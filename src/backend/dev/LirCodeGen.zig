@@ -879,29 +879,32 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// The target this LirCodeGen was instantiated for
         pub const roc_target = target;
 
-        /// Frame pointer register for the target architecture
-        const frame_ptr: GeneralReg = if (isa.binaryIs(.x86_64)) .RBP else .FP;
-
-        /// Stack pointer register for the target architecture
-        const stack_ptr: GeneralReg = if (isa.binaryIs(.x86_64)) .RSP else .ZRSP;
-
-        /// Scratch/temporary register (not preserved across calls)
-        const scratch_reg: GeneralReg = if (isa.binaryIs(.x86_64)) .R11 else .X9;
-
-        /// AArch64 callee-saved register reserved for the caller's stack-argument
-        /// base in internal procs that actually receive stack arguments.
-        const caller_stack_arg_base_reg: GeneralReg = if (isa.binaryIs(.x86_64)) frame_ptr else .X28;
-
-        /// Return value registers (first, second, third)
-        const ret_reg_0: GeneralReg = if (isa.binaryIs(.x86_64)) .RAX else .X0;
-        const ret_reg_1: GeneralReg = if (isa.binaryIs(.x86_64)) .RDX else .X1;
-        const ret_reg_2: GeneralReg = if (isa.binaryIs(.x86_64)) .RCX else .X2;
-
         /// Emit/calling-convention types for this architecture.
         const EmitType = @TypeOf(@as(CodeGen, undefined).emit);
+        /// The per-ISA register roles and ABI constants.
+        const CC = EmitType.CC;
         const Builder = CallingConventionMod.CallBuilder(EmitType);
-        const abi_shadow_space: i32 = @intCast(EmitType.CC.SHADOW_SPACE);
-        const incoming_stack_arg_base_offset: i32 = if (isa.binaryIs(.x86_64)) 16 + abi_shadow_space else 0;
+
+        /// Frame pointer register for the target architecture
+        const frame_ptr: GeneralReg = CC.BASE_PTR;
+
+        /// Stack pointer register for the target architecture
+        const stack_ptr: GeneralReg = CC.STACK_PTR;
+
+        /// Scratch/temporary register (not preserved across calls)
+        const scratch_reg: GeneralReg = CC.SCRATCH_REG;
+
+        /// Register that addresses the caller's stack arguments in internal
+        /// procs that receive them.
+        const caller_stack_arg_base_reg: GeneralReg = CC.CALLER_STACK_ARG_BASE_REG;
+
+        /// Return value registers (first, second, third)
+        const ret_reg_0: GeneralReg = CC.ROC_RET_REGS[0];
+        const ret_reg_1: GeneralReg = CC.ROC_RET_REGS[1];
+        const ret_reg_2: GeneralReg = CC.ROC_RET_REGS[2];
+
+        const abi_shadow_space: i32 = @intCast(CC.SHADOW_SPACE);
+        const incoming_stack_arg_base_offset: i32 = CC.INCOMING_STACK_ARG_BASE_OFFSET;
         const outgoing_stack_arg_base_offset: i32 = abi_shadow_space;
         const max_arg_regs: u8 = @intCast(EmitType.CC.PARAM_REGS.len);
         const pass_by_ptr_arg_regs: u8 = @intCast(EmitType.CC.PARAM_REGS.len + 1);
@@ -1888,17 +1891,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Save the result pointer to a callee-saved register before
             // generating code that might call procedures (which would clobber it).
-            const result_ptr_save_reg = if (comptime isa.binaryIs(.aarch64))
-                aarch64.GeneralReg.X19
-            else
-                x86_64.GeneralReg.RBX;
-
-            const arg0_reg = if (comptime isa.binaryIs(.aarch64))
-                aarch64.GeneralReg.X0
-            else if (comptime target.isWindows())
-                x86_64.GeneralReg.RCX
-            else
-                x86_64.GeneralReg.RDI;
+            const result_ptr_save_reg = CC.RESULT_PTR_SAVE_REG;
+            const arg0_reg = CC.PARAM_REGS[0];
 
             try self.emitMovRegReg(result_ptr_save_reg, arg0_reg);
 
@@ -1912,13 +1906,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Remove roc_ops and result_ptr registers from callee_saved_available
             // so the register allocator never uses them as temporaries.
-            if (comptime isa.binaryIs(.aarch64)) {
-                self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X20));
-                self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X19));
-            } else {
-                self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R12));
-                self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RBX));
-            }
+            self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(CC.ROC_OPS_SAVE_REG));
+            self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(CC.RESULT_PTR_SAVE_REG));
 
             const root_proc = try self.compiledProcForId(root_proc_id);
             const final_result = try self.generateCallToCompiledProc(root_proc, &.{}, &.{}, result_layout, null);
@@ -2023,42 +2012,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Reserve argument registers so they don't get allocated for temporaries
         fn reserveArgumentRegisters(self: *Self) void {
-            if (comptime isa.binaryIs(.aarch64)) {
-                // Clear X0 and X1 from the free register mask
-                // X0 = bit 0, X1 = bit 1
-                self.codegen.free_general &= ~@as(u32, 0b11);
-                // Reserve X19 (result pointer) and X20 (RocOps pointer) - both callee-saved
-                // Must mark as used so they get saved/restored in prologue/epilogue
-                const x19_bit = @as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X19);
-                const x20_bit = @as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X20);
-                self.codegen.callee_saved_available &= ~(x19_bit | x20_bit);
-                self.codegen.callee_saved_used |= @as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X19);
-                self.codegen.callee_saved_used |= @as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X20);
-            } else if (comptime target.isWindows()) {
-                // Windows x64: Clear RCX and RDX from the free register mask
-                const rcx_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RCX);
-                const rdx_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RDX);
-                self.codegen.free_general &= ~(rcx_bit | rdx_bit);
-                // Reserve RBX (result pointer) and R12 (RocOps pointer) - both callee-saved
-                // Must mark as used so they get saved/restored in prologue/epilogue
-                const rbx_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RBX);
-                const r12_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R12);
-                self.codegen.callee_saved_available &= ~(rbx_bit | r12_bit);
-                self.codegen.callee_saved_used |= @as(u16, 1) << @intFromEnum(x86_64.GeneralReg.RBX);
-                self.codegen.callee_saved_used |= @as(u16, 1) << @intFromEnum(x86_64.GeneralReg.R12);
-            } else {
-                // System V (Linux, macOS): Clear RDI and RSI from the free register mask
-                const rdi_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RDI);
-                const rsi_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RSI);
-                self.codegen.free_general &= ~(rdi_bit | rsi_bit);
-                // Reserve RBX (result pointer) and R12 (RocOps pointer) - both callee-saved
-                // Must mark as used so they get saved/restored in prologue/epilogue
-                const rbx_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RBX);
-                const r12_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R12);
-                self.codegen.callee_saved_available &= ~(rbx_bit | r12_bit);
-                self.codegen.callee_saved_used |= @as(u16, 1) << @intFromEnum(x86_64.GeneralReg.RBX);
-                self.codegen.callee_saved_used |= @as(u16, 1) << @intFromEnum(x86_64.GeneralReg.R12);
-            }
+            // The first two argument registers carry the result and RocOps
+            // pointers into the entry code.
+            self.codegen.free_general &= ~(generalRegBit(CC.PARAM_REGS[0]) | generalRegBit(CC.PARAM_REGS[1]));
+            // Reserve the callee-saved result-pointer and RocOps save registers.
+            // Mark them used so the prologue and epilogue save and restore them.
+            const pinned = generalRegBit(CC.RESULT_PTR_SAVE_REG) | generalRegBit(CC.ROC_OPS_SAVE_REG);
+            self.codegen.callee_saved_available &= ~pinned;
+            self.codegen.callee_saved_used |= @intCast(pinned);
+        }
+
+        fn generalRegBit(reg: GeneralReg) u32 {
+            return @as(u32, 1) << @intFromEnum(reg);
         }
 
         fn localMetadata(self: *Self, local: LocalId) lir.Local {
@@ -20593,16 +20558,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.current_proc_args = proc.args;
             self.current_stmt_id = null;
 
-            // Reserve R12/X20 for roc_ops exactly like standalone lambda compilation.
-            if (comptime isa.binaryIs(.x86_64)) {
-                const r12_bit = @as(u16, 1) << @intFromEnum(x86_64.GeneralReg.R12);
-                self.codegen.callee_saved_used |= r12_bit;
-                self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R12));
-            } else {
-                const x20_bit = @as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X20);
-                self.codegen.callee_saved_used |= x20_bit;
-                self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X20));
-            }
+            // Reserve the RocOps save register exactly like standalone lambda compilation.
+            self.codegen.callee_saved_used |= @intCast(generalRegBit(CC.ROC_OPS_SAVE_REG));
+            self.codegen.callee_saved_available &= ~generalRegBit(CC.ROC_OPS_SAVE_REG);
 
             // PHASE 1: Generate body first (to determine callee_saved_used)
             // Initialize stack_offset to reserve space for callee-saved area
