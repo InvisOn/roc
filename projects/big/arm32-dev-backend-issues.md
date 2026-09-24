@@ -79,6 +79,35 @@ design and the reasoning behind the arm32 work are in
   the binary reports every test passed; failures in that step are therefore
   easy to dismiss.
 
+### wasm32 wraps `U64` sublist indices to 32 bits (confirmed miscompile)
+
+- **Where:** `src/backend/wasm/WasmCodeGen.zig`, the `.list_sublist` /
+  `.list_sublist_borrowed` lowering, which loads the record's `U64` `start`
+  and `len` and narrows each with `i32_wrap_i64` before the call.
+- **Effect:** `List.sublist([1, 2, 3], { start: 4294967296, len: 1 })`
+  evaluates to `[1.0]` on the wasm backend and to `[]` on the interpreter and
+  the dev backend (checked with a temporary eval case). Any index at or above
+  2^32 wraps to a small in-range one. `List.get` with the same index is
+  correct on all three.
+- **Fix direction:** pass the full `U64` to a builtin that saturates it, as
+  the native builtins do (`start: u64`), or saturate instead of wrap. Worth an
+  eval case that runs on every backend.
+- **Relevance to arm32:** the dev backend's list and string builtins take
+  `u64` counts and indices and narrow them themselves, so the arm32 driver
+  must pass genuine 64-bit values (register pairs) there and must not narrow
+  them; only `usize` results typed `U64` (`List.len`) and in-bounds indices
+  used for address arithmetic cross the word/`U64` boundary in the driver.
+
+### `list_get_unsafe` accepts an index in an i128 location
+
+- **Where:** `src/backend/dev/LirCodeGen.zig`, the `.list_get_unsafe` handler's
+  index materialization (`.stack_i128` and `.immediate_i128` arms, commented
+  "Dec/i128 index - just load the low" part).
+- **Effect:** a list index is `U64` in LIR, so an i128/Dec location there is a
+  producer bug; the handler silently truncates it instead of reporting the
+  invariant violation. That is best-effort recovery in a compiler stage.
+- **Fix direction:** make those arms invariant failures.
+
 ## Open: risks for the remaining arm32 work
 
 ### The 64-bit register budget is nearly exhausted already
