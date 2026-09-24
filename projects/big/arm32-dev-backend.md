@@ -829,6 +829,20 @@ daily.
   `general_high_water`/`float_high_water`; over the eval corpus the general
   peak is 12 of 13 on x86_64 and 12 of 25 on aarch64, the float peak 3 on
   both (pinned registers counted). See `src/backend/dev/arm32/DESIGN.md`.
+- *Amended when the facade part of A1 landed:* the per-arch facade covers
+  the ISA-neutral helpers (55 of them: loads/stores by width, stack
+  addressing, immediates, compare/set/jump, conditions, register arithmetic,
+  trailing-zero count, trap, hosted float results, artifact hooks), and the
+  role registers come from `CC`. The remaining ~500 raw `codegen.emit.` calls
+  sit in lowering *strategies* (i128 arithmetic and comparison, SIMD
+  kernels, checked-multiply and overflow sequences, entry wrappers) whose
+  arm32 shape differs structurally: i128 is memory-resident with by-pointer
+  helpers and 64-bit values are register pairs (D6), SIMD is NEON. A shared
+  signature designed now would encode 64-bit register shapes that A2 then
+  has to redesign, so those sites keep their `binaryIs` tests (which still
+  refuse to compile for arm32) and get facade signatures in A2 (i128,
+  `Wide64`) and the NEON batch (SIMD). The `rg 'codegen\.emit\.'` check
+  therefore moves from A1's acceptance to J1's.
 - *Amended when the dispatch part of A1 landed:* two-way tests inside
   `LirCodeGen` bodies go through `Isa.binaryIs` (`src/backend/dev/isa.zig`),
   a compile error on arm32, instead of being hand-rewritten into three-way
