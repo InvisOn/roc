@@ -23,7 +23,7 @@ cross-compiling for a 32-bit target would validate 4-byte-aligned heap strings
 against 8-byte alignment (a false Debug crash) and lay out 8-byte slots the
 target reads as 4-byte ones. No effect on today's targets.
 
-### Erased-callable layouts taken from the host (next commit after `c5248f3763`)
+### Erased-callable layouts taken from the host (`ab6e860e2d`)
 
 `LirCodeGen` wrote erased-callable payloads using `builtins.erased_callable`'s
 constants and `@offsetOf`/`@sizeOf` on its structs, which the compiler host

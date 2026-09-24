@@ -7,7 +7,8 @@ criteria, is `projects/big/arm32-dev-backend.md`; its decision numbers (D1-D12)
 and unit names (A0-A3, Track B, J1-J4) are used here. `design.md` remains the
 authoritative reference for compiler-wide invariants.
 Issues found along the way are tracked in
-`projects/big/arm32-dev-backend-issues.md`.
+`projects/big/arm32-dev-backend-issues.md`. `GUIDE.md` explains how the pieces
+work and how to test each one; `TOOLS.md` documents the tools.
 
 ## Status
 
