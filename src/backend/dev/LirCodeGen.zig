@@ -892,6 +892,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// (I64/U64/F64 bits) is not a word on a 32-bit target.
         const word = CC.WORD;
 
+        /// The sign bit of a target word, sign-extended. A small RocStr sets
+        /// it in its length word.
+        const word_sign_bit: i64 = std.math.minInt(std.meta.Int(.signed, word_size * 8));
+
+        /// Right shift that brings a small RocStr's length byte (the last
+        /// byte of its length word) to the bottom of the word.
+        const small_str_len_shift: u6 = (word_size - 1) * 8;
+
         /// Byte offset of `field` in a RocList on the target. The builtins
         /// struct has only word-sized fields, so its host field index scaled
         /// by the target word is exact on every target.
@@ -9609,13 +9617,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.codegen.freeGeneral(len_reg);
             defer self.codegen.freeGeneral(ptr_reg);
 
-            try self.codegen.emitLoad(.w64, ptr_reg, frame_ptr, slot_offset);
+            try self.codegen.emitLoad(word, ptr_reg, frame_ptr, slot_offset + strFieldOffset("bytes"));
             try self.codegen.emitLoad(word, cap_reg, frame_ptr, slot_offset + strFieldOffset("capacity_or_alloc_ptr"));
             try self.codegen.emitLoad(word, len_reg, frame_ptr, slot_offset + strFieldOffset("length"));
 
             // Small RocStrs are stored inline and identified by the sign bit of length.
-            try self.codegen.emitLoadImm(tmp_reg, std.math.minInt(i64));
-            try self.codegen.emitAndRegs(.w64, tmp_reg, tmp_reg, len_reg);
+            try self.codegen.emitLoadImm(tmp_reg, word_sign_bit);
+            try self.codegen.emitAndRegs(word, tmp_reg, tmp_reg, len_reg);
             try self.codegen.emitCmpImm(tmp_reg, 0);
             const small_patch = try self.codegen.emitJumpIfNotEqual();
 
@@ -9631,12 +9639,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // may be arbitrarily offset, so validate the stored allocation
             // pointer instead of requiring bytes alignment.
             try self.codegen.emitLoadImm(tmp_reg, 1);
-            try self.codegen.emitAndRegs(.w64, tmp_reg, tmp_reg, cap_reg);
+            try self.codegen.emitAndRegs(word, tmp_reg, tmp_reg, cap_reg);
             try self.codegen.emitCmpImm(tmp_reg, 0);
             const non_seamless_patch = try self.codegen.emitJumpIfEqual();
 
             try self.codegen.emitLoadImm(tmp_reg, -2);
-            try self.codegen.emitAndRegs(.w64, tmp_reg, tmp_reg, cap_reg);
+            try self.codegen.emitAndRegs(word, tmp_reg, tmp_reg, cap_reg);
             try self.codegen.emitCmpImm(tmp_reg, 0);
             const alloc_non_null_patch = try self.codegen.emitJumpIfNotEqual();
             try self.emitDebugCrashInvalidLocal(.str, .null_allocation_pointer, local);
@@ -9644,7 +9652,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.patchJump(alloc_non_null_patch, after_alloc_null);
 
             try self.codegen.emitLoadImm(ptr_reg, word_size - 1);
-            try self.codegen.emitAndRegs(.w64, ptr_reg, ptr_reg, tmp_reg);
+            try self.codegen.emitAndRegs(word, ptr_reg, ptr_reg, tmp_reg);
             try self.codegen.emitCmpImm(ptr_reg, 0);
             const alloc_aligned_patch = try self.codegen.emitJumpIfEqual();
             try self.emitDebugCrashInvalidLocal(.str, .misaligned_allocation_pointer, local);
@@ -9657,14 +9665,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Non-slice RocStrs must satisfy len <= decoded capacity.
             try self.codegen.emitLoadImm(tmp_reg, word_size - 1);
-            try self.codegen.emitAndRegs(.w64, tmp_reg, tmp_reg, ptr_reg);
+            try self.codegen.emitAndRegs(word, tmp_reg, tmp_reg, ptr_reg);
             try self.codegen.emitCmpImm(tmp_reg, 0);
             const ptr_aligned_patch = try self.codegen.emitJumpIfEqual();
             try self.emitDebugCrashInvalidLocal(.str, .misaligned_bytes_pointer, local);
             const after_ptr_align = self.codegen.currentOffset();
             try self.codegen.patchJump(ptr_aligned_patch, after_ptr_align);
 
-            try self.codegen.emitLsrImm(.w64, tmp_reg, cap_reg, 1);
+            try self.codegen.emitLsrImm(word, tmp_reg, cap_reg, 1);
             try self.emitCmpReg(len_reg, tmp_reg);
             const len_ok_patch = try self.codegen.emitCondJump(CodeGen.condBelowOrEqual());
             try self.emitDebugCrashInvalidLocal(.str, .length_exceeds_capacity, local);
@@ -14542,21 +14550,21 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             value_ptr_reg: GeneralReg,
             out_reg: GeneralReg,
         ) Allocator.Error!void {
-            try self.codegen.emitLoad(.w64, out_reg, value_ptr_reg, 0);
+            try self.codegen.emitLoad(word, out_reg, value_ptr_reg, strFieldOffset("bytes"));
 
             const cap_reg = try self.allocTempGeneral();
             defer self.codegen.freeGeneral(cap_reg);
-            try self.codegen.emitLoad(.w64, cap_reg, value_ptr_reg, 8);
+            try self.codegen.emitLoad(word, cap_reg, value_ptr_reg, strFieldOffset("capacity_or_alloc_ptr"));
 
             const tag_reg = try self.allocTempGeneral();
             defer self.codegen.freeGeneral(tag_reg);
             try self.codegen.emitLoadImm(tag_reg, 1);
-            try self.codegen.emitAndRegs(.w64, tag_reg, tag_reg, cap_reg);
+            try self.codegen.emitAndRegs(word, tag_reg, tag_reg, cap_reg);
             try self.codegen.emitCmpImm(tag_reg, 0);
             const done_patch = try self.codegen.emitJumpIfEqual();
 
             try self.codegen.emitLoadImm(out_reg, -2);
-            try self.codegen.emitAndRegs(.w64, out_reg, out_reg, cap_reg);
+            try self.codegen.emitAndRegs(word, out_reg, out_reg, cap_reg);
             try self.codegen.patchJump(done_patch, self.codegen.currentOffset());
         }
 
@@ -14569,18 +14577,19 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         ) Allocator.Error!void {
             const value_ptr_reg = try self.allocTempGeneral();
             defer self.codegen.freeGeneral(value_ptr_reg);
-            try self.codegen.emitLoad(.w64, value_ptr_reg, frame_ptr, ptr_slot);
+            try self.codegen.emitLoad(word, value_ptr_reg, frame_ptr, ptr_slot);
 
-            const cap_reg = try self.allocTempGeneral();
-            defer self.codegen.freeGeneral(cap_reg);
-            try self.codegen.emitLoad(.w64, cap_reg, value_ptr_reg, 16);
+            const len_reg = try self.allocTempGeneral();
+            defer self.codegen.freeGeneral(len_reg);
+            // A small string sets the sign bit of its length word.
+            try self.codegen.emitLoad(word, len_reg, value_ptr_reg, strFieldOffset("length"));
 
             const skip_patch = blk: {
                 if (comptime isa.binaryIs(.aarch64)) {
-                    try self.codegen.emit.cmpRegImm12(.w64, cap_reg, 0);
+                    try self.codegen.emit.cmpRegImm12(word, len_reg, 0);
                     break :blk try self.codegen.emitCondJump(.mi);
                 } else {
-                    try self.codegen.emit.testRegReg(.w64, cap_reg, cap_reg);
+                    try self.codegen.emit.testRegReg(word, len_reg, len_reg);
                     break :blk try self.codegen.emitCondJump(.sign);
                 }
             };
@@ -14605,18 +14614,19 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         ) Allocator.Error!void {
             const value_ptr_reg = try self.allocTempGeneral();
             defer self.codegen.freeGeneral(value_ptr_reg);
-            try self.codegen.emitLoad(.w64, value_ptr_reg, frame_ptr, ptr_slot);
+            try self.codegen.emitLoad(word, value_ptr_reg, frame_ptr, ptr_slot);
 
-            const cap_reg = try self.allocTempGeneral();
-            defer self.codegen.freeGeneral(cap_reg);
-            try self.codegen.emitLoad(.w64, cap_reg, value_ptr_reg, 16);
+            const len_reg = try self.allocTempGeneral();
+            defer self.codegen.freeGeneral(len_reg);
+            // A small string sets the sign bit of its length word.
+            try self.codegen.emitLoad(word, len_reg, value_ptr_reg, strFieldOffset("length"));
 
             const skip_patch = blk: {
                 if (comptime isa.binaryIs(.aarch64)) {
-                    try self.codegen.emit.cmpRegImm12(.w64, cap_reg, 0);
+                    try self.codegen.emit.cmpRegImm12(word, len_reg, 0);
                     break :blk try self.codegen.emitCondJump(.mi);
                 } else {
-                    try self.codegen.emit.testRegReg(.w64, cap_reg, cap_reg);
+                    try self.codegen.emit.testRegReg(word, len_reg, len_reg);
                     break :blk try self.codegen.emitCondJump(.sign);
                 }
             };
@@ -14672,10 +14682,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.codegen.freeGeneral(bytes_reg);
             defer self.codegen.freeGeneral(value_ptr_reg);
 
-            try self.codegen.emitLoad(.w64, value_ptr_reg, frame_ptr, ptr_slot);
-            try self.codegen.emitLoad(.w64, bytes_reg, value_ptr_reg, 0);
-            try self.codegen.emitLoad(.w64, len_reg, value_ptr_reg, 8);
-            try self.codegen.emitLoad(.w64, cap_reg, value_ptr_reg, 16);
+            try self.codegen.emitLoad(word, value_ptr_reg, frame_ptr, ptr_slot);
+            try self.codegen.emitLoad(word, bytes_reg, value_ptr_reg, listFieldOffset("bytes"));
+            try self.codegen.emitLoad(word, len_reg, value_ptr_reg, listFieldOffset("length"));
+            try self.codegen.emitLoad(word, cap_reg, value_ptr_reg, listFieldOffset("capacity_or_alloc_ptr"));
 
             if (list_plan.child) |child_key| {
                 // The element callback's C ABI carries no atomicity parameter,
@@ -16185,7 +16195,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const desc_local = GuardedList.at(arg_desc_refs, desc_index);
                 const desc_reg = try self.ensureInGeneralReg(try self.emitValueLocal(desc_local));
                 try self.codegen.emitStore(
-                    .w64,
+                    word,
                     frame_ptr,
                     arg_descs_slot + @as(i32, @intCast(desc_index * word_size)),
                     desc_reg,
@@ -16521,13 +16531,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.emitPendingProcAddress(proc_id, proc_addr)
             else
                 try self.emitInternalCodeAddress(.{ .proc = proc.id }, proc.code_start, proc_addr);
-            try self.codegen.emitStore(.w64, heap_ptr, 0, proc_addr);
+            try self.codegen.emitStore(word, heap_ptr, 0, proc_addr);
             self.codegen.freeGeneral(proc_addr);
 
             if (self.enable_hot_reload) {
                 const hot_drop_reg = try self.allocTempGeneral();
                 try self.emitBuiltinAddress(hot_drop_reg, .hot_reload_erased_callable_drop);
-                try self.codegen.emitStore(.w64, heap_ptr, word_size, hot_drop_reg);
+                try self.codegen.emitStore(word, heap_ptr, word_size, hot_drop_reg);
                 self.codegen.freeGeneral(hot_drop_reg);
 
                 if (hot_reload_code_ref_slot) |slot| {
@@ -16552,7 +16562,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 self.codegen.freeGeneral(original_on_drop_reg);
             } else {
                 const on_drop_reg = try self.materializeErasedCallableOnDrop(on_drop);
-                try self.codegen.emitStore(.w64, heap_ptr, word_size, on_drop_reg);
+                try self.codegen.emitStore(word, heap_ptr, word_size, on_drop_reg);
                 self.codegen.freeGeneral(on_drop_reg);
             }
 
@@ -22886,21 +22896,21 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.codegen.freeGeneral(tmp_reg);
 
             try self.codegen.emitLoad(word, len_reg, frame_ptr, source_offset + strFieldOffset("length"));
-            try self.codegen.emitLoadImm(tmp_reg, std.math.minInt(i64));
-            try self.codegen.emitAndRegs(.w64, tmp_reg, tmp_reg, len_reg);
+            try self.codegen.emitLoadImm(tmp_reg, word_sign_bit);
+            try self.codegen.emitAndRegs(word, tmp_reg, tmp_reg, len_reg);
             try self.codegen.emitCmpImm(tmp_reg, 0);
             const small_patch = try self.codegen.emitCondJump(CodeGen.condNotEqual());
 
-            try self.codegen.emitLoad(.w64, bytes_reg, frame_ptr, source_offset);
+            try self.codegen.emitLoad(word, bytes_reg, frame_ptr, source_offset + strFieldOffset("bytes"));
             try self.codegen.emitLoadImm(source_is_small_reg, 0);
             try self.codegen.emitLoad(word, source_alloc_reg, frame_ptr, source_offset + strFieldOffset("capacity_or_alloc_ptr"));
             try self.codegen.emitLoadImm(tmp_reg, 1);
-            try self.codegen.emitAndRegs(.w64, tmp_reg, tmp_reg, source_alloc_reg);
+            try self.codegen.emitAndRegs(word, tmp_reg, tmp_reg, source_alloc_reg);
             try self.codegen.emitCmpImm(tmp_reg, 0);
             const already_slice_patch = try self.codegen.emitCondJump(CodeGen.condNotEqual());
             try self.emitMovRegReg(source_alloc_reg, bytes_reg);
             try self.codegen.emitLoadImm(tmp_reg, 1);
-            try self.codegen.emitOrRegs(.w64, source_alloc_reg, source_alloc_reg, tmp_reg);
+            try self.codegen.emitOrRegs(word, source_alloc_reg, source_alloc_reg, tmp_reg);
             const alloc_done_patch = try self.codegen.emitJump();
             const already_slice_offset = self.codegen.currentOffset();
             try self.codegen.patchJump(already_slice_patch, already_slice_offset);
@@ -22912,9 +22922,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.patchJump(small_patch, small_offset);
             try self.codegen.emitLeaStack(bytes_reg, source_offset);
             try self.codegen.emitLoadImm(source_is_small_reg, 1);
-            try self.codegen.emitLsrImm(.w64, len_reg, len_reg, 56);
+            try self.codegen.emitLsrImm(word, len_reg, len_reg, small_str_len_shift);
             try self.codegen.emitLoadImm(tmp_reg, 0x7F);
-            try self.codegen.emitAndRegs(.w64, len_reg, len_reg, tmp_reg);
+            try self.codegen.emitAndRegs(word, len_reg, len_reg, tmp_reg);
             try self.codegen.emitLoadImm(source_alloc_reg, 0);
 
             const shape_done_offset = self.codegen.currentOffset();
