@@ -738,6 +738,270 @@ pub fn CodeGen(comptime target: RocTarget) type {
                 },
             });
         }
+
+        // ── Instruction selection used by LirCodeGen (per-ISA facade) ──
+
+        /// Per-ISA instruction selection for `LirCodeGen.condEqual`.
+        pub fn condEqual() Emit.Condition {
+            return .equal;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condNotEqual`.
+        pub fn condNotEqual() Emit.Condition {
+            return .not_equal;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condLess`.
+        pub fn condLess() Emit.Condition {
+            return .less;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condLessOrEqual`.
+        pub fn condLessOrEqual() Emit.Condition {
+            return .less_or_equal;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condGreater`.
+        pub fn condGreater() Emit.Condition {
+            return .greater;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condGreaterOrEqual`.
+        pub fn condGreaterOrEqual() Emit.Condition {
+            return .greater_or_equal;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condBelow`.
+        pub fn condBelow() Emit.Condition {
+            return .below;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condBelowOrEqual`.
+        pub fn condBelowOrEqual() Emit.Condition {
+            return .below_or_equal;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condAbove`.
+        pub fn condAbove() Emit.Condition {
+            return .above;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condAboveOrEqual`.
+        pub fn condAboveOrEqual() Emit.Condition {
+            return .above_or_equal;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condOverflow`.
+        pub fn condOverflow() Emit.Condition {
+            return .overflow;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condUnsignedAddOverflow`.
+        pub fn condUnsignedAddOverflow() Emit.Condition {
+            return .below;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condUnsignedSubOverflow`.
+        pub fn condUnsignedSubOverflow() Emit.Condition {
+            return .below;
+        }
+
+        /// Get the register used for return values
+        pub fn getReturnRegister(_: *Self) GeneralReg {
+            return .RAX;
+        }
+
+        /// Compare a general register against an immediate bit pattern.
+        pub fn emitCmpImm(self: *Self, reg: GeneralReg, value: i64) Allocator.Error!void {
+            if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32)) {
+                try self.emit.cmpRegImm32(.w64, reg, @intCast(value));
+            } else {
+                const temp = self.allocTempGeneral();
+                try self.emitLoadImm(temp, value);
+                try self.emit.cmpRegReg(.w64, reg, temp);
+                self.freeGeneral(temp);
+            }
+        }
+
+        /// Emit jump if not equal (after comparison)
+        ///
+        /// BRANCH PATCHING MECHANISM:
+        /// When generating switch dispatch, we don't know the jump target offset until
+        /// we've generated the code for the branch body. So we:
+        /// 1. Emit the architecture-specific branch placeholder
+        /// 2. Record the instruction's location (patch_loc)
+        /// 3. Generate the branch body code
+        /// 4. Calculate the actual offset: current_offset - patch_loc
+        /// 5. Patch the instruction at patch_loc with the real offset
+        ///
+        /// PLACEHOLDER SAFETY:
+        /// The architecture-specific emitters choose harmless placeholder bytes
+        /// and reserve whatever space their patching strategy requires. In normal
+        /// operation, codegen.patchJump() overwrites the placeholder before execution.
+        ///
+        /// RETURNS: The patch location (where the displacement bytes are) for later patching.
+        pub fn emitJumpIfNotEqual(self: *Self) Allocator.Error!usize {
+            // JNE (jump if not equal) with placeholder offset
+            // x86_64: JNE rel32 is 0F 85 xx xx xx xx (6 bytes)
+            // The displacement starts at offset +2, so patch_loc = currentOffset + 2
+            const patch_loc = self.currentOffset() + 2;
+            try self.emit.jne(@bitCast(@as(i32, 0)));
+            return patch_loc;
+        }
+
+        /// Emit a conditional jump for unsigned less than (for list length comparisons)
+        pub fn emitJumpIfEqual(self: *Self) Allocator.Error!usize {
+            // JE (jump if equal) with placeholder offset
+            const patch_loc = self.currentOffset() + 2;
+            try self.emit.jccRel32(.equal, @bitCast(@as(i32, 0)));
+            return patch_loc;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoad`.
+        pub fn emitLoad(self: *Self, comptime width: anytype, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.movRegMem(width, dst, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStore`.
+        pub fn emitStore(self: *Self, comptime width: anytype, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emit.movMemReg(width, base_reg, offset, src);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadW8`.
+        pub fn emitLoadW8(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.movzxBRegMem(dst, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadW16`.
+        pub fn emitLoadW16(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.movzxWRegMem(dst, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreW8`.
+        pub fn emitStoreW8(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emit.movMemReg(.w8, base_reg, offset, src);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreW16`.
+        pub fn emitStoreW16(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emit.movMemReg(.w16, base_reg, offset, src);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadStackW8`.
+        pub fn emitLoadStackW8(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.movzxBRegMem(dst, Emit.CC.BASE_PTR, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadStackW16`.
+        pub fn emitLoadStackW16(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.movzxWRegMem(dst, Emit.CC.BASE_PTR, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitShlImm`.
+        pub fn emitShlImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
+            if (dst != src) try self.emit.movRegReg(width, dst, src);
+            try self.emit.shlRegImm8(width, dst, amount);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLsrImm`.
+        pub fn emitLsrImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
+            if (dst != src) try self.emit.movRegReg(width, dst, src);
+            try self.emit.shrRegImm8(width, dst, amount);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAsrImm`.
+        pub fn emitAsrImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
+            if (dst != src) try self.emit.movRegReg(width, dst, src);
+            try self.emit.sarRegImm8(width, dst, amount);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSaturatingSub`.
+        pub fn emitSaturatingSub(self: *Self, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            if (dst != a) try self.emit.movRegReg(.w64, dst, a);
+            try self.emit.subRegReg(.w64, dst, b);
+            const patch_loc = try self.emitCondJump(.above_or_equal);
+            try self.emit.xorRegReg(.w64, dst, dst);
+            try self.patchJump(patch_loc, self.currentOffset());
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAddImm`.
+        pub fn emitAddImm(self: *Self, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
+            if (dst != src) try self.emit.movRegReg(.w64, dst, src);
+            try self.emit.addImm(dst, imm);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSubImm`.
+        pub fn emitSubImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
+            if (dst != src) try self.emit.movRegReg(width, dst, src);
+            try self.emit.subRegImm32(width, dst, imm);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSetCond`.
+        pub fn emitSetCond(self: *Self, dst: GeneralReg, cond: Emit.Condition) Allocator.Error!void {
+            try self.emit.setcc(cond, dst);
+            try self.emit.andRegImm32(dst, 0xFF);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLeaStack`.
+        pub fn emitLeaStack(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.leaRegMem(dst, Emit.CC.BASE_PTR, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAddStackPtr`.
+        pub fn emitAddStackPtr(self: *Self, imm: i32) Allocator.Error!void {
+            try self.emit.addRegImm32(.w64, Emit.CC.STACK_PTR, imm);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreStackW8`.
+        pub fn emitStoreStackW8(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emitStoreStack(.w8, offset, src);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreStackW16`.
+        pub fn emitStoreStackW16(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emitStoreStack(.w16, offset, src);
+        }
+
+        /// Store float register to memory at [ptr_reg] (architecture-specific)
+        pub fn emitStoreFloatToMem(self: *Self, ptr_reg: anytype, src_reg: FloatReg) Allocator.Error!void {
+            try self.emit.movsdMemReg(ptr_reg, 0, src_reg);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitTrap`.
+        pub fn emitTrap(self: *Self) Allocator.Error!void {
+            try self.emit.ud2();
+        }
+
+        /// Store an incoming float argument register into the frame.
+        pub fn emitEntryFloatStore(self: *Self, dest_off: i32, freg: FloatReg, size: u8) Allocator.Error!void {
+            switch (size) {
+                4 => try self.emit.movssMemReg(Emit.CC.BASE_PTR, dest_off, freg),
+                8 => try self.emit.movsdMemReg(Emit.CC.BASE_PTR, dest_off, freg),
+                16 => try self.emit.movdquMemReg(Emit.CC.BASE_PTR, dest_off, freg),
+                else => unreachable,
+            }
+        }
+
+        /// Load C-ABI float return piece `index` from the frame into the
+        /// float return register sequence (V0..V3 / XMM0..XMM1).
+        pub fn emitEntryFloatLoad(self: *Self, src_off: i32, index: usize, size: u8) Allocator.Error!void {
+            const fregs = [_]FloatReg{ .XMM0, .XMM1 };
+            const freg = fregs[index];
+            switch (size) {
+                4 => try self.emit.movssRegMem(freg, Emit.CC.BASE_PTR, src_off),
+                8 => try self.emit.movsdRegMem(freg, Emit.CC.BASE_PTR, src_off),
+                16 => try self.emit.movdquRegMem(freg, Emit.CC.BASE_PTR, src_off),
+                else => unreachable,
+            }
+        }
+
+        /// Emit a jump placeholder (will be patched later).
+        /// Returns the patch location for use with patchJump.
+        pub fn emitJumpPlaceholder(self: *Self) Allocator.Error!usize {
+            const patch_loc = self.currentOffset() + 1; // after E9 opcode
+            try self.emit.jmp(0);
+            return patch_loc;
+        }
     };
 }
 
