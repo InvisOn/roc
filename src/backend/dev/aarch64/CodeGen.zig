@@ -1233,6 +1233,148 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
         // ── Instruction selection used by LirCodeGen (per-ISA facade) ──
 
+        /// Float register holding piece `index` of a hosted call's C-ABI
+        /// float result: V0-V3 carry a homogeneous float or vector aggregate.
+        pub fn hostedFloatResultReg(index: usize) FloatReg {
+            return switch (index) {
+                0 => .V0,
+                1 => .V1,
+                2 => .V2,
+                3 => .V3,
+                else => unreachable,
+            };
+        }
+
+        /// Store piece `index` of a hosted call's float result to the frame.
+        pub fn emitHostedFloatResultStore(self: *Self, dst_off: i32, index: usize, size: u8) Allocator.Error!void {
+            const freg = hostedFloatResultReg(index);
+            switch (size) {
+                4 => try self.emitStoreStackF32(dst_off, freg),
+                8 => try self.emitStoreStackF64(dst_off, freg),
+                16 => try self.emitStoreStackV128(dst_off, freg),
+                else => unreachable,
+            }
+        }
+
+        /// Condition testing `lhs < rhs` after this ISA's float compare.
+        pub fn condFloatLess() Emit.Condition {
+            return .mi;
+        }
+
+        /// Condition testing `lhs <= rhs` after this ISA's float compare.
+        pub fn condFloatLessOrEqual() Emit.Condition {
+            return .ls;
+        }
+
+        /// Condition testing `lhs > rhs` after this ISA's float compare.
+        pub fn condFloatGreater() Emit.Condition {
+            return .gt;
+        }
+
+        /// Condition testing `lhs >= rhs` after this ISA's float compare.
+        pub fn condFloatGreaterOrEqual() Emit.Condition {
+            return .ge;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAddRegs`.
+        pub fn emitAddRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.addRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSubRegs`.
+        pub fn emitSubRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.subRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitMulRegs`.
+        pub fn emitMulRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.mulRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAndRegs`.
+        pub fn emitAndRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.andRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitOrRegs`.
+        pub fn emitOrRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.orrRegRegReg(width, dst, src1, src2);
+        }
+
+        /// dst = number of trailing zero bits of the full 64-bit value `src`
+        /// (64 when `src` is zero).
+        pub fn emitCtz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            // No native ctz: reverse the bits, then count leading zeros.
+            try self.emit.rbitRegReg(.w64, dst, src);
+            try self.emit.clzRegReg(.w64, dst, dst);
+            return;
+        }
+
+        /// Store a discriminant value at the given offset
+        pub fn storeDiscriminant(self: *Self, offset: i32, value: u16, disc_size: u8) Allocator.Error!void {
+            if (disc_size == 0) return;
+
+            const reg = self.allocTempGeneral();
+            try self.emitLoadImm(reg, value);
+
+            // Store appropriate size - architecture specific
+            // aarch64 only has .w32 and .w64 for emitStoreStack, use direct emit for smaller sizes.
+            switch (disc_size) {
+                1 => try self.emit.strbRegMemSoff(reg, .FP, offset),
+                2 => try self.emit.strhRegMemSoff(reg, .FP, offset),
+                else => {
+                    // 4 or 8 bytes - use standard store
+                    try self.emitStoreStack(.w64, offset, reg);
+                },
+            }
+
+            self.freeGeneral(reg);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.patchInternalCodeAddress`.
+        pub fn patchInternalCodeAddress(self: *Self, instr_offset: usize, target_offset: usize) void {
+            const buf = self.emit.buf.items;
+            // The emit reserves the 4-instruction PC-relative sequence (see
+            // Emit.pcRelAddrSequence) starting at instr_offset. The registers
+            // the emitter chose are read back out of the existing ADR and MOVZ
+            // words so the rewritten sequence targets the same ones.
+            const EmitT = Emit;
+            const adr_existing: u32 = @bitCast(buf[instr_offset..][0..4].*);
+            const movz_existing: u32 = @bitCast(buf[instr_offset + 4 ..][0..4].*);
+            const dst: GeneralReg = @enumFromInt(@as(u5, @truncate(adr_existing & 0x1F)));
+            const scratch: GeneralReg = @enumFromInt(@as(u5, @truncate(movz_existing & 0x1F)));
+            const parts = Self.pcRelParts(instr_offset, target_offset);
+            const words = [4]u32{
+                EmitT.encodeAdrZero(dst),
+                EmitT.encodeMovz64(scratch, parts.lo16, 0),
+                EmitT.encodeMovk64(scratch, parts.hi16, 1),
+                EmitT.encodeAddSubRegRegReg64(dst, dst, scratch, parts.subtract),
+            };
+            for (words, 0..) |word, i| {
+                @memcpy(buf[instr_offset + i * 4 ..][0..4], &@as([4]u8, @bitCast(word)));
+            }
+        }
+
+        /// Producer-authored placement metadata; never decode it from bytes.
+        pub fn codeRefVeneer(self: *const Self, site: usize) ?usize {
+            return self.callVeneer(site);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.registerAssembledRefVeneer`.
+        pub fn registerAssembledRefVeneer(self: *Self, site: usize, veneer: ?usize) Allocator.Error!void {
+            try self.registerAssembledCallVeneer(site, veneer);
+        }
+
+        /// Remove placement-specific stub displacements using producer records.
+        pub fn normalizeArtifactCode(self: *const Self, start: usize, bytes: []u8) void {
+            for (self.extern_stubs.items) |stub| {
+                if (stub.call < start or stub.call >= start + bytes.len) continue;
+                const stub_start = self.relocations.items[stub.page_relocation].linked_data.offset;
+                if (stub_start >= start and stub_start + 12 <= start + bytes.len) continue;
+                std.mem.writeInt(u32, bytes[stub.call - start ..][0..4], 0x94000000, .little);
+            }
+        }
+
         /// Per-ISA instruction selection for `LirCodeGen.condEqual`.
         pub fn condEqual() Emit.Condition {
             return .eq;

@@ -741,6 +741,139 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
         // ── Instruction selection used by LirCodeGen (per-ISA facade) ──
 
+        /// Float register holding piece `index` of a hosted call's C-ABI
+        /// float result: XMM0 and XMM1.
+        pub fn hostedFloatResultReg(index: usize) FloatReg {
+            return switch (index) {
+                0 => .XMM0,
+                1 => .XMM1,
+                else => unreachable,
+            };
+        }
+
+        /// Store piece `index` of a hosted call's float result to the frame.
+        pub fn emitHostedFloatResultStore(self: *Self, dst_off: i32, index: usize, size: u8) Allocator.Error!void {
+            const freg = hostedFloatResultReg(index);
+            switch (size) {
+                4 => try self.emit.movssMemReg(Emit.CC.BASE_PTR, dst_off, freg),
+                8 => try self.emit.movsdMemReg(Emit.CC.BASE_PTR, dst_off, freg),
+                16 => try self.emit.movdquMemReg(Emit.CC.BASE_PTR, dst_off, freg),
+                else => unreachable,
+            }
+        }
+
+        /// Condition testing `lhs < rhs` after this ISA's float compare.
+        pub fn condFloatLess() Emit.Condition {
+            return .below;
+        }
+
+        /// Condition testing `lhs <= rhs` after this ISA's float compare.
+        pub fn condFloatLessOrEqual() Emit.Condition {
+            return .below_or_equal;
+        }
+
+        /// Condition testing `lhs > rhs` after this ISA's float compare.
+        pub fn condFloatGreater() Emit.Condition {
+            return .above;
+        }
+
+        /// Condition testing `lhs >= rhs` after this ISA's float compare.
+        pub fn condFloatGreaterOrEqual() Emit.Condition {
+            return .above_or_equal;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAddRegs`.
+        pub fn emitAddRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst == src1);
+            try self.emit.addRegReg(width, dst, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSubRegs`.
+        pub fn emitSubRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst == src1);
+            if (dst != src1) try self.emit.movRegReg(width, dst, src1);
+            try self.emit.subRegReg(width, dst, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitMulRegs`.
+        pub fn emitMulRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst == src1);
+            try self.emit.imulRegReg(width, dst, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAndRegs`.
+        pub fn emitAndRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst == src1);
+            try self.emit.andRegReg(width, dst, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitOrRegs`.
+        pub fn emitOrRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst == src1);
+            if (dst != src1) try self.emit.movRegReg(width, dst, src1);
+            try self.emit.orRegReg(width, dst, src2);
+        }
+
+        /// dst = number of trailing zero bits of the full 64-bit value `src`
+        /// (64 when `src` is zero).
+        pub fn emitCtz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            if (self.cpu_level == .v1) {
+                // BSF already reports the index of the lowest set bit, which is
+                // the trailing zero count. Only the zero operand differs, and
+                // TZCNT reports 64 there.
+                const t = self.allocTempGeneral();
+                try self.emitLoadImm(t, 64);
+                try self.emit.bsfRegReg(.w64, dst, src);
+                try self.emit.cmovcc(.equal, .w64, dst, t);
+                self.freeGeneral(t);
+                return;
+            }
+            try self.emit.tzcntRegReg(.w64, dst, src);
+        }
+
+        /// Store a discriminant value at the given offset
+        pub fn storeDiscriminant(self: *Self, offset: i32, value: u16, disc_size: u8) Allocator.Error!void {
+            if (disc_size == 0) return;
+
+            const reg = self.allocTempGeneral();
+            try self.emitLoadImm(reg, value);
+
+            // Store appropriate size - architecture specific
+            // x86_64 supports all widths
+            const width: RegisterWidth = switch (disc_size) {
+                1 => .w8,
+                2 => .w16,
+                4 => .w32,
+                else => .w64,
+            };
+            try self.emitStoreStack(width, offset, reg);
+
+            self.freeGeneral(reg);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.patchInternalCodeAddress`.
+        pub fn patchInternalCodeAddress(self: *Self, instr_offset: usize, target_offset: usize) void {
+            const buf = self.emit.buf.items;
+            const new_rel: i64 = @as(i64, @intCast(target_offset)) - @as(i64, @intCast(instr_offset));
+            const lea_size: i64 = 7;
+            const disp: i32 = @intCast(new_rel - lea_size);
+            const bytes: [4]u8 = @bitCast(disp);
+            @memcpy(buf[instr_offset + 3 ..][0..4], &bytes);
+        }
+
+        /// Producer-authored placement metadata; never decode it from bytes.
+        /// x86_64 calls reach every target directly, so no site has a veneer.
+        pub fn codeRefVeneer(_: *const Self, _: usize) ?usize {
+            return null;
+        }
+
+        /// Record the veneer an assembled reference uses. x86_64 has none.
+        pub fn registerAssembledRefVeneer(_: *Self, _: usize, _: ?usize) Allocator.Error!void {}
+
+        /// Remove placement-specific stub displacements using producer records.
+        /// x86_64 emits no placement-specific stubs.
+        pub fn normalizeArtifactCode(_: *const Self, _: usize, _: []u8) void {}
+
         /// Per-ISA instruction selection for `LirCodeGen.condEqual`.
         pub fn condEqual() Emit.Condition {
             return .equal;
