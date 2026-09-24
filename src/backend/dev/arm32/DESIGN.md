@@ -1,0 +1,298 @@
+# ARM32 Dev Backend Design
+
+This document describes how the arm32 (A32, ARMv7-A + NEON, AAPCS32
+hard-float) dev backend is built, what exists today, and what was learned
+while building it. The plan that sequences the work, with its acceptance
+criteria, is `projects/big/arm32-dev-backend.md`; its decision numbers (D1-D12)
+and unit names (A0-A3, Track B, J1-J4) are used here. `design.md` remains the
+authoritative reference for compiler-wide invariants.
+
+## Status
+
+| Unit | State |
+|------|-------|
+| Track B, first batch: registers, integer/VFP encoder, AAPCS32 constants, encoding oracle | Done |
+| A0: byte-identity oracles for the 64-bit targets | Done |
+| A1, dispatch: every arch decision in the driver is exhaustive or arm32-refusing | Done |
+| A1, remaining: `CC` register seam, mnemonic facade, register high-water mark | Not started |
+| Track B, NEON batch | Not started |
+| A2-A3: width model; ELF32 | Not started |
+| Track C: arm32 runtime objects, platforms, `_start` | Not started |
+| J1-J4: arm32 `CodeGen`, gates, qemu execution, lock-in | Not started |
+
+Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
+--opt=dev --target=arm32musl` is still rejected (first by the platform's target
+list, then by the dev backend's dispatch), and every `dev_object` snapshot
+still prints `arm32*=NOT_IMPLEMENTED`.
+
+## Where arm32 sits in the pipeline
+
+```
+checked modules -> LIR (target_usize = u32) -> LirCodeGen (shared driver)
+    -> arm32.CodeGen (J1) -> arm32.Emit (this directory)
+    -> ObjectWriter / ELF32 (A3) -> ld.lld (unchanged)
+```
+
+Everything up to and including LIR is already width-generic: `TargetUsize`,
+the layout store, static-data materialization and `StaticStringData` all take
+the word size from the target, and they already produce 32-bit layouts for
+wasm32. The work is downstream of LIR, in the dev backend's shared driver
+(`LirCodeGen.zig`, `FrameBuilder.zig`, `CallingConvention.zig`), which is
+written against a 64-bit general register and branches on the architecture
+with binary `if`s that would silently route `.arm` into the aarch64 or x86_64
+paths. Track A replaces those with exhaustive switches and a per-arch facade
+before any arm32 code is reachable.
+
+## Architecture dispatch in the shared driver
+
+`src/backend/dev/isa.zig` defines `Isa = { x86_64, aarch64, arm32 }` and
+`isaOf(target)`. `LirCodeGen`, `FrameBuilder` and `CallingConvention` take
+every architecture decision through it, in one of two forms:
+
+- an exhaustive `switch (isa)` with an `.arm32` prong (today
+  `@compileError("arm32: TODO")`), used wherever the choice selects a type or
+  a whole implementation (`CodeGen`, register types, `CalleeSavedInfo`, the
+  prologue/epilogue bodies, the `CallBuilder` register-assignment bodies);
+- `isa.binaryIs(.x86_64)` / `isa.binaryIs(.aarch64)` for the ~250 two-way
+  tests inside `LirCodeGen`'s bodies. `binaryIs` is a compile error when the
+  instantiation is arm32.
+
+This amends the plan's A1, which asked for every site to be rewritten by
+hand into a three-way switch. Both give the property the plan is after:
+instantiating the driver for arm32 cannot compile while any site still makes
+a two-way x86_64/aarch64 decision, so the compiler, not review, produces
+J1's checklist, and no site can silently send arm32 down another ISA's path
+(the failure mode the plan warns about, where `if (arch == .x86_64) A else B`
+quietly routes arm32 into `B`). The `binaryIs` form was chosen because it is
+a mechanical rewrite of existing boolean tests and therefore provably
+byte-identical for x86_64 and aarch64, whereas hand-rewriting ~250 if/else
+bodies into switches in a 28,000-line file is where a behavior change would
+hide. J1 converts each site to a real switch as it teaches it arm32. The
+never-read `LirCodeGen.cc` field, whose initializer would have panicked for
+arm32 through `CallingConvention.forTarget`, is gone, and `ObjectWriter`'s ELF
+architecture choice is an exhaustive switch with arm32 still refused until
+A3's ELF32 writer exists.
+
+## Module layout
+
+- `Registers.zig`: `GeneralReg` r0-r15 with `fp`/`ip`/`sp`/`lr`/`pc` as
+  declarations (Zig enums cannot alias values). The VFP/NEON bank is one
+  register file seen three ways: `SReg` s0-s31, `DReg` d0-d31, `QReg` q0-q15,
+  with conversions between views. `FloatReg` is `DReg`, the unit a register
+  allocator owns, so one allocator owns every view and s/d/q aliasing cannot
+  be double-booked. Only d0-d15 have S views, so an f32 value must be
+  allocated in d0-d15. `RegisterWidth` has one member, `w32`.
+- `Emit.zig`: one function per instruction form, with typed operands:
+  - `ModImm` is the only way to pass a data-processing immediate. A32 can
+    only encode an 8-bit value rotated by an even amount, so an unencodable
+    immediate is a type error at the call site (`ModImm.of` fails at compile
+    time, `ModImm.encode` returns null) rather than a silent fallback inside
+    the encoder.
+  - `Operand2` covers immediate, register, register shifted by an immediate
+    and register shifted by a register; `dataProc` is the general entry point
+    with condition and flag-setting, and named wrappers exist for the common
+    forms.
+  - Memory forms assert their offset range. `fitsImmediate(form, offset)`
+    exposes the per-form ranges (word/byte ±4095; halfword, signed byte and
+    doubleword ±255; VFP ±1020 in multiples of 4; NEON none) so the caller
+    decides when to form the address in the scratch register. The encoder
+    never forms addresses itself.
+  - Branch displacements are relative to the branch instruction; the encoder
+    applies A32's PC+8 bias. `bl(0)` therefore encodes `0xEBFFFFFE`, which is
+    exactly the REL-form addend of an `R_ARM_CALL` relocation (D1).
+  - `pcRelAddress` emits the D8 sequence (`movw`/`movt`/`add rd, pc, rd`,
+    immediates `0xFFF0`/`0xFFF4` holding the REL addends -16/-12) and returns
+    the offset the relocations attach to.
+  - The `CC` namespace carries D5's constants for `CallingConvention` and
+    `FrameBuilder`.
+- `Call.zig`: AAPCS32 register roles and allocation masks. The pool is r0-r3
+  (caller-saved) plus r4-r10 (callee-saved); r11 is the frame pointer and r12
+  the scratch register, excluded from allocation as x86_64's R11 and
+  aarch64's X9 are.
+- `encoding_oracle_tests.zig`: generated; see below.
+
+## Decisions as implemented
+
+The plan's D1-D12 stand; these points are where the implementation made them
+concrete or amended them.
+
+- **Return registers (D5, amended).** `CC.RETURN_REGS = {r0, r1}` is the C-ABI
+  return set (r0:r1 for a 64-bit scalar). The Roc-internal three-register
+  RocStr/RocList return is a separate constant, `CC.ROC_RET_REGS = {r0, r1,
+  r2}`, so no C-ABI consumer can mistake r2 for a return register.
+- **`needsReturnByPointer` is not in `CC` yet.** AAPCS32 returns composites
+  wider than a word through a hidden pointer but 64-bit scalars in r0:r1, so
+  the predicate needs to know whether the value is a composite. The shared
+  signature takes only a size; J1 changes the shared signature rather than
+  giving arm32 a size-only approximation.
+- **Runtime helpers (D7, confirmed).** Zig's compiler-rt (the pinned 0.16.0)
+  exports every helper D7 lists. The float/i64 conversions
+  (`__aeabi_d2lz`, `__aeabi_l2d`, ...) are declared `callconv(.arm_aapcs)`,
+  the base procedure-call standard, so operands travel in core registers
+  even in a hard-float program, as D7 requires. `__aeabi_ldivmod`,
+  `__aeabi_uldivmod` and `__aeabi_uidivmod` are naked assembly with the
+  documented register convention. `__aeabi_llsl`/`llsr`/`lasr` are exported
+  too; the encoder already has the shifted-register operand forms the
+  standard inline 64-bit shift sequence needs, and J1 decides between the
+  two.
+
+## How correctness is established
+
+### Encodings: the assembler is the oracle
+
+`ci/arm32_encoding_oracle.s` pairs each line of A32 assembly with the `Emit`
+call that must produce the same bytes. `ci/arm32_encoding_oracle.py`
+assembles the file with `zig cc -target arm-linux-musleabihf` (LLVM's
+integrated assembler, so every host with the pinned Zig can run it), reads the
+object with `ci/elf32_reader.py`, and writes one `expectEqualSlices` test per
+entry to `encoding_oracle_tests.zig`. `zig build test` therefore needs no
+external tool, and `zig build run-check-arm32-encoding-oracle` (in minici)
+fails when the generated file is stale or when an emitter has no entry.
+
+Entries deliberately exercise the high register bits (r8-r15, odd S
+registers, d16-d31) and both offset signs, which is where hand-written A32
+encoders usually go wrong (the D/N/M bit split of VFP register numbers is
+different for S and D registers).
+
+### The 64-bit targets must not change: two byte-identity oracles
+
+Track A rewrites the shared driver that x86_64 and aarch64 depend on, so any
+change to their output is a bug. Two oracles catch it:
+
+- **`dev_object` snapshots.** Ten existed; A0 added six that reach the code
+  paths Track A touches (float math and F64 to I64, Dec/I128/U128 with a tuple
+  return, list operations with a capturing closure, a recursive boxed tree
+  forcing refcount helpers, eighteen mixed arguments that overflow both
+  argument register files, and string operations beyond the small-string
+  limit). They hash the object for every `RocTarget` from every host.
+- **Eval-corpus object hashes.** `eval-test-runner
+  --check-dev-code-hashes test/dev_code_hashes/eval.blake3` (the
+  `run-check-dev-code-hashes` step, in minici) compiles every eval case that
+  returns an inspected value, 1961 of them, through the dev backend's
+  object-file path for `x64musl` and `arm64musl` and compares each object's
+  Blake3. `--write-dev-code-hashes` regenerates the file. The work is sharded
+  across forked children and concatenated in order, so the output is
+  byte-identical to a sequential run; it takes about four minutes on sixteen
+  cores.
+
+Both oracles hash objects with procedure symbol names canonicalized (see
+"Procedure symbol names change with every compiler build" below), so they pin
+code generation, not the compiler's git revision.
+
+## Learnings
+
+### Is 32-bit support too tightly coupled to wasm32?
+
+No. The 32-bit data model is shared, and the places that single out wasm32 do
+so for wasm-specific reasons. What the dev backend is coupled to is the 64-bit
+register and its two existing ISAs. The details:
+
+- **The width model is shared, not wasm-owned.** Layouts, `TargetUsize`,
+  static data and string data are parameterized by the target's word size and
+  were built so wasm32 could use them; arm32 uses the same code. Nothing in
+  LIR or the layout store asks "is this wasm".
+- **wasm32 is the only thing that ever exercises 32-bit code, and it shares no
+  codegen with the dev backend.** The eval harness lowers every case twice,
+  for the host word and for `u32`, but only the wasm backend consumes the
+  `u32` lowering, through its own `WasmCodeGen`. The comptime float-bits tests
+  check "64-bit native and wasm32" static bytes. So 32-bit *layouts* are well
+  tested, but no 32-bit *native* code path is. arm32 will be the first, and
+  any width bug in shared native code (object writing, relocation widths,
+  DWARF address size, the driver's literal 8s) will surface for the first
+  time on arm32, not in wasm testing.
+- **Places that name wasm32 where they mean something else**, all checked:
+  - `src/builtins/compiler_rt_128.zig` decomposes u128 shifts and widening
+    multiplies only when `cpu.arch == .wasm32`. The reason is that the wasm
+    builtins link without compiler-rt, not the word size. On arm32 the Zig-
+    compiled builtins emit calls to `__ashlti3`, `__multi3` and friends, and
+    Zig's compiler-rt exports those on every target, so they link from
+    `roc_default_compiler_rt.o` (Track C). No change is needed, but the
+    `is_wasm` name hides the real condition.
+  - `src/base/ConcurrentU64.zig` treats wasm32 as "no 64-bit atomics"; other
+    targets with a 32-bit `usize` fall through to a mutex-guarded counter, so
+    arm32 is correct without a change.
+  - `src/layout/abi/call.zig` (the shared C-ABI classifier) has `wasm32` and
+    `wasm64` targets but no AAPCS32 one; J1 adds `arm32_aapcs_vfp`.
+  - `CallingConvention.forTarget` lumps `.arm`, `.wasm32` and `.other` into
+    one unsupported arm, and the CLI's LLVM gate (`src/cli/main.zig`) allows
+    wasm32 as the only 32-bit target. Both are explicit per-arch decisions;
+    J2 revisits them.
+
+### JIT code cannot be a golden oracle
+
+The plan's A0 originally hashed the eval runner's in-process (JIT) dev code
+per host. That does not work: in JIT mode `LirCodeGen` embeds absolute host
+addresses of static data and runtime functions as immediates
+(`nativeStaticDataAddress` feeding `emitLoadImm`), so the bytes change with
+address-space layout between runs. The object-file mode references the same
+things through relocations and is deterministic, and because the eval corpus
+is lowered for a 64-bit word it can be compiled for both 64-bit ISAs from any
+host. One host-independent golden file therefore replaces the plan's two
+per-host files.
+
+### LIR images drop the layout store's recursive-graph keys
+
+The eval runner normally hands backends a `LirImage` (a relocatable copy of
+the lowered program). `lir_image.zig` rebuilds the layout store with an empty
+`interned_recursive_graphs` map. The dev object path computes content digests
+of layouts (`src/layout/digest.zig`) and needs those keys to terminate the walk
+through recursive layouts; without them it panics ("cyclic layout N has no
+recursive-graph key"). The hash oracle therefore compiles the live lowering
+(`eval.test_helpers.devObjectHashes`), not the image. The image path is a
+latent bug for any future consumer that feeds an image to the object path,
+and it should be fixed by serializing the keys, not by making the digest
+tolerate their absence.
+
+### Procedure symbol names change with every compiler build
+
+A procedure's object symbol is `roc__proc_` plus 128 bits of its
+`ProcIdentity`, a content digest that includes the checked-module artifact
+keys, and those include `compiler_artifact_hash`, which `build.zig` derives
+from the git revision. So an object containing any procedure changes its bytes
+on every commit even when code generation is identical. The ten original
+`dev_object` snapshots never noticed, because none of them compiles a
+procedure. Rebuilding with two pinned compiler versions and diffing one
+object showed that only these names differ: renaming each to its
+first-appearance ordinal made the objects identical. The oracles therefore
+hash with `ProcIdentity.canonicalizeSymbolNames` applied, and a rebuild under a
+different compiler version leaves all 16 snapshots and all 1961 eval hashes
+unchanged. A naive golden hash of generated objects would have failed on the
+first commit after it was recorded.
+
+### Snapshot inputs must exercise code generation
+
+Two properties of `type=dev_object` snapshots decide whether a new snapshot
+tests anything:
+
+- A provided value with no arguments is evaluated at compile time and emitted
+  as data (that is what `dev_object_static_data_exports` checks), so a
+  snapshot only exercises code generation if its provided entry point is a
+  function the host calls with arguments.
+- The snapshot tool reports no diagnostics for these files. A type error turns
+  the definition into `<runtime_error>` in the MONO section, and the tool
+  happily hashes the resulting object. Every new snapshot has to be checked
+  for `<runtime_error>` (or run through `roc check`) before its hashes are
+  trusted. Recursive types, for example, must be nominal (`:=`); a recursive
+  structural alias is rejected.
+
+### A32 encoding facts that bit, or would have
+
+- LLVM keeps every `BL` relocatable (`R_ARM_CALL`), even to a local label, so
+  the linker can interwork with Thumb. The oracle accepts exactly the
+  relocations whose symbol is the branch itself, where the in-place REL
+  addend already equals the resolved bytes.
+- Immediates such as 4092 have no modified-immediate encoding (4080 does).
+- `LDRD`/`STRD` need an even first register and reach only ±255;
+  `VLDR`/`VSTR` reach ±1020 in words. Frame layout has to keep 64-bit and
+  vector slots near `fp` (D5), and every other access goes through `r12`.
+- A single-register `PUSH`/`POP` uses a different encoding (`STR`/`LDR` with
+  writeback). The multi-register form asserts at least two registers; the
+  8-byte stack alignment makes even-count pushes the normal case anyway.
+
+## Next steps
+
+In plan order: A1 (three-way arch switches, the `CC` seam, raw mnemonics
+behind the per-arch facade), A2 (the `WORD`/`Wide64`/four-word width model),
+A3 (ELF32, `R_ARM_*` relocations, DWARF address width), with the NEON encoder
+batch and Track C in parallel. Every Track A change must leave both
+byte-identity oracles unchanged.
