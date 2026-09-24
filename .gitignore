@@ -65,6 +65,8 @@ zig-pkg
 !test/fx/platform/targets/x64musl/libc.a
 !test/fx/platform/targets/arm64musl/crt1.o
 !test/fx/platform/targets/arm64musl/libc.a
+!test/fx/platform/targets/arm32musl/crt1.o
+!test/fx/platform/targets/arm32musl/libc.a
 
 # Force-include the MinGW C runtime files that are checked into the repo
 # (see ci/vendor_mingw_runtime.py). A `*mingw` target links only

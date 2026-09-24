@@ -935,6 +935,13 @@ they cannot break `main`.
   (`all_cross_targets` `:47`, `targets_with_glibc` `:57`, `targets_fx` `:67`);
   make `parallel_cli_runner.zig` fail, not pass, when `--cross-target` matches
   zero cases (`:11589-11595`).
+- *Done, amended:* all twelve objects build and pass the checks below; Zig's
+  arm baseline already equals the D2 floor (NEON, VFPv3-D32, no hwdiv), pinned
+  by a test in `src/target/mod.zig`. The musl `crt1.o`/`libc.a` come from
+  `ci/vendor_musl_runtime.py`. The `platform_config.zig` roster rows move to
+  J2: until the dev backend serves arm32, every arm32 case in the default
+  `platforms` suite would fail (plain `roc build` is LLVM, which rejects
+  arm32). The runner now fails when `--cross-target` selects no cases.
 - Acceptance: `zig build` produces
   `src/cli/targets/arm32musl/{roc_builtins,roc_builtins_extern,roc_boxy_runtime,roc_default_runtime,roc_default_compiler_rt,roc_default_platform}.o`
   and the arm32glibc set; `python3 ci/elf32_reader.py --header --attributes`
