@@ -109,6 +109,16 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   invariant violation. That is best-effort recovery in a compiler stage.
 - **Fix direction:** make those arms invariant failures.
 
+### Redundant narrowing before byte stores
+
+- **Where:** `src/backend/dev/LirCodeGen.zig`, `storeResultToSavedPtr`'s `.u8`
+  and `.i8` arms.
+- **Effect:** each shifts the register left and right by `word_bits - 8`
+  before `emitStoreScalarToPtr(..., 1)`, which stores only the low byte, so
+  the two shifts are dead work. Harmless; left in place because Track A
+  changes must be byte-identical. A cleanup can drop them with a regenerated
+  hash file.
+
 ## Open: risks for the remaining arm32 work
 
 ### Target data laid out with the host's word
