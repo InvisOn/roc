@@ -15,7 +15,8 @@ authoritative reference for compiler-wide invariants.
 | A0: byte-identity oracles for the 64-bit targets | Done |
 | A1, dispatch: every arch decision in the driver is exhaustive or arm32-refusing | Done |
 | A1, register budget: temporaries allocated by the per-arch `CodeGen`, D10 high-water mark | Done |
-| A1, remaining: `CC` register seam, mnemonic facade | Not started |
+| A1, `CC` register seam and facade for ISA-neutral helpers | Done |
+| A1 facade for i128/SIMD/overflow/entry strategies | Deferred to A2 and the NEON batch |
 | Track B, NEON batch | Not started |
 | A2-A3: width model; ELF32 | Not started |
 | Track C: arm32 runtime objects, platforms, `_start` | Not started |
@@ -73,6 +74,18 @@ never-read `LirCodeGen.cc` field, whose initializer would have panicked for
 arm32 through `CallingConvention.forTarget`, is gone, and `ObjectWriter`'s ELF
 architecture choice is an exhaustive switch with arm32 still refused until
 A3's ELF32 writer exists.
+
+### Which sequences get a facade method
+
+A facade method is worth its shared signature only when every ISA can
+implement that signature naturally. The 55 helpers moved in A1 qualify:
+width-tagged loads and stores, stack addressing, immediates, compares,
+condition codes, register arithmetic, trap. The i128 arithmetic, SIMD
+kernels, checked-multiply sequences and entry wrappers do not yet: their
+x86_64/aarch64 bodies assume one 64-bit register per value, while arm32
+keeps i128 in memory with by-pointer helpers and 64-bit values in register
+pairs (D6), and its SIMD is NEON. They keep `binaryIs` tests until A2 and the
+NEON batch define signatures that fit all three ISAs.
 
 ## Module layout
 
