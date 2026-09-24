@@ -22,6 +22,7 @@ const builtins = @import("builtins");
 
 pub const x86_64 = @import("x86_64/mod.zig");
 pub const aarch64 = @import("aarch64/mod.zig");
+pub const arm32 = @import("arm32/mod.zig");
 pub const object = @import("object/mod.zig");
 const relocation_mod = @import("Relocation.zig");
 pub const Relocation = relocation_mod.Relocation;
