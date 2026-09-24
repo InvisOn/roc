@@ -56,6 +56,22 @@ pub fn Emit(comptime target: RocTarget) type {
             pub const STACK_PTR = Registers.GeneralReg.ZRSP;
             pub const STACK_ALIGNMENT: u32 = 16;
 
+            /// Roc-internal return registers for RocStr/RocList results of
+            /// compiled-proc calls.
+            pub const ROC_RET_REGS = [3]Registers.GeneralReg{ .X0, .X1, .X2 };
+            /// Callee-saved register that holds an entrypoint's result pointer.
+            pub const RESULT_PTR_SAVE_REG = Registers.GeneralReg.X19;
+            /// Callee-saved register that holds an entrypoint's RocOps pointer.
+            pub const ROC_OPS_SAVE_REG = Registers.GeneralReg.X20;
+            /// Callee-saved register that internal procs receiving stack
+            /// arguments set to the caller's stack-argument base: deferred
+            /// prologues put FP at the bottom of the frame, so incoming
+            /// arguments are not at a fixed FP offset.
+            pub const CALLER_STACK_ARG_BASE_REG = Registers.GeneralReg.X28;
+            /// Offset of the first incoming stack argument from
+            /// `CALLER_STACK_ARG_BASE_REG`.
+            pub const INCOMING_STACK_ARG_BASE_OFFSET: i32 = 0;
+
             /// Check if a struct of the given size can be passed by value.
             /// AAPCS64: structs up to 16 bytes can be passed in registers.
             pub fn canPassStructByValue(size: usize) bool {
