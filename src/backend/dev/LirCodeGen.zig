@@ -2168,7 +2168,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     const result_reg = try self.allocTempGeneral();
                     try self.codegen.emitLoad(word, result_reg, frame_ptr, base_offset + listFieldOffset("length"));
-                    return .{ .general_reg = result_reg };
+                    return try self.wordAsU64(result_reg);
                 },
                 .list_capacity => {
                     // RocList stores normal-list capacity shifted left by one.
@@ -2195,18 +2195,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     try self.codegen.emitLoad(word, len_reg, frame_ptr, base_offset + listFieldOffset("length"));
                     try self.codegen.emitLoad(word, cap_reg, frame_ptr, base_offset + listFieldOffset("capacity_or_alloc_ptr"));
-                    try self.codegen.emitLsrImm(.w64, result_reg, cap_reg, 1);
+                    try self.codegen.emitLsrImm(word, result_reg, cap_reg, 1);
 
                     try self.codegen.emitLoadImm(tag_reg, 1);
-                    try self.codegen.emitAndRegs(.w64, tag_reg, tag_reg, cap_reg);
+                    try self.codegen.emitAndRegs(word, tag_reg, tag_reg, cap_reg);
                     try self.codegen.emitCmpImm(tag_reg, 0);
                     if (comptime isa.binaryIs(.aarch64)) {
-                        try self.codegen.emit.csel(.w64, result_reg, len_reg, result_reg, .ne);
+                        try self.codegen.emit.csel(word, result_reg, len_reg, result_reg, .ne);
                     } else {
-                        try self.codegen.emit.cmovcc(.not_equal, .w64, result_reg, len_reg);
+                        try self.codegen.emit.cmovcc(.not_equal, word, result_reg, len_reg);
                     }
 
-                    return .{ .general_reg = result_reg };
+                    return try self.wordAsU64(result_reg);
                 },
                 .list_with_capacity => {
                     // listWithCapacity(capacity, alignment, elem_width, elements_refcounted,
@@ -2545,11 +2545,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         },
                         .stack => |s| {
                             const off = s.offset;
-                            try self.codegen.emitLoadStack(.w64, index_reg, off);
+                            try self.codegen.emitLoadStack(word, index_reg, off);
                         },
                         .stack_i128 => |off| {
-                            // Dec/i128 index - just load the low 64 bits as U64
-                            try self.codegen.emitLoadStack(.w64, index_reg, off);
+                            // Dec/i128 index - just load the low word
+                            try self.codegen.emitLoadStack(word, index_reg, off);
                         },
                         .immediate_i128 => |val| {
                             // i128 immediate - truncate to 64 bits for index
@@ -2568,34 +2568,34 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     // Load list pointer (offset 0 in list struct)
                     const ptr_reg = try self.allocTempGeneral();
-                    try self.codegen.emitLoadStack(.w64, ptr_reg, list_base);
+                    try self.codegen.emitLoadStack(word, ptr_reg, list_base + listFieldOffset("bytes"));
 
                     // Calculate element address: ptr + index * elem_size
                     const addr_reg = try self.allocTempGeneral();
-                    try self.codegen.emit.movRegReg(.w64, addr_reg, index_reg);
+                    try self.codegen.emit.movRegReg(word, addr_reg, index_reg);
                     self.codegen.freeGeneral(index_reg);
 
                     if (elem_size != 1) {
                         const size_reg = try self.allocTempGeneral();
                         try self.codegen.emitLoadImm(size_reg, elem_size);
-                        try self.codegen.emitMulRegs(.w64, addr_reg, addr_reg, size_reg);
+                        try self.codegen.emitMulRegs(word, addr_reg, addr_reg, size_reg);
                         self.codegen.freeGeneral(size_reg);
                     }
 
                     // Add base pointer
-                    try self.codegen.emitAddRegs(.w64, addr_reg, addr_reg, ptr_reg);
+                    try self.codegen.emitAddRegs(word, addr_reg, addr_reg, ptr_reg);
                     self.codegen.freeGeneral(ptr_reg);
 
                     // Load element to stack slot
                     const elem_slot = self.codegen.allocStackSlot(@intCast(elem_size));
                     const temp_reg = try self.allocTempGeneral();
 
-                    if (elem_size <= 8) {
+                    if (elem_size <= word_size) {
                         const vs = ValueSize.fromByteCount(@intCast(elem_size));
                         try self.emitSizedLoadMem(temp_reg, addr_reg, 0, vs);
                         try self.emitSizedStoreMem(frame_ptr, elem_slot, temp_reg, vs);
                     } else {
-                        // For larger elements, copy in 8-byte chunks
+                        // For larger elements, copy in word chunks
                         try self.copyChunked(temp_reg, addr_reg, 0, frame_ptr, elem_slot, elem_size);
                     }
 
@@ -18451,6 +18451,17 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         /// Ensure a value is in a general-purpose register
+        /// A word-sized result (a list or string length or capacity) as the
+        /// `U64` Roc types it as. A 64-bit word already is one; a 32-bit
+        /// target zero-extends it into a 64-bit value.
+        fn wordAsU64(self: *Self, reg: GeneralReg) Allocator.Error!ValueLocation {
+            _ = self;
+            return switch (isa) {
+                .x86_64, .aarch64 => .{ .general_reg = reg },
+                .arm32 => @compileError("arm32: TODO zero-extend a word into a U64 value"),
+            };
+        }
+
         fn ensureInGeneralReg(self: *Self, loc: ValueLocation) Allocator.Error!GeneralReg {
             switch (loc) {
                 .general_reg => |reg| return reg,
@@ -19446,12 +19457,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// bytes; source and destination therefore must not overlap.
         fn copyChunked(self: *Self, temp_reg: GeneralReg, src_base: GeneralReg, src_offset: i32, dst_base: GeneralReg, dst_offset: i32, size: u32) Allocator.Error!void {
             if (size == 0) return;
-            if (size == 8) {
-                try self.codegen.emitLoad(.w64, temp_reg, src_base, src_offset);
-                try self.codegen.emitStore(.w64, dst_base, dst_offset, temp_reg);
+            if (size == word_size) {
+                try self.codegen.emitLoad(word, temp_reg, src_base, src_offset);
+                try self.codegen.emitStore(word, dst_base, dst_offset, temp_reg);
                 return;
             }
-            if (size < 8) {
+            if (size < word_size) {
                 // A leading chunk plus an overlapping tail chunk of the same
                 // width cover any sub-word size in at most two copies.
                 if (size >= 4) {
@@ -19479,20 +19490,21 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 return;
             }
 
+            // Whole words, then one overlapping word for any remainder.
             var copied: u32 = 0;
-            while (copied + 8 <= size) : (copied += 8) {
+            while (copied + word_size <= size) : (copied += word_size) {
                 const s = src_offset + @as(i32, @intCast(copied));
                 const d = dst_offset + @as(i32, @intCast(copied));
-                try self.codegen.emitLoad(.w64, temp_reg, src_base, s);
-                try self.codegen.emitStore(.w64, dst_base, d, temp_reg);
+                try self.codegen.emitLoad(word, temp_reg, src_base, s);
+                try self.codegen.emitStore(word, dst_base, d, temp_reg);
             }
 
             if (copied < size) {
-                const tail = @as(i32, @intCast(size - 8));
+                const tail = @as(i32, @intCast(size - word_size));
                 const s = src_offset + tail;
                 const d = dst_offset + tail;
-                try self.codegen.emitLoad(.w64, temp_reg, src_base, s);
-                try self.codegen.emitStore(.w64, dst_base, d, temp_reg);
+                try self.codegen.emitLoad(word, temp_reg, src_base, s);
+                try self.codegen.emitStore(word, dst_base, d, temp_reg);
             }
         }
 
