@@ -267,6 +267,14 @@ Both are `.w64` on the 64-bit ISAs, so the classification is byte-identical
 there, and arm32's `RegisterWidth` has no `w64`, so every unclassified site is
 a compile error for arm32.
 
+One representation invariant makes many sites classifiable locally: a
+`ValueLocation.general_reg` never holds more than a word. On the 64-bit ISAs a
+word is 64 bits, so nothing changes; on arm32 a 64-bit value is never a single
+`general_reg` (it lives in memory or, transiently, in a register pair), so
+storing or spilling a `general_reg` is always a word-sized access. Immediate
+locations (`immediate_i64`) are different: they can carry a genuine 64-bit
+value and stay 64-bit.
+
 The list and string builtins take their Roc `U64` counts and indices as
 `u64` and narrow them to `usize` themselves (saturating, so an index past
 2^32 is past the end). The driver therefore passes those operands as 64-bit
