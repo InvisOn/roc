@@ -755,7 +755,7 @@ Work is organized as four independent tracks and four joins. Every unit has an
 green throughout. Nothing arm32-specific is reachable until J2 flips the
 gates.
 
-### Track A — make the driver ISA- and width-generic (behavior-preserving)
+### Track A: make the driver ISA- and width-generic (behavior-preserving)
 
 Lands first, alone, as a PR series on `main`, before any arm32 code exists.
 It is the conflict-prone piece (27,740 lines, ~100 commits/month) and rebases
@@ -840,7 +840,7 @@ daily.
   the existing `:877` test gains an aarch64 sibling so all three arches assert
   relocation types.
 
-### Track B — the arm32 encoder module (parallel with A)
+### Track B: the arm32 encoder module (parallel with A)
 
 New files under `src/backend/dev/arm32/`, referenced by nothing until J1, so
 they cannot break `main`.
@@ -862,7 +862,7 @@ they cannot break `main`.
   `ci/arm32_encoding_oracle.py --check` agrees with the committed
   `encoding_oracle_tests.zig`; `zig build run-test-zig` runs them on every host.
 
-### Track C — arm32 target artifacts (parallel with A and B)
+### Track C: arm32 target artifacts (parallel with A and B)
 
 - `build.zig`: add `.{ .name = "arm32musl", .query = .{ .cpu_arch = .arm,
   .os_tag = .linux, .abi = .musleabihf } }` and `arm32glibc` (`.gnueabihf`)
@@ -897,7 +897,7 @@ they cannot break `main`.
   build run-test-cli -- --suite platforms --cross-target=arm32musl` reports a
   non-zero case count (build-only until J2).
 
-### Track D — CI lanes (parallel; allowed-to-fail until J3 makes them required)
+### Track D: CI lanes (parallel; allowed-to-fail until J3 makes them required)
 
 - `ci_cross_compile.yml`: add `arm32musl` to `matrix.target` (`:22`); change
   the int-app build steps (`:67`, `:73`) and the runner's cross-compile argv
@@ -926,7 +926,7 @@ they cannot break `main`.
   true`, and their logs show the `roc build --opt=dev --target=arm32musl` step
   and the `qemu-arm-static` step executed (exit code recorded, not skipped).
 
-### J1 — arm32 `CodeGen` and the driver's `.arm` arms (needs A, B)
+### J1: arm32 `CodeGen` and the driver's `.arm` arms (needs A, B)
 
 - `arm32/CodeGen.zig` implementing the full facade from A1, including the
   NEON lowering of the 55 SIMD ops (its own batch, after scalar), the
@@ -951,7 +951,7 @@ they cannot break `main`.
   and (on a Linux host with `qemu-user-static`) runs it. The SIMD lane and the
   arm32 register-budget measurement need J2's gates and live there.
 
-### J2 — turn cross-compilation on (needs J1, C)
+### J2: turn cross-compilation on (needs J1, C)
 
 - Add `pub fn supportsTarget(target: RocTarget) bool` to
   `ObjectFileCompiler.zig` beside `crossCompileDispatch` (`:761`) as the one
@@ -993,7 +993,7 @@ they cannot break `main`.
   `dev_object_*.md` sources never trips the D10 high-water mark above
   `MAX_TEMP_GENERAL`/`MAX_TEMP_FLOAT`.
 
-### J3 — execution oracles (needs J2, D)
+### J3: execution oracles (needs J2, D)
 
 arm32 codegen cannot be driven by the eval runner from a 64-bit host, but it
 can under user-mode QEMU, and no LLVM differential oracle exists for arm32
@@ -1040,7 +1040,7 @@ interpreter or against the x86_64/aarch64 dev backends:
   locks hashes; whether the self-hosted ARM64 runner's CPU implements AArch32
   at EL0 is checked, not assumed.
 
-### J4 — lock-in and documentation (needs J3)
+### J4: lock-in and documentation (needs J3)
 
 - Regenerate all 10 (plus A0's) `dev_object_*.md` snapshots. Regeneration is
   pure cross-compilation and works on every host including Windows and macOS;
@@ -1270,28 +1270,27 @@ no release cost.
 
 ## Related projects
 
-- [runtime-representation-single-sourcing.md](runtime-representation-single-sourcing.md)
-  — **prerequisite for A2's RocStr/RocList half.** Its solution item 2
+- [runtime-representation-single-sourcing.md](runtime-representation-single-sourcing.md)—**prerequisite for A2's RocStr/RocList half.** Its solution item 2
   (offsets derived from `@offsetOf` scaled by the target word size, its
   `:101-105`) is the mechanism A2 needs for the `+ 8`/`+ 16` field-offset
   sites (`:13-18`); A2 adopts that derivation rather than introducing a
   second. If that project has not landed first, A2 lands the dev-backend half
   (one `wordOffset(comptime field)` helper) and that project's checklist is
   updated to say so.
-- [parallel-backend-codegen.md](parallel-backend-codegen.md) — independent in
+- [parallel-backend-codegen.md](parallel-backend-codegen.md)—independent in
   mechanism; both rewrite `LirCodeGen.zig` hot paths (its slice 1 moves the
   proc loop and pending-call patching), so whichever lands second rebases;
   A0's byte-identity oracle serves both. Its per-proc worker split applies to
   `LirCodeGen(arm32)` unchanged.
-- `design.md` — edited by J4 as listed there; AGENTS.md makes it the
+- `design.md`—edited by J4 as listed there; AGENTS.md makes it the
   authoritative reference, so the three-backend wording and the D2 floor must
   land with J2/J4, not after.
-- `projects/README.md` — does not index this document yet. It belongs to none
+- `projects/README.md`—does not index this document yet. It belongs to none
   of the existing audit batches: it is a capability gap (`RocTarget` names a
   target no backend serves), independent of the other batches except for the
   derived-offset dependency above.
 
-# AI Final Words
+## AI Final Words
 
 The plan is finished and verified. Here is where things stand.
 
