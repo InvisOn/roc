@@ -619,7 +619,7 @@ r1, dN` / `vmov dN, r0, r1` around these calls; D3's d0-d7/s0-s15 rules do
 **not** apply to them (VFP `VCVT` handles only 32-bit integers, so every
 64-bit integer↔float conversion is one of these calls). Zig's compiler-rt
 exports all of the above for `arm-linux-*eabihf` with the base PCS
-(*confirm*: `callconv(.arm_aapcs)` in `lib/compiler_rt`), so they come from
+(confirmed for Zig 0.16.0: the conversion helpers are declared `callconv(.arm_aapcs)` in `lib/compiler_rt`, and the division helpers are naked assembly), so they come from
 `roc_default_compiler_rt.o` (Track C). 64×64→64 multiply is inlined as
 `UMULL`/`MLA`/`MLA`; the 64×64→128 `umulh` sites (`LirCodeGen.zig:10993`,
 `:11436`) get a four-`UMULL` sequence in `arm32/CodeGen` or a by-pointer
