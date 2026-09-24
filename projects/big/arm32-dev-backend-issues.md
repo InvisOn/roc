@@ -117,11 +117,10 @@ Code generation sometimes sizes *target* data with the *host's* `usize`, which
 is right only while host and target share a word size (every target before
 arm32). Fixed (`654087283b`): `@alignOf(usize)` in the Debug RocStr validity
 check and `@sizeOf(usize)` in the erased-call descriptor array and the
-erased-callable drop-pointer slot. Still open: `LirCodeGen` uses
+erased-callable drop-pointer slot; and every use of
 `builtins.erased_callable`'s host layouts (`Payload`, `capture_offset`,
-`HotReloadCaptureHeader`, `CompilerMetadata`; ten sites), all built from
-pointer-sized fields, so erased callables need a target-word layout before
-arm32 can use them.
+`HotReloadCaptureHeader`, `CompilerMetadata`), now derived for the target word
+by `erased_layout` in `LirCodeGen`.
 
 ### The 64-bit register budget is nearly exhausted already
 
