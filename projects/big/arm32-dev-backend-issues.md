@@ -4,7 +4,8 @@ Issues found while carrying out `projects/big/arm32-dev-backend.md`, each
 verified in the tree rather than inferred. Most are pre-existing and outside
 arm32's scope; each says where it lives, why it matters, and its status. The
 design and the reasoning behind the arm32 work are in
-`src/backend/dev/arm32/DESIGN.md`.
+`src/backend/dev/arm32/DESIGN.md`; every change made to existing code, and why,
+is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 
 ## Open: pre-existing defects
 
@@ -109,6 +110,18 @@ design and the reasoning behind the arm32 work are in
 - **Fix direction:** make those arms invariant failures.
 
 ## Open: risks for the remaining arm32 work
+
+### Target data laid out with the host's word
+
+Code generation sometimes sizes *target* data with the *host's* `usize`, which
+is right only while host and target share a word size (every target before
+arm32). Fixed (`654087283b`): `@alignOf(usize)` in the Debug RocStr validity
+check and `@sizeOf(usize)` in the erased-call descriptor array and the
+erased-callable drop-pointer slot. Still open: `LirCodeGen` uses
+`builtins.erased_callable`'s host layouts (`Payload`, `capture_offset`,
+`HotReloadCaptureHeader`, `CompilerMetadata`; ten sites), all built from
+pointer-sized fields, so erased callables need a target-word layout before
+arm32 can use them.
 
 ### The 64-bit register budget is nearly exhausted already
 
