@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const isaOf = @import("isa.zig").isaOf;
 
 const stack_probe_page_size: u32 = 0x1000;
 
@@ -63,20 +64,18 @@ pub const FramePointerPolicy = enum {
 /// Callers: compileProcSpec, x86_64/CodeGen, aarch64/CodeGen
 pub fn DeferredFrameBuilder(comptime EmitType: type) type {
     const roc_target = EmitType.roc_target;
-    const is_x86_64 = roc_target.toCpuArch() == .x86_64;
-    const is_aarch64 = roc_target.toCpuArch() == .aarch64 or roc_target.toCpuArch() == .aarch64_be;
+    const isa = comptime isaOf(roc_target);
     const is_windows = roc_target.isWindows();
 
     const GeneralReg = EmitType.GeneralReg;
     const CC = EmitType.CC;
 
     // Architecture-specific callee-saved register definitions
-    const CalleeSavedInfo = if (is_x86_64)
-        X86_64CalleeSavedInfo(is_windows, GeneralReg)
-    else if (is_aarch64)
-        Aarch64CalleeSavedInfo(GeneralReg)
-    else
-        @compileError("Unsupported architecture for DeferredFrameBuilder");
+    const CalleeSavedInfo = switch (isa) {
+        .x86_64 => X86_64CalleeSavedInfo(is_windows, GeneralReg),
+        .aarch64 => Aarch64CalleeSavedInfo(GeneralReg),
+        .arm32 => @compileError("arm32: TODO"),
+    };
 
     return struct {
         const Self = @This();
@@ -129,7 +128,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         /// marking that register as used so the normal callee-saved save/restore
         /// path preserves the incoming value before this prologue overwrites it.
         pub fn setCallerStackArgBaseReg(self: *Self, reg: GeneralReg) void {
-            if (!is_aarch64) {
+            if (!isa.binaryIs(.aarch64)) {
                 if (std.debug.runtime_safety) {
                     @panic("caller stack-argument base register is only meaningful on aarch64");
                 }
@@ -157,13 +156,11 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         pub fn calculatePrologueSize(self: *const Self) u32 {
             if (!self.usesFramePointer()) return 0;
 
-            if (is_x86_64) {
-                return self.calculatePrologueSizeX86_64();
-            } else if (is_aarch64) {
-                return self.calculatePrologueSizeAarch64();
-            } else {
-                unreachable;
-            }
+            return switch (isa) {
+                .x86_64 => self.calculatePrologueSizeX86_64(),
+                .aarch64 => self.calculatePrologueSizeAarch64(),
+                .arm32 => @compileError("arm32: TODO"),
+            };
         }
 
         /// Emit function prologue.
@@ -174,13 +171,11 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
                 return 0;
             }
 
-            if (is_x86_64) {
-                return self.emitPrologueX86_64(emit);
-            } else if (is_aarch64) {
-                return self.emitPrologueAarch64(emit);
-            } else {
-                unreachable;
-            }
+            return switch (isa) {
+                .x86_64 => self.emitPrologueX86_64(emit),
+                .aarch64 => self.emitPrologueAarch64(emit),
+                .arm32 => @compileError("arm32: TODO"),
+            };
         }
 
         /// Emit function epilogue.
@@ -190,37 +185,31 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
                 return;
             }
 
-            if (is_x86_64) {
-                return self.emitEpilogueX86_64(emit);
-            } else if (is_aarch64) {
-                return self.emitEpilogueAarch64(emit);
-            } else {
-                unreachable;
-            }
+            return switch (isa) {
+                .x86_64 => self.emitEpilogueX86_64(emit),
+                .aarch64 => self.emitEpilogueAarch64(emit),
+                .arm32 => @compileError("arm32: TODO"),
+            };
         }
 
         /// Emit only callee-saved register saves (for pre-allocated frame pattern).
         /// Use this when the frame has already been set up and you just need to
         /// save the callee-saved registers at fixed offsets.
         pub fn emitSaveCalleeSaved(self: *const Self, emit: *EmitType) Allocator.Error!void {
-            if (is_x86_64) {
-                return self.emitSaveCalleeSavedX86_64(emit);
-            } else if (is_aarch64) {
-                return self.emitSaveCalleeSavedAarch64(emit);
-            } else {
-                unreachable;
-            }
+            return switch (isa) {
+                .x86_64 => self.emitSaveCalleeSavedX86_64(emit),
+                .aarch64 => self.emitSaveCalleeSavedAarch64(emit),
+                .arm32 => @compileError("arm32: TODO"),
+            };
         }
 
         /// Emit only callee-saved register restores (for pre-allocated frame pattern).
         pub fn emitRestoreCalleeSaved(self: *const Self, emit: *EmitType) Allocator.Error!void {
-            if (is_x86_64) {
-                return self.emitRestoreCalleeSavedX86_64(emit);
-            } else if (is_aarch64) {
-                return self.emitRestoreCalleeSavedAarch64(emit);
-            } else {
-                unreachable;
-            }
+            return switch (isa) {
+                .x86_64 => self.emitRestoreCalleeSavedX86_64(emit),
+                .aarch64 => self.emitRestoreCalleeSavedAarch64(emit),
+                .arm32 => @compileError("arm32: TODO"),
+            };
         }
 
         // ==================== x86_64 Implementation ====================
@@ -583,10 +572,10 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         }
 
         /// Callee-saved register slots (for direct access if needed)
-        pub const CALLEE_SAVED_SLOTS = if (is_x86_64) CalleeSavedInfo.SLOTS else @compileError("CALLEE_SAVED_SLOTS only available on x86_64");
+        pub const CALLEE_SAVED_SLOTS = if (isa.binaryIs(.x86_64)) CalleeSavedInfo.SLOTS else @compileError("CALLEE_SAVED_SLOTS only available on x86_64");
 
         /// Callee-saved register pairs (for direct access if needed)
-        pub const CALLEE_SAVED_PAIRS = if (is_aarch64) CalleeSavedInfo.PAIRS else @compileError("CALLEE_SAVED_PAIRS only available on aarch64");
+        pub const CALLEE_SAVED_PAIRS = if (isa.binaryIs(.aarch64)) CalleeSavedInfo.PAIRS else @compileError("CALLEE_SAVED_PAIRS only available on aarch64");
 
         /// Size of the callee-saved area when all registers are saved
         pub const CALLEE_SAVED_AREA_SIZE: i32 = CalleeSavedInfo.AREA_SIZE;
@@ -615,7 +604,7 @@ pub fn ForwardFrameBuilder(comptime EmitType: type) type {
     const CC_EMIT = EmitType.CC;
     const GeneralReg = EmitType.GeneralReg;
     const roc_target = EmitType.roc_target;
-    const is_aarch64 = roc_target.toCpuArch() == .aarch64 or roc_target.toCpuArch() == .aarch64_be;
+    const isa = comptime isaOf(roc_target);
 
     return struct {
         const Self = @This();
@@ -662,7 +651,7 @@ pub fn ForwardFrameBuilder(comptime EmitType: type) type {
         /// 2. push <regs> (callee-saved via push, in order added)
         /// 3. sub rsp, <aligned_size> (allocate stack space)
         pub fn emitPrologue(self: *Self) Allocator.Error!i32 {
-            if (comptime is_aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 return self.emitPrologueAarch64();
             } else {
                 return self.emitPrologueX86_64();
@@ -761,7 +750,7 @@ pub fn ForwardFrameBuilder(comptime EmitType: type) type {
         /// 2. pop <regs> (restore PUSH-saved registers, reverse order)
         /// 3. pop rbp; ret
         pub fn emitEpilogue(self: *Self) Allocator.Error!void {
-            if (comptime is_aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 return self.emitEpilogueAarch64();
             } else {
                 return self.emitEpilogueX86_64();
@@ -837,7 +826,7 @@ pub fn ForwardFrameBuilder(comptime EmitType: type) type {
         /// This is useful when you need to create separate ForwardFrameBuilder instances
         /// for prologue and epilogue (e.g., when storing frame state is impractical).
         pub fn computeActualStackAlloc(self: *const Self) u32 {
-            if (comptime is_aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const odd_reg_space: u32 = if (self.push_count % 2 == 1) 16 else 0;
                 const total_needed = self.stack_size + odd_reg_space;
                 return CC_EMIT.alignStackSize(total_needed);

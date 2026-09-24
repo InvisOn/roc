@@ -825,6 +825,14 @@ daily.
   register literal (`rg '\.(RAX|RBX|RCX|RDX|R11|R12|XMM0|X0|X9|X19|X20|X28|IP0|IP1|V0|FP|ZRSP)\b'`
   is empty).
 - Add the D10 high-water mark and record the x86_64/aarch64 peaks.
+- *Amended when the dispatch part of A1 landed:* two-way tests inside
+  `LirCodeGen` bodies go through `Isa.binaryIs` (`src/backend/dev/isa.zig`),
+  a compile error on arm32, instead of being hand-rewritten into three-way
+  switches now; type and implementation selections are exhaustive switches.
+  The compile-error checklist property is the same; see
+  `src/backend/dev/arm32/DESIGN.md`, "Architecture dispatch". The
+  `rg 'arch == \.|toCpuArch\(\) [=!]= \.'` check is empty for `LirCodeGen.zig`
+  outside its host-side test guards.
 - Acceptance: A0's snapshot and golden-hash oracles unchanged; `run-test-zig`,
   `run-test-eval`, `run-test-eval-host-effects`, `run-test-cli` green; the
   three `rg` checks above return nothing; the `@compileError` gate at `:680`

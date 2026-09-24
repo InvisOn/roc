@@ -38,7 +38,6 @@ const GuardedList = lir.LirStore.GuardedList;
 const x86_64 = @import("x86_64/mod.zig");
 const aarch64 = @import("aarch64/mod.zig");
 const CallingConventionMod = @import("CallingConvention.zig");
-const CallingConvention = CallingConventionMod.CallingConvention;
 const roc_target_mod = @import("roc_target");
 const RocTarget = roc_target_mod.RocTarget;
 const CpuLevel = roc_target_mod.CpuLevel;
@@ -812,13 +811,19 @@ const LirProcSpec = lir.LirProcSpec;
 
 const Allocator = std.mem.Allocator;
 
+const isa_mod = @import("isa.zig");
+/// The instruction set a `LirCodeGen` instantiation emits; see `isa.zig`.
+pub const Isa = isa_mod.Isa;
+/// The instruction set that a target compiles to; see `isa.zig`.
+pub const isaOf = isa_mod.isaOf;
+
 /// Code generator for statement-only LIR procs
 /// Parameterized by RocTarget for cross-compilation support
 pub fn LirCodeGen(comptime target: RocTarget) type {
-    // Validate target architecture is supported
-    const arch = target.toCpuArch();
-    if (arch != .x86_64 and arch != .aarch64 and arch != .aarch64_be) {
-        @compileError("LirCodeGen requires x86_64 or aarch64 target");
+    const isa = comptime isaOf(target);
+    switch (isa) {
+        .x86_64, .aarch64 => {},
+        .arm32 => @compileError("LirCodeGen does not support arm32 yet; see projects/big/arm32-dev-backend.md"),
     }
 
     // ── Target-specific size constants ──
@@ -836,126 +841,72 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
     const roc_list_size: u32 = 3 * target_ptr_size;
 
     // Select architecture-specific types based on target
-    const CodeGen = if (arch == .x86_64)
-        x86_64.CodeGen(target)
-    else
-        aarch64.CodeGen(target);
+    const CodeGen = switch (isa) {
+        .x86_64 => x86_64.CodeGen(target),
+        .aarch64 => aarch64.CodeGen(target),
+        .arm32 => @compileError("arm32: TODO"),
+    };
 
-    const GeneralReg = if (arch == .x86_64)
-        x86_64.GeneralReg
-    else
-        aarch64.GeneralReg;
+    const GeneralReg = switch (isa) {
+        .x86_64 => x86_64.GeneralReg,
+        .aarch64 => aarch64.GeneralReg,
+        .arm32 => @compileError("arm32: TODO"),
+    };
 
-    const FloatReg = if (arch == .x86_64)
-        x86_64.FloatReg
-    else
-        aarch64.FloatReg;
+    const FloatReg = switch (isa) {
+        .x86_64 => x86_64.FloatReg,
+        .aarch64 => aarch64.FloatReg,
+        .arm32 => @compileError("arm32: TODO"),
+    };
 
-    const Condition = if (arch == .x86_64)
-        x86_64.Emit(target).Condition
-    else
-        aarch64.Emit(target).Condition;
+    const Condition = switch (isa) {
+        .x86_64 => x86_64.Emit(target).Condition,
+        .aarch64 => aarch64.Emit(target).Condition,
+        .arm32 => @compileError("arm32: TODO"),
+    };
 
     return struct {
         const Self = @This();
-        const call_stack_alignment: u32 = switch (arch) {
-            .aarch64, .aarch64_be => aarch64.Call.STACK_ALIGNMENT,
+        const call_stack_alignment: u32 = switch (isa) {
+            .aarch64 => aarch64.Call.STACK_ALIGNMENT,
             .x86_64 => if (target.isWindows())
                 x86_64.WindowsFastcall.STACK_ALIGNMENT
             else
                 x86_64.SystemV.STACK_ALIGNMENT,
-            .alpha,
-            .amdgcn,
-            .arc,
-            .arceb,
-            .arm,
-            .armeb,
-            .avr,
-            .bpfeb,
-            .bpfel,
-            .csky,
-            .hexagon,
-            .hppa,
-            .hppa64,
-            .kalimba,
-            .kvx,
-            .lanai,
-            .loongarch32,
-            .loongarch64,
-            .m68k,
-            .microblaze,
-            .microblazeel,
-            .mips,
-            .mipsel,
-            .mips64,
-            .mips64el,
-            .msp430,
-            .nvptx,
-            .nvptx64,
-            .or1k,
-            .powerpc,
-            .powerpcle,
-            .powerpc64,
-            .powerpc64le,
-            .propeller,
-            .riscv32,
-            .riscv32be,
-            .riscv64,
-            .riscv64be,
-            .s390x,
-            .sh,
-            .sheb,
-            .sparc,
-            .sparc64,
-            .spirv32,
-            .spirv64,
-            .thumb,
-            .thumbeb,
-            .ve,
-            .wasm32,
-            .wasm64,
-            .x86_16,
-            .x86,
-            .xcore,
-            .xtensa,
-            .xtensaeb,
-            => unreachable,
+            .arm32 => @compileError("arm32: TODO"),
         };
 
         /// The target this LirCodeGen was instantiated for
         pub const roc_target = target;
 
         /// Frame pointer register for the target architecture
-        const frame_ptr: GeneralReg = if (arch == .x86_64) .RBP else .FP;
+        const frame_ptr: GeneralReg = if (isa.binaryIs(.x86_64)) .RBP else .FP;
 
         /// Stack pointer register for the target architecture
-        const stack_ptr: GeneralReg = if (arch == .x86_64) .RSP else .ZRSP;
+        const stack_ptr: GeneralReg = if (isa.binaryIs(.x86_64)) .RSP else .ZRSP;
 
         /// Scratch/temporary register (not preserved across calls)
-        const scratch_reg: GeneralReg = if (arch == .x86_64) .R11 else .X9;
+        const scratch_reg: GeneralReg = if (isa.binaryIs(.x86_64)) .R11 else .X9;
 
         /// AArch64 callee-saved register reserved for the caller's stack-argument
         /// base in internal procs that actually receive stack arguments.
-        const caller_stack_arg_base_reg: GeneralReg = if (arch == .x86_64) frame_ptr else .X28;
+        const caller_stack_arg_base_reg: GeneralReg = if (isa.binaryIs(.x86_64)) frame_ptr else .X28;
 
         /// Return value registers (first, second, third)
-        const ret_reg_0: GeneralReg = if (arch == .x86_64) .RAX else .X0;
-        const ret_reg_1: GeneralReg = if (arch == .x86_64) .RDX else .X1;
-        const ret_reg_2: GeneralReg = if (arch == .x86_64) .RCX else .X2;
+        const ret_reg_0: GeneralReg = if (isa.binaryIs(.x86_64)) .RAX else .X0;
+        const ret_reg_1: GeneralReg = if (isa.binaryIs(.x86_64)) .RDX else .X1;
+        const ret_reg_2: GeneralReg = if (isa.binaryIs(.x86_64)) .RCX else .X2;
 
         /// Emit/calling-convention types for this architecture.
         const EmitType = @TypeOf(@as(CodeGen, undefined).emit);
         const Builder = CallingConventionMod.CallBuilder(EmitType);
         const abi_shadow_space: i32 = @intCast(EmitType.CC.SHADOW_SPACE);
-        const incoming_stack_arg_base_offset: i32 = if (arch == .x86_64) 16 + abi_shadow_space else 0;
+        const incoming_stack_arg_base_offset: i32 = if (isa.binaryIs(.x86_64)) 16 + abi_shadow_space else 0;
         const outgoing_stack_arg_base_offset: i32 = abi_shadow_space;
         const max_arg_regs: u8 = @intCast(EmitType.CC.PARAM_REGS.len);
         const pass_by_ptr_arg_regs: u8 = @intCast(EmitType.CC.PARAM_REGS.len + 1);
 
         allocator: Allocator,
-
-        /// Calling convention for the target platform (derived from comptime target)
-        cc: CallingConvention,
 
         /// How old a CPU the emitted instructions must run on.
         ///
@@ -1591,7 +1542,6 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             errdefer scratch_param_num_regs.deinit();
             return .{
                 .allocator = allocator,
-                .cc = CallingConvention.forTarget(target),
                 .cpu_level = cpu_level,
                 .codegen = CodeGen.init(allocator),
                 .store = store,
@@ -1929,7 +1879,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Initialize stack_offset to reserve space for callee-saved area
             // (same convention as compileProcSpec—positive offsets, deferred prologue)
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
                 // aarch64: FP-relative addressing
@@ -1947,12 +1897,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Save the result pointer to a callee-saved register before
             // generating code that might call procedures (which would clobber it).
-            const result_ptr_save_reg = if (comptime target.toCpuArch() == .aarch64)
+            const result_ptr_save_reg = if (comptime isa.binaryIs(.aarch64))
                 aarch64.GeneralReg.X19
             else
                 x86_64.GeneralReg.RBX;
 
-            const arg0_reg = if (comptime target.toCpuArch() == .aarch64)
+            const arg0_reg = if (comptime isa.binaryIs(.aarch64))
                 aarch64.GeneralReg.X0
             else if (comptime target.isWindows())
                 x86_64.GeneralReg.RCX
@@ -1971,7 +1921,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Remove roc_ops and result_ptr registers from callee_saved_available
             // so the register allocator never uses them as temporaries.
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X20));
                 self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(aarch64.GeneralReg.X19));
             } else {
@@ -1995,7 +1945,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // Emit epilogue using DeferredFrameBuilder with actual stack usage
             const body_epilogue_offset = self.codegen.currentOffset();
             {
-                const actual_locals: u32 = if (comptime target.toCpuArch() == .aarch64)
+                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -2016,7 +1966,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const prologue_start = self.codegen.currentOffset();
             var root_stack_alloc: u32 = 0;
             var root_frame_size: u32 = 0;
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 const actual_locals_x86: u32 = @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
                 try self.codegen.emitPrologueWithAlloc(actual_locals_x86);
                 root_stack_alloc = actual_locals_x86;
@@ -2046,7 +1996,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.shiftPendingProcAddrs(body_start, body_end, prologue_size);
             self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
             self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-            if (comptime target.toCpuArch() == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+            if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
             self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
             self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
 
@@ -2082,7 +2032,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Reserve argument registers so they don't get allocated for temporaries
         fn reserveArgumentRegisters(self: *Self) void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // Clear X0 and X1 from the free register mask
                 // X0 = bit 0, X1 = bit 1
                 self.codegen.free_general &= ~@as(u32, 0b11);
@@ -2268,7 +2218,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitLoadImm(tag_reg, 1);
                     try self.emitAndRegs(.w64, tag_reg, tag_reg, cap_reg);
                     try self.emitCmpImm(tag_reg, 0);
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.csel(.w64, result_reg, len_reg, result_reg, .ne);
                     } else {
                         try self.codegen.emit.cmovcc(.not_equal, .w64, result_reg, len_reg);
@@ -2454,7 +2404,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     // layout supplies the width, and the Roc wrapper has already
                     // bounds-checked, so this is address arithmetic plus one
                     // sized load.
-                    if (comptime arch.endian() == .big) {
+                    if (comptime target.toCpuArch().endian() == .big) {
                         // A plain load would read the bytes in the wrong order, and
                         // neither emitter has a byte-swap yet. Fail loudly rather
                         // than silently disagreeing with every other backend.
@@ -2712,7 +2662,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.callBuiltin(&builder, LowLevelBuiltins.listOp(.list_map_can_reuse));
 
                     const result_reg = try self.allocTempGeneral();
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.movRegReg(.w64, result_reg, .X0);
                     } else {
                         try self.codegen.emit.movRegReg(.w64, result_reg, .RAX);
@@ -3419,7 +3369,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         ll.op == .i32_to_f32 or
                         ll.op == .i64_to_f32;
                     const freg = try self.allocTempFloat();
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.scvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
                     } else {
                         if (is_f32) {
@@ -3456,7 +3406,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         ll.op == .u16_to_f32 or
                         ll.op == .u32_to_f32;
                     const freg = try self.allocTempFloat();
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.scvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
                     } else {
                         if (is_f32) {
@@ -3480,7 +3430,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const freg = try self.allocTempFloat();
                     const is_f32 = ll.op == .u64_to_f32;
 
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         // UCVTF handles unsigned integers directly
                         try self.codegen.emit.ucvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
                     } else {
@@ -3549,7 +3499,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const dst_width: FloatWidth = if (ll.op == .f32_to_f64) .f64 else .f32;
                     const src_reg = try self.ensureInFloatReg(src_loc, src_width);
                     const result_reg = try self.allocTempFloat();
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.fcvtFloatFloat(
                             if (dst_width == .f32) .single else .double,
                             result_reg,
@@ -5060,7 +5010,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         const result_low = try self.allocTempGeneral();
                         const result_high = try self.allocTempGeneral();
 
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.codegen.emit.subsRegRegReg(.w64, result_low, .ZRSP, parts.low);
                             try self.codegen.emit.sbcRegRegReg(.w64, result_high, .ZRSP, parts.high);
                         } else {
@@ -5280,14 +5230,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     switch (ll.ret_layout) {
                         .f32 => {
-                            if (comptime target.toCpuArch() == .aarch64) {
+                            if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.fsqrtRegReg(.single, result_reg, src_reg);
                             } else {
                                 try self.codegen.emit.sqrtssRegReg(result_reg, src_reg);
                             }
                         },
                         .f64 => {
-                            if (comptime target.toCpuArch() == .aarch64) {
+                            if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.fsqrtRegReg(.double, result_reg, src_reg);
                             } else {
                                 try self.codegen.emit.sqrtsdRegReg(result_reg, src_reg);
@@ -5961,7 +5911,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const high: u64 = @truncate(bits >> 64);
             try self.codegen.emitLoadImm(low_reg, @bitCast(low));
             try self.codegen.emitLoadImm(high_reg, @bitCast(high));
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 if (self.cpu_level == .v1) {
                     // PINSRQ is SSE4.1. Assembling the constant in a stack slot
                     // and loading it back uses only baseline instructions.
@@ -6057,7 +6007,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             src: GeneralReg,
             kind: builtins.simd.Kind,
         ) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.movVectorFromGeneral(dst, src, kind.laneBits() == 64);
                 if (self.cpu_level == .v1) {
                     // VPBROADCAST is AVX2. SSE2 widens the scalar to the full
@@ -6164,20 +6114,20 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const ramp = try self.materializeVectorConstant(simdByteRamp(), protected);
             defer self.releaseAcquiredVector(ramp);
             protected |= floatRegMask(ramp.reg);
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.emitX86PackedBinary(.map_0f, 0xFC, indices, indices, ramp.reg);
             } else {
                 try self.codegen.emit.simdThreeReg(0x4E208400, indices, indices, ramp.reg);
             }
             const shuffled = try self.allocTempVector(protected);
             defer self.codegen.freeFloat(shuffled);
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.vexRegRegReg(.map_0f38, .p66, false, 0x00, shuffled, vector.reg, indices);
             } else {
                 try self.codegen.emit.simdThreeReg(0x4E000000, shuffled, vector.reg, indices);
             }
             const result = try self.allocTempGeneral();
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.movGeneralFromVector(result, shuffled, kind.laneBits() == 64);
             } else {
                 try self.codegen.emit.extractVectorLaneUnsigned(result, shuffled, kind.laneBits(), 0);
@@ -6257,7 +6207,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const result = try self.allocTempVector(protected);
             protected |= floatRegMask(result);
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 switch (op) {
                     .simd_even_lanes => try self.codegen.emit.simdThreeReg(0x4E001800 | neonSizeBits(kind), result, lhs.reg, rhs.?.reg),
                     .simd_odd_lanes => try self.codegen.emit.simdThreeReg(0x4E005800 | neonSizeBits(kind), result, lhs.reg, rhs.?.reg),
@@ -6303,7 +6253,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             protected |= floatRegMask(indices.reg);
             const result = try self.allocTempVector(protected);
             protected |= floatRegMask(result);
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.simdThreeReg(0x4E000000, result, table.reg, indices.reg);
             } else {
                 const fixup = try self.allocTempVector(protected);
@@ -6344,7 +6294,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.codegen.patchJump(case_patches[shift], self.codegen.currentOffset());
                 if (shift == 0) {
                     try self.codegen.emitMoveV128(result, lhs.reg);
-                } else if (comptime target.toCpuArch() == .x86_64) {
+                } else if (comptime isa.binaryIs(.x86_64)) {
                     try self.codegen.emit.vexRegRegRegImm8(.map_0f3a, .p66, false, 0x0F, result, rhs.reg, lhs.reg, @intCast(shift));
                 } else {
                     try self.codegen.emit.simdThreeReg(0x6E000000 | (@as(u32, @intCast(shift)) << 11), result, lhs.reg, rhs.reg);
@@ -6365,7 +6315,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             high: bool,
             protected_mask: u32,
         ) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const size_opcode: u32 = switch (source_kind.laneBits()) {
                     8 => 0x00080000,
                     16 => 0x00100000,
@@ -6442,7 +6392,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const result = try self.allocTempVector(protected);
             protected |= floatRegMask(result);
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 switch (op) {
                     .simd_mul_wrap => try self.codegen.emit.simdThreeReg(0x4E209C00 | neonSizeBits(source_kind), result, lhs.reg, rhs.reg),
                     .simd_mul_q15_sat => try self.codegen.emit.simdThreeReg(0x6E20B400 | neonSizeBits(source_kind), result, lhs.reg, rhs.reg),
@@ -6550,7 +6500,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     op == .simd_widen_hi,
                     protected,
                 ),
-                .simd_pairwise_add_widen => if (comptime target.toCpuArch() == .aarch64) {
+                .simd_pairwise_add_widen => if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.emit.simdTwoReg(
                         (if (source_kind.isSigned()) @as(u32, 0x4E202800) else 0x6E202800) | neonSizeBits(source_kind),
                         result,
@@ -6571,7 +6521,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         high,
                     );
                 },
-                .simd_narrow_wrap => if (comptime target.toCpuArch() == .aarch64) {
+                .simd_narrow_wrap => if (comptime isa.binaryIs(.aarch64)) {
                     const size = neonSizeBits(destination_kind);
                     try self.codegen.emit.simdTwoReg(0x0E212800 | size, result, lhs.reg);
                     try self.codegen.emit.simdTwoReg(0x4E212800 | size, result, rhs.?.reg);
@@ -6586,7 +6536,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emit.vexRegRegReg(.map_0f38, .p66, false, 0x00, high, rhs.?.reg, high_control.reg);
                     try self.emitX86PackedBinary(.map_0f, 0xEB, result, result, high);
                 },
-                .simd_narrow_sat => if (comptime target.toCpuArch() == .aarch64) {
+                .simd_narrow_sat => if (comptime isa.binaryIs(.aarch64)) {
                     const size = neonSizeBits(destination_kind);
                     const low_base: u32 = if (destination_kind.isSigned())
                         0x0E214800
@@ -6668,7 +6618,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const result = try self.allocTempVector(protected);
             protected |= floatRegMask(result);
 
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 switch (op) {
                     .simd_dot_pairs => try self.emitX86PackedBinary(.map_0f, 0xF5, result, lhs.reg, rhs.reg),
                     .simd_dot_pairs_sat => try self.emitX86PackedBinary(.map_0f38, 0x04, result, lhs.reg, rhs.reg),
@@ -6738,7 +6688,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.releaseAcquiredVector(vector);
             const result = try self.allocTempGeneral();
 
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.packedMoveMask(result, vector.reg, kind.laneBits());
                 if (kind.laneBits() == 16) {
                     const mask = try self.allocTempGeneral();
@@ -6823,7 +6773,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const result = try self.allocTempVector(protected);
             protected |= floatRegMask(result);
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (ll.op != .simd_shl_wrap) {
                     const zero = try self.allocTempGeneral();
                     defer self.codegen.freeGeneral(zero);
@@ -6980,7 +6930,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.emitShlReg(.w64, bias_scalar, bias_scalar, bias_shift);
             const bias = try self.allocTempVector(protected);
             try self.emitSimdSplatFromGeneral(bias, bias_scalar, wide_kind);
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.emitX86PackedBinary(.map_0f, x86PackedOpcode(wide_kind, 0, 0, 0xFE, 0xD4), result, result, bias);
                 try self.emitX86PackedBinary(.map_0f, x86PackedOpcode(wide_kind, 0, 0, 0xFE, 0xD4), high, high, bias);
             } else {
@@ -6990,7 +6940,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.codegen.freeFloat(bias);
 
             const counts = try self.allocTempVector(protected);
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.movVectorFromGeneral(counts, count, true);
                 if (wide_kind.laneBits() == 32) {
                     try self.emitX86PackedBinary(.map_0f, 0xE2, result, result, counts);
@@ -7012,7 +6962,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
             self.codegen.freeFloat(counts);
 
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.emitX86NarrowWrapRegisters(result, result, high, wide_kind, kind, protected | floatRegMask(high));
             } else {
                 try self.codegen.emit.simdTwoReg(0x0E212800 | neonSizeBits(kind), result, result);
@@ -7022,7 +6972,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const normal_done = try self.codegen.emitJump();
 
             try self.codegen.patchJump(out_of_range_patch, self.codegen.currentOffset());
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.emitX86PackedBinary(.map_0f, 0xEF, result, result, result);
             } else {
                 try self.codegen.emit.simdThreeReg(0x6E201C00, result, result, result);
@@ -7044,7 +6994,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.releaseAcquiredVector(vector);
             const result = try self.allocTempGeneral();
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (kind.laneBits() == 64) {
                     const high = try self.allocTempGeneral();
                     defer self.codegen.freeGeneral(high);
@@ -7142,7 +7092,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// time is tracked in roc-lang/roc#10552.
         fn simdOpUsesBaselineBuiltin(self: *Self, op: lir.LowLevel) bool {
             if (self.cpu_level != .v1) return false;
-            if (comptime target.toCpuArch() != .x86_64) {
+            if (comptime !isa.binaryIs(.x86_64)) {
                 // NEON is mandatory in Armv8.0-A, so every other op already has
                 // a baseline instruction. Carryless multiply is PMULL64, which
                 // the AES extension supplies rather than base NEON.
@@ -7743,7 +7693,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.releaseAcquiredVector(rhs);
             protected |= floatRegMask(rhs.reg);
             const result = try self.allocTempVector(protected);
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.vexRegRegRegImm8(
                     .map_0f3a,
                     .p66,
@@ -7883,7 +7833,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 simd_interleave_hi = @intFromEnum(lir.LowLevel.simd_interleave_hi),
             };
             const basic_op = narrowEnum(BasicSimdOp, op);
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 const r = rhs;
                 const compare_map: @TypeOf(self.codegen.emit).VexMap = if (kind.laneBits() == 64) .map_0f38 else .map_0f;
                 switch (basic_op) {
@@ -8452,7 +8402,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Result is in return register (X0 or RAX)
             const result_reg = try self.allocTempGeneral();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .RAX);
@@ -8469,12 +8419,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltin(&builder, builtin_fn);
 
             const result_reg = try self.allocTempGeneral();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .RAX);
             }
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.andRegImm32(result_reg, 0xff);
             }
             return .{ .general_reg = result_reg };
@@ -8496,7 +8446,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Result is in return register (X0 or RAX)
             const result_reg = try self.allocTempGeneral();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .RAX);
@@ -8524,7 +8474,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltinWithAdapter(&builder, adapter_addr, builtin_fn);
 
             const result_reg = try self.allocTempGeneral();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .RAX);
@@ -8547,7 +8497,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltinWithAdapter(&builder, adapter_addr, builtin_fn);
 
             const result_reg = try self.allocTempGeneral();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(.w64, result_reg, .RAX);
@@ -9875,7 +9825,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitStoreStack(.w64, dest_offset, reg);
                     switch (signedness) {
                         .signed => {
-                            if (comptime target.toCpuArch() == .aarch64) {
+                            if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.asrRegRegImm(.w64, high_reg, reg, 63);
                             } else {
                                 try self.emitMovRegReg(high_reg, reg);
@@ -10286,7 +10236,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const root_index = plan.representative(@intCast(i));
                 if (root_index != i or self.local_locations.contains(localKey(v.local))) continue;
                 const size = self.getLayoutSize(self.localLayout(v.local));
-                const alignment: u32 = if (comptime target.toCpuArch() == .aarch64) 16 else if (size > 8) 16 else 8;
+                const alignment: u32 = if (comptime isa.binaryIs(.aarch64)) 16 else if (size > 8) 16 else 8;
                 plan.values.items[i].size = std.mem.alignForward(u32, size, alignment);
             }
             try plan.solve();
@@ -10474,7 +10424,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             switch (int_op) {
                 .num_plus => {
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.addsRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
                     } else {
                         try self.codegen.emitAdd(.w64, result_reg, lhs_reg, rhs_reg);
@@ -10496,7 +10446,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     } else if (checked_op) |tag| try self.emitCheckedIntAddSubOverflow(tag, result_reg, operand_layout, is_unsigned);
                 },
                 .num_minus => {
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.subsRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
                     } else {
                         try self.codegen.emitSub(.w64, result_reg, lhs_reg, rhs_reg);
@@ -10582,7 +10532,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.emitCmpImm(result_reg, 0);
                         const zero_patch = try self.emitJumpIfEqual();
 
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.codegen.emit.eorRegRegReg(.w64, sign_check_reg, result_reg, divisor_reg);
                         } else {
                             try self.emitMovRegReg(sign_check_reg, result_reg);
@@ -10699,7 +10649,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.emitSignedIntRangeFlag(flag_reg, result_reg, -2_147_483_648, 2_147_483_647);
                     } else unreachable;
                 },
-                .i64 => if (comptime target.toCpuArch() == .aarch64) {
+                .i64 => if (comptime isa.binaryIs(.aarch64)) {
                     const high_reg = try self.allocTempGeneral();
                     const sign_reg = try self.allocTempGeneral();
                     try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
@@ -10712,7 +10662,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitMul(.w64, result_reg, lhs_reg, rhs_reg);
                     try self.emitSetCond(flag_reg, condOverflow());
                 },
-                .u64 => if (comptime target.toCpuArch() == .aarch64) {
+                .u64 => if (comptime isa.binaryIs(.aarch64)) {
                     const high_reg = try self.allocTempGeneral();
                     const zero_reg = try self.allocTempGeneral();
                     try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
@@ -10885,7 +10835,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitCheckedI64Mul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const high_reg = try self.allocTempGeneral();
                 const sign_reg = try self.allocTempGeneral();
                 try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
@@ -10902,7 +10852,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitCheckedU64Mul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const high_reg = try self.allocTempGeneral();
                 try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
                 try self.codegen.emit.umulhRegRegReg(high_reg, lhs_reg, rhs_reg);
@@ -10951,57 +10901,57 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         // Condition code helpers for cross-architecture support
         fn condEqual() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .eq else .equal;
+            return if (comptime isa.binaryIs(.aarch64)) .eq else .equal;
         }
 
         fn condNotEqual() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .ne else .not_equal;
+            return if (comptime isa.binaryIs(.aarch64)) .ne else .not_equal;
         }
 
         // Signed condition codes
         fn condLess() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .lt else .less;
+            return if (comptime isa.binaryIs(.aarch64)) .lt else .less;
         }
 
         fn condLessOrEqual() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .le else .less_or_equal;
+            return if (comptime isa.binaryIs(.aarch64)) .le else .less_or_equal;
         }
 
         fn condGreater() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .gt else .greater;
+            return if (comptime isa.binaryIs(.aarch64)) .gt else .greater;
         }
 
         fn condGreaterOrEqual() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .ge else .greater_or_equal;
+            return if (comptime isa.binaryIs(.aarch64)) .ge else .greater_or_equal;
         }
 
         // Unsigned condition codes
         fn condBelow() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .cc else .below;
+            return if (comptime isa.binaryIs(.aarch64)) .cc else .below;
         }
 
         fn condBelowOrEqual() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .ls else .below_or_equal;
+            return if (comptime isa.binaryIs(.aarch64)) .ls else .below_or_equal;
         }
 
         fn condAbove() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .hi else .above;
+            return if (comptime isa.binaryIs(.aarch64)) .hi else .above;
         }
 
         fn condAboveOrEqual() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .cs else .above_or_equal;
+            return if (comptime isa.binaryIs(.aarch64)) .cs else .above_or_equal;
         }
 
         fn condOverflow() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .vs else .overflow;
+            return if (comptime isa.binaryIs(.aarch64)) .vs else .overflow;
         }
 
         fn condUnsignedAddOverflow() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .cs else .below;
+            return if (comptime isa.binaryIs(.aarch64)) .cs else .below;
         }
 
         fn condUnsignedSubOverflow() Condition {
-            return if (comptime target.toCpuArch() == .aarch64) .cc else .below;
+            return if (comptime isa.binaryIs(.aarch64)) .cc else .below;
         }
 
         fn checkedOverflowMessage(op: lir.LowLevel) []const u8 {
@@ -11070,7 +11020,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             switch (i128_op) {
                 .num_plus => {
                     // 128-bit add: low = lhs_low + rhs_low, high = lhs_high + rhs_high + carry
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         // ADDS sets carry; ADCS adds it into the high word and leaves final flags.
                         try self.codegen.emit.addsRegRegReg(.w64, result_low, lhs_parts.low, rhs_parts.low);
                         try self.codegen.emit.adcsRegRegReg(.w64, result_high, lhs_parts.high, rhs_parts.high);
@@ -11101,7 +11051,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 },
                 .num_minus => {
                     // 128-bit sub: low = lhs_low - rhs_low, high = lhs_high - rhs_high - borrow
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         // SUBS sets borrow flag, SBC subtracts with borrow
                         try self.codegen.emit.subsRegRegReg(.w64, result_low, lhs_parts.low, rhs_parts.low);
                         try self.codegen.emit.sbcsRegRegReg(.w64, result_high, lhs_parts.high, rhs_parts.high);
@@ -11155,7 +11105,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         // result_lo = low64(a_lo * b_lo)
                         // result_hi = high64(a_lo * b_lo) + low64(a_lo * b_hi) + low64(a_hi * b_lo)
 
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             // aarch64: Use MUL for low and UMULH for high
                             // 1. a_lo * b_lo -> result_low (low), temp (high via UMULH)
                             try self.codegen.emit.mulRegRegReg(.w64, result_low, lhs_parts.low, rhs_parts.low);
@@ -11388,7 +11338,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.codegen.freeGeneral(parts.high);
 
             const freg = try self.allocTempFloat();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, freg, .V0);
             } else {
                 if (freg != .XMM0) {
@@ -11440,7 +11390,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.codegen.freeFloat(freg);
 
             const result_reg = try self.allocTempFloat();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (result_reg != .V0) {
                     try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, result_reg, .V0);
                 }
@@ -11485,7 +11435,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltin(&builder, builtin_fn);
 
             const result_reg = try self.allocTempFloat();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (result_reg != .V0) {
                     try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, result_reg, .V0);
                 }
@@ -11740,13 +11690,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         const freg = try self.ensureInFloatReg(src_loc, src_width);
                         const base_reg = frame_ptr;
 
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             if (freg != .V0) try self.codegen.emit.fmovRegReg(if (src_width == .f32) .single else .double, .V0, freg);
                         }
 
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addLeaArg(base_reg, result_offset);
-                        if (comptime target.toCpuArch() != .aarch64) {
+                        if (comptime !isa.binaryIs(.aarch64)) {
                             if (src_width == .f32)
                                 try builder.addF32RegArg(freg)
                             else
@@ -11787,13 +11737,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         const freg = try self.ensureInFloatReg(src_loc, .f64);
                         const base_reg = frame_ptr;
 
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             if (freg != .V0) try self.codegen.emit.fmovRegReg(.double, .V0, freg);
                         }
 
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addLeaArg(base_reg, result_offset);
-                        if (comptime target.toCpuArch() != .aarch64) {
+                        if (comptime !isa.binaryIs(.aarch64)) {
                             try builder.addF64RegArg(freg);
                         }
                         try builder.addImmArg(@intCast(offsets.success));
@@ -12129,7 +12079,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn emitPopcount64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
             // POPCNT is an SSE4.2-era instruction, so an x86 target at the
             // baseline CPU level counts bits the same way aarch64 does.
-            const use_swar = comptime target.toCpuArch() == .aarch64;
+            const use_swar = comptime isa.binaryIs(.aarch64);
             if (use_swar or self.cpu_level == .v1) {
                 // aarch64 has no scalar population-count instruction; use the
                 // classic SWAR sequence on general registers.
@@ -12167,7 +12117,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// dst = number of leading zero bits of the full 64-bit value `src`
         /// (64 when `src` is zero).
         fn emitClz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.clzRegReg(.w64, dst, src);
                 return;
             }
@@ -12193,7 +12143,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// dst = number of trailing zero bits of the full 64-bit value `src`
         /// (64 when `src` is zero).
         fn emitCtz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // No native ctz: reverse the bits, then count leading zeros.
                 try self.codegen.emit.rbitRegReg(.w64, dst, src);
                 try self.codegen.emit.clzRegReg(.w64, dst, dst);
@@ -12404,7 +12354,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             result_reg: GeneralReg,
             is_eq: bool,
         ) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // Compare low parts
                 try self.codegen.emit.cmpRegReg(.w64, lhs_parts.low, rhs_parts.low);
                 // Use CSET to get 1 if equal, 0 if not
@@ -12461,7 +12411,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // If high parts are not equal, use that result
             // If high parts are equal, compare low parts (always unsigned since they're magnitudes)
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // Compare high parts
                 try self.codegen.emit.cmpRegReg(.w64, lhs_parts.high, rhs_parts.high);
 
@@ -12776,7 +12726,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                 try self.emitAndRegs(.w64, tmp_b, tmp_b, mask_reg);
                                 self.codegen.freeGeneral(mask_reg);
                             }
-                            if (comptime target.toCpuArch() == .aarch64) {
+                            if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.eorRegRegReg(.w64, tmp_a, tmp_a, tmp_b);
                                 try self.codegen.emit.orrRegRegReg(.w64, xor_acc, xor_acc, tmp_a);
                             } else {
@@ -13214,7 +13164,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // Comparisons produce integer results (0 or 1), not floats.
             // On x86_64, UCOMISD sets PF=1 for NaN (unordered), so eq/neq/lt/lte
             // need special handling to produce correct results when either operand is NaN.
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 switch (float_op) {
                     .num_is_eq => {
                         // NaN-safe eq: (ZF=1) AND (PF=0) → sete + setnp + and
@@ -13360,19 +13310,19 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn floatCondition(op: lir.LowLevel) ?Condition {
             return switch (narrowEnum(IntBinOp, op)) {
                 .num_is_eq => condEqual(),
-                .num_is_lt => if (comptime target.toCpuArch() == .aarch64)
+                .num_is_lt => if (comptime isa.binaryIs(.aarch64))
                     @as(Condition, .mi)
                 else
                     @as(Condition, .below),
-                .num_is_lte => if (comptime target.toCpuArch() == .aarch64)
+                .num_is_lte => if (comptime isa.binaryIs(.aarch64))
                     @as(Condition, .ls)
                 else
                     @as(Condition, .below_or_equal),
-                .num_is_gt => if (comptime target.toCpuArch() == .aarch64)
+                .num_is_gt => if (comptime isa.binaryIs(.aarch64))
                     @as(Condition, .gt)
                 else
                     @as(Condition, .above),
-                .num_is_gte => if (comptime target.toCpuArch() == .aarch64)
+                .num_is_gte => if (comptime isa.binaryIs(.aarch64))
                     @as(Condition, .ge)
                 else
                     @as(Condition, .above_or_equal),
@@ -13447,7 +13397,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const neg_low = try self.allocTempGeneral();
                 const neg_high = try self.allocTempGeneral();
 
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.emit.subsRegRegReg(.w64, neg_low, .ZRSP, parts.low);
                     try self.codegen.emit.sbcRegRegReg(.w64, neg_high, .ZRSP, parts.high);
                     // If original was negative (signed < 0), use negated
@@ -13482,7 +13432,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const neg_reg = try self.allocTempGeneral();
             try self.codegen.emitNeg(.w64, neg_reg, reg);
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // CMP reg, #0; CSEL result, neg_reg, reg, Before
                 try self.codegen.emit.cmpRegImm12(.w64, reg, 0);
                 try self.codegen.emit.csel(.w64, neg_reg, neg_reg, reg, .lt);
@@ -13576,7 +13526,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const diff_reg = try self.allocTempGeneral();
             const neg_reg = try self.allocTempGeneral();
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // CMP a, b
                 try self.codegen.emit.cmpRegReg(.w64, a_reg, b_reg);
                 // diff = a - b
@@ -13618,7 +13568,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const bma_hi = try self.allocTempGeneral();
             const flag_reg = try self.allocTempGeneral();
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // Compute a - b with flags (SUBS + SBCS gives correct 128-bit comparison)
                 try self.codegen.emit.subsRegRegReg(.w64, diff_lo, a_parts.low, b_parts.low);
                 try self.codegen.emit.sbcsRegRegReg(.w64, diff_hi, a_parts.high, b_parts.high);
@@ -13697,7 +13647,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
             switch (value_loc) {
                 .stack_str, .stack_i128 => |base_offset| {
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         const w = if (disc_use_w32) aarch64.RegisterWidth.w32 else aarch64.RegisterWidth.w64;
                         try self.codegen.emit.ldrRegMemSoff(w, disc_reg, .FP, base_offset + tu_disc_offset);
                     } else {
@@ -13707,7 +13657,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 },
                 .stack => |s| {
                     const base_offset = s.offset;
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         const w = if (disc_use_w32) aarch64.RegisterWidth.w32 else aarch64.RegisterWidth.w64;
                         try self.codegen.emit.ldrRegMemSoff(w, disc_reg, .FP, base_offset + tu_disc_offset);
                     } else {
@@ -13716,7 +13666,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                 },
                 .list_stack => |ls_info| {
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         const w = if (disc_use_w32) aarch64.RegisterWidth.w32 else aarch64.RegisterWidth.w64;
                         try self.codegen.emit.ldrRegMemSoff(w, disc_reg, .FP, ls_info.struct_offset + tu_disc_offset);
                     } else {
@@ -13745,7 +13695,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // Mask to actual discriminant size—memory loads may include padding bytes
             if (tu_disc_size != 0 and tu_disc_size < 4) {
                 const mask: i32 = (@as(i32, 1) << @as(u5, @intCast(tu_disc_size * 8))) - 1;
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     const mask_reg = try self.allocTempGeneral();
                     try self.codegen.emitLoadImm(mask_reg, mask);
                     try self.codegen.emit.andRegRegReg(.w32, disc_reg, disc_reg, mask_reg);
@@ -13774,7 +13724,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.emitLoadImm(reg, value);
 
             // Store appropriate size - architecture specific
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // aarch64 only has .w32 and .w64 for emitStoreStack, use direct emit for smaller sizes.
                 switch (disc_size) {
                     1 => try self.codegen.emit.strbRegMemSoff(reg, .FP, offset),
@@ -13807,14 +13757,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             switch (disc_size) {
                 1 => {
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.strbRegMemSoff(reg, ptr_reg, @intCast(offset));
                     } else {
                         try self.codegen.emit.movMemReg(.w8, ptr_reg, @intCast(offset), reg);
                     }
                 },
                 2 => {
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.strhRegMemSoff(reg, ptr_reg, @intCast(offset));
                     } else {
                         try self.codegen.emit.movMemReg(.w16, ptr_reg, @intCast(offset), reg);
@@ -14206,14 +14156,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn emitSizedLoadMem(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32, size: ValueSize) Allocator.Error!void {
             switch (size) {
                 .byte => {
-                    if (comptime arch == .aarch64 or arch == .aarch64_be) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.ldrbRegMemSoff(dst, base_reg, offset);
                     } else {
                         try self.codegen.emit.movzxBRegMem(dst, base_reg, offset);
                     }
                 },
                 .word => {
-                    if (comptime arch == .aarch64 or arch == .aarch64_be) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.ldrhRegMemSoff(dst, base_reg, offset);
                     } else {
                         try self.codegen.emit.movzxWRegMem(dst, base_reg, offset);
@@ -14228,14 +14178,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn emitSizedStoreMem(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg, size: ValueSize) Allocator.Error!void {
             switch (size) {
                 .byte => {
-                    if (comptime arch == .aarch64 or arch == .aarch64_be) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.strbRegMemSoff(src, base_reg, offset);
                     } else {
                         try self.codegen.emit.movMemReg(.w8, base_reg, offset, src);
                     }
                 },
                 .word => {
-                    if (comptime arch == .aarch64 or arch == .aarch64_be) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.strhRegMemSoff(src, base_reg, offset);
                     } else {
                         try self.codegen.emit.movMemReg(.w16, base_reg, offset, src);
@@ -14262,7 +14212,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Get the register used for return values
         fn getReturnRegister(_: *Self) GeneralReg {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 return .X0;
             } else {
                 return .RAX;
@@ -14280,7 +14230,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .call_offset = current,
                 .target_offset = target_offset,
             });
-            const form: CodeRefForm = if (comptime target.toCpuArch() == .aarch64)
+            const form: CodeRefForm = if (comptime isa.binaryIs(.aarch64))
                 switch (try self.codegen.emitDirectCall(target_offset)) {
                     .call => .call,
                     .inline_call => .inline_call,
@@ -14335,7 +14285,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     // For targets outside the shifted body, or the current body's entry point,
                     // re-patch because only the call site moved.
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         self.codegen.patchDirectCall(patch.call_offset, patch.target_offset);
                     } else {
                         // Patch CALL rel32 instruction (5 bytes: 0xE8 + 4-byte offset)
@@ -14451,7 +14401,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitInternalCodeAddress(self: *Self, ref_target: CodeRefTarget, target_offset: usize, dst_reg: GeneralReg) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // The scratch register must be allocated before the anchor offset
                 // is read: allocation may emit spill code, and the anchor must be
                 // the ADR instruction itself.
@@ -14492,7 +14442,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitPendingProcAddress(self: *Self, target_proc: lir.LIR.LirProcSpecId, dst_reg: GeneralReg) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // Reserve the 4-instruction PC-relative address sequence so the
                 // patcher can rewrite it once the target proc's code offset is
                 // known. The scratch register is allocated before the anchor
@@ -14531,7 +14481,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn emitPendingRcCall(self: *Self, helper: RcHelperVariant) Allocator.Error!void {
             const call_site = self.codegen.currentOffset();
             try self.pending_rc_calls.append(self.allocator, .{ .instr_offset = call_site, .target_key = helper.encode() });
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 _ = try self.codegen.emitCallPlaceholder();
             } else {
                 try self.codegen.emit.call(@bitCast(@as(i32, 0)));
@@ -14544,7 +14494,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitPendingRcAddrKey(self: *Self, key: u64, dst_reg: GeneralReg) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // Same 4-instruction sequence the patcher rewrites; the scratch
                 // register is allocated before the anchor offset is read because
                 // allocation may emit spill code.
@@ -14581,7 +14531,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.compiling_rc_helpers = false;
 
             while (self.rc_helper_worklist.pop()) |helper| {
-                if (comptime target.toCpuArch() == .aarch64) try self.emitBranchIslandIfNeeded();
+                if (comptime isa.binaryIs(.aarch64)) try self.emitBranchIslandIfNeeded();
                 _ = try self.compileSingleRcHelper(helper);
             }
 
@@ -14772,7 +14722,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.emitLoad(.w64, cap_reg, value_ptr_reg, 16);
 
             const skip_patch = blk: {
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.emit.cmpRegImm12(.w64, cap_reg, 0);
                     break :blk try self.codegen.emitCondJump(.mi);
                 } else {
@@ -14808,7 +14758,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.emitLoad(.w64, cap_reg, value_ptr_reg, 16);
 
             const skip_patch = blk: {
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.emit.cmpRegImm12(.w64, cap_reg, 0);
                     break :blk try self.codegen.emitCondJump(.mi);
                 } else {
@@ -15224,7 +15174,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.runtime_ret_desc_local = null;
             self.uses_caller_stack_arg_base = false;
 
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
                 self.codegen.stack_offset = 16 + CodeGen.CALLEE_SAVED_AREA_SIZE;
@@ -15261,7 +15211,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const body_epilogue_offset = self.codegen.currentOffset();
             {
-                const actual_locals: u32 = if (comptime target.toCpuArch() == .aarch64)
+                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -15280,7 +15230,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             var helper_callee_saved_mask: u32 = 0;
             var helper_epilogue_offset: u32 = 0;
 
-            const final_offset = if (comptime target.toCpuArch() == .x86_64) blk: {
+            const final_offset = if (comptime isa.binaryIs(.x86_64)) blk: {
                 const body_bytes = self.allocator.dupe(u8, self.codegen.emit.buf.items[body_start..body_end]) catch return error.OutOfMemory;
                 defer self.allocator.free(body_bytes);
 
@@ -15304,7 +15254,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime target.toCpuArch() == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -15335,7 +15285,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime target.toCpuArch() == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -15416,7 +15366,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.runtime_ret_desc_local = null;
             self.uses_caller_stack_arg_base = false;
 
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
                 self.codegen.stack_offset = 16 + CodeGen.CALLEE_SAVED_AREA_SIZE;
@@ -15465,7 +15415,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const body_epilogue_offset = self.codegen.currentOffset();
             {
-                const actual_locals: u32 = if (comptime target.toCpuArch() == .aarch64)
+                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -15484,7 +15434,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             var helper_callee_saved_mask: u32 = 0;
             var helper_epilogue_offset: u32 = 0;
 
-            const final_offset = if (comptime target.toCpuArch() == .x86_64) blk: {
+            const final_offset = if (comptime isa.binaryIs(.x86_64)) blk: {
                 const body_bytes = self.allocator.dupe(u8, self.codegen.emit.buf.items[body_start..body_end]) catch return error.OutOfMemory;
                 defer self.allocator.free(body_bytes);
 
@@ -15508,7 +15458,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime target.toCpuArch() == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -15539,7 +15489,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime target.toCpuArch() == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -15893,7 +15843,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     if (tu_data.discriminant_size != 0 and tu_data.discriminant_size < 4) {
                         const mask: i32 = (@as(i32, 1) << @as(u5, @intCast(tu_data.discriminant_size * 8))) - 1;
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             const mask_reg = try self.allocTempGeneral();
                             try self.codegen.emitLoadImm(mask_reg, mask);
                             try self.codegen.emit.andRegRegReg(.w32, disc_reg, disc_reg, mask_reg);
@@ -16924,7 +16874,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Lower the call to the platform C ABI (shared classifier, same as the LLVM
             // backend and interpreter trampoline).
-            const abi_target: layout.abi.Target = if (comptime target.toCpuArch() == .aarch64)
+            const abi_target: layout.abi.Target = if (comptime isa.binaryIs(.aarch64))
                 layout.abi.aarch64Target(target.toOsTag())
             else if (comptime roc_target.isWindows())
                 .x86_64_windows
@@ -16939,8 +16889,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // sret: on x86 the indirect-result pointer is the first integer argument; on
             // aarch64 it is the dedicated x8 register, set just before the call.
-            const aarch64_sret = lowered.ret == .indirect and comptime target.toCpuArch() == .aarch64;
-            if (lowered.ret == .indirect and comptime target.toCpuArch() != .aarch64) {
+            const aarch64_sret = lowered.ret == .indirect and comptime isa.binaryIs(.aarch64);
+            if (lowered.ret == .indirect and comptime !isa.binaryIs(.aarch64)) {
                 try builder.setReturnByPointer(ret_slot);
             }
 
@@ -16991,8 +16941,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
 
             // Register-class return: store each result register into the return slot.
-            const hosted_ret_reg_0: GeneralReg = if (arch == .x86_64) .RAX else .X0;
-            const hosted_ret_reg_1: GeneralReg = if (arch == .x86_64) .RDX else .X1;
+            const hosted_ret_reg_0: GeneralReg = if (isa.binaryIs(.x86_64)) .RAX else .X0;
+            const hosted_ret_reg_1: GeneralReg = if (isa.binaryIs(.x86_64)) .RDX else .X1;
             switch (lowered.ret) {
                 .none, .indirect => {},
                 .registers => |registers| {
@@ -17038,7 +16988,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// register-class returns use xmm0..xmm1.
         fn emitHostedFloatResultStore(self: *Self, dst_off: i32, index: usize, size: u8) Allocator.Error!void {
             const freg = hostedFloatResultReg(index);
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 switch (size) {
                     4 => try self.codegen.emitStoreStackF32(dst_off, freg),
                     8 => try self.codegen.emitStoreStackF64(dst_off, freg),
@@ -17056,7 +17006,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn hostedFloatResultReg(index: usize) FloatReg {
-            return if (comptime target.toCpuArch() == .aarch64) switch (index) {
+            return if (comptime isa.binaryIs(.aarch64)) switch (index) {
                 0 => .V0,
                 1 => .V1,
                 2 => .V2,
@@ -17071,7 +17021,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Compare a general register against an immediate bit pattern.
         fn emitCmpImm(self: *Self, reg: GeneralReg, value: i64) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (value >= 0 and value <= std.math.maxInt(u12)) {
                     try self.codegen.emit.cmpRegImm12(.w64, reg, @intCast(value));
                 } else {
@@ -17110,7 +17060,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         ///
         /// RETURNS: The patch location (where the displacement bytes are) for later patching.
         fn emitJumpIfNotEqual(self: *Self) Allocator.Error!usize {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 return self.codegen.emitCondJump(.ne);
             } else {
                 // JNE (jump if not equal) with placeholder offset
@@ -17124,7 +17074,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Emit a conditional jump for unsigned less than (for list length comparisons)
         fn emitJumpIfEqual(self: *Self) Allocator.Error!usize {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 return self.codegen.emitCondJump(.eq);
             } else {
                 // JE (jump if equal) with placeholder offset
@@ -17154,7 +17104,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             var reg_count: u8 = initial_reg_idx;
             for (param_num_regs, 0..) |nr, i| {
                 const is_i128_arg = self.argNeedsI128Abi(arg_infos[i].loc, arg_infos[i].layout_idx);
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     if (!pass_by_ptr[i] and is_i128_arg and reg_count < max_arg_regs and reg_count % 2 != 0) {
                         reg_count += 1;
                     }
@@ -17264,7 +17214,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .target_proc = target_proc,
             });
 
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 _ = try self.codegen.emitCallPlaceholder();
             } else {
                 try self.codegen.emit.call(@bitCast(@as(i32, 0)));
@@ -18842,7 +18792,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         std.debug.panic("LIR/codegen invariant violated: materializing F32 bits from F64 register", .{});
                     }
                     const reg = try self.allocTempGeneral();
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.fmovGenFromFloat(.single, reg, float.reg);
                     } else {
                         const slot = self.codegen.allocStackSlot(4);
@@ -19038,7 +18988,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         std.debug.panic("LIR/codegen invariant violated: requested F64 register from F32 immediate", .{});
                     }
                     const bits: u32 = @bitCast(val);
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.movRegImm64(.IP0, bits);
                         try self.codegen.emit.fmovFloatFromGen(.single, reg, .IP0);
                     } else {
@@ -19056,13 +19006,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                     const bits: u64 = @bitCast(val);
                     if (bits == 0) {
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.codegen.emit.fmovFloatFromGen(.double, reg, .ZRSP);
                         } else {
                             try self.codegen.emit.xorpdRegReg(reg, reg);
                         }
                     } else {
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.codegen.emit.movRegImm64(.IP0, @bitCast(bits));
                             try self.codegen.emit.fmovFloatFromGen(.double, reg, .IP0);
                         } else {
@@ -19083,7 +19033,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                 .{@tagName(s.size)},
                             );
                         }
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.codegen.emitLoadStackF32(reg, s.offset);
                         } else {
                             try self.codegen.emit.movssRegMem(reg, .RBP, s.offset);
@@ -19180,7 +19130,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     switch (loc) {
                         .float_reg => |float| {
                             if (float.width != .f32) std.debug.panic("LIR/codegen invariant violated: storing F64 register as F32", .{});
-                            if (comptime target.toCpuArch() == .aarch64) {
+                            if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.fstrRegMemUoff(.single, float.reg, saved_ptr_reg, 0);
                             } else {
                                 try self.codegen.emit.movssMemReg(saved_ptr_reg, 0, float.reg);
@@ -19357,7 +19307,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         remaining -= 4;
                     }
                     if (remaining >= 2) {
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.codegen.emitLoadStackHalfword(temp_reg, src_offset);
                             try self.codegen.emit.strhRegMemSoff(temp_reg, ptr_reg, dst_offset);
                         } else {
@@ -19369,7 +19319,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         remaining -= 2;
                     }
                     if (remaining >= 1) {
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.codegen.emitLoadStackByte(temp_reg, src_offset);
                             try self.codegen.emit.strbRegMemSoff(temp_reg, ptr_reg, dst_offset);
                         } else {
@@ -19489,7 +19439,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     // Only have low 64 bits in register—sign-extend to i128
                     // by arithmetic-shifting right by 63 to fill high word.
                     const sign_reg = try self.allocTempGeneral();
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.emitStoreToPtr(.w64, reg, ptr_reg, 0);
                         try self.codegen.emit.asrRegRegImm(.w64, sign_reg, reg, 63);
                         try self.emitStoreToPtr(.w64, sign_reg, ptr_reg, 8);
@@ -19627,7 +19577,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         },
                         8 => {
                             if (float.width != .f64) std.debug.panic("LIR/codegen invariant violated: copying F32 register into F64 slot", .{});
-                            if (comptime target.toCpuArch() == .aarch64) {
+                            if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emitStoreStackF64(dest_offset, float.reg);
                             } else {
                                 try self.codegen.emit.movsdMemReg(frame_ptr, dest_offset, float.reg);
@@ -19661,7 +19611,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLoad(self: *Self, comptime width: anytype, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.ldrRegMemSoff(width, dst, base_reg, offset);
             } else {
                 try self.codegen.emit.movRegMem(width, dst, base_reg, offset);
@@ -19669,7 +19619,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitStore(self: *Self, comptime width: anytype, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.strRegMemSoff(width, src, base_reg, offset);
             } else {
                 try self.codegen.emit.movMemReg(width, base_reg, offset, src);
@@ -19677,7 +19627,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLoadW8(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.ldrbRegMemSoff(dst, base_reg, offset);
             } else {
                 try self.codegen.emit.movzxBRegMem(dst, base_reg, offset);
@@ -19685,7 +19635,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLoadW16(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.ldrhRegMemSoff(dst, base_reg, offset);
             } else {
                 try self.codegen.emit.movzxWRegMem(dst, base_reg, offset);
@@ -19693,7 +19643,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitStoreW8(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.strbRegMemSoff(src, base_reg, offset);
             } else {
                 try self.codegen.emit.movMemReg(.w8, base_reg, offset, src);
@@ -19701,7 +19651,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitStoreW16(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.strhRegMemSoff(src, base_reg, offset);
             } else {
                 try self.codegen.emit.movMemReg(.w16, base_reg, offset, src);
@@ -19709,8 +19659,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitAddRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
-            std.debug.assert(arch == .aarch64 or arch == .aarch64_be or dst == src1);
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            std.debug.assert(isa.binaryIs(.aarch64) or dst == src1);
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.addRegRegReg(width, dst, src1, src2);
             } else {
                 try self.codegen.emit.addRegReg(width, dst, src2);
@@ -19718,8 +19668,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitSubRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
-            std.debug.assert(arch == .aarch64 or arch == .aarch64_be or dst == src1);
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            std.debug.assert(isa.binaryIs(.aarch64) or dst == src1);
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.subRegRegReg(width, dst, src1, src2);
             } else {
                 if (dst != src1) try self.codegen.emit.movRegReg(width, dst, src1);
@@ -19728,8 +19678,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitMulRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
-            std.debug.assert(arch == .aarch64 or arch == .aarch64_be or dst == src1);
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            std.debug.assert(isa.binaryIs(.aarch64) or dst == src1);
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.mulRegRegReg(width, dst, src1, src2);
             } else {
                 try self.codegen.emit.imulRegReg(width, dst, src2);
@@ -19737,8 +19687,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitAndRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
-            std.debug.assert(arch == .aarch64 or arch == .aarch64_be or dst == src1);
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            std.debug.assert(isa.binaryIs(.aarch64) or dst == src1);
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.andRegRegReg(width, dst, src1, src2);
             } else {
                 try self.codegen.emit.andRegReg(width, dst, src2);
@@ -19746,8 +19696,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitOrRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
-            std.debug.assert(arch == .aarch64 or arch == .aarch64_be or dst == src1);
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            std.debug.assert(isa.binaryIs(.aarch64) or dst == src1);
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.orrRegRegReg(width, dst, src1, src2);
             } else {
                 if (dst != src1) try self.codegen.emit.movRegReg(width, dst, src1);
@@ -19756,7 +19706,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLoadStackW8(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emitLoadStackByte(dst, offset);
             } else {
                 try self.codegen.emit.movzxBRegMem(dst, frame_ptr, offset);
@@ -19764,7 +19714,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLoadStackW16(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emitLoadStackHalfword(dst, offset);
             } else {
                 try self.codegen.emit.movzxWRegMem(dst, frame_ptr, offset);
@@ -19772,7 +19722,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitShlImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.lslRegRegImm(width, dst, src, @intCast(amount));
             } else {
                 if (dst != src) try self.codegen.emit.movRegReg(width, dst, src);
@@ -19781,7 +19731,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLsrImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.lsrRegRegImm(width, dst, src, @intCast(amount));
             } else {
                 if (dst != src) try self.codegen.emit.movRegReg(width, dst, src);
@@ -19790,7 +19740,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitAsrImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.asrRegRegImm(width, dst, src, @intCast(amount));
             } else {
                 if (dst != src) try self.codegen.emit.movRegReg(width, dst, src);
@@ -19799,7 +19749,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitShlReg(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.lslRegReg(width, dst, src, amount);
             } else {
                 try self.emitShiftRegX86(width, dst, src, amount, .shl);
@@ -19807,7 +19757,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLsrReg(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.lsrRegReg(width, dst, src, amount);
             } else {
                 try self.emitShiftRegX86(width, dst, src, amount, .shr);
@@ -19815,7 +19765,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitAsrReg(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.asrRegReg(width, dst, src, amount);
             } else {
                 try self.emitShiftRegX86(width, dst, src, amount, .sar);
@@ -19853,7 +19803,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitSaturatingSub(self: *Self, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.cmpRegReg(.w64, a, b);
                 try self.codegen.emit.subRegRegReg(.w64, dst, a, b);
                 try self.codegen.emit.csel(.w64, dst, dst, .ZRSP, .cs);
@@ -19867,7 +19817,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitAddImm(self: *Self, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.addRegRegImm12(.w64, dst, src, @intCast(imm));
             } else {
                 if (dst != src) try self.codegen.emit.movRegReg(.w64, dst, src);
@@ -19881,7 +19831,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 return;
             }
 
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (imm > 0 and imm <= 4095) {
                     try self.codegen.emit.addRegRegImm12(.w64, dst, src, @intCast(imm));
                     return;
@@ -19898,7 +19848,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitSubImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.subRegRegImm12(width, dst, src, @intCast(imm));
             } else {
                 if (dst != src) try self.codegen.emit.movRegReg(width, dst, src);
@@ -19907,7 +19857,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitSetCond(self: *Self, dst: GeneralReg, cond: Condition) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.cset(.w64, dst, cond);
             } else {
                 try self.codegen.emit.setcc(cond, dst);
@@ -19916,7 +19866,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitLeaStack(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (offset >= 0 and offset <= 4095) {
                     try self.codegen.emit.addRegRegImm12(.w64, dst, frame_ptr, @intCast(offset));
                 } else {
@@ -19929,7 +19879,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitAddStackPtr(self: *Self, imm: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.addRegRegImm12(.w64, stack_ptr, stack_ptr, @intCast(imm));
             } else {
                 try self.codegen.emit.addRegImm32(.w64, stack_ptr, imm);
@@ -20083,7 +20033,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         const StoreWidth = enum { w32, w64 };
 
         fn emitStoreToPtr(self: *Self, comptime width: StoreWidth, src: GeneralReg, ptr_reg: GeneralReg, byte_offset: i32) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 switch (width) {
                     .w64 => try self.codegen.emit.strRegMemSoff(.w64, src, ptr_reg, byte_offset),
                     .w32 => try self.codegen.emit.strRegMemSoff(.w32, src, ptr_reg, byte_offset),
@@ -20097,7 +20047,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitStoreStackW8(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emitStoreStackByte(offset, src);
             } else {
                 try self.codegen.emitStoreStack(.w8, offset, src);
@@ -20105,7 +20055,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitStoreStackW16(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emitStoreStackHalfword(offset, src);
             } else {
                 try self.codegen.emitStoreStack(.w16, offset, src);
@@ -20121,14 +20071,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             switch (size) {
                 0 => {},
                 1 => {
-                    if (comptime arch == .aarch64 or arch == .aarch64_be) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.strbRegMem(src_reg, ptr_reg, 0);
                     } else {
                         try self.codegen.emit.movMemReg(.w8, ptr_reg, 0, src_reg);
                     }
                 },
                 2 => {
-                    if (comptime arch == .aarch64 or arch == .aarch64_be) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.strhRegMem(src_reg, ptr_reg, 0);
                     } else {
                         try self.codegen.emit.movMemReg(.w16, ptr_reg, 0, src_reg);
@@ -20144,7 +20094,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Store float register to memory at [ptr_reg] (architecture-specific)
         fn emitStoreFloatToMem(self: *Self, ptr_reg: anytype, src_reg: FloatReg) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.fstrRegMemUoff(.double, src_reg, ptr_reg, 0);
             } else {
                 try self.codegen.emit.movsdMemReg(ptr_reg, 0, src_reg);
@@ -20220,7 +20170,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn patchCallTarget(self: *Self, call_site: usize, target_offset: usize) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // A far target gets a veneer appended at the emission point.
                 const island_start = self.codegen.currentOffset();
                 try self.codegen.patchCall(call_site, target_offset);
@@ -20234,7 +20184,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         fn patchInternalCodeAddress(self: *Self, instr_offset: usize, target_offset: usize) void {
             const buf = self.codegen.emit.buf.items;
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // The emit reserves the 4-instruction PC-relative sequence (see
                 // Emit.pcRelAddrSequence) starting at instr_offset. The registers
                 // the emitter chose are read back out of the existing ADR and MOVZ
@@ -20420,7 +20370,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                     unreachable;
                 }
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.emitBranchIslandIfNeeded();
                     try self.codegen.compactBranchSites();
                 }
@@ -20466,7 +20416,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                     unreachable;
                 }
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.emitBranchIslandIfNeeded();
                     try self.codegen.compactBranchSites();
                 }
@@ -20659,7 +20609,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.current_stmt_id = null;
 
             // Reserve R12/X20 for roc_ops exactly like standalone lambda compilation.
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 const r12_bit = @as(u16, 1) << @intFromEnum(x86_64.GeneralReg.R12);
                 self.codegen.callee_saved_used |= r12_bit;
                 self.codegen.callee_saved_available &= ~(@as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R12));
@@ -20671,7 +20621,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // PHASE 1: Generate body first (to determine callee_saved_used)
             // Initialize stack_offset to reserve space for callee-saved area
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 // Reserve 40 bytes for 5 callee-saved registers at fixed offsets
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
@@ -20788,7 +20738,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.emitHotReloadLeaveForHostCallable(slot);
             }
             {
-                const actual_locals: u32 = if (comptime target.toCpuArch() == .aarch64)
+                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -20802,7 +20752,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const body_end = self.codegen.currentOffset();
 
             // PHASE 2: Extract body and prepend prologue (x86_64 only - uses deferred pattern)
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 // Save body bytes
                 const body_bytes = self.allocator.dupe(u8, self.codegen.emit.buf.items[body_start..body_end]) catch return error.OutOfMemory;
                 defer self.allocator.free(body_bytes);
@@ -20832,7 +20782,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 self.shiftPendingProcAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime target.toCpuArch() == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
 
                 // Re-patch internal calls/addr whose targets are outside the shifted body
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
@@ -20914,7 +20864,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 self.shiftPendingProcAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime target.toCpuArch() == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
 
                 // Re-patch internal calls/addr whose targets are outside the shifted body
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
@@ -21061,7 +21011,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // not in the integer return register (X0/RAX).
             if (runtime_ret_layout == .f32) {
                 const stack_offset = self.codegen.allocStackSlot(4);
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.emitStoreStackF32(stack_offset, .V0);
                 } else {
                     try self.codegen.emit.movssMemReg(.RBP, stack_offset, .XMM0);
@@ -21071,7 +21021,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             if (runtime_ret_layout == .f64) {
                 const stack_offset = self.codegen.allocStackSlot(8);
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.emitStoreStackF64(stack_offset, .V0);
                 } else {
                     try self.codegen.emitStoreStackF64(stack_offset, .XMM0);
@@ -21137,7 +21087,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     if (size_align.size > 8) {
                         const stack_offset = self.codegen.allocStackSlot(size_align.size);
                         const num_regs = (size_align.size + 7) / 8;
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             const regs = [_]@TypeOf(GeneralReg.X0){ .X0, .X1, .X2, .X3, .X4, .X5, .X6, .X7, .XR, .X9, .X10, .X11, .X12, .X13, .X14, .X15 };
                             for (0..@min(num_regs, regs.len)) |i| {
                                 try self.codegen.emit.strRegMemSoff(.w64, regs[i], .FP, stack_offset + @as(i32, @intCast(i * 8)));
@@ -21416,7 +21366,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 for (arg_infos, 0..) |ai, i| {
                     const pbp = if (config.pass_by_ptr) |p| p[i] else false;
                     const is_i128_arg = self.argNeedsI128Abi(ai.loc, ai.layout_idx);
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         if (!pbp and is_i128_arg and reg_count < max_arg_regs and reg_count % 2 != 0) {
                             reg_count += 1;
                         }
@@ -21508,7 +21458,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     // Handle i128/Dec arguments (need two registers, even-aligned on aarch64)
                     const is_i128_arg = self.argNeedsI128Abi(info.loc, arg_layout);
                     if (is_i128_arg) {
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             if (reg_idx % 2 != 0) {
                                 reg_idx += 1;
                             }
@@ -21593,7 +21543,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn markCallerStackArgBaseUsed(self: *Self) void {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const bit = @as(u32, 1) << @intFromEnum(caller_stack_arg_base_reg);
                 self.uses_caller_stack_arg_base = true;
                 self.codegen.callee_saved_used |= bit;
@@ -21602,7 +21552,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn callerStackArgBaseReg(self: *Self) GeneralReg {
-            if (comptime arch == .aarch64 or arch == .aarch64_be) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 self.markCallerStackArgBaseUsed();
                 return caller_stack_arg_base_reg;
             } else {
@@ -21829,7 +21779,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const runtime_layout_idx = self.runtimeRepresentationLayoutIdx(self.localLayout(local));
                     break :blk runtime_layout_idx == .i128 or runtime_layout_idx == .u128 or runtime_layout_idx == .dec;
                 };
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     if (is_i128_param and pre_reg_count < max_arg_regs and pre_reg_count % 2 != 0) {
                         pre_reg_count += 1;
                     }
@@ -21874,7 +21824,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         const runtime_layout_idx = self.runtimeRepresentationLayoutIdx(self.localLayout(local));
                         break :blk runtime_layout_idx == .i128 or runtime_layout_idx == .u128 or runtime_layout_idx == .dec;
                     };
-                    if (comptime target.toCpuArch() == .aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         if (!pbp and is_i128_param and pre_reg_count < max_arg_regs and pre_reg_count % 2 != 0) {
                             pre_reg_count += 1;
                         }
@@ -21943,7 +21893,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     continue;
                 }
 
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     const runtime_layout_idx = self.runtimeRepresentationLayoutIdx(self.localLayout(local));
                     if (num_regs == 2 and (runtime_layout_idx == .i128 or runtime_layout_idx == .u128 or runtime_layout_idx == .dec) and reg_idx % 2 != 0) {
                         reg_idx += 1;
@@ -22078,7 +22028,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                 switch (loc) {
                                     .float_reg => |float| {
                                         if (float.width != width) std.debug.panic("LIR/codegen invariant violated: float return width mismatch", .{});
-                                        if (comptime target.toCpuArch() == .aarch64) {
+                                        if (comptime isa.binaryIs(.aarch64)) {
                                             if (float.reg != .V0) try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, .V0, float.reg);
                                         } else {
                                             if (float.reg != .XMM0) {
@@ -22094,16 +22044,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                             std.debug.panic("LIR/codegen invariant violated: float return stack width mismatch", .{});
                                         }
                                         if (width == .f32) {
-                                            try self.codegen.emitLoadStackF32(if (comptime target.toCpuArch() == .aarch64) .V0 else .XMM0, s.offset);
+                                            try self.codegen.emitLoadStackF32(if (comptime isa.binaryIs(.aarch64)) .V0 else .XMM0, s.offset);
                                         } else {
-                                            try self.codegen.emitLoadStackF64(if (comptime target.toCpuArch() == .aarch64) .V0 else .XMM0, s.offset);
+                                            try self.codegen.emitLoadStackF64(if (comptime isa.binaryIs(.aarch64)) .V0 else .XMM0, s.offset);
                                         }
                                     },
                                     .immediate_f32 => |val| {
                                         if (width != .f32) std.debug.panic("LIR/codegen invariant violated: returning F32 immediate as F64", .{});
                                         const immediate_loc: ValueLocation = .{ .immediate_f32 = val };
                                         const reg = try self.ensureInFloatReg(immediate_loc, width);
-                                        if (comptime target.toCpuArch() == .aarch64) {
+                                        if (comptime isa.binaryIs(.aarch64)) {
                                             if (reg != .V0) try self.codegen.emit.fmovRegReg(.single, .V0, reg);
                                         } else if (reg != .XMM0) {
                                             try self.codegen.emit.movssRegReg(.XMM0, reg);
@@ -22114,7 +22064,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                         if (width != .f64) std.debug.panic("LIR/codegen invariant violated: returning F64 immediate as F32", .{});
                                         const immediate_loc: ValueLocation = .{ .immediate_f64 = val };
                                         const reg = try self.ensureInFloatReg(immediate_loc, width);
-                                        if (comptime target.toCpuArch() == .aarch64) {
+                                        if (comptime isa.binaryIs(.aarch64)) {
                                             if (reg != .V0) try self.codegen.emit.fmovRegReg(.double, .V0, reg);
                                         } else if (reg != .XMM0) {
                                             try self.codegen.emit.movsdRegReg(.XMM0, reg);
@@ -22227,7 +22177,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                             => unreachable,
                         };
                         const num_regs = (size_align.size + 7) / 8;
-                        if (comptime target.toCpuArch() == .aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             const regs = [_]@TypeOf(GeneralReg.X0){ .X0, .X1, .X2, .X3, .X4, .X5, .X6, .X7, .XR, .X9, .X10, .X11, .X12, .X13, .X14, .X15 };
                             for (0..@min(num_regs, regs.len)) |i| {
                                 try self.codegen.emitLoadStack(.w64, regs[i], stack_offset + @as(i32, @intCast(i * 8)));
@@ -22308,7 +22258,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // so writing even one byte past ret_size corrupts the caller's
             // frame.
             const ptr_reg: GeneralReg = scratch_reg;
-            const temp_reg: GeneralReg = if (comptime target.toCpuArch() == .aarch64) .X10 else .RAX;
+            const temp_reg: GeneralReg = if (comptime isa.binaryIs(.aarch64)) .X10 else .RAX;
 
             // Register and immediate scalars store their exact width straight
             // through the return pointer instead of bouncing through a spill
@@ -22473,7 +22423,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             end: i32,
 
             fn finish(scratch: *@This(), owner: *Self) void {
-                scratch.end = if (comptime target.toCpuArch() == .aarch64)
+                scratch.end = if (comptime isa.binaryIs(.aarch64))
                     @max(scratch.end, owner.codegen.stack_offset)
                 else
                     @min(scratch.end, owner.codegen.stack_offset);
@@ -22506,7 +22456,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer scratch.finish(self);
             while (work.pop()) |item| switch (scratch.begin(self, item)) {
                 .node => |stmt_id| {
-                    if (comptime target.toCpuArch() == .aarch64) try self.emitBranchIslandIfNeeded();
+                    if (comptime isa.binaryIs(.aarch64)) try self.emitBranchIslandIfNeeded();
                     const stmt_key = @intFromEnum(stmt_id);
                     if (self.stmt_locations.get(stmt_key)) |stmt_location| {
                         const patch = try self.codegen.emitJump();
@@ -23923,7 +23873,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn emitPendingMessageAddress(self: *Self, msg: []const u8, dst_reg: GeneralReg) Allocator.Error!void {
             self.assertImageOpen();
             const message_offset = try self.internMessage(msg);
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 // Reserve the 4-instruction PC-relative address sequence. The
                 // scratch register is allocated before the anchor offset is
                 // read because allocation may emit spill code.
@@ -24097,7 +24047,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitTrap(self: *Self) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.brk();
             } else {
                 try self.codegen.emit.ud2();
@@ -24139,7 +24089,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.clearLocalLocationsRetainingCapacity();
             self.codegen.callee_saved_used = 0;
 
-            if (arch == .aarch64 or arch == .aarch64_be) {
+            if (isa.binaryIs(.aarch64)) {
                 const saved_callee_saved_used = self.codegen.callee_saved_used;
                 const saved_callee_saved_available = self.codegen.callee_saved_available;
                 const saved_early_return_patches_len = self.early_return_patches.items.len;
@@ -24356,7 +24306,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn generateBoxyDictProcThunk(self: *Self, proc_id: lir.LIR.LirProcSpecId) Allocator.Error!usize {
             const func_start = self.codegen.currentOffset();
 
-            if (arch == .aarch64 or arch == .aarch64_be) {
+            if (isa.binaryIs(.aarch64)) {
                 const saved_callee_saved_used = self.codegen.callee_saved_used;
                 const saved_callee_saved_available = self.codegen.callee_saved_available;
                 const saved_early_return_patches_len = self.early_return_patches.items.len;
@@ -24882,7 +24832,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 unreachable;
             }
 
-            const abi_target: layout.abi.Target = if (comptime target.toCpuArch() == .aarch64)
+            const abi_target: layout.abi.Target = if (comptime isa.binaryIs(.aarch64))
                 layout.abi.aarch64Target(target.toOsTag())
             else if (comptime roc_target.isWindows())
                 .x86_64_windows
@@ -24898,7 +24848,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Capture the sret pointer before anything else can clobber it.
             if (lowered.ret == .indirect) {
-                if (comptime target.toCpuArch() == .aarch64) {
+                if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.emit.movRegReg(.w64, sret_reg, .XR);
                 } else {
                     try self.codegen.emit.movRegReg(.w64, sret_reg, int_param_regs[0]);
@@ -25047,7 +24997,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // offset, so its copies happen here in the body. (On aarch64 the
             // offset depends on the final frame size; those copies are emitted
             // by emitEntryIncomingStackCopies right after the prologue.)
-            if (comptime target.toCpuArch() == .x86_64) {
+            if (comptime isa.binaryIs(.x86_64)) {
                 for (incoming_stack_copies.items) |copy| {
                     const src_off = incoming_stack_arg_base_offset + @as(i32, @intCast(copy.incoming_byte_offset));
                     switch (copy.kind) {
@@ -25095,7 +25045,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.storeResultToSavedPtr(result_loc, ret_layout, sret_reg);
                     }
                     // Both SysV and Win64 require the sret pointer back in RAX.
-                    if (comptime target.toCpuArch() == .x86_64) {
+                    if (comptime isa.binaryIs(.x86_64)) {
                         try self.codegen.emit.movRegReg(.w64, .RAX, sret_reg);
                     }
                 },
@@ -25128,7 +25078,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Store an incoming float argument register into the frame.
         fn emitEntryFloatStore(self: *Self, dest_off: i32, freg: FloatReg, size: u8) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 switch (size) {
                     4 => try self.codegen.emitStoreStackF32(dest_off, freg),
                     8 => try self.codegen.emitStoreStackF64(dest_off, freg),
@@ -25148,7 +25098,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// Load C-ABI float return piece `index` from the frame into the
         /// float return register sequence (V0..V3 / XMM0..XMM1).
         fn emitEntryFloatLoad(self: *Self, src_off: i32, index: usize, size: u8) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const fregs = [_]FloatReg{ .V0, .V1, .V2, .V3 };
                 const freg = fregs[index];
                 switch (size) {
@@ -25173,7 +25123,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// area into the frame. Emitted right after the prologue on aarch64,
         /// where that area begins at [fp + frame_total].
         fn emitEntryIncomingStackCopies(self: *Self, copies: []const EntryStackCopy, frame_total: i32) Allocator.Error!void {
-            if (comptime target.toCpuArch() != .aarch64) {
+            if (comptime !isa.binaryIs(.aarch64)) {
                 std.debug.assert(copies.len == 0);
                 return;
             }
@@ -25239,7 +25189,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// Emit a jump placeholder (will be patched later).
         /// Returns the patch location for use with patchJump.
         fn emitJumpPlaceholder(self: *Self) Allocator.Error!usize {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 return try self.codegen.emitJump();
             } else {
                 const patch_loc = self.codegen.currentOffset() + 1; // after E9 opcode
@@ -25322,7 +25272,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             frame: ?AssembledFrame,
         ) Allocator.Error!usize {
             self.assertImageOpen();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const island_start = self.codegen.currentOffset();
                 try self.codegen.prepareForAppend(bytes.len);
                 try self.logBranchIsland(island_start);
@@ -25407,7 +25357,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const symbol = try self.internSymbolName(reference.target.rc_helper);
                 owned.target = .{ .rc_helper = self.symbolName(symbol) };
             }
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (reference.form == .call) {
                     try self.codegen.registerAssembledCallVeneer(reference.site, if (reference.veneer) |veneer| @as(usize, veneer) else null);
                 }
@@ -25442,12 +25392,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Producer-authored placement metadata; never decode it from bytes.
         pub fn codeRefVeneer(self: *const Self, site: usize) ?usize {
-            if (comptime target.toCpuArch() == .aarch64) return self.codegen.callVeneer(site);
+            if (comptime isa.binaryIs(.aarch64)) return self.codegen.callVeneer(site);
             return null;
         }
 
         pub fn registerAssembledRefVeneer(self: *Self, site: usize, veneer: ?usize) Allocator.Error!void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.registerAssembledCallVeneer(site, veneer);
             }
         }
@@ -25529,13 +25479,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// Re-resolve one assembled reference to its target's new offset.
         pub fn patchAssembledRef(self: *Self, site: usize, form: CodeRefForm, ref_target: CodeRefTarget, target_offset: usize) Allocator.Error!void {
             switch (form) {
-                .call => if (comptime target.toCpuArch() == .aarch64) {
+                .call => if (comptime isa.binaryIs(.aarch64)) {
                     try self.codegen.registerAssembledCallSite(site);
                     try self.patchCallTarget(site, target_offset);
                 } else {
                     try self.patchCallTarget(site, target_offset);
                 },
-                .inline_call => if (comptime target.toCpuArch() == .aarch64) {
+                .inline_call => if (comptime isa.binaryIs(.aarch64)) {
                     self.codegen.patchDirectCall(site, target_offset);
                 } else unreachable,
                 .addr => self.patchInternalCodeAddress(site, target_offset),
@@ -25549,7 +25499,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         pub fn appendAssembledRelocation(self: *Self, relocation: Relocation) Allocator.Error!void {
             const reloc_index: u32 = @intCast(self.codegen.relocations.items.len);
             try self.codegen.relocations.append(self.allocator, relocation);
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 if (relocation == .linked_function) {
                     const loc: usize = @intCast(relocation.linked_function.offset);
                     if (self.codegen.isBlAt(loc)) try self.codegen.registerAssembledExternCall(loc, reloc_index);
@@ -25572,7 +25522,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// body's branch so a large body never loses its reachable reservation.
         pub fn artifactRelocations(self: *Self, allocator: Allocator) Allocator.Error![]Relocation {
             const relocations = try allocator.dupe(Relocation, self.getRelocations());
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 for (self.codegen.extern_stubs.items) |stub| {
                     const stub_start = relocations[stub.page_relocation].linked_data.offset;
                     if (self.artifactContainsExternStub(stub.call, stub_start)) continue;
@@ -25598,7 +25548,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Remove placement-specific stub displacements using producer records.
         pub fn normalizeArtifactCode(self: *const Self, start: usize, bytes: []u8) void {
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 for (self.codegen.extern_stubs.items) |stub| {
                     if (stub.call < start or stub.call >= start + bytes.len) continue;
                     const stub_start = self.codegen.relocations.items[stub.page_relocation].linked_data.offset;
@@ -25614,7 +25564,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             if (self.image_finished) return;
             try self.resolveAssembledSymbolicRefs();
             try self.placeMessagePool();
-            if (comptime target.toCpuArch() == .aarch64) {
+            if (comptime isa.binaryIs(.aarch64)) {
                 const island_start = self.codegen.currentOffset();
                 try self.codegen.finishImage();
                 try self.logBranchIsland(island_start);
@@ -28095,14 +28045,14 @@ test "symbol producer caches reuse identities and reset with generated code" {
         for (0..128) |_| {
             try std.testing.expectEqual(builtin_symbol, try codegen.builtinSymbol(.str_concat));
             _ = try codegen.staticStringSymbol(literal);
-            try codegen.emitStaticDataAddress(if (comptime target.toCpuArch() == .x86_64) .RAX else .X0, data_id);
+            try codegen.emitStaticDataAddress(if (comptime isaOf(target).binaryIs(.x86_64)) .RAX else .X0, data_id);
         }
         try std.testing.expectEqual(@as(usize, 3), codegen.getSymbolNames().len);
         try std.testing.expectEqual(@as(usize, 2), codegen.codegen.symbols.required_definitions.items.len);
         const old_data_symbol = codegen.static_data_symbols.get(data_id).?.symbol.?;
         codegen.reset();
         try std.testing.expectEqual(@as(usize, 0), codegen.getSymbolNames().len);
-        try codegen.emitStaticDataAddress(if (comptime target.toCpuArch() == .x86_64) .RAX else .X0, data_id);
+        try codegen.emitStaticDataAddress(if (comptime isaOf(target).binaryIs(.x86_64)) .RAX else .X0, data_id);
         const new_data_symbol = codegen.static_data_symbols.get(data_id).?.symbol.?;
         try std.testing.expect(old_data_symbol != new_data_symbol);
         try std.testing.expectEqualStrings("test_static_root", codegen.getSymbolNames()[@intFromEnum(new_data_symbol)]);
