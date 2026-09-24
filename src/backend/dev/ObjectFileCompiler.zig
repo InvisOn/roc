@@ -650,6 +650,11 @@ fn compileWithCodeGen(
     var dwarf_sections = Dwarf.build(
         allocator,
         "roc dev",
+        switch (target.ptrBitWidth()) {
+            32 => .four,
+            64 => .eight,
+            else => unreachable,
+        },
         source_file_names,
         codegen.getLineEntries(),
         dwarf_procs.items,
