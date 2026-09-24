@@ -12590,7 +12590,15 @@ pub fn main(init: std.process.Init) CliRunnerError!void {
     platform_specialization_arg = parsed.specialization_arg;
 
     const tests = try buildCases(spec_arena.allocator(), args.filters, args.include_llvm, parsed.suites, parsed.glue_options, parsed.cross_target);
-    if (tests.len == 0) return;
+    if (tests.len == 0) {
+        // A cross target that selects nothing means the requested lane is not
+        // being tested at all; that must not read as a pass.
+        if (parsed.cross_target) |cross_target| {
+            std.debug.print("error: --cross-target={s} selected no test cases\n", .{cross_target});
+            std.process.exit(1);
+        }
+        return;
+    }
     const timeout_ms = effectiveTimeoutMs(args, parsed.suites);
 
     // Worker modes: on Windows the harness pool spawned this process with

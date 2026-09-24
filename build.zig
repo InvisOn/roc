@@ -22,12 +22,14 @@ const CrossTarget = struct {
 const musl_cross_targets = [_]CrossTarget{
     .{ .name = "x64musl", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl } },
     .{ .name = "arm64musl", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
+    .{ .name = "arm32musl", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .musleabihf } },
 };
 
 /// Glibc cross-compile targets (dynamic linking)
 const glibc_cross_targets = [_]CrossTarget{
     .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
     .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
+    .{ .name = "arm32glibc", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
 };
 
 /// Windows cross-compile targets
@@ -8207,6 +8209,8 @@ fn addMainExe(
         .{ .name = "arm64musl", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
         .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
         .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
+        .{ .name = "arm32musl", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .musleabihf } },
+        .{ .name = "arm32glibc", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
         .{ .name = "wasm32", .query = .{ .cpu_arch = .wasm32, .os_tag = .freestanding, .abi = .none } },
         .{ .name = "x64win", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc } },
         .{ .name = "x64mingw", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },

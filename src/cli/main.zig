@@ -477,6 +477,10 @@ const BuiltinsObjects = struct {
     const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_builtins.o");
     const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_builtins.o");
 
+    /// Cross-compilation target builtins (32-bit ARM Linux targets)
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_builtins.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_builtins.o");
+
     /// WebAssembly target builtins (wasm32-freestanding)
     const wasm32 = if (builtin.is_test) &[_]u8{} else @embedFile("targets/wasm32/roc_builtins.o");
 
@@ -508,6 +512,8 @@ const BuiltinsObjects = struct {
     const arm64musl_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/roc_builtins_extern.o");
     const x64glibc_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_builtins_extern.o");
     const arm64glibc_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_builtins_extern.o");
+    const arm32musl_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_builtins_extern.o");
+    const arm32glibc_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_builtins_extern.o");
     const wasm32_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/wasm32/roc_builtins_extern.o");
     const x64win_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64win/roc_builtins_extern.obj");
     const x64mingw_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mingw/roc_builtins_extern.obj");
@@ -532,6 +538,8 @@ const BuiltinsObjects = struct {
             .arm64musl => arm64musl,
             .x64glibc => x64glibc,
             .arm64glibc => arm64glibc,
+            .arm32musl => arm32musl,
+            .arm32linux => arm32glibc,
             .wasm32 => wasm32,
             .x64win => x64win,
             .x64mingw => x64mingw,
@@ -560,8 +568,6 @@ const BuiltinsObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32v1,
             => native,
         };
@@ -576,6 +582,8 @@ const BuiltinsObjects = struct {
             .arm64musl => arm64musl_extern,
             .x64glibc => x64glibc_extern,
             .arm64glibc => arm64glibc_extern,
+            .arm32musl => arm32musl_extern,
+            .arm32linux => arm32glibc_extern,
             .wasm32 => wasm32_extern,
             .x64win => x64win_extern,
             .x64mingw => x64mingw_extern,
@@ -604,8 +612,6 @@ const BuiltinsObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32v1,
             => native_extern,
         };
@@ -641,6 +647,8 @@ fn DefaultPlatformObjects(comptime base_name: []const u8) type {
         const arm64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/" ++ base_name ++ ".o");
         const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/" ++ base_name ++ ".o");
         const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/" ++ base_name ++ ".o");
+        const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/" ++ base_name ++ ".o");
+        const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/" ++ base_name ++ ".o");
         const x64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mac/" ++ base_name ++ ".o");
         const arm64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mac/" ++ base_name ++ ".o");
         const x64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64win/" ++ base_name ++ ".obj");
@@ -658,6 +666,8 @@ fn DefaultPlatformObjects(comptime base_name: []const u8) type {
                 .arm64musl => arm64musl,
                 .x64glibc, .x64linux => x64glibc,
                 .arm64glibc, .arm64linux => arm64glibc,
+                .arm32musl => arm32musl,
+                .arm32linux => arm32glibc,
                 .x64mac => x64mac,
                 .arm64mac => arm64mac,
                 .x64win => x64win,
@@ -683,8 +693,6 @@ fn DefaultPlatformObjects(comptime base_name: []const u8) type {
                 .arm64v1linux,
                 .arm64v1musl,
                 .arm64v1glibc,
-                .arm32linux,
-                .arm32musl,
                 .wasm32,
                 .wasm32v1,
                 => null,
@@ -705,6 +713,8 @@ const DefaultPlatformCompilerRtObjects = struct {
     const arm64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/roc_default_compiler_rt.o");
     const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_default_compiler_rt.o");
     const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_default_compiler_rt.o");
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_default_compiler_rt.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_default_compiler_rt.o");
 
     pub fn forTarget(requested: RocTarget) ?[]const u8 {
         return switch (requested.defaultCpuTarget()) {
@@ -712,6 +722,8 @@ const DefaultPlatformCompilerRtObjects = struct {
             .arm64musl => arm64musl,
             .x64glibc, .x64linux => x64glibc,
             .arm64glibc, .arm64linux => arm64glibc,
+            .arm32musl => arm32musl,
+            .arm32linux => arm32glibc,
             .x64mac,
             .arm64mac,
             .x64win,
@@ -737,8 +749,6 @@ const DefaultPlatformCompilerRtObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32,
             .wasm32v1,
             => null,
@@ -756,6 +766,8 @@ const BoxyRuntimeObjects = struct {
     const arm64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/roc_boxy_runtime.o");
     const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_boxy_runtime.o");
     const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_boxy_runtime.o");
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_boxy_runtime.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_boxy_runtime.o");
     const x64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mac/roc_boxy_runtime.o");
     const arm64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mac/roc_boxy_runtime.o");
     const x64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64win/roc_boxy_runtime.obj");
@@ -776,6 +788,8 @@ const BoxyRuntimeObjects = struct {
             .arm64musl => arm64musl,
             .x64glibc, .x64linux => x64glibc,
             .arm64glibc, .arm64linux => arm64glibc,
+            .arm32musl => arm32musl,
+            .arm32linux => arm32glibc,
             .x64mac => x64mac,
             .arm64mac => arm64mac,
             .x64win => x64win,
@@ -802,8 +816,6 @@ const BoxyRuntimeObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32v1,
             => null,
         };
