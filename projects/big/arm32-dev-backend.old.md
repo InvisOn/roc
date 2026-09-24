@@ -1,3 +1,5 @@
+# ARM32 Dev Backend (superseded draft)
+
 ## Problem
 
 `RocTarget` (`src/target/mod.zig:420-422`) already lists `arm32linux` and
@@ -35,7 +37,7 @@ The dev backend is a hybrid of shared driver and per-architecture encoder:
   vs. `aarch64` via comptime type params and tagged unions.
 - **Architecture-specific, unavoidably per-ISA:**
   `x86_64/{CodeGen,Emit,Registers,SystemV,WindowsFastcall}.zig` and
-  `aarch64/{CodeGen,Emit,Registers,Call}.zig` — literal machine-code
+  `aarch64/{CodeGen,Emit,Registers,Call}.zig`—literal machine-code
   encoders. No generic driver can derive ARM32 opcodes from x86_64 or
   aarch64 encoding logic. `aarch64_be` reuses `aarch64`'s files because it
   is an endianness variant of the *same* ISA, not evidence that one encoder
@@ -52,7 +54,7 @@ separate backends; only ABI/CPU-level variants within one ISA share.
 `LirCodeGen` (`src/backend/dev/LirCodeGen.zig:676-782`) hardcodes:
 
 ```zig
-const target_ptr_size: u32 = 8;   // line 688 — assumed for x86_64/aarch64
+const target_ptr_size: u32 = 8;   // line 688—assumed for x86_64/aarch64
 const roc_str_size: u32 = 3 * target_ptr_size;
 const roc_list_size: u32 = 3 * target_ptr_size;
 ```
@@ -62,7 +64,7 @@ There are 152 uses of `target_ptr_size`/`roc_str_size`/`roc_list_size`, and
 roughly 385 other literal-8 occurrences (stack-slot strides, `while (off <
 roc_list_size) : (off += 8)` loops, etc.) across this 27,403-line file. The
 good news: `layout.Store` and `base.target.TargetUsize` (`src/base/target.zig`)
-already fully support `u32` width — that is how wasm32 works today — so the
+already fully support `u32` width—that is how wasm32 works today—so the
 type-size math upstream of codegen is already width-generic. The gap is
 specific to this native-codegen driver.
 
@@ -70,7 +72,7 @@ specific to this native-codegen driver.
 
 ARM32 (AAPCS32) has far fewer usable general-purpose registers than either
 supported architecture: R0-R3 (args/caller-saved), R4-R11 (callee-saved),
-R12 (scratch), R13=SP, R14=LR, R15=PC — about 12 usable GPRs, vs. x86_64's
+R12 (scratch), R13=SP, R14=LR, R15=PC—about 12 usable GPRs, vs. x86_64's
 ~14 and aarch64's ~28. `Storage.claimGeneralReg`
 (`src/backend/dev/mod.zig:200-205`) currently `@panic`s when registers run
 out ("TODO: no free general registers; spilling/reload is not implemented").
@@ -86,7 +88,7 @@ this project, not a stretch goal deferred past it.
 2. ABI: AAPCS32 hard-float (VFP), matching the realistic musl/glibc-hardfloat
    Linux default rather than soft-float.
 3. Register allocation: implement real stack spilling for ARM32 rather than
-   relying on the shared `Storage` panic path — the register budget is too
+   relying on the shared `Storage` panic path—the register budget is too
    small to defer this.
 4. Object format: ELF only. There is no arm32 macOS or Windows `RocTarget`,
    so `object/macho.zig` and `object/coff.zig` need no arm32 work.
@@ -96,7 +98,7 @@ this project, not a stretch goal deferred past it.
 
 ## Implementation slices
 
-### Slice 0 — Design decisions (no code)
+### Slice 0: Design decisions (no code)
 
 Confirm A32-vs-Thumb-2, hard-float-vs-soft-float, and the spilling strategy
 above in a short note, checked against the doc comments already in
@@ -104,7 +106,7 @@ above in a short note, checked against the doc comments already in
 
 **Validate:** design note reviewed; no build/test impact yet.
 
-### Slice 1 — Make `LirCodeGen` width-generic
+### Slice 1: Make `LirCodeGen` width-generic
 
 Replace `target_ptr_size: u32 = 8` with a value derived from
 `target.ptrBitWidth() / 8` (or thread `base.target.TargetUsize` through
@@ -119,7 +121,7 @@ and the existing `dev_object_*.md` snapshot tests, and confirm every
 existing hash is byte-identical. Any diff here means the refactor leaked
 into 64-bit codegen and must be fixed before continuing.
 
-### Slice 2 — `src/backend/dev/arm32/` module
+### Slice 2: `src/backend/dev/arm32/` module
 
 - `Registers.zig`: `GeneralReg` (R0-R12 + SP/LR/PC aliases), `FloatReg`
   (S0-S31/D0-D15 VFP).
@@ -135,11 +137,11 @@ encoding tests (mirroring the existing tests already in `x86_64/Emit.zig`
 and `aarch64/Emit.zig`) for every instruction as it is written, checked
 against an independent oracle (`objdump`/an ARM reference, or a
 cross-toolchain assembler such as `arm-none-eabi-as`) before wiring it into
-`CodeGen`. Land in small batches — moves/returns, then arithmetic, then
-branches/calls, then loads/stores, then float ops — rather than writing the
+`CodeGen`. Land in small batches—moves/returns, then arithmetic, then
+branches/calls, then loads/stores, then float ops—rather than writing the
 whole encoder before testing any of it.
 
-### Slice 3 — Extend the shared abstractions
+### Slice 3: Extend the shared abstractions
 
 - `CallingConvention.zig`: add an `arm32` arm to the `ParamReg`/`ParamRegs`
   unions and the AAPCS32 constants (`shadow_space = 0`, return/pass-by-ptr
@@ -148,7 +150,7 @@ whole encoder before testing any of it.
   selection arms, and `frame_ptr`/`stack_ptr`/`scratch_reg`/return-register
   mappings for ARM32.
 - Zig's exhaustive `switch` on these enums will itself surface every
-  remaining site needing an `.arm` arm as a compile error — treat that list
+  remaining site needing an `.arm` arm as a compile error—treat that list
   of compile errors as the checklist for this slice rather than grepping
   manually.
 
@@ -157,7 +159,7 @@ threaded through everywhere; a clean build is the completion signal for
 this slice, not a bug to route around (e.g. do not add a catch-all `else`
 arm to silence it).
 
-### Slice 4 — Object file emission (ELF only)
+### Slice 4: Object file emission (ELF only)
 
 - `object/elf.zig:28-70,295-349`: add `EM_ARM = 40`, and the minimal ARM
   relocation set actually needed for the static/PIE-less Linux/musl targets
@@ -168,14 +170,14 @@ arm to silence it).
 
 **Validate:** generate a trivial "hello world" object file for
 `arm32musl`, then verify it independently with a cross toolchain
-(`arm-linux-gnueabihf-objdump -dr`, `readelf -a`) before trusting anything —
-this is the ground truth, not the eventual snapshot hash.
+(`arm-linux-gnueabihf-objdump -dr`, `readelf -a`) before trusting anything—this
+is the ground truth, not the eventual snapshot hash.
 
-### Slice 5 — Wire into dispatch points
+### Slice 5: Wire into dispatch points
 
 - `LirCodeGen.zig:25379` (`host_lir_codegen_available`): move `.arm` out of
   the `false` list for the host-arch case (only relevant if Roc's own
-  compiler is built to run on ARM32 hardware — a separate, lower-priority
+  compiler is built to run on ARM32 hardware—a separate, lower-priority
   axis from cross-compiling *to* ARM32).
 - `ObjectFileCompiler.zig:781` (`crossCompileDispatch`): add `.arm` to the
   arch check so it calls `compileWithCodeGen(LirCodeGen(comptime_target),
@@ -185,7 +187,7 @@ this is the ground truth, not the eventual snapshot hash.
   currently lump `arm32linux`/`arm32musl` into LLVM-only/"native" fallback
   branches (`main.zig:557-561`, `600-606`, `680-684`, `734-738`,
   `799-804`, `6088-6093`, `8395-8400`). Each needs a dedicated arm now that
-  the dev backend can serve these targets — each is a place the old "arm32
+  the dev backend can serve these targets—each is a place the old "arm32
   has no dev backend" assumption could otherwise linger unnoticed.
 
 **Validate:** `roc build --target arm32musl app.roc` end-to-end on a "hello
@@ -193,20 +195,20 @@ world" program; inspect the produced binary. Full behavioral comparison
 against the equivalent LLVM-backend build waits on Slice 6 (need to execute
 the binary first).
 
-### Slice 6 — Execution testing
+### Slice 6: Execution testing
 
 The cross-backend eval harness (`zig build run-test-eval`, see
 `CONTRIBUTING/debugging_backend_bugs.md`) drives the dev backend in-process
-via JIT (`ExecutableMemory`) on the *host* architecture — it cannot exercise
+via JIT (`ExecutableMemory`) on the *host* architecture—it cannot exercise
 ARM32 codegen unless the test runner itself runs on ARM32 hardware. Real
 correctness testing needs one of:
 
 - **QEMU user-mode emulation** (`qemu-arm`) to run cross-compiled ELF
-  binaries from x86_64 CI — cheapest to stand up; add to
+  binaries from x86_64 CI—cheapest to stand up; add to
   `.github/workflows/ci_cross_compile.yml`.
 - **Native execution on the existing self-hosted ARM64 runner**
   (`.github/workflows/basic_cli_test_arm64.yml`): many arm64 Linux kernels
-  support running 32-bit ARM binaries natively via compat mode — check this
+  support running 32-bit ARM binaries natively via compat mode—check this
   before reaching for QEMU, since it is faster and closer to real hardware.
 - A dedicated self-hosted 32-bit ARM runner (e.g. Raspberry Pi class),
   mirroring the ARM64 runner's pattern, if emulation proves insufficient for
@@ -218,7 +220,7 @@ runner is chosen, comparing stdout against the same programs run through
 the interpreter and the x86_64/aarch64 dev backends. This is the actual
 functional-correctness gate, independent of the snapshot hashes in Slice 7.
 
-### Slice 7 — Snapshot/regression lock-in (last, not first)
+### Slice 7: Snapshot/regression lock-in (last, not first)
 
 Once Slice 6 has independently verified correctness for a representative
 program set, regenerate every `test/snapshots/dev_object_*.md` (14+ files)
@@ -226,7 +228,7 @@ via the snapshot tool so `arm32linux=`/`arm32musl=` get real hashes instead
 of `NOT_IMPLEMENTED`.
 
 **Validate:** diff each regenerated snapshot by hand for the first pass and
-confirm *only* the arm32/arm32musl lines changed — x86_64/aarch64 hashes
+confirm *only* the arm32/arm32musl lines changed—x86_64/aarch64 hashes
 must stay byte-identical, per Slice 1's guarantee. After that, these hashes
 become the fast regression net for future changes.
 
@@ -238,7 +240,7 @@ become the fast regression net for future changes.
   review time here, not a mechanical find-and-replace.
 - **Register spilling correctness.** This is new logic the x86_64/aarch64
   backends do not exercise as hard (they rarely hit the panic path). It is
-  the most likely place for silent miscompiles rather than crashes — needs
+  the most likely place for silent miscompiles rather than crashes—needs
   its own stress-test category (Tests to add, below), not incidental
   coverage from ordinary snapshot programs.
 - **No native execution path in ordinary CI.** Every correctness signal for
@@ -301,6 +303,6 @@ in-repo snapshot hashes for the first several builds.
 
 None yet filed against this doc. If [big/parallel-backend-codegen.md](parallel-backend-codegen.md)
 lands first, its per-proc worker/writer split applies to `LirCodeGen(arm32)`
-the same as it does to the existing two architectures — no extra work
+the same as it does to the existing two architectures—no extra work
 implied in either direction, but land order should be noted if both are in
 flight at once.
