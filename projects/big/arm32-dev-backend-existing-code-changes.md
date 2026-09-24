@@ -23,6 +23,19 @@ cross-compiling for a 32-bit target would validate 4-byte-aligned heap strings
 against 8-byte alignment (a false Debug crash) and lay out 8-byte slots the
 target reads as 4-byte ones. No effect on today's targets.
 
+### Erased-callable layouts taken from the host (next commit after `c5248f3763`)
+
+`LirCodeGen` wrote erased-callable payloads using `builtins.erased_callable`'s
+constants and `@offsetOf`/`@sizeOf` on its structs, which the compiler host
+lays out. Those structs hold only pointer-sized fields, so on a 32-bit target
+`HotReloadCaptureHeader.original_on_drop` moves from 8 to 4 and
+`CompilerMetadata` shrinks from 8 bytes (8-aligned) to 4, while the builtins
+compiled for the target read the target layout. Needed because arm32 code
+would write erased-callable fields where the target runtime does not look.
+The driver now derives every such layout from the builtins struct scaled by
+the target word (`erased_layout`), with a compile-time check that each field
+is pointer-sized. No effect on today's targets.
+
 ### Plan documents failed `run-check-tidy` (`12be3758d5`)
 
 Spaced em dashes and missing or duplicate top-level titles in
