@@ -547,8 +547,10 @@ and `:152-153` for IP0/IP1), and never live across a `BL` because linker
 veneers and PLT (procedure-linkage-table) stubs clobber it (AAPCS32, "Core
 registers": §6.1.1 in the current 2023Q3 release, §5.1.1 in releases up to
 F); LR likewise dead across calls. `PARAM_REGS = {r0,r1,r2,r3}`,
-`FLOAT_PARAM_REGS = d0-d7 / s0-s15`, `RETURN_REGS = {r0,r1,r2}` (r0:r1 for
-i64; r0-r2 only for the internal str/list path), callee-saved `r4-r10` (r9 is
+`FLOAT_PARAM_REGS = d0-d7 / s0-s15`, `RETURN_REGS = {r0,r1}` (the C-ABI
+registers, r0:r1 for i64) and `ROC_RET_REGS = {r0,r1,r2}` (only the internal
+str/list path; amended by Track B's first batch, which keeps the two apart so
+no C-ABI consumer can read r2 as a return register), callee-saved `r4-r10` (r9 is
 an ordinary variable register on Linux EABI), callee-saved VFP `d8-d15`.
 Result-pointer and RocOps save registers `r9`/`r10` (the X19/X20 and RBX/R12
 analogues, `LirCodeGen.zig:1684-1692`); `NULL_OPS_REG` and the hosted-call

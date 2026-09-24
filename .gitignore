@@ -39,6 +39,8 @@ zig-pkg
 *.s
 # Hand-written assembly source (the interpreter's hosted-call trampoline), not a build artifact.
 !src/eval/host_trampoline.S
+# The arm32 encoding oracle's input: A32 assembly paired with arm32 Emit calls.
+!ci/arm32_encoding_oracle.s
 *.so
 *.so.*
 *.obj
