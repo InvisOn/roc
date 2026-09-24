@@ -825,6 +825,10 @@ daily.
   register literal (`rg '\.(RAX|RBX|RCX|RDX|R11|R12|XMM0|X0|X9|X19|X20|X28|IP0|IP1|V0|FP|ZRSP)\b'`
   is empty).
 - Add the D10 high-water mark and record the x86_64/aarch64 peaks.
+  *Done:* temporaries are allocated by the per-arch `CodeGen`, which records
+  `general_high_water`/`float_high_water`; over the eval corpus the general
+  peak is 12 of 13 on x86_64 and 12 of 25 on aarch64, the float peak 3 on
+  both (pinned registers counted). See `src/backend/dev/arm32/DESIGN.md`.
 - *Amended when the dispatch part of A1 landed:* two-way tests inside
   `LirCodeGen` bodies go through `Isa.binaryIs` (`src/backend/dev/isa.zig`),
   a compile error on arm32, instead of being hand-rewritten into three-way
