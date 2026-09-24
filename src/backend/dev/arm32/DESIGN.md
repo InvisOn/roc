@@ -20,7 +20,8 @@ authoritative reference for compiler-wide invariants.
 | Track B, NEON batch | Not started |
 | A3: ELF32/REL writer, `.ARM.attributes`, `R_ARM_*` relocation kinds, DWARF address width | Done |
 | A2: width model (`WORD`, `Wide64`, four-word i128) | Not started |
-| Track C: arm32 runtime objects, platforms, `_start` | Not started |
+| Track C: arm32 runtime objects, `_start`, glibc stub, CLI tables, test-platform manifests and musl runtime | Done |
+| Track C: CLI test-runner cross-target rosters | Moved to J2 (the builds cannot succeed before it) |
 | J1-J4: arm32 `CodeGen`, gates, qemu execution, lock-in | Not started |
 
 Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
@@ -223,6 +224,33 @@ Two pre-existing J3a concerns surfaced: `Relocation.patchLinkedFunctionRelocatio
 chooses a patch by decoding the instruction bytes, and
 `patchAbsolutePointerOperand` sizes `abs64` by the *host's* `usize`. The
 in-process arm32 path must instead carry explicit kinds (`abs32` exists now).
+
+### Runtime objects and the CPU floor (Track C)
+
+`build.zig` builds the six prebuilt objects (`roc_builtins`,
+`roc_builtins_extern`, `roc_boxy_runtime`, `roc_default_runtime`,
+`roc_default_compiler_rt`, `roc_default_platform`) for `arm32musl`
+(`arm-linux-musleabihf`) and `arm32glibc` (`arm-linux-gnueabihf`); all twelve
+are ELF32, EM_ARM, `e_flags 0x5000400`, `Tag_ABI_VFP_args: 1`. The builtins
+compile unchanged at 32-bit `usize`, which answers the plan's first Track C
+risk. The CLI embeds them with explicit `arm32musl`/`arm32linux` rows in every
+table; arm32 no longer falls through to the host's `native` object. The
+default platform has an A32 `_start` (argv one word above argc, SP aligned to
+8) and an arm `ucontext` arm for its crash backtrace; the glibc stub has real
+A32 bodies. `test/fx` and `test/int` declare `arm32musl` with musl's `crt1.o`
+and `libc.a`, vendored by `ci/vendor_musl_runtime.py` from the pinned Zig.
+
+D2's *confirm* item resolves in D2's favor, more strongly than the plan
+expected: Zig 0.16's baseline for `arm-linux-musleabihf` is ARMv7-A with NEON,
+VFPv3-D32 and Thumb-2, without hardware divide or VFPv4, which is exactly the
+floor generated code assumes. The prebuilt objects and generated code share
+one floor; `src/target/mod.zig` pins it with a test.
+
+Two practical notes. Zig partial-links (`ld.lld -r`) the raw musl startup
+object into the `crt1.o` it links, so its cache holds two `crt1.o` files for
+the triple with different float-ABI flags; the vendoring script takes the one
+the program's own link line names. And `libc.a` is not byte-reproducible (its
+members are named by absolute cache paths), so it is vendored, not checked.
 
 ## Learnings
 

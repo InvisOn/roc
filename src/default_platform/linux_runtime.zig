@@ -93,11 +93,14 @@ comptime {
                 @export(&linuxStartAarch64, .{ .name = "_start" });
                 @export(&linuxStartMain, .{ .name = "roc_default_linux_start_main", .visibility = .hidden });
             },
+            .arm => {
+                @export(&linuxStartArm, .{ .name = "_start" });
+                @export(&linuxStartMain, .{ .name = "roc_default_linux_start_main", .visibility = .hidden });
+            },
             .alpha,
             .amdgcn,
             .arc,
             .arceb,
-            .arm,
             .armeb,
             .aarch64_be,
             .avr,
@@ -188,6 +191,19 @@ fn linuxStartAarch64() callconv(.naked) noreturn {
         \\add x1, x19, #8
         \\bl roc_default_linux_start_main
         \\brk #0
+    );
+}
+
+/// A32 process entry: argc is at [sp] and argv follows one word later. SP is
+/// aligned down to the 8 bytes AAPCS32 requires at a public interface.
+fn linuxStartArm() callconv(.naked) noreturn {
+    asm volatile (
+        \\mov r4, sp
+        \\bic sp, sp, #7
+        \\ldr r0, [r4]
+        \\add r1, r4, #4
+        \\bl roc_default_linux_start_main
+        \\udf #0
     );
 }
 
@@ -353,11 +369,14 @@ fn signalHandler(sig: linux.SIG, _: *const linux.siginfo_t, ctx: ?*anyopaque) ca
                 const fp: usize = @intCast(context.mcontext.regs[29]);
                 printBacktrace(pc, fp);
             },
+            .arm => {
+                const context: *const ArmUContext = @ptrCast(@alignCast(context_ptr));
+                printBacktrace(context.mcontext.pc, context.mcontext.r[11]);
+            },
             .alpha,
             .amdgcn,
             .arc,
             .arceb,
-            .arm,
             .armeb,
             .aarch64_be,
             .avr,
@@ -448,6 +467,26 @@ const Aarch64UContext = extern struct {
     sigmask: linux.sigset_t,
     unused: [120]u8,
     mcontext: Aarch64MContext,
+};
+
+/// `struct sigcontext` from Linux's arch/arm/include/uapi/asm/sigcontext.h:
+/// r[11] is the frame pointer.
+const ArmMContext = extern struct {
+    trap_no: u32,
+    error_code: u32,
+    oldmask: u32,
+    r: [15]u32,
+    pc: u32,
+    cpsr: u32,
+    fault_address: u32,
+};
+
+/// `struct ucontext` from Linux's arch/arm/include/asm/ucontext.h.
+const ArmUContext = extern struct {
+    flags: u32,
+    link: ?*anyopaque,
+    stack: linux.stack_t,
+    mcontext: ArmMContext,
 };
 
 const Frame = extern struct {
