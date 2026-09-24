@@ -4175,8 +4175,14 @@ fn processDevObjectSnapshot(
                 lowered.lir_result.boxy_worker_procs.items,
                 target,
             )) |result| {
+                // Procedure symbol names digest the compiler build; hash the
+                // object with them canonicalized so the pin tracks code
+                // generation, not the compiler's git revision.
+                const canonical = try allocator.dupe(u8, result.object_bytes);
+                defer allocator.free(canonical);
+                try lir.LIR.ProcIdentity.canonicalizeSymbolNames(allocator, canonical);
                 var hasher = Blake3.init(.{});
-                hasher.update(result.object_bytes);
+                hasher.update(canonical);
                 var hash: [32]u8 = undefined;
                 hasher.final(&hash);
                 hash_results[i].hash_hex = std.fmt.bytesToHex(hash, .lower);

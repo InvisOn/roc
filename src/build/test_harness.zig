@@ -597,6 +597,18 @@ pub fn buildWorkerArgvTemplate(io: std.Io, arena: Allocator, process_args: std.p
     return try argv.toOwnedSlice(arena);
 }
 
+/// Write `data` to `path` (relative to the working directory), replacing any
+/// existing file. Runners in core source trees use this instead of reaching
+/// for the working directory themselves.
+pub fn writeWholeFile(io: std.Io, path: []const u8, data: []const u8) !void {
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
+}
+
+/// Read all of `path` (relative to the working directory).
+pub fn readWholeFile(io: std.Io, gpa: Allocator, path: []const u8) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(256 * 1024 * 1024));
+}
+
 /// Writes a self-contained runner stats JSON file.
 pub fn writeRunnerStatsJson(
     allocator: Allocator,

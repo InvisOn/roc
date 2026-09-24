@@ -3076,6 +3076,7 @@ pub fn build(b: *std.Build) void {
     const build_test_lsp_integration_runner_step = b.step("build-test-lsp-integration-runner", "Build LSP integration test harness");
     const build_test_eval_runner_step = b.step("build-test-eval-runner", "Build eval test runner");
     const run_test_eval_step = b.step("run-test-eval", "Run eval tests in parallel across enabled backends");
+    const run_check_dev_code_hashes_step = b.step("run-check-dev-code-hashes", "Check that dev-backend objects for every eval case match test/dev_code_hashes/eval.blake3");
     const run_test_simd_differential_step = b.step("run-test-simd-differential", "Run the exhaustive integer-SIMD oracle corpus through every compiler consumer");
     const build_test_eval_host_effects_runner_step = b.step("build-test-eval-host-effects-runner", "Build runtime host-effects eval test runner");
     const run_test_eval_host_effects_step = b.step("run-test-eval-host-effects", "Run runtime host-effects eval tests across supported backends");
@@ -4403,6 +4404,11 @@ pub fn build(b: *std.Build) void {
         run_test_eval_step,
         eval_run_args,
     );
+
+    const run_check_dev_code_hashes = b.addRunArtifact(eval_test_exe);
+    run_check_dev_code_hashes.addArg("--check-dev-code-hashes");
+    run_check_dev_code_hashes.addFileArg(b.path("test/dev_code_hashes/eval.blake3"));
+    run_check_dev_code_hashes_step.dependOn(&run_check_dev_code_hashes.step);
 
     const run_simd_eval = b.addRunArtifact(eval_test_exe);
     run_simd_eval.addArgs(&.{

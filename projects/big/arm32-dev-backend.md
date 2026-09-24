@@ -782,6 +782,21 @@ daily.
   --exit-code test/snapshots` passes on every `ci_zig.yml` host; the golden
   hash files exist and the compare mode passes on an x86_64 and an aarch64
   host.
+- *Amended when A0 landed* (details in `src/backend/dev/arm32/DESIGN.md`,
+  "Learnings"): JIT code embeds absolute host addresses, so hashing
+  `CodeResult.code` per host is not deterministic. The runner instead compiles
+  each case through the object-file path for both `x64musl` and `arm64musl`
+  and writes one host-independent file, `test/dev_code_hashes/eval.blake3`
+  (`--write-dev-code-hashes` / `--check-dev-code-hashes`, build step
+  `run-check-dev-code-hashes`, in minici). It hashes the live lowering, not
+  the `LirImage`, because images drop the layout store's recursive-graph
+  keys. The new `dev_object` sources use host-called functions, since
+  zero-argument provided values are folded to data at compile time.
+  Procedure symbol names digest the compiler build (`compiler_artifact_hash`
+  is part of every checked-artifact key), so both oracles hash objects with
+  those names canonicalized to first-appearance ordinals
+  (`ProcIdentity.canonicalizeSymbolNames`); otherwise every commit would change
+  every hash of an object that contains a procedure.
 
 **A1. Arch dispatch: three-way switches and the `CC` seam.**
 - Convert every binary arch test to `switch (arch) { .x86_64 => ...,
