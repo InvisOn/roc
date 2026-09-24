@@ -9,6 +9,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RocTarget = @import("roc_target").RocTarget;
+const CpuLevel = @import("roc_target").CpuLevel;
 
 const EmitMod = @import("Emit.zig");
 const Registers = @import("Registers.zig");
@@ -48,6 +49,15 @@ pub fn CodeGen(comptime target: RocTarget) type {
         pub const INITIAL_FREE_GENERAL: u32 = CC.CALLER_SAVED_GENERAL_MASK;
         pub const INITIAL_FREE_FLOAT: u32 = CC.CALLER_SAVED_FLOAT_MASK;
 
+        /// Most general registers that can be in use at once, pinned or
+        /// temporary: the whole allocatable pool (D10 of
+        /// projects/big/arm32-dev-backend.md). Instruction selection must fit
+        /// within it; there is no spill path.
+        pub const MAX_TEMP_GENERAL: u8 = @popCount(INITIAL_FREE_GENERAL | CALLEE_SAVED_GENERAL_MASK);
+
+        /// Most float registers that can be in use at once.
+        pub const MAX_TEMP_FLOAT: u8 = @popCount(INITIAL_FREE_FLOAT);
+
         /// Bitmask of callee-saved general registers available for allocation
         /// System V: RBX, R12, R13, R14, R15 (not RBP - it's the frame pointer)
         /// Windows: RBX, RSI, RDI, R12, R13, R14, R15 (not RBP - it's the frame pointer)
@@ -71,6 +81,23 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// System V: 5 registers * 8 bytes = 40 bytes
         pub const CALLEE_SAVED_AREA_SIZE: i32 = if (target.isWindows()) 56 else 40;
 
+        /// How old a CPU the emitted instructions must run on.
+        ///
+        /// This is a runtime field rather than part of the comptime `target`
+        /// so that a `v1` target compiles through its default twin's
+        /// instantiation. The OS, architecture, ABI, and calling convention are
+        /// identical between the two; only instruction selection differs.
+        cpu_level: CpuLevel,
+
+        /// The most general registers in use at once when a temporary was
+        /// allocated, over this code generator's lifetime. Pinned registers
+        /// count, since they shrink the budget too. Measures the D10 register
+        /// budget of instruction selection.
+        general_high_water: u8 = 0,
+
+        /// The float-register counterpart of `general_high_water`.
+        float_high_water: u8 = 0,
+
         emit: Emit,
         allocator: Allocator,
         stack_offset: i32,
@@ -83,8 +110,9 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// Remaining callee-saved registers available (used after caller-saved exhausted)
         callee_saved_available: u32,
 
-        pub fn init(allocator: Allocator) Self {
+        pub fn init(allocator: Allocator, cpu_level: CpuLevel) Self {
             return Self{
+                .cpu_level = cpu_level,
                 .emit = Emit.init(allocator),
                 .allocator = allocator,
                 .stack_offset = 0,
@@ -126,6 +154,33 @@ pub fn CodeGen(comptime target: RocTarget) type {
         // Register allocation. LirCodeGen keeps every semantic local in its
         // authoritative stable-location table; these masks manage only bounded,
         // short-lived instruction-selection temporaries.
+
+        /// Allocate a short-lived general register used only during
+        /// instruction selection. Exhausting the bounded pool is an internal
+        /// lifetime-invariant failure (design.md, "Dev Backend Register
+        /// Lifetimes"), never a reason to spill.
+        pub fn allocTempGeneral(self: *Self) GeneralReg {
+            const reg = self.allocGeneral() orelse std.debug.panic(
+                "LirCodeGen invariant violated: bounded instruction selection exhausted the general-register pool",
+                .{},
+            );
+            const free = (self.free_general & INITIAL_FREE_GENERAL) | (self.callee_saved_available & CALLEE_SAVED_GENERAL_MASK);
+            const in_use: u8 = MAX_TEMP_GENERAL - @as(u8, @popCount(free));
+            self.general_high_water = @max(self.general_high_water, in_use);
+            return reg;
+        }
+
+        /// Allocate a short-lived floating-point register used only during
+        /// instruction selection; see `allocTempGeneral`.
+        pub fn allocTempFloat(self: *Self) FloatReg {
+            const reg = self.allocFloat() orelse std.debug.panic(
+                "LirCodeGen invariant violated: bounded instruction selection exhausted the float-register pool",
+                .{},
+            );
+            const in_use: u8 = MAX_TEMP_FLOAT - @as(u8, @popCount(self.free_float & INITIAL_FREE_FLOAT));
+            self.float_high_water = @max(self.float_high_water, in_use);
+            return reg;
+        }
 
         pub fn allocGeneral(self: *Self) ?GeneralReg {
             // Try caller-saved first
@@ -693,7 +748,7 @@ const WinCodeGen = CodeGen(.x64win);
 const MacCodeGen = CodeGen(.x64mac);
 
 test "prologue and epilogue" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Use emitPrologueWithAlloc for Windows compatibility (0 bytes allocated)
@@ -717,7 +772,7 @@ test "prologue and epilogue" {
 }
 
 test "load immediate" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     try cg.emitLoadImm(.RAX, 42);
@@ -726,7 +781,7 @@ test "load immediate" {
 }
 
 test "integer operations" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     try cg.emitAdd(.w64, .RAX, .RBX, .RCX);
@@ -737,7 +792,7 @@ test "integer operations" {
 }
 
 test "float operations" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     try cg.emitAddF32(.XMM0, .XMM1, .XMM2);
@@ -753,7 +808,7 @@ test "float operations" {
 }
 
 test "float allocation never relocates an allocated register" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const count: usize = @popCount(LinuxCodeGen.INITIAL_FREE_FLOAT);
@@ -772,7 +827,7 @@ test "float allocation never relocates an allocated register" {
 }
 
 test "Windows vector allocation excludes nonvolatile XMM registers" {
-    var cg = WinCodeGen.init(std.testing.allocator);
+    var cg = WinCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     for (0..6) |index| {
@@ -782,7 +837,7 @@ test "Windows vector allocation excludes nonvolatile XMM registers" {
 }
 
 test "allocate caller-saved registers first" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const reg1 = cg.allocGeneral().?;
@@ -799,7 +854,7 @@ test "allocate caller-saved registers first" {
 }
 
 test "Linux x64: use callee-saved registers when caller-saved exhausted" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // System V caller-saved: RAX, RCX, RDX, RSI, RDI, R8, R9, R10 = 8
@@ -824,7 +879,7 @@ test "Linux x64: use callee-saved registers when caller-saved exhausted" {
 }
 
 test "Windows x64: use callee-saved registers when caller-saved exhausted" {
-    var cg = WinCodeGen.init(std.testing.allocator);
+    var cg = WinCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Windows caller-saved: RAX, RCX, RDX, R8, R9, R10 = 6
@@ -849,7 +904,7 @@ test "Windows x64: use callee-saved registers when caller-saved exhausted" {
 }
 
 test "allocate all caller-saved and callee-saved registers" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // System V: 8 caller-saved + 5 callee-saved = 13 allocatable
@@ -877,7 +932,7 @@ test "allocate all caller-saved and callee-saved registers" {
 }
 
 test "Linux x64 prologue saves callee-saved registers with MOV" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // System V: 9 caller-saved, need 11 total to use 2 callee-saved
@@ -903,7 +958,7 @@ test "Linux x64 prologue saves callee-saved registers with MOV" {
 }
 
 test "Windows x64 prologue saves callee-saved registers with MOV" {
-    var cg = WinCodeGen.init(std.testing.allocator);
+    var cg = WinCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Windows: 7 caller-saved, need 9 total to use 2 callee-saved
@@ -921,7 +976,7 @@ test "Windows x64 prologue saves callee-saved registers with MOV" {
 }
 
 test "free register returns it to correct pool" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Allocate a caller-saved register
@@ -947,7 +1002,7 @@ test "free register returns it to correct pool" {
 }
 
 test "epilogue restores callee-saved registers with MOV" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Use some callee-saved registers (System V: 9 caller-saved)
@@ -991,7 +1046,7 @@ test "Windows x64 callee-saved register count" {
 }
 
 test "stack frame is 16-byte aligned" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Allocate various stack sizes and verify alignment
@@ -1018,7 +1073,7 @@ test "stack frame is 16-byte aligned" {
 }
 
 test "getStackSize returns 16-byte aligned size" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Allocate some space
@@ -1036,7 +1091,7 @@ test "getStackSize returns 16-byte aligned size" {
 }
 
 test "emitPrologueWithAlloc produces 16-byte aligned frame" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     // Request odd-sized allocation
@@ -1074,10 +1129,10 @@ test "MacCodeGen matches LinuxCodeGen (both System V)" {
 
 test "MacCodeGen prologue/epilogue matches LinuxCodeGen" {
     // macOS and Linux should produce identical code (both System V)
-    var mac_cg = MacCodeGen.init(std.testing.allocator);
+    var mac_cg = MacCodeGen.init(std.testing.allocator, .default);
     defer mac_cg.deinit();
 
-    var linux_cg = LinuxCodeGen.init(std.testing.allocator);
+    var linux_cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer linux_cg.deinit();
 
     // Emit prologue and epilogue for both
@@ -1089,4 +1144,22 @@ test "MacCodeGen prologue/epilogue matches LinuxCodeGen" {
 
     // Should produce identical code
     try std.testing.expectEqualSlices(u8, linux_cg.getCode(), mac_cg.getCode());
+}
+
+test "temporary allocation records the register high-water mark" {
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
+    defer cg.deinit();
+
+    const a = cg.allocTempGeneral();
+    const b = cg.allocTempGeneral();
+    cg.freeGeneral(a);
+    const c = cg.allocTempGeneral();
+    try std.testing.expectEqual(@as(u8, 2), cg.general_high_water);
+    cg.freeGeneral(b);
+    cg.freeGeneral(c);
+
+    const f = cg.allocTempFloat();
+    try std.testing.expectEqual(@as(u8, 1), cg.float_high_water);
+    cg.freeFloat(f);
+    try std.testing.expect(LinuxCodeGen.MAX_TEMP_GENERAL >= 13);
 }

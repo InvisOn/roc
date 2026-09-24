@@ -908,14 +908,6 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         allocator: Allocator,
 
-        /// How old a CPU the emitted instructions must run on.
-        ///
-        /// This is a runtime field rather than part of the comptime `target`
-        /// so that a `v1` target compiles through its default twin's
-        /// instantiation. The OS, architecture, ABI, and calling convention are
-        /// identical between the two; only instruction selection differs.
-        cpu_level: CpuLevel,
-
         /// Architecture-specific code generator with register allocation
         codegen: CodeGen,
 
@@ -1542,8 +1534,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             errdefer scratch_param_num_regs.deinit();
             return .{
                 .allocator = allocator,
-                .cpu_level = cpu_level,
-                .codegen = CodeGen.init(allocator),
+                .codegen = CodeGen.init(allocator, cpu_level),
                 .store = store,
                 .layout_store = layout_store_opt,
                 .static_strings = static_strings,
@@ -5912,7 +5903,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.emitLoadImm(low_reg, @bitCast(low));
             try self.codegen.emitLoadImm(high_reg, @bitCast(high));
             if (comptime isa.binaryIs(.x86_64)) {
-                if (self.cpu_level == .v1) {
+                if (self.codegen.cpu_level == .v1) {
                     // PINSRQ is SSE4.1. Assembling the constant in a stack slot
                     // and loading it back uses only baseline instructions.
                     const slot = self.codegen.allocStackSlot(16);
@@ -6009,7 +6000,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         ) Allocator.Error!void {
             if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.movVectorFromGeneral(dst, src, kind.laneBits() == 64);
-                if (self.cpu_level == .v1) {
+                if (self.codegen.cpu_level == .v1) {
                     // VPBROADCAST is AVX2. SSE2 widens the scalar to the full
                     // register by repeatedly interleaving it with itself, then
                     // copying the resulting dword across all four lanes.
@@ -7091,7 +7082,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// above it. Converting these to baseline vector sequences one at a
         /// time is tracked in roc-lang/roc#10552.
         fn simdOpUsesBaselineBuiltin(self: *Self, op: lir.LowLevel) bool {
-            if (self.cpu_level != .v1) return false;
+            if (self.codegen.cpu_level != .v1) return false;
             if (comptime !isa.binaryIs(.x86_64)) {
                 // NEON is mandatory in Armv8.0-A, so every other op already has
                 // a baseline instruction. Carryless multiply is PMULL64, which
@@ -7761,7 +7752,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             lhs: FloatReg,
             rhs: FloatReg,
         ) Allocator.Error!void {
-            if (self.cpu_level == .v1) {
+            if (self.codegen.cpu_level == .v1) {
                 // VEX is an AVX encoding, so the baseline reaches these same
                 // opcodes through legacy SSE. Legacy SSE reads and writes one
                 // register for the left operand, so materialize `lhs` in `dst`
@@ -12080,7 +12071,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // POPCNT is an SSE4.2-era instruction, so an x86 target at the
             // baseline CPU level counts bits the same way aarch64 does.
             const use_swar = comptime isa.binaryIs(.aarch64);
-            if (use_swar or self.cpu_level == .v1) {
+            if (use_swar or self.codegen.cpu_level == .v1) {
                 // aarch64 has no scalar population-count instruction; use the
                 // classic SWAR sequence on general registers.
                 const t = try self.allocTempGeneral();
@@ -12121,7 +12112,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.codegen.emit.clzRegReg(.w64, dst, src);
                 return;
             }
-            if (self.cpu_level == .v1) {
+            if (self.codegen.cpu_level == .v1) {
                 // BSR reports the index of the highest set bit, so the leading
                 // zero count is `63 - index`. Selecting -1 for a zero operand
                 // carries that arithmetic to the 64 LZCNT reports.
@@ -12149,7 +12140,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.codegen.emit.clzRegReg(.w64, dst, dst);
                 return;
             }
-            if (self.cpu_level == .v1) {
+            if (self.codegen.cpu_level == .v1) {
                 // BSF already reports the index of the lowest set bit, which is
                 // the trailing zero count. Only the zero operand differs, and
                 // TZCNT reports 64 there.
@@ -18202,18 +18193,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn allocTempGeneral(self: *Self) Allocator.Error!GeneralReg {
-            return self.codegen.allocGeneral() orelse std.debug.panic(
-                "LirCodeGen invariant violated: bounded instruction selection exhausted the general-register pool",
-                .{},
-            );
+            return self.codegen.allocTempGeneral();
         }
 
         /// Allocate a short-lived floating-point register used only during instruction selection.
         fn allocTempFloat(self: *Self) Allocator.Error!FloatReg {
-            return self.codegen.allocFloat() orelse std.debug.panic(
-                "LirCodeGen invariant violated: bounded instruction selection exhausted the float-register pool",
-                .{},
-            );
+            return self.codegen.allocTempFloat();
         }
 
         fn floatRegMask(reg: FloatReg) u32 {
@@ -20293,7 +20278,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const mode = if (self.fragment_mode) self.fragment_source_mode else self.generation_mode;
             return .{
                 .target = target.defaultCpuTarget(),
-                .cpu_level = self.cpu_level,
+                .cpu_level = self.codegen.cpu_level,
                 .hot_reload = self.enable_hot_reload,
                 .default_platform_runtime = self.enable_default_platform_runtime,
                 .dict_seed_mode = self.dict_seed_mode,

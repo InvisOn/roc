@@ -14,7 +14,8 @@ authoritative reference for compiler-wide invariants.
 | Track B, first batch: registers, integer/VFP encoder, AAPCS32 constants, encoding oracle | Done |
 | A0: byte-identity oracles for the 64-bit targets | Done |
 | A1, dispatch: every arch decision in the driver is exhaustive or arm32-refusing | Done |
-| A1, remaining: `CC` register seam, mnemonic facade, register high-water mark | Not started |
+| A1, register budget: temporaries allocated by the per-arch `CodeGen`, D10 high-water mark | Done |
+| A1, remaining: `CC` register seam, mnemonic facade | Not started |
 | Track B, NEON batch | Not started |
 | A2-A3: width model; ELF32 | Not started |
 | Track C: arm32 runtime objects, platforms, `_start` | Not started |
@@ -258,6 +259,29 @@ hash with `ProcIdentity.canonicalizeSymbolNames` applied, and a rebuild under a
 different compiler version leaves all 16 snapshots and all 1961 eval hashes
 unchanged. A naive golden hash of generated objects would have failed on the
 first commit after it was recorded.
+
+### The register budget is already tight on 64-bit targets
+
+Temporary registers are now allocated by each ISA's `CodeGen`
+(`allocTempGeneral`/`allocTempFloat`), which records a high-water mark: the
+most registers in use at once when a temporary was taken, pinned registers
+included, since they shrink the budget too (D10). `MAX_TEMP_GENERAL` and
+`MAX_TEMP_FLOAT` are the allocatable pool sizes. Measured once over the eval
+corpus compiled for both ISAs (1961 cases):
+
+| ISA | General peak / pool | Float peak / pool |
+|-----|---------------------|-------------------|
+| x86_64 (System V) | 12 / 13 | 3 / 16 |
+| aarch64 | 12 / 25 | 3 / 32 |
+
+arm32's pool is 11 (r0-r10, D5), and every 64-bit temporary takes two. The
+selection sequences written for 64-bit registers already need twelve live
+general registers, so arm32 cannot reuse them: the heavy sequences (i128
+multiply, checked i64 multiply, wide struct returns) must be lowered through
+memory operands or runtime calls, as D6/D7/D10 require, and J2 asserts the
+arm32 high-water mark stays within its pool. The measurement was taken with
+temporary instrumentation that is not in the tree; rerun it by reading
+`general_high_water`/`float_high_water` after compiling.
 
 ### Snapshot inputs must exercise code generation
 
