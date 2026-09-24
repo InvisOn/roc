@@ -146,3 +146,10 @@ check could gate every later commit.
   helpers use words; `word_sign_bit` and `small_str_len_shift` replace
   `minInt(i64)` and a literal 56. Needed because those are pointer-sized
   values whose 64-bit spelling is a compile error (or wrong) on arm32.
+- `LirCodeGen.zig` (list helpers and pointer-moving helpers): element-address
+  arithmetic in `listGetAtLastIndex` and `callListSplitOp`, `generateList`'s
+  heap-pointer slot, `emitAddPtrImmAny`, `copyStackToPtr`,
+  `copyResultToReturnPointer`, the `general_reg` arms of the `ensure*OnStack`
+  helpers and the ZST list copies use words; `storeResultToSavedPtr`'s 8-bit
+  narrowing shifts are register-width-relative (`word_bits - 8`). Needed
+  because each is a pointer, a byte count or a register-width operation.
