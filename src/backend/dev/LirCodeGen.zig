@@ -9643,7 +9643,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const after_alloc_null = self.codegen.currentOffset();
             try self.codegen.patchJump(alloc_non_null_patch, after_alloc_null);
 
-            try self.codegen.emitLoadImm(ptr_reg, @alignOf(usize) - 1);
+            try self.codegen.emitLoadImm(ptr_reg, word_size - 1);
             try self.codegen.emitAndRegs(.w64, ptr_reg, ptr_reg, tmp_reg);
             try self.codegen.emitCmpImm(ptr_reg, 0);
             const alloc_aligned_patch = try self.codegen.emitJumpIfEqual();
@@ -9656,7 +9656,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.patchJump(non_seamless_patch, after_seamless);
 
             // Non-slice RocStrs must satisfy len <= decoded capacity.
-            try self.codegen.emitLoadImm(tmp_reg, @alignOf(usize) - 1);
+            try self.codegen.emitLoadImm(tmp_reg, word_size - 1);
             try self.codegen.emitAndRegs(.w64, tmp_reg, tmp_reg, ptr_reg);
             try self.codegen.emitCmpImm(tmp_reg, 0);
             const ptr_aligned_patch = try self.codegen.emitJumpIfEqual();
@@ -16180,14 +16180,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const arg_descs_slot = if (arg_desc_refs.len == 0)
                 0
             else
-                self.codegen.allocStackSlot(@intCast(arg_desc_refs.len * @sizeOf(usize)));
+                self.codegen.allocStackSlot(@intCast(arg_desc_refs.len * word_size));
             for (0..arg_desc_refs.len) |desc_index| {
                 const desc_local = GuardedList.at(arg_desc_refs, desc_index);
                 const desc_reg = try self.ensureInGeneralReg(try self.emitValueLocal(desc_local));
                 try self.codegen.emitStore(
                     .w64,
                     frame_ptr,
-                    arg_descs_slot + @as(i32, @intCast(desc_index * @sizeOf(usize))),
+                    arg_descs_slot + @as(i32, @intCast(desc_index * word_size)),
                     desc_reg,
                 );
                 self.codegen.freeGeneral(desc_reg);
@@ -16527,7 +16527,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             if (self.enable_hot_reload) {
                 const hot_drop_reg = try self.allocTempGeneral();
                 try self.emitBuiltinAddress(hot_drop_reg, .hot_reload_erased_callable_drop);
-                try self.codegen.emitStore(.w64, heap_ptr, @intCast(@sizeOf(usize)), hot_drop_reg);
+                try self.codegen.emitStore(.w64, heap_ptr, word_size, hot_drop_reg);
                 self.codegen.freeGeneral(hot_drop_reg);
 
                 if (hot_reload_code_ref_slot) |slot| {
@@ -16552,7 +16552,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 self.codegen.freeGeneral(original_on_drop_reg);
             } else {
                 const on_drop_reg = try self.materializeErasedCallableOnDrop(on_drop);
-                try self.codegen.emitStore(.w64, heap_ptr, @intCast(@sizeOf(usize)), on_drop_reg);
+                try self.codegen.emitStore(.w64, heap_ptr, word_size, on_drop_reg);
                 self.codegen.freeGeneral(on_drop_reg);
             }
 
