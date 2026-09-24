@@ -106,12 +106,14 @@ pub fn generateIndexedObjectFileWithDebug(
 
     switch (roc_target.classifyOs(os_tag)) {
         .linux, .freebsd, .openbsd, .netbsd => {
-            const elf_arch: object.elf.Architecture = if (cpu_arch == .x86_64)
-                .x86_64
-            else if (cpu_arch == .aarch64)
-                .aarch64
-            else
-                return error.UnsupportedTarget;
+            const elf_arch: object.elf.Architecture = switch (roc_target.classifyCpuArch(cpu_arch)) {
+                .x86_64 => .x86_64,
+                .aarch64 => .aarch64,
+                // The ELF writer emits ELF64 only; arm32 needs ELF32 (A3 of
+                // projects/big/arm32-dev-backend.md).
+                .arm => return error.UnsupportedTarget,
+                .aarch64_be, .wasm32, .other => return error.UnsupportedTarget,
+            };
             var elf = try object.ElfWriter.init(allocator, elf_arch, elfOsabi(os_tag));
             defer elf.deinit();
 
