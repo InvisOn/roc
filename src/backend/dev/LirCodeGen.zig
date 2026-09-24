@@ -560,6 +560,43 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// The target this LirCodeGen was instantiated for
         pub const roc_target = target;
 
+        /// `builtins.erased_callable`'s layouts as the target sees them. Those
+        /// structs hold only pointer-sized fields, so their sizes and field
+        /// offsets scale with the target word; the builtins' own constants
+        /// describe the host. `capture_alignment` is the same on every target.
+        const erased_layout = struct {
+            const ec = builtins.erased_callable;
+
+            fn assertWordFields(comptime T: type) void {
+                inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, field_type| {
+                    if (@sizeOf(field_type) != @sizeOf(usize)) {
+                        @compileError("erased_layout scales " ++ @typeName(T) ++ " by the target word, but its field " ++ field_name ++ " is not pointer-sized");
+                    }
+                }
+            }
+
+            fn size(comptime T: type) comptime_int {
+                comptime assertWordFields(T);
+                return @sizeOf(T) / @sizeOf(usize) * target_ptr_size;
+            }
+
+            fn fieldOffset(comptime T: type, comptime field: []const u8) comptime_int {
+                comptime assertWordFields(T);
+                return @offsetOf(T, field) / @sizeOf(usize) * target_ptr_size;
+            }
+
+            const capture_alignment: u32 = ec.capture_alignment;
+            const capture_offset: u32 = std.mem.alignForward(u32, size(ec.Payload), capture_alignment);
+            const hot_reload_capture_prefix_size: u32 = std.mem.alignForward(u32, size(ec.HotReloadCaptureHeader), capture_alignment);
+            const compiler_metadata_size: u32 = size(ec.CompilerMetadata);
+
+            /// Aligned offset of the compiler metadata after `capture_size`
+            /// capture bytes (it is pointer-aligned).
+            fn compilerMetadataOffset(capture_size: u32) u32 {
+                return std.mem.alignForward(u32, capture_size, target_ptr_size);
+            }
+        };
+
         /// Frame pointer register for the target architecture
         const frame_ptr: GeneralReg = if (isa.binaryIs(.x86_64)) .RBP else .FP;
 
@@ -14358,7 +14395,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const capture_ptr_reg = try self.allocTempGeneral();
             try self.emitLoad(.w64, capture_ptr_reg, frame_ptr, closure_ptr_slot);
-            try self.emitAddPtrImmAny(capture_ptr_reg, capture_ptr_reg, builtins.erased_callable.capture_offset);
+            try self.emitAddPtrImmAny(capture_ptr_reg, capture_ptr_reg, erased_layout.capture_offset);
             const capture_stack_offset = self.codegen.allocStackSlot(8);
             try self.emitStore(.w64, frame_ptr, capture_stack_offset, capture_ptr_reg);
             self.codegen.freeGeneral(capture_ptr_reg);
@@ -14609,17 +14646,17 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             if (builtin.mode == .debug) {
                 if (capture_layout) |layout_idx| {
                     const capture_align = self.layout_store.layoutSizeAlign(self.layout_store.getLayout(layout_idx)).alignment.toByteUnits();
-                    if (capture_align > builtins.erased_callable.capture_alignment) {
+                    if (capture_align > erased_layout.capture_alignment) {
                         base.invariant(
                             "Dev/codegen invariant violated: erased callable capture layout alignment {d} exceeds fixed capture alignment {d}",
-                            .{ capture_align, builtins.erased_callable.capture_alignment },
+                            .{ capture_align, erased_layout.capture_alignment },
                         );
                     }
                 }
             }
             const capture_prefix_size: u32 = self.erased_capture_prefix;
             const base_capture_size: u32 = capture_prefix_size + capture_size;
-            const metadata_offset: u32 = if (self.store.runtime_contract == .boxy) @intCast(builtins.erased_callable.compilerMetadataOffset(base_capture_size)) else 0;
+            const metadata_offset: u32 = if (self.store.runtime_contract == .boxy) erased_layout.compilerMetadataOffset(base_capture_size) else 0;
             const result_desc_slot: ?i32 = if (result_desc) |desc| try self.boxyDescRefToSlot(desc) else null;
 
             if (reuse) |reuse_local| {
@@ -14633,7 +14670,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 // allocation in place when uniqueness permits (running the old
                 // capture's drop callback first) and otherwise allocates a fresh
                 // payload and decrefs the shared old one.
-                const total_capture_size: u32 = if (self.store.runtime_contract == .boxy) metadata_offset + @sizeOf(builtins.erased_callable.CompilerMetadata) else base_capture_size;
+                const total_capture_size: u32 = if (self.store.runtime_contract == .boxy) metadata_offset + erased_layout.compiler_metadata_size else base_capture_size;
                 const capture_src_slot = self.codegen.allocStackSlot(total_capture_size);
 
                 if (self.hotReloadEnabled()) {
@@ -14643,7 +14680,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.emitStore(
                         .w64,
                         frame_ptr,
-                        capture_src_slot + @as(i32, @intCast(@offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "code_ref"))),
+                        capture_src_slot + erased_layout.fieldOffset(builtins.erased_callable.HotReloadCaptureHeader, "code_ref"),
                         ret_reg_0,
                     );
 
@@ -14651,7 +14688,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.emitStore(
                         .w64,
                         frame_ptr,
-                        capture_src_slot + @as(i32, @intCast(@offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "original_on_drop"))),
+                        capture_src_slot + erased_layout.fieldOffset(builtins.erased_callable.HotReloadCaptureHeader, "original_on_drop"),
                         original_on_drop_reg,
                     );
                     self.codegen.freeGeneral(original_on_drop_reg);
@@ -14795,7 +14832,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.emitStore(
                         .w64,
                         heap_ptr,
-                        @intCast(builtins.erased_callable.capture_offset + @offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "code_ref")),
+                        erased_layout.capture_offset + erased_layout.fieldOffset(builtins.erased_callable.HotReloadCaptureHeader, "code_ref"),
                         code_ref_reg,
                     );
                     self.codegen.freeGeneral(code_ref_reg);
@@ -14805,7 +14842,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.emitStore(
                     .w64,
                     heap_ptr,
-                    @intCast(builtins.erased_callable.capture_offset + @offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "original_on_drop")),
+                    erased_layout.capture_offset + erased_layout.fieldOffset(builtins.erased_callable.HotReloadCaptureHeader, "original_on_drop"),
                     original_on_drop_reg,
                 );
                 self.codegen.freeGeneral(original_on_drop_reg);
@@ -14831,7 +14868,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         frame_ptr,
                         capture_stack,
                         heap_ptr,
-                        @intCast(builtins.erased_callable.capture_offset + capture_prefix_size),
+                        @intCast(erased_layout.capture_offset + capture_prefix_size),
                         capture_size,
                     );
                     self.codegen.freeGeneral(temp);
@@ -14847,7 +14884,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.emitStore(
                     .w64,
                     heap_ptr,
-                    @intCast(builtins.erased_callable.capture_offset + metadata_offset + @offsetOf(builtins.erased_callable.CompilerMetadata, "result_desc")),
+                    @intCast(erased_layout.capture_offset + metadata_offset + erased_layout.fieldOffset(builtins.erased_callable.CompilerMetadata, "result_desc")),
                     metadata_result_desc,
                 );
                 self.codegen.freeGeneral(metadata_result_desc);
@@ -22390,7 +22427,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 // one this code packs, before its captures and metadata.
                 const capture_prefix_size: u32 = self.erased_capture_prefix;
                 const capture_size = capture_prefix_size + self.getLayoutSize(capture_layout);
-                try self.emitErasedProcRegistration(proc_id, @intCast(builtins.erased_callable.compilerMetadataOffset(capture_size)), capture_prefix_size);
+                try self.emitErasedProcRegistration(proc_id, erased_layout.compilerMetadataOffset(capture_size), capture_prefix_size);
             }
             for (self.boxy_worker_procs) |proc_id| {
                 const proc_index = @backingInt(proc_id);
