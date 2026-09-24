@@ -254,6 +254,27 @@ the triple with different float-ABI flags; the vendoring script takes the one
 the program's own link line names. And `libc.a` is not byte-reproducible (its
 members are named by absolute cache paths), so it is vendored, not checked.
 
+### Words versus 64-bit values (A2)
+
+`LirCodeGen` classifies every 64-bit-looking operand as one of two things.
+A *word* (`word`, `word_size`, `listFieldOffset`/`strFieldOffset`,
+`wordOffset`) is a usize-typed value: a pointer, a list or string length or
+capacity, a refcount, a byte count, an in-bounds index used for address
+arithmetic. A *64-bit value* is one whose Roc type is 64 bits (I64, U64, F64
+bits) and stays 64 bits on every target (a register pair or memory on arm32).
+Both are `.w64` on the 64-bit ISAs, so the classification is byte-identical
+there, and arm32's `RegisterWidth` has no `w64`, so every unclassified site is
+a compile error for arm32.
+
+The list and string builtins take their Roc `U64` counts and indices as
+`u64` and narrow them to `usize` themselves (saturating, so an index past
+2^32 is past the end). The driver therefore passes those operands as 64-bit
+values and never narrows them; the wasm32 backend's `i32_wrap_i64` does, and
+miscompiles (see the issues note). The driver crosses the boundary in only
+two directions: a `usize` result that Roc types as `U64` (`List.len`,
+`List.capacity`) goes through `wordAsU64`, and an index that the operation's
+contract puts in bounds is read as its low word.
+
 ## Learnings
 
 ### Is 32-bit support too tightly coupled to wasm32?
