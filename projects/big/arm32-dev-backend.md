@@ -876,6 +876,9 @@ daily.
   `unreachable`) in `elf.zig:323-349`, `macho.zig:352-376`, `coff.zig:394-403`,
   `RunImage.zig:529-535`.
 - `Dwarf.zig`: address width parameter; `ObjectWriter.zig:109-114`: `.arm`.
+- *Done;* D9's REL decision is confirmed (details in
+  `src/backend/dev/arm32/DESIGN.md`, "Objects"). A hand-built arm32 function
+  linked by LLD runs under `qemu-arm-static -cpu cortex-a9`.
 - Acceptance: A0 oracles unchanged; new `elf.zig` tests write an EM_ARM object
   and assert `EI_CLASS == 1`, `e_machine == 40`, `e_flags == 0x05000400`,
   `.rel.text` `sh_type == 9`/`sh_entsize == 8`, and

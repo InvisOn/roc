@@ -109,10 +109,15 @@ pub fn generateIndexedObjectFileWithDebug(
             const elf_arch: object.elf.Architecture = switch (roc_target.classifyCpuArch(cpu_arch)) {
                 .x86_64 => .x86_64,
                 .aarch64 => .aarch64,
-                // The ELF writer emits ELF64 only; arm32 needs ELF32 (A3 of
-                // projects/big/arm32-dev-backend.md).
-                .arm => return error.UnsupportedTarget,
+                .arm => .arm,
                 .aarch64_be, .wasm32, .other => return error.UnsupportedTarget,
+            };
+            // The addend of a call relocation compensates for where the
+            // architecture's PC reads relative to the relocated field.
+            const call_addend: i64 = switch (elf_arch) {
+                .x86_64 => -4,
+                .aarch64 => 0,
+                .arm => -8,
             };
             var elf = try object.ElfWriter.init(allocator, elf_arch, elfOsabi(os_tag));
             defer elf.deinit();
@@ -140,7 +145,7 @@ pub fn generateIndexedObjectFileWithDebug(
             }
             for (relocations) |rel| {
                 switch (rel) {
-                    .linked_function => |f| try elf.addTextRelocation(rel.getOffset(), target_indices[@intFromEnum(f.symbol)], if (cpu_arch == .x86_64) -4 else 0),
+                    .linked_function => |f| try elf.addTextRelocation(rel.getOffset(), target_indices[@intFromEnum(f.symbol)], call_addend),
                     .linked_data => |d| try elf.addTextDataRelocation(rel.getOffset(), target_indices[@intFromEnum(d.symbol)], d.kind),
                     .local_data, .jmp_to_return, .retired => {},
                 }

@@ -404,6 +404,8 @@ pub const CoffWriter = struct {
                 .x86_64 => unreachable,
                 .aarch64 => COFF.IMAGE_REL_ARM64_PAGEOFFSET_12A,
             },
+            // arm32 relocation kinds are produced only for arm32 ELF objects.
+            .abs32, .arm_movw_prel, .arm_movt_prel => unreachable,
         };
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,

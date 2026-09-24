@@ -18,7 +18,8 @@ authoritative reference for compiler-wide invariants.
 | A1, `CC` register seam and facade for ISA-neutral helpers | Done |
 | A1 facade for i128/SIMD/overflow/entry strategies | Deferred to A2 and the NEON batch |
 | Track B, NEON batch | Not started |
-| A2-A3: width model; ELF32 | Not started |
+| A3: ELF32/REL writer, `.ARM.attributes`, `R_ARM_*` relocation kinds, DWARF address width | Done |
+| A2: width model (`WORD`, `Wide64`, four-word i128) | Not started |
 | Track C: arm32 runtime objects, platforms, `_start` | Not started |
 | J1-J4: arm32 `CodeGen`, gates, qemu execution, lock-in | Not started |
 
@@ -192,6 +193,36 @@ change to their output is a bug. Two oracles catch it:
 Both oracles hash objects with procedure symbol names canonicalized (see
 "Procedure symbol names change with every compiler build" below), so they pin
 code generation, not the compiler's git revision.
+
+### Objects: ELF32 with REL relocations (A3)
+
+`object/elf.zig` writes `Architecture.arm` as ELF32 (`write32`); x86_64 and
+aarch64 keep the untouched ELF64 path (`write64`), which the byte-identity
+oracles confirm. D9's REL form is confirmed: records are `Elf32_Rel`, and
+because REL has no addend field the writer stores each relocation's explicit
+addend into the relocated field of its output copy, encoded per type (a
+word for `R_ARM_ABS32`, imm24 in words for `R_ARM_CALL`, signed imm16 for
+`R_ARM_MOVW_PREL_NC`/`R_ARM_MOVT_PREL`). Producers therefore pass addends as
+data exactly as they do for RELA; nothing decodes an addend back out of an
+instruction. Every object carries `e_flags = 0x05000400`, D9's
+`.ARM.attributes` set, and a `$a` mapping symbol. `Dwarf.build` takes the
+target's address width, and `DataRelocationKind` gains `abs32`,
+`arm_movw_prel` and `arm_movt_prel` (refused explicitly by the Mach-O and
+COFF writers and by `RunImage`, whose shim never runs arm32 code).
+
+An end-to-end check ties the encoder and writer to a real toolchain: a
+function built with `arm32.Emit` (PC-relative string address through
+`movw`/`movt`/`add rX, pc`, a `bl` to musl's `puts` through `R_ARM_CALL`,
+`push`/`pop`) and written by `ElfWriter`, linked by LLD via `zig cc -target
+arm-linux-musleabihf` with a C `main`, runs under `QEMU_CPU=cortex-a9
+qemu-arm-static` and prints its string and returns 42. `readelf -A` and
+`python3 ci/elf32_reader.py --attributes` decode the attributes identically,
+and they match what LLVM emits for `-mcpu=cortex-a9` on every tag Roc writes.
+
+Two pre-existing J3a concerns surfaced: `Relocation.patchLinkedFunctionRelocation`
+chooses a patch by decoding the instruction bytes, and
+`patchAbsolutePointerOperand` sizes `abs64` by the *host's* `usize`. The
+in-process arm32 path must instead carry explicit kinds (`abs32` exists now).
 
 ## Learnings
 
