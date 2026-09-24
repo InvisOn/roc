@@ -59,6 +59,9 @@ pub fn Emit(comptime target: RocTarget) type {
             pub const STACK_PTR = Registers.GeneralReg.RSP;
             pub const STACK_ALIGNMENT: u32 = 16;
 
+            /// Register width of a usize-typed value (pointers, lengths).
+            pub const WORD: Registers.RegisterWidth = .w64;
+
             /// Roc-internal return registers for RocStr/RocList results of
             /// compiled-proc calls.
             pub const ROC_RET_REGS = [3]Registers.GeneralReg{ .RAX, .RDX, .RCX };
