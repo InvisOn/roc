@@ -22,7 +22,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | A1 facade for i128/SIMD/overflow/entry strategies | Deferred to A2 and the NEON batch |
 | Track B, NEON batch | Not started |
 | A3: ELF32/REL writer, `.ARM.attributes`, `R_ARM_*` relocation kinds, DWARF address width | Done |
-| A2: width model (`WORD`, `Wide64`, four-word i128) | In progress: words and one-register integer arithmetic classified; `Wide64` pair lowering and four-word i128 remain |
+| A2: width model (`WORD`, `Wide64`, four-word i128) | Classification done outside SIMD: every non-SIMD `.w64` is `word`, a word loop, or `wide64_reg_width`/`wide64_store_width`; the SIMD sites move with the NEON batch; pair lowering is J1's |
 | Track C: arm32 runtime objects, `_start`, glibc stub, CLI tables, test-platform manifests and musl runtime | Done |
 | Track C: CLI test-runner cross-target rosters | Moved to J2 (the builds cannot succeed before it) |
 | J1-J4: arm32 `CodeGen`, gates, qemu execution, lock-in | Not started |
