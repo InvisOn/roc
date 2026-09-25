@@ -5,10 +5,17 @@ Where these files come from
 ---------------------------
 `crt1.o` (process startup) and `libc.a` are Zig's bundled musl, compiled by the
 installed Zig toolchain (Zig 0.16.0) for the requested target. The script links
-a trivial program with `zig build-exe -target <triple> -lc --verbose-link` and
+a trivial C program with `zig build-exe -target <triple> -lc --verbose-link` and
 copies the `crt1.o` and `libc.a` the program's link line names. (Zig first
 partial-links the raw startup object into the `crt1.o` it links, so the cache
 holds two; only the final link line identifies the one to vendor.)
+
+Zig 0.16 builds part of the C library from its own sources rather than musl's
+(`string.h`, `strings.h`, `ctype.h`, parts of `stdlib.h` and `math.h`: Zig's
+`lib/c/`), into a separate `libzigc.a` on the same link line; musl's `libc.a`
+omits those functions. The script appends `libzigc.a`'s members to the vendored
+`libc.a`, so one archive is the whole C library and the platforms keep
+declaring just `crt1.o` and `libc.a`.
 
 Why they are checked in
 -----------------------
@@ -48,7 +55,7 @@ TARGETS = {
     "arm32musl": "arm-linux-musleabihf",
 }
 
-FILES = ("crt1.o", "libc.a")
+FILES = ("crt1.o", "libc.a", "libzigc.a")
 
 
 def zig() -> str:
@@ -96,11 +103,22 @@ def main() -> int:
 
     dest = ROOT / "test" / "fx" / "platform" / "targets" / args.target
     with tempfile.TemporaryDirectory() as tmp:
-        built = build_runtime(TARGETS[args.target], Path(tmp))
+        work = Path(tmp)
+        built = build_runtime(TARGETS[args.target], work)
         dest.mkdir(parents=True, exist_ok=True)
-        for name, path in built.items():
-            shutil.copyfile(path, dest / name)
-            print("wrote %s" % (dest / name).relative_to(ROOT))
+        shutil.copyfile(built["crt1.o"], dest / "crt1.o")
+        print("wrote %s" % (dest / "crt1.o").relative_to(ROOT))
+        libc = dest / "libc.a"
+        shutil.copyfile(built["libc.a"], libc)
+        # Append Zig's own C-library objects (see the module doc).
+        zigc = work / "zigc"
+        zigc.mkdir()
+        subprocess.run([zig(), "ar", "x", str(built["libzigc.a"])], cwd=zigc, check=True)
+        members = sorted(str(path) for path in zigc.iterdir())
+        if not members:
+            sys.exit("libzigc.a has no members")
+        subprocess.run([zig(), "ar", "rs", str(libc)] + members, check=True)
+        print("wrote %s (musl libc.a + %d libzigc.a members)" % (libc.relative_to(ROOT), len(members)))
     return 0
 
 
