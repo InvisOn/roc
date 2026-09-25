@@ -10,7 +10,8 @@ and its reason is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 ## What works today
 
 - The A32 encoder produces the exact bytes LLVM's assembler produces for every
-  instruction it supports (integer, branch, load/store, VFP).
+  instruction it supports (integer, branch, load/store, VFP, and the NEON
+  families the SIMD ops need).
 - `ElfWriter` writes arm32 objects as ELF32 with REL relocations that LLD
   links; a hand-built function runs under `qemu-arm`.
 - The arm32 runtime objects (builtins, compiler-rt, default platform, Boxy
@@ -42,7 +43,9 @@ Roc source -> checked modules -> LIR (usize = u32 for arm32)
   declarations) and the VFP/NEON bank as `SReg`/`DReg`/`QReg` views of one file.
   `FloatReg` is `DReg`, the unit an allocator owns; `sLow`/`sHigh`/`dLow`
   convert between views.
-- `Emit.zig`: one function per instruction form. Immediates are typed: a
+- `Emit.zig`: one function per instruction form (NEON: one per encoding
+  family, with the operation as an enum such as `NeonThreeSame`; see
+  `DESIGN.md`). Immediates are typed: a
   data-processing immediate is a `ModImm`, which only exists for encodable
   values; memory offsets are checked against `fitsImmediate(form, offset)`.
   Branch offsets are relative to the branch; the encoder applies A32's PC+8
@@ -116,7 +119,7 @@ python3 ci/arm32_encoding_oracle.py --check  # what CI runs (run-check-arm32-enc
 zig test --dep roc_target -Mroot=src/backend/dev/arm32/mod.zig -Mroc_target=src/target/mod.zig
 ```
 
-The last command runs the arm32 module's tests alone in seconds (184 today).
+The last command runs the arm32 module's tests alone in seconds (331 today).
 To add an instruction: add the emitter to `Emit.zig`, add one or more lines to
 `ci/arm32_encoding_oracle.s`, regenerate, run the tests. The oracle refuses to
 pass while an emitter has no entry.
