@@ -385,6 +385,10 @@ check could gate every later commit.
   (`emitSwitchCondCompare`); in-bounds U64 indices use their low word; one-
   register element copies are bounded by the word. All byte-identical on the
   64-bit targets.
+- `LirCodeGen.zig` (J3b, found by running `test/fx` on arm32):
+  `list_sublist`'s `{ start, len }` record fields and the drop/take window
+  slots pass as `u64` pairs; the list incref RC helper reads the list's
+  words at `listFieldOffset` instead of the literal 0/8/16 (an A2 miss).
 - `cli/test/parallel_cli_runner.zig` (J3b): `--cross-run` and
   `--cross-runner`, and the cross build's stderr expectations filtered by
   backend (a fix to Track D's `--cross-opt`).

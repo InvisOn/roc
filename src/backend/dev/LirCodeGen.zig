@@ -9893,8 +9893,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try builder.addMemArg(frame_ptr, list_off + wordOffset(1));
                 try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.elem_size_align.size));
-                try builder.addMemArg(frame_ptr, record_off + start_field_off);
-                try builder.addMemArg(frame_ptr, record_off + len_field_off);
+                try self.addU64SlotArg(&builder, record_off + start_field_off);
+                try self.addU64SlotArg(&builder, record_off + len_field_off);
                 try builder.addImmArg(if (list_abi.elements_refcounted) 1 else 0);
                 try self.callBuiltin(&builder, LowLevelBuiltins.listOp(.list_sublist_borrowed));
             } else if (try self.boxyListElementDescForLocals(list_abi, &.{list_local}, ll.target)) |boxy_elem| {
@@ -9905,8 +9905,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.alignment_bytes));
                 try builder.addImmArg(@intCast(list_abi.elem_size_align.size));
-                try builder.addMemArg(frame_ptr, record_off + start_field_off);
-                try builder.addMemArg(frame_ptr, record_off + len_field_off);
+                try self.addU64SlotArg(&builder, record_off + start_field_off);
+                try self.addU64SlotArg(&builder, record_off + len_field_off);
                 try builder.addImmArg(@intFromEnum(boxy_elem.elem_layout));
                 try builder.addMemArg(frame_ptr, boxy_elem.desc_slot);
                 try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
@@ -9924,8 +9924,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.alignment_bytes));
                 try builder.addImmArg(@intCast(list_abi.elem_size_align.size));
-                try builder.addMemArg(frame_ptr, record_off + start_field_off);
-                try builder.addMemArg(frame_ptr, record_off + len_field_off);
+                try self.addU64SlotArg(&builder, record_off + start_field_off);
+                try self.addU64SlotArg(&builder, record_off + len_field_off);
                 try builder.addImmArg(if (list_abi.elements_refcounted) 1 else 0);
                 if (elem_decref_reg) |reg| try builder.addRegArg(reg) else try builder.addImmArg(0);
                 try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
@@ -10108,8 +10108,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.alignment_bytes));
                 try builder.addImmArg(@intCast(elem_size));
-                try builder.addMemArg(frame_ptr, start_slot);
-                try builder.addMemArg(frame_ptr, sublist_len_slot);
+                try self.addU64SlotArg(&builder, start_slot);
+                try self.addU64SlotArg(&builder, sublist_len_slot);
                 try builder.addImmArg(if (list_abi.elements_refcounted) 1 else 0);
                 if (elem_decref_reg) |reg| try builder.addRegArg(reg) else try builder.addImmArg(0);
                 try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
@@ -17187,9 +17187,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.emitLoad(word, value_ptr_reg, frame_ptr, ptr_slot);
 
             var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
-            try builder.addMemArg(value_ptr_reg, 0);
-            try builder.addMemArg(value_ptr_reg, 8);
-            try builder.addMemArg(value_ptr_reg, 16);
+            try builder.addMemArg(value_ptr_reg, listFieldOffset("bytes"));
+            try builder.addMemArg(value_ptr_reg, listFieldOffset("length"));
+            try builder.addMemArg(value_ptr_reg, listFieldOffset("capacity_or_alloc_ptr"));
             try builder.addMemArg(frame_ptr, count_slot);
             try builder.addImmArg(@intFromBool(list_plan.child != null));
             try self.callBuiltin(&builder, builtin_fn);
