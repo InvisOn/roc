@@ -925,6 +925,13 @@ pub fn Emit(comptime target: RocTarget) type {
             try self.multiply(0b0101, false, dst_hi, dst_lo, src2, src1);
         }
 
+        /// UMAAL rdlo, rdhi, rn, rm (rdhi:rdlo = rn * rm + rdlo + rdhi, unsigned;
+        /// the sum cannot overflow 64 bits)
+        pub fn umaal(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst_lo != dst_hi);
+            try self.multiply(0b0010, false, dst_hi, dst_lo, src2, src1);
+        }
+
         /// SMULL rdlo, rdhi, rn, rm (signed 32x32 -> 64)
         pub fn smull(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
             std.debug.assert(dst_lo != dst_hi);

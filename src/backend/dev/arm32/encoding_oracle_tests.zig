@@ -611,6 +611,22 @@ test "arm32 encoding: umlal r4, r5, r6, r7" {
     try std.testing.expectEqualSlices(u8, &.{ 0x96, 0x47, 0xa5, 0xe0 }, e.buf.items);
 }
 
+test "arm32 encoding: umaal r0, r1, r2, r3" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.umaal(.r0, .r1, .r2, .r3);
+    // e0410392
+    try std.testing.expectEqualSlices(u8, &.{ 0x92, 0x03, 0x41, 0xe0 }, e.buf.items);
+}
+
+test "arm32 encoding: umaal r10, r12, r9, r8" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.umaal(.r10, .r12, .r9, .r8);
+    // e04ca899
+    try std.testing.expectEqualSlices(u8, &.{ 0x99, 0xa8, 0x4c, 0xe0 }, e.buf.items);
+}
+
 test "arm32 encoding: smull r8, r9, r10, r12" {
     var e = E.init(std.testing.allocator);
     defer e.deinit();

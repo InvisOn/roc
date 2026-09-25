@@ -92,6 +92,8 @@ mla r0, r1, r2, r3                      | mlaRegRegRegReg(.r0, .r1, .r2, .r3)
 mls r4, r5, r6, r7                      | mlsRegRegRegReg(.r4, .r5, .r6, .r7)
 umull r0, r1, r2, r3                    | umull(.r0, .r1, .r2, .r3)
 umlal r4, r5, r6, r7                    | umlal(.r4, .r5, .r6, .r7)
+umaal r0, r1, r2, r3                    | umaal(.r0, .r1, .r2, .r3)
+umaal r10, r12, r9, r8                  | umaal(.r10, .r12, .r9, .r8)
 smull r8, r9, r10, r12                  | smull(.r8, .r9, .r10, .r12)
 smlal r0, r12, r2, r3                   | smlal(.r0, .r12, .r2, .r3)
 
