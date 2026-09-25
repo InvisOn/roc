@@ -251,3 +251,11 @@ check could gate every later commit.
   `emitPopcount64`/`emitClz64` become `emitPopcountWord`/`emitClzWord` with
   word-width SWAR constants. Needed because the 64-bit constants and the
   `64 - width` adjustments are wrong for a 32-bit register.
+- `LirCodeGen.zig` (SIMD lowering): lane indices, shift counts, masks,
+  bitmask bits, SIMD load/store addresses and the builtin path's slots use
+  words; 64-bit halves and lane sums, the 64-bit-lane rounding bias and
+  `simdArgParts` name `wide64_reg_width`. Needed for the same reason as the
+  scalar slices. The eval hashes barely reach SIMD code, so this one was also
+  verified by comparing the `.text` of `test/simd/differential.roc` and
+  `test/cli/runtime_simd_smoke.roc` built with `--opt=dev` for x64musl and
+  arm64musl before and after (identical).
