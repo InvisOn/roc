@@ -330,6 +330,19 @@ Single-source builtin registration has landed: the seven hand-typed
 (src/builtins/builtin_registry.zig), and the LowLevel-to-builtin member
 choice is shared across backends via `base.LowLevelBuiltins`.
 
+The arm32 dev backend (2026-09) is a standalone project:
+
+- [big/arm32-dev-backend.md](big/arm32-dev-backend.md)—
+  a third native dev backend for 32-bit ARM (A32, ARMv7-A with NEON,
+  AAPCS32 hard-float, Linux musl and glibc): the shared driver made
+  ISA- and width-generic, then arm32 code generation, cross-compilation,
+  execution oracles under qemu and on hardware, and the snapshot lock-in.
+  Its notes: [big/arm32-dev-backend-issues.md](big/arm32-dev-backend-issues.md)
+  (issues and annoyances found along the way) and
+  [big/arm32-dev-backend-existing-code-changes.md](big/arm32-dev-backend-existing-code-changes.md)
+  (every change it made outside the arm32 backend). The implementation's own
+  record is `src/backend/dev/arm32/DESIGN.md`.
+
 ### Suggested overall sequence
 
 If one person or agent works through everything serially, this order
