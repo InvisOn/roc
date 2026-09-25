@@ -45,6 +45,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J3b: `--cross-run`/`--cross-runner` in the CLI runner | Done; all 121 `test/fx` programs run correctly under qemu (the fx host works around a Zig 0.16 arm ABI bug) |
 | J3a: `host_lir_codegen_available` for arm; the eval runner, host-effects runner and backend tests built for arm32 | Done: under qemu, eval 2171/2171 (dev 2030 evaluations, as on x86_64), host effects 86/86, backend tests 892 passed. On the Raspberry Pi 3: host effects 86/86, eval 2169/2171 with dev 2028 of the 2028 evaluations it reached; the two others ran out of memory while compiling (issues note). Wasm evaluation is unavailable in a 32-bit process (issues note) |
 | J3c: the `ci_cross_compile.yml` arm32 lanes are required, and the on-target job compares each arm32 int app's stdout with the Linux-built x64musl app's | Done locally (Linux host, qemu); the macOS and Windows hosts are first checked by CI. The int app prints heap addresses, which the comparison masks |
+| J3: call-shape battery and real hardware (the residual risk J3 names) | Done: `test/fx/abi_call_shapes.roc` crosses the host boundary with each AAPCS32 argument and result shape (a register pair after an i32, an i64 on the stack, a record split by C.5, an f32 back-fill, nine f64s, a hidden result pointer, an F64 -> I64 -> F64 round trip). On a Raspberry Pi 3 (Cortex-A53, 32-bit Linux) all 122 fx programs pass through `ci/ssh_cross_runner.sh`, and the refcount builtins there run LDREX/STREX/DMB (refcounts are atomic unless proven single-threaded) |
 | J4 | Not started |
 
 `roc build --opt=dev --target=arm32musl` and `--target=arm32linux` build real
@@ -687,7 +688,6 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 
 ## Next steps
 
-J1, J2, J3a and J3c are done. Next, in plan order: the float-ABI and atomics
-battery on real hardware (the residual risk J3 names), then J4 (regenerate the arm32 `dev_object` snapshot lines, add the
+J1, J2 and J3 are done. Next, in plan order: J4 (regenerate the arm32 `dev_object` snapshot lines, add the
 gate-consistency test, update design.md). Every Track A change must leave both byte-identity oracles
 unchanged.
