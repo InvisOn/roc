@@ -4037,7 +4037,7 @@ fn rocRunDefaultAppSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, staged
         };
         const link_config = linker.LinkConfig{
             .target_format = linker.TargetFormat.detectFromOs(selected_target.toOsTag()),
-            .target_abi = llvmBuildLinkAbi(selected_target, true),
+            .target_abi = buildLinkAbi(selected_target, true),
             .target_os = selected_target.toOsTag(),
             .target_arch = selected_target.toCpuArch(),
             .output_path = exe_path,
@@ -9275,7 +9275,12 @@ fn linkerOutputKind(output: roc_target.OutputKind) linker.OutputKind {
     };
 }
 
-fn llvmBuildLinkAbi(target: RocTarget, synthetic_default_platform: bool) linker.TargetAbi {
+/// The link ABI of a `roc build` executable. The default platform's runtime
+/// owns the process entry and uses no C library on Linux, FreeBSD or NetBSD,
+/// so it links statically (no program interpreter) whatever the target's C
+/// ABI; every other platform links with its target's ABI. Both backends use
+/// this.
+fn buildLinkAbi(target: RocTarget, synthetic_default_platform: bool) linker.TargetAbi {
     if (synthetic_default_platform) {
         const os = target.toOsTag();
         if (os == .linux) return .musl;
@@ -10478,7 +10483,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
 
             const link_config = linker.LinkConfig{
                 .target_format = target_format,
-                .target_abi = llvmBuildLinkAbi(target, args.synthetic_default_platform),
+                .target_abi = buildLinkAbi(target, args.synthetic_default_platform),
                 .target_os = target_os,
                 .target_arch = target_arch,
                 .output_path = final_output_path,
@@ -10918,7 +10923,7 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
 
         const link_config = linker.LinkConfig{
             .target_format = linker.TargetFormat.detectFromOs(target_os),
-            .target_abi = linker.TargetAbi.fromRocTarget(target),
+            .target_abi = buildLinkAbi(target, args.synthetic_default_platform),
             .target_os = target_os,
             .target_arch = target_arch,
             .output_path = final_output_path,
@@ -11234,7 +11239,7 @@ fn rocBuildEmbedded(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildRe
 
         const link_config = linker.LinkConfig{
             .target_format = linker.TargetFormat.detectFromOs(target_os),
-            .target_abi = linker.TargetAbi.fromRocTarget(target),
+            .target_abi = buildLinkAbi(target, args.synthetic_default_platform),
             .target_os = target_os,
             .target_arch = target_arch,
             .output_path = final_output_path,

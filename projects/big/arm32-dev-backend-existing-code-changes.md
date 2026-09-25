@@ -13,6 +13,19 @@ eval-corpus object hashes) unless the entry says otherwise.
 
 ## Fixes to existing defects (separate commits)
 
+### Default-platform glibc builds with `--opt=dev` crashed at startup
+
+`roc build --opt=dev` of a program without a `platform` header, for a glibc
+target (`x64glibc`, `arm64glibc`, now `arm32linux`), linked with the
+target's C ABI: it requested the glibc program interpreter but, since the
+default platform's runtime uses no C library, produced no dynamic section,
+so the loader crashed before `main`. The LLVM path already linked such
+programs statically (`llvmBuildLinkAbi`). That rule is now `buildLinkAbi`,
+used by both backends (`rocBuildNative`, `rocBuildEmbedded`). The existing
+default-platform CLI cases built only with `--opt=speed`; they now take the
+backend, and a new case builds x64glibc with `--opt=dev` and runs it. Found
+while checking J2's `arm32linux` target.
+
 ### The snapshot tool mapped every dev compile error to `NOT_IMPLEMENTED`
 
 `processDevObjectSnapshot` called `compileToObjectFile` for each target that
