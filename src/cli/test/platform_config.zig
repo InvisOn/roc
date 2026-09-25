@@ -52,6 +52,7 @@ pub const all_cross_targets = [_][]const u8{
     "x64glibc",
     "arm64glibc",
     "arm32musl",
+    "arm32linux",
 };
 
 /// Standard targets for platforms with glibc support
@@ -68,8 +69,12 @@ const targets_with_glibc = [_]TargetInfo{
 /// `targets` include arm32musl with vendored musl runtime objects).
 const arm32_target = [_]TargetInfo{.{ .name = "arm32musl", .requires_linux = false }};
 
+/// arm32 glibc, declared by the int platform (vendored `Scrt1.o`, the
+/// generated glibc stub). Linking against glibc stubs needs a Linux host.
+const arm32_glibc_target = [_]TargetInfo{.{ .name = "arm32linux", .requires_linux = true }};
+
 /// Targets of the int platform
-const targets_int = targets_with_glibc ++ arm32_target;
+const targets_int = targets_with_glibc ++ arm32_target ++ arm32_glibc_target;
 
 /// Targets for fx platforms (musl + Windows)
 const targets_fx = [_]TargetInfo{
@@ -265,6 +270,8 @@ test "arm32musl is a cross target of exactly the platforms that declare it" {
     try std.testing.expect(findTarget(findPlatform("fx").?, "arm32musl") != null);
     try std.testing.expect(findTarget(findPlatform("str").?, "arm32musl") == null);
     try std.testing.expect(findTarget(findPlatform("fx-open").?, "arm32musl") == null);
+    try std.testing.expect(findTarget(findPlatform("int").?, "arm32linux") != null);
+    try std.testing.expect(findTarget(findPlatform("fx").?, "arm32linux") == null);
 }
 
 test "fx platform has io specs" {
