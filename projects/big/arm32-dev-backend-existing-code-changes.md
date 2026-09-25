@@ -345,3 +345,12 @@ check could gate every later commit.
   the AAPCS64 even-register rule for i128 arguments is explicitly
   aarch64-only, and an arm32 i128 argument is four words on the generic
   path. Needed because each two-way test was a compile error for arm32.
+- `LirCodeGen.zig` (J1c, entry and hosted calls): the C-ABI target comes
+  from one exhaustive selection (`c_abi_target`, `.arm32` for AAPCS32); the
+  x86_64 entry-wrapper and Boxy-thunk frames name their pinned registers
+  through `CC.RESULT_PTR_SAVE_REG`/`CC.ROC_OPS_SAVE_REG`/`entry_args_reg`
+  and `CC.PARAM_REGS`, so arm32 (r9/r10/r8, r0/r1) shares that path; the
+  result pointer is the first integer argument on arm32 as on x86_64;
+  incoming stack arguments are copied at fixed fp offsets in word pieces;
+  C-ABI integer pieces wider than four bytes are 64-bit-only. Needed because
+  each two-way test was a compile error for arm32.
