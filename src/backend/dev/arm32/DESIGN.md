@@ -34,7 +34,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J1d: `Wide64` lowering (arithmetic, overflow, division, shifts, compares, unary ops, conversions, F64 bits) | Done |
 | J1d: four-word i128/Dec, word division through `__aeabi_idivmod`, U64 window and discriminant values | Done |
 | J1e: NEON lowering of every SIMD op; q8-q15 as vector-only temporaries | Done (compiles; execution checked in J1f-J3) |
-| J1f: acceptance test, hello world under qemu and on the Pi | Not started |
+| J1f: acceptance tests (`LirCodeGen(.arm32musl)` instantiates with the D5 map; a proc compiles through it) | Done; the hand-linked hello world moved to J2, whose `roc build --opt=dev --target=arm32musl` links and runs real programs through the same code generator |
 | J2-J4: gates, qemu execution, lock-in | Not started |
 
 Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
