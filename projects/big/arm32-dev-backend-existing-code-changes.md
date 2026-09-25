@@ -283,3 +283,10 @@ check could gate every later commit.
 - `.github/workflows/ci_cross_compile.yml`, `ci_zig.yml`: the arm32 lanes
   (cross-compile with `--opt=dev`, a qemu `cortex-a9` on-target row, the eval
   runner built for arm32 and run under qemu), all allowed to fail until J3.
+
+### J1: arm32 code generation
+
+- `x86_64/CodeGen.zig`, `aarch64/CodeGen.zig`, `LirCodeGen.zig`: the facade
+  method `emitCtz64` is renamed `emitCtzWord`. Needed because the driver
+  calls it only on values that fit one register, and arm32's implementation
+  counts a 32-bit word; the name now states the contract every ISA meets.

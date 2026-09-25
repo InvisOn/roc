@@ -1301,9 +1301,9 @@ pub fn CodeGen(comptime target: RocTarget) type {
             try self.emit.orrRegRegReg(width, dst, src1, src2);
         }
 
-        /// dst = number of trailing zero bits of the full 64-bit value `src`
+        /// dst = number of trailing zero bits of the full word `src`
         /// (64 when `src` is zero).
-        pub fn emitCtz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+        pub fn emitCtzWord(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
             // No native ctz: reverse the bits, then count leading zeros.
             try self.emit.rbitRegReg(.w64, dst, src);
             try self.emit.clzRegReg(.w64, dst, dst);
