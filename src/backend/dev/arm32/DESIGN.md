@@ -36,6 +36,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J1e: NEON lowering of every SIMD op; q8-q15 as vector-only temporaries | Done (compiles; execution checked in J1f-J3) |
 | J1f: acceptance tests (`LirCodeGen(.arm32musl)` instantiates with the D5 map; a proc compiles through it) | Done; the hand-linked hello world moved to J2, whose `roc build --opt=dev --target=arm32musl` links and runs real programs through the same code generator |
 | J2: `supportsTarget` gate, CLI and phase names, `--keep-temp`, arm32 runtime fixes found by real builds | Done (the snapshot tool keeps arm32 at `NOT_IMPLEMENTED` until J4) |
+| J2: the default platform declares `arm32musl` and `arm32linux` | Done; a CLI case builds `baseline_cpu_smoke.roc` for arm32musl |
 | J3b: `--cross-run`/`--cross-runner` in the CLI runner | Done; 105 of 121 `test/fx` programs run correctly under qemu, the rest blocked by a Zig ABI bug in the test host |
 | J3a, J3c, J4 | Not started |
 

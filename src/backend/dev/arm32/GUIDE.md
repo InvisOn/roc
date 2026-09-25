@@ -23,6 +23,10 @@ and its reason is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   (armv7l), and 120 of 121 `test/fx` programs build; 105 of them run
   correctly under qemu, and the other 16 hit a Zig ABI bug in the Zig test
   host (issues note).
+- The default platform (a program with no `platform` header) builds for
+  `arm32musl` and `arm32linux`: `test/cli/baseline_cpu_smoke.roc`, which
+  exercises the NEON lowering, prints the same as on x64 under qemu and on
+  the Pi.
 
 What does not work yet: the remaining `test/fx` run failures (see the
 issues note), the eval corpus on an arm32 host (J3a), and the arm32 lines of
