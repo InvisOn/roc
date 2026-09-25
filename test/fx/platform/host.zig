@@ -820,6 +820,47 @@ fn hostedPaddedCheck(padded: PaddedArgs) callconv(.c) RocStr {
     return RocStr.fromSlice(result_str, ops);
 }
 
+// Hosted functions for the call-shape battery (test/fx/abi_call_shapes.roc):
+// each C signature is one argument or result placement a native backend's
+// call lowering must get exactly right (on arm32, the AAPCS32 cases in
+// projects/big/arm32-dev-backend.md). Each folds its arguments with distinct
+// weights, so an argument read from the wrong place changes the result.
+
+/// `Abi.Triple`: three I32s in declared order.
+const AbiTriple = extern struct { a: i32, b: i32, c: i32 };
+
+fn hostedAbiI32I64(a: i32, b: i64) callconv(.c) i64 {
+    return b * 7 + a;
+}
+
+fn hostedAbiThreeI32I64(a: i32, b: i32, c: i32, d: i64) callconv(.c) i64 {
+    return @as(i64, a) + @as(i64, b) * 10 + @as(i64, c) * 100 + d * 1000;
+}
+
+fn hostedAbiTwoI32Triple(x: i32, y: i32, t: AbiTriple) callconv(.c) i64 {
+    return @as(i64, x) + @as(i64, y) * 10 + @as(i64, t.a) * 100 + @as(i64, t.b) * 1000 + @as(i64, t.c) * 10000;
+}
+
+fn hostedAbiF64F32F64(a: f64, b: f32, c: f64) callconv(.c) f64 {
+    return a + @as(f64, b) * 10 + c * 100;
+}
+
+fn hostedAbiNineF64(a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64) callconv(.c) f64 {
+    return a1 + a2 * 2 + a3 * 3 + a4 * 4 + a5 * 5 + a6 * 6 + a7 * 7 + a8 * 8 + a9 * 9;
+}
+
+fn hostedAbiTripleFrom(n: i32) callconv(.c) AbiTriple {
+    return .{ .a = n, .b = n * 2, .c = n * 3 };
+}
+
+fn hostedAbiF64Bits(x: f64) callconv(.c) i64 {
+    return @bitCast(x);
+}
+
+fn hostedAbiF64FromBits(bits: i64) callconv(.c) f64 {
+    return @bitCast(bits);
+}
+
 const BoxedHostDropCounts = struct {
     primitive: usize = 0,
     nested_record: usize = 0,
@@ -1372,6 +1413,14 @@ comptime {
     @export(&hostedHostBoxedNestedRecord, .{ .name = "roc_host_boxed_nested_record", .visibility = .hidden });
     @export(&hostedHostBoxedRecursiveTree, .{ .name = "roc_host_boxed_recursive_tree", .visibility = .hidden });
     @export(&hostedHostBoxedWithBoxedCapture, .{ .name = "roc_host_boxed_with_boxed_capture", .visibility = .hidden });
+    @export(&hostedAbiF64Bits, .{ .name = "roc_abi_f64_bits", .visibility = .hidden });
+    @export(&hostedAbiF64F32F64, .{ .name = "roc_abi_f64_f32_f64", .visibility = .hidden });
+    @export(&hostedAbiF64FromBits, .{ .name = "roc_abi_f64_from_bits", .visibility = .hidden });
+    @export(&hostedAbiI32I64, .{ .name = "roc_abi_i32_i64", .visibility = .hidden });
+    @export(&hostedAbiNineF64, .{ .name = "roc_abi_nine_f64", .visibility = .hidden });
+    @export(&hostedAbiThreeI32I64, .{ .name = "roc_abi_three_i32_i64", .visibility = .hidden });
+    @export(&hostedAbiTripleFrom, .{ .name = "roc_abi_triple_from", .visibility = .hidden });
+    @export(&hostedAbiTwoI32Triple, .{ .name = "roc_abi_two_i32_triple", .visibility = .hidden });
     @export(&hostedHostCallBoxed, .{ .name = "roc_host_call_boxed", .visibility = .hidden });
     @export(&hostedHostCallBoxedTransition, .{ .name = "roc_host_call_boxed_transition", .visibility = .hidden });
     @export(&hostedHostGetGreeting, .{ .name = "roc_host_get_greeting", .visibility = .hidden });

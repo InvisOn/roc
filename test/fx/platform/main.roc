@@ -2,10 +2,18 @@ platform ""
     requires {
         main! : () => {}
     }
-    exposes [Stdout, Stderr, Stdin, Builder, Host, NodeA, NodeB, Element, Padded, Rb]
+    exposes [Stdout, Stderr, Stdin, Builder, Host, NodeA, NodeB, Element, Padded, Rb, Abi]
     packages {}
     provides { "roc_main": main_for_host! }
     hosted {
+        "roc_abi_f64_bits": Abi.f64_bits!,
+        "roc_abi_f64_f32_f64": Abi.f64_f32_f64!,
+        "roc_abi_f64_from_bits": Abi.f64_from_bits!,
+        "roc_abi_i32_i64": Abi.i32_i64!,
+        "roc_abi_nine_f64": Abi.nine_f64!,
+        "roc_abi_three_i32_i64": Abi.three_i32_i64!,
+        "roc_abi_triple_from": Abi.triple_from!,
+        "roc_abi_two_i32_triple": Abi.two_i32_triple!,
         "roc_builder_print_value": Builder.print_value!,
         "roc_host_boxed_add": Host.boxed_add!,
         "roc_host_boxed_drop_report": Host.boxed_drop_report!,
@@ -53,6 +61,7 @@ import NodeA
 import NodeB
 import Element
 import Padded
+import Abi
 import Rb
 
 main_for_host! : () => {}
