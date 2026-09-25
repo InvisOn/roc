@@ -11748,51 +11748,67 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// `ne` holds exactly when the product does not fit the type. The
         /// full 128-bit unsigned product is w3:w2:w1:w0; a signed product's
         /// high half subtracts each operand where the other is negative, and
-        /// fits when it is the low half's sign spread.
+        /// fits when it is the low half's sign spread. The operands stay in
+        /// memory and each word is loaded into `x` or `y` when a step needs
+        /// it, so the sequence holds eight registers (D10).
         fn emitWide64MulChecked(self: *Self, lhs_loc: ValueLocation, rhs_loc: ValueLocation, signed: bool) Allocator.Error!Wide64Pair {
-            const a = try self.loadWide64Pair(lhs_loc);
-            const b = try self.loadWide64Pair(rhs_loc);
+            const a_off = try self.wide64StackOffset(lhs_loc);
+            const b_off = try self.wide64StackOffset(rhs_loc);
+            const a_lo, const a_hi = .{ a_off, a_off + word_size };
+            const b_lo, const b_hi = .{ b_off, b_off + word_size };
             const result = try self.allocWide64Pair();
+            const x = try self.allocTempGeneral();
+            const y = try self.allocTempGeneral();
             const t = try self.allocTempGeneral();
             const h = try self.allocTempGeneral();
             const u_lo = try self.allocTempGeneral();
             const u_hi = try self.allocTempGeneral();
+            const cg = &self.codegen;
             // w0 and the carry into word 1.
-            try self.codegen.emit.umull(result.lo, t, a.lo, b.lo);
+            try cg.emitLoadStack(word, x, a_lo);
+            try cg.emitLoadStack(word, y, b_lo);
+            try cg.emit.umull(result.lo, t, x, y);
             // h:t = t + a.lo * b.hi
-            try self.codegen.emitLoadImm(h, 0);
-            try self.codegen.emit.umlal(t, h, a.lo, b.hi);
+            try cg.emitLoadStack(word, y, b_hi);
+            try cg.emitLoadImm(h, 0);
+            try cg.emit.umlal(t, h, x, y);
             // h:t += a.hi * b.lo, carrying into word 3.
-            try self.codegen.emit.umull(u_lo, u_hi, a.hi, b.lo);
-            try self.codegen.emit.addsRegRegReg(result.hi, t, u_lo);
-            try self.codegen.emit.adcsRegRegReg(h, h, u_hi);
+            try cg.emitLoadStack(word, x, a_hi);
+            try cg.emitLoadStack(word, y, b_lo);
+            try cg.emit.umull(u_lo, u_hi, x, y);
+            try cg.emit.addsRegRegReg(result.hi, t, u_lo);
+            try cg.emit.adcsRegRegReg(h, h, u_hi);
             // w3:w2 = carry:h + a.hi * b.hi
             // MOV without S keeps the carry for the ADC.
-            try self.codegen.emit.movRegModImm(u_hi, arm32.ModImm.of(0));
-            try self.codegen.emit.dataProc(.al, .adc, false, u_hi, u_hi, .{ .imm = arm32.ModImm.of(0) });
-            self.codegen.freeGeneral(t);
+            try cg.emit.movRegModImm(u_hi, arm32.ModImm.of(0));
+            try cg.emit.dataProc(.al, .adc, false, u_hi, u_hi, .{ .imm = arm32.ModImm.of(0) });
             const w2 = h;
             const w3 = u_hi;
-            try self.codegen.emit.umlal(w2, w3, a.hi, b.hi);
+            try cg.emitLoadStack(word, y, b_hi);
+            try cg.emit.umlal(w2, w3, x, y);
             if (signed) {
-                // w3:w2 -= b where a < 0, and -= a where b < 0.
-                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, b.lo, .{ .shift_imm = .{ .rm = a.hi, .kind = .asr, .amount = 31 } });
-                try self.codegen.emit.subsRegRegReg(w2, w2, u_lo);
-                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, b.hi, .{ .shift_imm = .{ .rm = a.hi, .kind = .asr, .amount = 31 } });
-                try self.codegen.emit.sbcRegRegReg(w3, w3, u_lo);
-                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, a.lo, .{ .shift_imm = .{ .rm = b.hi, .kind = .asr, .amount = 31 } });
-                try self.codegen.emit.subsRegRegReg(w2, w2, u_lo);
-                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, a.hi, .{ .shift_imm = .{ .rm = b.hi, .kind = .asr, .amount = 31 } });
-                try self.codegen.emit.sbcRegRegReg(w3, w3, u_lo);
-                try self.codegen.emit.dataProc(.al, .eor, false, w2, w2, .{ .shift_imm = .{ .rm = result.hi, .kind = .asr, .amount = 31 } });
-                try self.codegen.emit.dataProc(.al, .eor, false, w3, w3, .{ .shift_imm = .{ .rm = result.hi, .kind = .asr, .amount = 31 } });
+                // w3:w2 -= b where a < 0 (x = a.hi), and -= a where b < 0
+                // (y = b.hi). Loads leave the borrow alone.
+                try cg.emitLoadStack(word, t, b_lo);
+                try cg.emit.dataProc(.al, .@"and", false, u_lo, t, .{ .shift_imm = .{ .rm = x, .kind = .asr, .amount = 31 } });
+                try cg.emit.subsRegRegReg(w2, w2, u_lo);
+                try cg.emit.dataProc(.al, .@"and", false, u_lo, y, .{ .shift_imm = .{ .rm = x, .kind = .asr, .amount = 31 } });
+                try cg.emit.sbcRegRegReg(w3, w3, u_lo);
+                try cg.emitLoadStack(word, t, a_lo);
+                try cg.emit.dataProc(.al, .@"and", false, u_lo, t, .{ .shift_imm = .{ .rm = y, .kind = .asr, .amount = 31 } });
+                try cg.emit.subsRegRegReg(w2, w2, u_lo);
+                try cg.emit.dataProc(.al, .@"and", false, u_lo, x, .{ .shift_imm = .{ .rm = y, .kind = .asr, .amount = 31 } });
+                try cg.emit.sbcRegRegReg(w3, w3, u_lo);
+                try cg.emit.dataProc(.al, .eor, false, w2, w2, .{ .shift_imm = .{ .rm = result.hi, .kind = .asr, .amount = 31 } });
+                try cg.emit.dataProc(.al, .eor, false, w3, w3, .{ .shift_imm = .{ .rm = result.hi, .kind = .asr, .amount = 31 } });
             }
-            try self.codegen.emit.dataProc(.al, .orr, true, w2, w2, .{ .reg = w3 });
-            self.codegen.freeGeneral(u_lo);
-            self.codegen.freeGeneral(w2);
-            self.codegen.freeGeneral(w3);
-            self.freeWide64Pair(a);
-            self.freeWide64Pair(b);
+            try cg.emit.dataProc(.al, .orr, true, w2, w2, .{ .reg = w3 });
+            cg.freeGeneral(u_lo);
+            cg.freeGeneral(w2);
+            cg.freeGeneral(w3);
+            cg.freeGeneral(t);
+            cg.freeGeneral(y);
+            cg.freeGeneral(x);
             return result;
         }
 

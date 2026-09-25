@@ -195,13 +195,14 @@ the dev backend. The first 32-bit native target will be the first to run the
 shared native code (object writing, relocation widths, DWARF, the driver's
 literal 8s) at 32-bit width.
 
-### A checked I64 multiply takes 10 of arm32's 11 temporaries
+### A checked I64 multiply took 10 of arm32's 11 temporaries (resolved in J2)
 
-`emitWide64MulChecked` holds both operand pairs, the result pair and four
-partial-product registers at once. It runs between statements, where the
-pool is otherwise free, but any caller that keeps a register live across it
-would exhaust the pool (an invariant panic, not a miscompile). Reloading an
-operand word from its slot would free two registers if that ever happens.
+`emitWide64MulChecked` held both operand pairs, the result pair and four
+partial-product registers at once, and J2's D10 measurement saw the general
+pool reach 11 / 11 there. It now leaves the operands in their memory slots and
+loads one word at a time into two scratch registers, so it holds 8 registers
+at most. Over everything J2 builds, the arm32 general peak is now 9 / 11 (see
+the register budget section of `src/backend/dev/arm32/DESIGN.md`).
 
 ### Shim execution does not resolve `__aeabi_*` yet
 
