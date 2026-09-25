@@ -17419,8 +17419,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                     try builder.addImmArg(@intFromEnum(desc_id));
                     try self.callBoxyBuiltin(&builder, .static_desc);
-                    const slot = self.codegen.allocStackSlot(8);
-                    try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                    const slot = self.codegen.allocStackSlot(word_size);
+                    try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                     return slot;
                 },
                 .local => |local| {
@@ -17435,8 +17435,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try builder.addImmArg(@intFromEnum(projection.method));
                     try builder.addImmArg(projection.arg_index);
                     try self.callBoxyBuiltin(&builder, .dict_method_arg_desc);
-                    const slot = self.codegen.allocStackSlot(8);
-                    try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                    const slot = self.codegen.allocStackSlot(word_size);
+                    try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                     return slot;
                 },
                 .dict_method_hidden => |projection| {
@@ -17448,8 +17448,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try builder.addImmArg(projection.hidden_index);
                     try builder.addImmArg(@intFromEnum(projection.shape));
                     try self.callBoxyBuiltin(&builder, .dict_method_hidden_desc);
-                    const slot = self.codegen.allocStackSlot(8);
-                    try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                    const slot = self.codegen.allocStackSlot(word_size);
+                    try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                     return slot;
                 },
                 .runtime => std.debug.panic(
@@ -17592,8 +17592,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try builder.addMemArg(frame_ptr, source_slot);
                 try builder.addMemArg(frame_ptr, target_slot);
                 try self.callBoxyBuiltin(&builder, .tag_residual_desc);
-                const slot = self.codegen.allocStackSlot(8);
-                try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                const slot = self.codegen.allocStackSlot(word_size);
+                try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                 return self.stackLocationForLayout(target_layout, slot);
             }
             if (assign.nested_index == null and assign.box_payload_layout == null and assign.tag_payload == null and !assign.tag_ext and captures.len == 0) {
@@ -17602,8 +17602,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addImmArg(@intFromEnum(desc_id));
                         try self.callBoxyBuiltin(&builder, .static_desc);
-                        const slot = self.codegen.allocStackSlot(8);
-                        try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                        const slot = self.codegen.allocStackSlot(word_size);
+                        try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                         return self.stackLocationForLayout(target_layout, slot);
                     },
                     .local => |local| return try self.emitValueLocal(local),
@@ -17631,16 +17631,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try builder.addMemArg(frame_ptr, base_slot);
                         try builder.addImmArg(@intFromEnum(box_layout));
                         try self.callBoxyBuiltin(&builder, .box_payload_desc);
-                        const slot = self.codegen.allocStackSlot(8);
-                        try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                        const slot = self.codegen.allocStackSlot(word_size);
+                        try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                         return self.stackLocationForLayout(target_layout, slot);
                     } else if (assign.tag_ext) {
                         const base_slot = try self.boxyDescRefToSlot(.{ .local = local });
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addMemArg(frame_ptr, base_slot);
                         try self.callBoxyBuiltin(&builder, .tag_ext_desc);
-                        const slot = self.codegen.allocStackSlot(8);
-                        try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                        const slot = self.codegen.allocStackSlot(word_size);
+                        try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                         return self.stackLocationForLayout(target_layout, slot);
                     } else if (assign.tag_payload) |payload| {
                         const base_slot = try self.boxyDescRefToSlot(.{ .local = local });
@@ -17649,8 +17649,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try builder.addImmArg(@intFromEnum(payload.tag_name));
                         try builder.addImmArg(payload.payload_index);
                         try self.callBoxyBuiltin(&builder, .tag_payload_desc);
-                        const slot = self.codegen.allocStackSlot(8);
-                        try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                        const slot = self.codegen.allocStackSlot(word_size);
+                        try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                         return self.stackLocationForLayout(target_layout, slot);
                     } else if (assign.nested_index) |idx| {
                         const base_slot = try self.boxyDescRefToSlot(.{ .local = local });
@@ -17658,8 +17658,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try builder.addMemArg(frame_ptr, base_slot);
                         try builder.addImmArg(@intCast(idx));
                         try self.callBoxyBuiltin(&builder, .nested_desc);
-                        const slot = self.codegen.allocStackSlot(8);
-                        try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                        const slot = self.codegen.allocStackSlot(word_size);
+                        try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                         return self.stackLocationForLayout(target_layout, slot);
                     }
                     return try self.emitValueLocal(local);
@@ -17671,7 +17671,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             };
             const count = captures.len;
             const ids_slot = if (count == 0) @as(i32, 0) else self.codegen.allocStackSlot(@intCast(count * 4));
-            const descs_slot = if (count == 0) @as(i32, 0) else self.codegen.allocStackSlot(@intCast(count * 8));
+            const descs_slot = if (count == 0) @as(i32, 0) else self.codegen.allocStackSlot(@intCast(count * word_size));
             for (0..GuardedList.borrowLen(captures)) |i| {
                 const capture_local = GuardedList.at(captures, i);
                 const id_reg = try self.allocTempGeneral();
@@ -17681,8 +17681,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 const desc_off = try self.boxyDescRefToSlot(.{ .local = capture_local });
                 const ptr_reg = try self.allocTempGeneral();
-                try self.codegen.emitLoad(.w64, ptr_reg, frame_ptr, desc_off);
-                try self.codegen.emitStore(.w64, frame_ptr, descs_slot + @as(i32, @intCast(i * 8)), ptr_reg);
+                try self.codegen.emitLoad(word, ptr_reg, frame_ptr, desc_off);
+                try self.codegen.emitStore(word, frame_ptr, descs_slot + @as(i32, @intCast(i * word_size)), ptr_reg);
                 self.codegen.freeGeneral(ptr_reg);
             }
 
@@ -17699,8 +17699,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 std.debug.panic("Dev/codegen invariant violated: descriptor projection selected multiple paths", .{});
             }
             if (projection_count != 0) {
-                const base_slot = self.codegen.allocStackSlot(8);
-                try self.codegen.emitStore(.w64, frame_ptr, base_slot, ret_reg_0);
+                const base_slot = self.codegen.allocStackSlot(word_size);
+                try self.codegen.emitStore(word, frame_ptr, base_slot, ret_reg_0);
                 var projection_builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                 try projection_builder.addMemArg(frame_ptr, base_slot);
                 if (assign.box_payload_layout) |box_layout| {
@@ -17717,8 +17717,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.callBoxyBuiltin(&projection_builder, .tag_ext_desc);
                 }
             }
-            const slot = self.codegen.allocStackSlot(8);
-            try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+            const slot = self.codegen.allocStackSlot(word_size);
+            try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
             return self.stackLocationForLayout(target_layout, slot);
         }
 
@@ -17731,15 +17731,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addImmArg(@intFromEnum(dict_id));
                         try self.callBoxyBuiltin(&builder, .static_dict);
-                        const slot = self.codegen.allocStackSlot(8);
-                        try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                        const slot = self.codegen.allocStackSlot(word_size);
+                        try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                         return self.stackLocationForLayout(target_layout, slot);
                     }
                     // A template dictionary is materialized with the values of
                     // the frame locals its method slots name.
                     const count = captures.len;
                     const ids_slot = self.codegen.allocStackSlot(@intCast(count * 4));
-                    const values_slot = self.codegen.allocStackSlot(@intCast(count * 8));
+                    const values_slot = self.codegen.allocStackSlot(@intCast(count * word_size));
                     for (0..GuardedList.borrowLen(captures)) |i| {
                         const capture_local = GuardedList.at(captures, i);
                         const id_reg = try self.allocTempGeneral();
@@ -17747,10 +17747,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.codegen.emitStore(.w32, frame_ptr, ids_slot + @as(i32, @intCast(i * 4)), id_reg);
                         self.codegen.freeGeneral(id_reg);
 
-                        const value_off = try self.ensureOnStack(try self.emitValueLocal(capture_local), 8);
+                        const value_off = try self.ensureOnStack(try self.emitValueLocal(capture_local), word_size);
                         const ptr_reg = try self.allocTempGeneral();
-                        try self.codegen.emitLoad(.w64, ptr_reg, frame_ptr, value_off);
-                        try self.codegen.emitStore(.w64, frame_ptr, values_slot + @as(i32, @intCast(i * 8)), ptr_reg);
+                        try self.codegen.emitLoad(word, ptr_reg, frame_ptr, value_off);
+                        try self.codegen.emitStore(word, frame_ptr, values_slot + @as(i32, @intCast(i * word_size)), ptr_reg);
                         self.codegen.freeGeneral(ptr_reg);
                     }
                     var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
@@ -17759,8 +17759,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try builder.addLeaArg(frame_ptr, values_slot);
                     try builder.addImmArg(@intCast(count));
                     try self.callBoxyBuiltin(&builder, .dict_copy);
-                    const slot = self.codegen.allocStackSlot(8);
-                    try self.codegen.emitStore(.w64, frame_ptr, slot, ret_reg_0);
+                    const slot = self.codegen.allocStackSlot(word_size);
+                    try self.codegen.emitStore(word, frame_ptr, slot, ret_reg_0);
                     return self.stackLocationForLayout(target_layout, slot);
                 },
                 .local => |local| return try self.emitValueLocal(local),
@@ -18192,10 +18192,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const hidden_locals = self.store.getLocalSpan(assign.hidden_args);
             if (arg_desc_locals.len != arg_locals.len) unreachable;
 
-            const call_arg_stride: i32 = 24;
+            // eval.boxy_abi.RocBoxyCallArg on the target: { value: pointer,
+            // layout: u32, desc: pointer } is three words with the layout in
+            // the second (boxy_abi.zig tests this shape).
+            const call_arg_stride: i32 = 3 * word_size;
             const call_arg_value_off: i32 = 0;
-            const call_arg_layout_off: i32 = 8;
-            const call_arg_desc_off: i32 = 16;
+            const call_arg_layout_off: i32 = word_size;
+            const call_arg_desc_off: i32 = 2 * word_size;
 
             const dict_slot = try self.boxyDictRefToSlot(assign.dict);
             const result_desc_slot: ?i32 = if (assign.result_desc) |ref| try self.boxyDescRefToSlot(ref) else null;
@@ -18227,28 +18230,28 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const entry_base = args_slot + @as(i32, @intCast(i)) * call_arg_stride;
                 const reg = try self.allocTempGeneral();
                 if (plan.value_off) |off| try self.codegen.emitLeaStack(reg, off) else try self.codegen.emitLoadImm(reg, 0);
-                try self.codegen.emitStore(.w64, frame_ptr, entry_base + call_arg_value_off, reg);
+                try self.codegen.emitStore(word, frame_ptr, entry_base + call_arg_value_off, reg);
                 try self.codegen.emitLoadImm(reg, @intFromEnum(plan.layout));
                 try self.codegen.emitStore(.w32, frame_ptr, entry_base + call_arg_layout_off, reg);
-                if (plan.desc_slot) |s| try self.codegen.emitLoad(.w64, reg, frame_ptr, s) else try self.codegen.emitLoadImm(reg, 0);
-                try self.codegen.emitStore(.w64, frame_ptr, entry_base + call_arg_desc_off, reg);
+                if (plan.desc_slot) |s| try self.codegen.emitLoad(word, reg, frame_ptr, s) else try self.codegen.emitLoadImm(reg, 0);
+                try self.codegen.emitStore(word, frame_ptr, entry_base + call_arg_desc_off, reg);
                 self.codegen.freeGeneral(reg);
             }
 
             const hidden_slot: i32 = if (hidden_locals.len == 0)
                 0
             else
-                self.codegen.allocStackSlot(@intCast(@as(i32, @intCast(hidden_locals.len)) * 8));
+                self.codegen.allocStackSlot(@intCast(@as(i32, @intCast(hidden_locals.len)) * word_size));
             for (hidden_offs, 0..) |off_opt, i| {
-                const hoff = hidden_slot + @as(i32, @intCast(i)) * 8;
+                const hoff = hidden_slot + @as(i32, @intCast(i)) * word_size;
                 const reg = try self.allocTempGeneral();
-                if (off_opt) |off| try self.codegen.emitLoad(.w64, reg, frame_ptr, off) else try self.codegen.emitLoadImm(reg, 0);
-                try self.codegen.emitStore(.w64, frame_ptr, hoff, reg);
+                if (off_opt) |off| try self.codegen.emitLoad(word, reg, frame_ptr, off) else try self.codegen.emitLoadImm(reg, 0);
+                try self.codegen.emitStore(word, frame_ptr, hoff, reg);
                 self.codegen.freeGeneral(reg);
             }
 
             const out_slot = try self.allocBoxyOutSlot(target_layout);
-            const out_desc_slot = self.codegen.allocStackSlot(8);
+            const out_desc_slot = self.codegen.allocStackSlot(word_size);
 
             var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
             try builder.addLeaArg(frame_ptr, out_slot);
@@ -23997,9 +24000,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // Spill the incoming argument-array, result, and result-descriptor
             // pointers to the frame before any of these registers can be
             // clobbered by argument setup or the procedure call.
-            const args_ptr_slot = self.codegen.allocStackSlot(8);
-            const ret_ptr_slot = self.codegen.allocStackSlot(8);
-            const ret_desc_ptr_slot = self.codegen.allocStackSlot(8);
+            const args_ptr_slot = self.codegen.allocStackSlot(word_size);
+            const ret_ptr_slot = self.codegen.allocStackSlot(word_size);
+            const ret_desc_ptr_slot = self.codegen.allocStackSlot(word_size);
             try self.saveIncomingPointerArg(args_ptr_slot, 0);
             try self.saveIncomingPointerArg(ret_ptr_slot, 1);
             try self.saveIncomingPointerArg(ret_desc_ptr_slot, 2);
@@ -24029,8 +24032,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const slot_offset = self.codegen.allocStackSlot(@intCast(slot_size));
                 param_slots[i] = slot_offset;
                 const ptr_reg = try self.allocTempGeneral();
-                try self.codegen.emitLoad(.w64, ptr_reg, frame_ptr, args_ptr_slot);
-                try self.codegen.emitLoad(.w64, ptr_reg, ptr_reg, @intCast(i * 8));
+                try self.codegen.emitLoad(word, ptr_reg, frame_ptr, args_ptr_slot);
+                try self.codegen.emitLoad(word, ptr_reg, ptr_reg, @intCast(i * word_size));
                 try self.copyBytesFromMemToStackOffset(
                     ptr_reg,
                     0,
@@ -24059,7 +24062,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             if (self.getLayoutSize(proc_spec.ret_layout) > 0) {
                 const ret_ptr_reg = try self.allocTempGeneral();
-                try self.codegen.emitLoad(.w64, ret_ptr_reg, frame_ptr, ret_ptr_slot);
+                try self.codegen.emitLoad(word, ret_ptr_reg, frame_ptr, ret_ptr_slot);
                 try self.storeResultToSavedPtr(result_loc, proc_spec.ret_layout, ret_ptr_reg);
                 self.codegen.freeGeneral(ret_ptr_reg);
             }
@@ -24115,14 +24118,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 null;
 
             const desc_ptr_reg = try self.allocTempGeneral();
-            try self.codegen.emitLoad(.w64, desc_ptr_reg, frame_ptr, ret_desc_ptr_slot);
+            try self.codegen.emitLoad(word, desc_ptr_reg, frame_ptr, ret_desc_ptr_slot);
             const value_reg = try self.allocTempGeneral();
             if (desc_value_slot) |slot| {
-                try self.codegen.emitLoad(.w64, value_reg, frame_ptr, slot);
+                try self.codegen.emitLoad(word, value_reg, frame_ptr, slot);
             } else {
                 try self.codegen.emitLoadImm(value_reg, 0);
             }
-            try self.codegen.emitStore(.w64, desc_ptr_reg, 0, value_reg);
+            try self.codegen.emitStore(word, desc_ptr_reg, 0, value_reg);
             self.codegen.freeGeneral(value_reg);
             self.codegen.freeGeneral(desc_ptr_reg);
         }

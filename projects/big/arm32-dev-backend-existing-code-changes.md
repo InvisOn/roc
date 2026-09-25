@@ -153,3 +153,10 @@ check could gate every later commit.
   helpers and the ZST list copies use words; `storeResultToSavedPtr`'s 8-bit
   narrowing shifts are register-width-relative (`word_bits - 8`). Needed
   because each is a pointer, a byte count or a register-width operation.
+- `LirCodeGen.zig`, `src/eval/boxy_abi.zig` (Boxy descriptor and dictionary
+  references): `generateBoxyDescRef`, `generateBoxyDictRef`,
+  `boxyDescRefToSlot`, the dictionary thunk bodies and `generateCallDict` use
+  words, and `generateCallDict` lays out `RocBoxyCallArg` as three target
+  words (value, layout, descriptor) instead of the literal offsets 0/8/16 and
+  stride 24. A new `boxy_abi` test pins that shape. Needed because descriptors
+  and dictionaries are pointers, and the literal layout is the 64-bit one.
