@@ -113,6 +113,41 @@ actually uses). The outputs are not byte-reproducible (musl's archive members
 are named by absolute cache paths), so there is no check mode; regenerate when
 the Zig version changes.
 
+## `ci/vendor_glibc_crt.py`
+
+**Purpose:** produces the glibc `Scrt1.o` that a `*linux` (glibc) test platform
+links, from the pinned Zig (0.16.0). The C library itself is the stub
+`libc.so` that `build.zig` generates for every GNU target.
+
+**Usage:**
+
+```
+python3 ci/vendor_glibc_crt.py arm32linux   # writes test/int/platform/targets/arm32linux/Scrt1.o
+```
+
+Then run `git add -f` on the output. `.gitignore` whitelists it. Like
+`vendor_musl_runtime.py`, the script takes the file named on a trivial
+program's link line (`zig build-exe --verbose-link`). Regenerate it when the
+Zig version changes.
+
+## `test/fx/platform/zig_arm_nested_struct_abi_probe.zig`
+
+**Purpose:** detects whether Zig still has the arm bug that `test/fx/platform/host.zig` works
+around (`work_around_zig_arm_nested_struct_bug`): Zig 0.16 passes a by-value
+`extern struct` that contains a struct at an even register. The test expects
+the bug and fails with `error.ZigNestedStructAbiBugFixed` once Zig is fixed.
+`host.zig` also has a comptime version gate that stops the fx host from
+building on any Zig other than 0.16.0, and it names this probe.
+
+**Usage:**
+
+```
+zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static \
+    --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig
+```
+
+CI runs it in `ci_zig.yml`. It is skipped on non-arm targets.
+
 ## `eval-test-runner --write-dev-code-hashes` / `--check-dev-code-hashes`
 
 **Purpose:** the golden byte-identity oracle for Track A: every eval case that
