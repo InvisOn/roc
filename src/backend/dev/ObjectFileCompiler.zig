@@ -968,13 +968,6 @@ fn compileStaticDataObjectBytes(
     };
 }
 
-/// Runtime-to-comptime dispatch for compilation.
-/// Uses inline for over RocTarget enum fields to select the correct LirCodeGen instantiation.
-///
-/// Only default-CPU targets are instantiated. A `v1` target compiles through
-/// its default twin's instantiation and carries its CPU level as a runtime
-/// field, so the baseline targets cost no extra monomorphizations: they select
-/// different instruction sequences, not a different code generator.
 /// Whether the dev backend generates native code for `target`: x86_64,
 /// aarch64 and arm32. wasm32 has its own backend, and every gate that decides
 /// whether the dev backend serves a target asks this.
@@ -985,6 +978,13 @@ pub fn supportsTarget(target: RocTarget) bool {
     };
 }
 
+/// Runtime-to-comptime dispatch for compilation.
+/// Uses inline for over RocTarget enum fields to select the correct LirCodeGen instantiation.
+///
+/// Only default-CPU targets are instantiated. A `v1` target compiles through
+/// its default twin's instantiation and carries its CPU level as a runtime
+/// field, so the baseline targets cost no extra monomorphizations: they select
+/// different instruction sequences, not a different code generator.
 fn crossCompileDispatch(
     allocator: Allocator,
     lir_store: *const LirStore,
