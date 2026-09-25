@@ -316,6 +316,9 @@ test "backend module imports" {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(@import("CallingConvention.zig"));
     std.testing.refAllDecls(@import("FrameBuilder.zig"));
+    // The arm32 link smoke program (`ci/arm32_link_smoke.py` runs it); its
+    // test checks the object it builds.
+    _ = @import("arm32_link_smoke.zig");
 }
 
 test "resolve builtin functions" {
