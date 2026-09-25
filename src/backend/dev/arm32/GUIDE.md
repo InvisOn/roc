@@ -23,7 +23,10 @@ and its reason is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   (armv7l), and all 121 `test/fx` programs build and run correctly under
   qemu. The fx host works around a Zig 0.16 arm ABI bug for one hosted
   function (`work_around_zig_arm_nested_struct_bug` in
-  `test/fx/platform/host.zig`; issues note).
+  `test/fx/platform/host.zig`; issues note). After a Zig upgrade the arm host
+  stops compiling until you run the probe it names:
+  `zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig`
+  (fails once the bug is fixed).
 - The default platform (a program with no `platform` header) builds for
   `arm32musl` and `arm32linux`: `test/cli/baseline_cpu_smoke.roc`, which
   exercises the NEON lowering, prints the same as on x64 under qemu and on

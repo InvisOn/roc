@@ -754,10 +754,31 @@ const HostRecord = extern struct { name: RocStr };
 // struct field has the same C ABI as that field on every target, so the Roc
 // side is unchanged and still correct.
 //
+// Two tripwires say when to remove it:
+// - `zig_arm_nested_struct_abi_probe.zig` (next to this file) expects the bug
+//   and fails, saying so, once Zig passes nested structs correctly.
+// - The comptime check below stops the build on any Zig other than the one the
+//   bug was confirmed on, so an upgrade forces running that probe.
+//
 // WHEN ZIG IS FIXED: set `work_around_zig_arm_nested_struct_bug` to false (then
-// delete it, `HostGreetingArg` and `hostRecordFromArg`, and give
-// `hostedHostGetGreeting` its plain `host: HostRecord` parameter).
+// delete it, `HostGreetingArg`, `hostRecordFromArg`, the version check and the
+// probe, and give `hostedHostGetGreeting` its plain `host: HostRecord`
+// parameter).
 const work_around_zig_arm_nested_struct_bug = builtin.cpu.arch == .arm;
+
+comptime {
+    const confirmed_on = std.SemanticVersion{ .major = 0, .minor = 16, .patch = 0 };
+    if (work_around_zig_arm_nested_struct_bug and builtin.zig_version.order(confirmed_on) != .eq) {
+        @compileError(std.fmt.comptimePrint(
+            \\Zig is {f}, but the arm nested-struct ABI workaround was confirmed on Zig {f}.
+            \\Check whether Zig still has the bug:
+            \\    zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig
+            \\If that probe FAILS (bug fixed), remove the workaround as the comment at
+            \\`work_around_zig_arm_nested_struct_bug` in test/fx/platform/host.zig says.
+            \\If it PASSES (bug still there), update `confirmed_on` here to the new version.
+        , .{ builtin.zig_version, confirmed_on }));
+    }
+}
 const HostGreetingArg = if (work_around_zig_arm_nested_struct_bug) RocStr else HostRecord;
 
 fn hostRecordFromArg(arg: HostGreetingArg) HostRecord {
