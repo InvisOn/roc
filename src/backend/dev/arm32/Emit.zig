@@ -1054,6 +1054,11 @@ pub fn Emit(comptime target: RocTarget) type {
             try self.emit32(condBits(.al) | 0x012FFF10 | @as(u32, reg.enc()));
         }
 
+        /// BX lr: return
+        pub fn ret(self: *Self) Allocator.Error!void {
+            try self.bxReg(.lr);
+        }
+
         /// BLX rm (call register; bit 0 selects Thumb state)
         pub fn blxReg(self: *Self, reg: GeneralReg) Allocator.Error!void {
             std.debug.assert(reg != .r15);

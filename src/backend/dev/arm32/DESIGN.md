@@ -27,7 +27,8 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | Track C: CLI test-runner cross-target rosters | Done with Track D (`int` and `fx` list arm32musl; the runner's `--cross-opt=dev`) |
 | Track D: CI lanes (arm32 cross-compile with `--opt=dev`, qemu on-target row, arm32 eval runner under qemu), allowed to fail | Done |
 | J1a: `arm32/CodeGen.zig`: allocator pools, stack slots, the ISA-neutral facade | Done |
-| J1b-J1f: frame, AAPCS32 calls, driver sites, Wide64 pairs, NEON lowering, acceptance test | Not started |
+| J1b: frame builders (deferred and forward) | Done |
+| J1b: AAPCS32 `CallBuilder`, ABI classifier; J1c-J1f: driver sites, Wide64 pairs, NEON lowering, acceptance test | Not started |
 | J2-J4: gates, qemu execution, lock-in | Not started |
 
 Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build

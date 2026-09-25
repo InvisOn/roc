@@ -795,6 +795,14 @@ test "arm32 encoding: bx lr" {
     try std.testing.expectEqualSlices(u8, &.{ 0x1e, 0xff, 0x2f, 0xe1 }, e.buf.items);
 }
 
+test "arm32 encoding: bx lr (2)" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.ret();
+    // e12fff1e
+    try std.testing.expectEqualSlices(u8, &.{ 0x1e, 0xff, 0x2f, 0xe1 }, e.buf.items);
+}
+
 test "arm32 encoding: blx r3" {
     var e = E.init(std.testing.allocator);
     defer e.deinit();
