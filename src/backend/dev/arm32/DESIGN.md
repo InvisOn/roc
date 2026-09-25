@@ -39,13 +39,16 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J2: the default platform declares `arm32musl` and `arm32linux` | Done; a CLI case builds `baseline_cpu_smoke.roc` for arm32musl |
 | J2: `arm32linux` (glibc) on the int platform | Done; runs on the Pi, CI builds it on the Linux host |
 | J2: arm32 lane of `run-check-simd-codegen` | Done; the exhaustive SIMD corpus builds, contains NEON, and passes under qemu and on the Pi |
+| J2: D10 register budget over every program J2 builds | Done: general 9 / 11, float 7 / 12, no pool exhausted (see "The register budget is already tight on 64-bit targets") |
+| J2: D2 floor asserted where code is generated | Done: `arm32/Emit.zig` checks Zig's arm baseline at comptime (see D2 under "Decisions as implemented") |
+| J2: gate-consistency test (`supportsTarget` against the `dev_object` snapshot lines) | Moved to J4: it cannot hold until J4 regenerates the arm32 snapshot lines |
 | J3b: `--cross-run`/`--cross-runner` in the CLI runner | Done; all 121 `test/fx` programs run correctly under qemu (the fx host works around a Zig 0.16 arm ABI bug) |
 | J3a, J3c, J4 | Not started |
 
-Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
---opt=dev --target=arm32musl` is still rejected (first by the platform's target
-list, then by the dev backend's dispatch), and every `dev_object` snapshot
-still prints `arm32*=NOT_IMPLEMENTED`.
+`roc build --opt=dev --target=arm32musl` and `--target=arm32linux` build real
+programs through the arm32 code generator. Every `dev_object` snapshot still
+prints `arm32*=NOT_IMPLEMENTED`: the plan regenerates those lines in J4, after
+J3's execution oracles have checked the code the hashes would lock in.
 
 ## Where arm32 sits in the pipeline
 
@@ -198,6 +201,20 @@ concrete or amended them.
   vector-only: `CodeGen.allocVector` hands them out first and the shared pool
   after them, while `allocFloat` (f32/f64) draws only from d0-d6. Calls spill
   vector locals as before, so no callee-saved register is involved.
+- **The floor is Zig's arm baseline, asserted in `Emit` (D2, amended).** D2
+  planned to record the floor in `cpuContract` by giving `.arm`
+  `instruction_features = neon`, and to assert
+  `requiredRuntimeCpuFeatures()` in `arm32/Emit.zig`. Since then the target
+  module has adopted a rule that forbids this: a target whose query names a CPU
+  model or adds CPU features raises the floor, so it must have a `v1` twin
+  (tests "every target Roc raises the CPU floor for has a v1 twin" and "arm32
+  and macOS arm64 have no v1 twin because Roc names no floor for them"). NEON
+  is already in Zig's arm baseline, so naming it would add a floor that is not
+  above anything, and D2 rules out an arm32 `v1` twin. The contract stays
+  empty. `Emit` instead asserts at comptime that the contract names no
+  features, and that `std.Target.Cpu.baseline` for the target has NEON and
+  lacks `hwdiv`/`hwdiv_arm`. The existing `src/target/mod.zig` test pins the
+  resolved query the same way at run time.
 - **Word division (D7).** The floor has no `SDIV`/`UDIV` (D2), so a word
   divide or remainder calls `__aeabi_idivmod`/`__aeabi_uidivmod` (quotient
   r0, remainder r1) through `emitWordDivRem`; signed modulo keeps its divisor
@@ -561,6 +578,21 @@ arm32 high-water mark stays within its pool. The measurement was taken with
 temporary instrumentation that is not in the tree; rerun it by reading
 `general_high_water`/`float_high_water` after compiling.
 
+J2 measured arm32 the same way, over every program it builds: the 121 fx
+programs, the int app, the SIMD differential corpus, `baseline_cpu_smoke.roc`
+and the 16 `dev_object` snapshot sources.
+
+| ISA | General peak / pool | Float peak / pool |
+|-----|---------------------|-------------------|
+| arm32 (AAPCS32) | 9 / 11 | 7 / 12 |
+
+The general peak is `dev_object_many_args` (argument marshalling). The float
+peak is the NEON lowering in the SIMD corpus. Before J2, the checked 64-bit
+multiply (`emitWide64MulChecked`) held both operand pairs in registers and
+reached 11 / 11. It now reads each operand word from memory when it needs it,
+so it holds 8 registers at most. No build hit an exhausted pool, which would
+panic rather than miscompile.
+
 ### Snapshot inputs must exercise code generation
 
 Two properties of `type=dev_object` snapshots decide whether a new snapshot
@@ -625,9 +657,8 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 
 ## Next steps
 
-In plan order: J1 (arm32 `CodeGen` with the `Wide64` pair lowering and the
-NEON lowering of the SIMD ops, AAPCS32 `CallBuilder`, four-word i128/Dec,
-every `binaryIs`, `wide64_reg_width` and
-`@compileError("arm32: ...")` site), J2 (gates and hello world under qemu and
-on the Raspberry Pi), J3 and J4. Every Track A change must leave both byte-identity oracles
+J1 and J2 are done. Next, in plan order: J3a (the eval suite on an arm32
+host, under qemu and on the Raspberry Pi), J3c, then J4 (regenerate the
+arm32 `dev_object` snapshot lines, add the gate-consistency test, update
+design.md). Every Track A change must leave both byte-identity oracles
 unchanged.
