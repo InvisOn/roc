@@ -324,14 +324,37 @@ builtin with a `u64` parameter needs the same.
 
 ### The wasm eval oracle cannot run in a 32-bit process
 
-Roc's wasm modules declare linear memory without a maximum, and bytebox
-reserves a module's whole possible memory up front: 4 GiB for wasm32. A
-32-bit process cannot hold that reservation, so the eval runner built for
-arm32 cannot execute wasm, and J3a's "same pass count as the host x86_64
-run" is measured over the interpreter and dev backends only. Declaring a
-maximum in the emitted modules would change the wasm backend's output and
-limit programs on every host, so it is not done for this; a bytebox that
-grows its memory without reserving the maximum would lift the restriction.
+- **Symptom:** in an eval runner built for arm32, every wasm evaluation failed
+  with `WasmExecFailed`. The ReleaseSafe runner shows the cause:
+  `wasm instantiate failed: Uninstantiable64BitLimitsOn32BitArch`.
+- **Cause:** Roc's wasm modules declare linear memory without a maximum
+  (`WasmModule.memory_max_pages = null`). bytebox then takes the wasm32 limit
+  of 65536 pages (4 GiB) and reserves all of it up front (`MemoryInstance.init`,
+  a `StableArray` of the maximum size). Its own check refuses a maximum above
+  `maxInt(usize)`, and 4 GiB does not fit a 32-bit address space. Nothing
+  about the program or the arm32 backend is involved: any 32-bit host fails
+  the same way.
+- **What J3a did:** `eval.backendAvailable(.wasm)` is `@sizeOf(usize) >= 8`,
+  and the eval runner asks it (it hardcoded `true` before), so a 32-bit build
+  reports wasm as `not_implemented` instead of failing. The comment at the
+  gate in `src/eval/mod.zig` explains why.
+- **What it costs:** on an arm32 (or any 32-bit) host the wasm backend is not
+  cross-checked by the eval corpus, and J3a's "same pass count as the host
+  x86_64 run" covers the interpreter and dev backends only. The REPL's wasm
+  backend is likewise unavailable in a 32-bit compiler. The wasm backend
+  itself is host-independent and stays fully tested on 64-bit hosts.
+- **Ways to lift it, in order of preference:**
+  1. bytebox grows linear memory on demand instead of reserving the maximum
+     (a change upstream, or to the vendored copy, which would need its own
+     decision).
+  2. The eval runner supplies memory through bytebox's `WasmMemoryExternal`
+     hooks. This does not work alone: `verifyLimitsAreInstantiable` rejects
+     the limit before the hooks are used, so it needs (1) too.
+  3. The wasm backend declares a memory maximum. This changes the emitted
+     modules on every host and caps every program's memory, so it is a
+     language/platform decision, not a test-harness fix.
+  Whichever lands, remove the `@sizeOf(usize)` gate in the same commit and
+  rerun the arm32 eval corpus under qemu to confirm wasm passes.
 
 ### A Debug arm32 eval runner does not link
 
@@ -394,5 +417,9 @@ Fix each one in its own commit, and remove its entry in that commit.
 - **The int app prints heap addresses,** so comparing its stdout across
   targets needs masking (the J3c lane masks `0x…`). Printing a stable token
   instead of the pointer would make the output directly comparable.
+- **The wasm eval oracle is off on 32-bit hosts** (see "The wasm eval oracle
+  cannot run in a 32-bit process" above for the cause and the options). The
+  fix belongs in bytebox's memory reservation; remove the gate in
+  `eval.backendAvailable` in the same commit.
 - **Probe apps that read stdin block without input.** Any ad-hoc
   build-and-run script must redirect stdin (`</dev/null`) and use a timeout.
