@@ -2627,7 +2627,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     // Calculate element address: ptr + index * elem_size
                     const addr_reg = try self.allocTempGeneral();
-                    try self.codegen.emit.movRegReg(word, addr_reg, index_reg);
+                    try self.emitMovRegReg(addr_reg, index_reg);
                     self.codegen.freeGeneral(index_reg);
 
                     if (elem_size != 1) {
@@ -2767,7 +2767,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitLoadStack(word, ptr_reg, list_base);
 
                     const addr_reg = try self.allocTempGeneral();
-                    try self.codegen.emit.movRegReg(word, addr_reg, index_reg);
+                    try self.emitMovRegReg(addr_reg, index_reg);
                     self.codegen.freeGeneral(index_reg);
                     if (elem_size != 1) {
                         const size_reg = try self.allocTempGeneral();
@@ -2833,7 +2833,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     const index_reg = try self.ensureInGeneralReg(index_loc);
                     const addr_reg = try self.allocTempGeneral();
-                    try self.codegen.emit.movRegReg(word, addr_reg, index_reg);
+                    try self.emitMovRegReg(addr_reg, index_reg);
                     self.codegen.freeGeneral(index_reg);
                     if (elem_size != 1) {
                         const size_reg = try self.allocTempGeneral();
@@ -3506,6 +3506,22 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .f64_to_bits => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+                    if (comptime isa == .arm32) {
+                        // The u64 result is memory-resident (D6). A NaN
+                        // compares unordered with itself (V set).
+                        const float_reg = try self.ensureInFloatReg(src_loc, .f64);
+                        const slot = self.codegen.allocStackSlot(8);
+                        try self.codegen.emitStoreStackF64(slot, float_reg);
+                        try self.codegen.emit.vcmpF64(float_reg, float_reg);
+                        try self.codegen.emit.vmrsApsrNzcv();
+                        self.codegen.freeFloat(float_reg);
+                        const not_nan_patch = try self.codegen.emitCondJump(.vc);
+                        const temp = try self.allocTempGeneral();
+                        try self.emitStoreImm64(temp, frame_ptr, slot, @bitCast(builtins.float_bits.normalized_f64_nan_bits));
+                        self.codegen.freeGeneral(temp);
+                        try self.codegen.patchJump(not_nan_patch, self.codegen.currentOffset());
+                        return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = .u64 } };
+                    }
                     const reg = try self.ensureInGeneralReg(src_loc);
                     try self.emitNormalizeNanBitsInReg(reg, .f64);
                     return .{ .general_reg = reg };
@@ -3513,6 +3529,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .f64_from_bits => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+                    if (comptime word_size < 8) {
+                        // The u64 operand is memory-resident (D6): copy its bytes.
+                        const src_offset = try self.wide64StackOffset(src_loc);
+                        const slot = self.codegen.allocStackSlot(8);
+                        try self.copyBytesToStackOffset(slot, .{ .stack = .{ .offset = src_offset, .size = .qword, .layout_idx = .u64 } }, 8);
+                        return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = .f64 } };
+                    }
                     const bits_reg = try self.ensureInGeneralReg(src_loc);
                     const stack_offset = self.codegen.allocStackSlot(8);
                     try self.codegen.emitStoreStack(wide64_reg_width, stack_offset, bits_reg);
@@ -5739,6 +5762,156 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
         }
 
+        /// Store a builtin's 64-bit result, returned in r0:r1 on a 32-bit
+        /// target, to a fresh slot: a memory-resident Wide64 (D6).
+        fn wide64FromRet(self: *Self, value_layout: layout.Idx) Allocator.Error!ValueLocation {
+            const slot = self.codegen.allocStackSlot(8);
+            try self.codegen.emitStoreStack(word, slot, internal_ret_regs[0]);
+            try self.codegen.emitStoreStack(word, slot + word_size, internal_ret_regs[1]);
+            return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = value_layout } };
+        }
+
+        /// The stack offset of the eight bytes of a 64-bit value (a Wide64
+        /// on a 32-bit target: memory-resident, or an immediate stored here).
+        fn wide64StackOffset(self: *Self, loc: ValueLocation) Allocator.Error!i32 {
+            return switch (loc) {
+                .stack => |s| s.offset,
+                .immediate_i64 => |val| blk: {
+                    const slot = self.codegen.allocStackSlot(8);
+                    const temp = try self.allocTempGeneral();
+                    try self.emitStoreImm64(temp, frame_ptr, slot, val);
+                    self.codegen.freeGeneral(temp);
+                    break :blk slot;
+                },
+                .immediate_f64 => |val| blk: {
+                    const slot = self.codegen.allocStackSlot(8);
+                    const temp = try self.allocTempGeneral();
+                    try self.emitStoreImm64(temp, frame_ptr, slot, @bitCast(val));
+                    self.codegen.freeGeneral(temp);
+                    break :blk slot;
+                },
+                .float_reg => |float| blk: {
+                    std.debug.assert(float.width == .f64);
+                    const slot = self.codegen.allocStackSlot(8);
+                    try self.codegen.emitStoreStackF64(slot, float.reg);
+                    self.codegen.freeFloat(float.reg);
+                    break :blk slot;
+                },
+                // A Wide64 is memory-resident or an immediate (D6).
+                .general_reg, .vector_reg, .stack_i128, .stack_str, .list_stack, .immediate_f32, .immediate_i128, .noreturn => unreachable,
+            };
+        }
+
+        /// Copy the eight bytes of a Wide64 (D6) to `[ptr_reg]`.
+        fn storeWide64ToPtr(self: *Self, loc: ValueLocation, value_layout: layout.Idx, ptr_reg: GeneralReg) Allocator.Error!void {
+            const off = try self.wide64StackOffset(loc);
+            try self.copyStackToPtr(.{ .stack = .{ .offset = off, .size = .qword, .layout_idx = value_layout } }, ptr_reg, 8);
+        }
+
+        /// The stack offset of `loc` widened to 64 bits: a word-sized or
+        /// narrower integer is sign- or zero-extended into a fresh 8-byte
+        /// slot; a 64-bit value is used where it is.
+        fn wide64StackOffsetExtended(self: *Self, loc: ValueLocation, value_layout: layout.Idx) Allocator.Error!i32 {
+            const shape = scalarIntShape(value_layout);
+            if (shape == null or shape.?.bits > word_bits) return self.wide64StackOffset(loc);
+            return self.wide64StackOffsetFromShape(loc, shape.?);
+        }
+
+        /// A word-sized or narrower integer of `shape`, sign- or zero-extended
+        /// into a fresh 8-byte slot.
+        fn wide64StackOffsetFromShape(self: *Self, loc: ValueLocation, shape: ScalarIntShape) Allocator.Error!i32 {
+            std.debug.assert(shape.bits <= word_bits);
+            const reg = try self.ensureInGeneralReg(loc);
+            defer self.codegen.freeGeneral(reg);
+            const bits = shape.bits;
+            if (bits < word_bits) {
+                const shift: u8 = word_bits - bits;
+                try self.codegen.emitShlImm(word, reg, reg, shift);
+                if (shape.signed) try self.codegen.emitAsrImm(word, reg, reg, shift) else try self.codegen.emitLsrImm(word, reg, reg, shift);
+            }
+            const slot = self.codegen.allocStackSlot(8);
+            try self.codegen.emitStoreStack(word, slot, reg);
+            if (shape.signed) {
+                try self.codegen.emitAsrImm(word, reg, reg, word_bits - 1);
+            } else {
+                try self.codegen.emitLoadImm(reg, 0);
+            }
+            try self.codegen.emitStoreStack(word, slot + word_size, reg);
+            return slot;
+        }
+
+        /// The hasher builtins on a 32-bit target: the u64 state and every
+        /// 64-bit operand travel as register pairs or stack pairs (D6's Wide64,
+        /// placed by `CallBuilder.addMem64Arg`), and the u64 result is stored
+        /// from r0:r1.
+        fn generateHasherLowLevelWide64(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            const op = narrowEnum(HasherOp, ll.op);
+            var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+            if (op == .dict_pseudo_seed) {
+                if (args.len != 0) unreachable;
+                self.fragment_context.dict_seed = true;
+                if (self.dict_seed_mode == .comptime_zero) return .{ .immediate_i64 = 0 };
+                try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.dict_pseudo_seed));
+                return self.wide64FromRet(.u64);
+            }
+            const seed_off = try self.wide64StackOffset(try self.emitValueLocal(GuardedList.at(args, 0)));
+            try builder.addMem64Arg(frame_ptr, seed_off);
+            switch (op) {
+                .hasher_finish => try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.hasher_finish)),
+                .hasher_write_bool,
+                .hasher_write_u8,
+                .hasher_write_u16,
+                .hasher_write_u32,
+                .hasher_write_u64,
+                .hasher_write_i8,
+                .hasher_write_i16,
+                .hasher_write_i32,
+                .hasher_write_i64,
+                => {
+                    const value_local = GuardedList.at(args, 1);
+                    const value_off = try self.wide64StackOffsetExtended(try self.emitValueLocal(value_local), self.localLayout(value_local));
+                    try builder.addImmArg(@intFromEnum(lir.hasherDomain(ll.op)));
+                    try builder.addMem64Arg(frame_ptr, value_off);
+                    try builder.addImmArg(lir.hasherU64Width(ll.op));
+                    try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.hasher_write_u64));
+                },
+                .hasher_write_f32 => {
+                    const bits_reg = try self.materializeF32BitsInGeneralReg(try self.emitValueLocal(GuardedList.at(args, 1)));
+                    try builder.addRegArg(bits_reg);
+                    try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.hasher_write_f32));
+                    self.codegen.freeGeneral(bits_reg);
+                },
+                .hasher_write_f64 => {
+                    const bits_off = try self.wide64StackOffset(try self.emitValueLocal(GuardedList.at(args, 1)));
+                    try builder.addMem64Arg(frame_ptr, bits_off);
+                    try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.hasher_write_f64));
+                },
+                .hasher_write_u128, .hasher_write_i128, .hasher_write_dec => {
+                    const value_off = try self.ensureOnStack(try self.emitValueLocal(GuardedList.at(args, 1)), 16);
+                    try builder.addImmArg(@intFromEnum(lir.hasherDomain(ll.op)));
+                    try builder.addMem64Arg(frame_ptr, value_off);
+                    try builder.addMem64Arg(frame_ptr, value_off + 8);
+                    try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.hasher_write_u128));
+                },
+                .hasher_write_bytes => {
+                    const list_off = try self.ensureOnStack(try self.emitValueLocal(GuardedList.at(args, 1)), roc_list_size);
+                    try builder.addImmArg(@intCast(@intFromEnum(builtins.hash.HasherDomain.bytes)));
+                    try builder.addMemArg(frame_ptr, list_off + listFieldOffset("bytes"));
+                    try builder.addMemArg(frame_ptr, list_off + listFieldOffset("length"));
+                    try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.hasher_write_bytes));
+                },
+                .hasher_write_str => {
+                    const str_off = try self.ensureOnStack(try self.emitValueLocal(GuardedList.at(args, 1)), roc_str_size);
+                    try builder.addMemArg(frame_ptr, str_off);
+                    try builder.addMemArg(frame_ptr, str_off + strFieldOffset("length"));
+                    try builder.addMemArg(frame_ptr, str_off + strFieldOffset("capacity_or_alloc_ptr"));
+                    try self.callBuiltin(&builder, LowLevelBuiltins.hasherOp(.hasher_write_str));
+                },
+                .dict_pseudo_seed => unreachable,
+            }
+            return self.wide64FromRet(.u64);
+        }
+
         fn hasherStateReg(self: *Self, local: LocalId) Allocator.Error!GeneralReg {
             const loc = try self.emitValueLocal(local);
             return switch (loc) {
@@ -5762,9 +5935,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             };
         }
 
-        /// The u64 result of a builtin, in one register. Only a 64-bit target
-        /// returns a u64 in one register.
+        /// The u64 result of a builtin: one register on a 64-bit target; on a
+        /// 32-bit target the r0:r1 pair, stored as a memory-resident Wide64.
         fn scalarRetReg(self: *Self) Allocator.Error!ValueLocation {
+            if (comptime word_size < 8) return self.wide64FromRet(.u64);
             const result_reg = try self.allocTempGeneral();
             try self.codegen.emit.movRegReg(wide64_reg_width, result_reg, ret_reg_0);
             return .{ .general_reg = result_reg };
@@ -7079,6 +7253,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// time is tracked in roc-lang/roc#10552.
         fn simdOpUsesBaselineBuiltin(self: *Self, op: lir.LowLevel) bool {
             if (self.codegen.cpu_level != .v1) return false;
+            if (comptime isa == .arm32) return false;
             if (comptime !isa.binaryIs(.x86_64)) {
                 // NEON is mandatory in Armv8.0-A, so every other op already has
                 // a baseline instruction. Carryless multiply is PMULL64, which
@@ -8116,27 +8291,30 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             return .{ .list_stack = .{ .struct_offset = result_offset, .data_offset = 0, .num_elements = 0 } };
         }
 
+        /// The hasher low-levels.
+        const HasherOp = enum(u16) {
+            dict_pseudo_seed = @intFromEnum(lir.LowLevel.dict_pseudo_seed),
+            hasher_finish = @intFromEnum(lir.LowLevel.hasher_finish),
+            hasher_write_bool = @intFromEnum(lir.LowLevel.hasher_write_bool),
+            hasher_write_u8 = @intFromEnum(lir.LowLevel.hasher_write_u8),
+            hasher_write_u16 = @intFromEnum(lir.LowLevel.hasher_write_u16),
+            hasher_write_u32 = @intFromEnum(lir.LowLevel.hasher_write_u32),
+            hasher_write_u64 = @intFromEnum(lir.LowLevel.hasher_write_u64),
+            hasher_write_i8 = @intFromEnum(lir.LowLevel.hasher_write_i8),
+            hasher_write_i16 = @intFromEnum(lir.LowLevel.hasher_write_i16),
+            hasher_write_i32 = @intFromEnum(lir.LowLevel.hasher_write_i32),
+            hasher_write_i64 = @intFromEnum(lir.LowLevel.hasher_write_i64),
+            hasher_write_f32 = @intFromEnum(lir.LowLevel.hasher_write_f32),
+            hasher_write_f64 = @intFromEnum(lir.LowLevel.hasher_write_f64),
+            hasher_write_u128 = @intFromEnum(lir.LowLevel.hasher_write_u128),
+            hasher_write_i128 = @intFromEnum(lir.LowLevel.hasher_write_i128),
+            hasher_write_dec = @intFromEnum(lir.LowLevel.hasher_write_dec),
+            hasher_write_bytes = @intFromEnum(lir.LowLevel.hasher_write_bytes),
+            hasher_write_str = @intFromEnum(lir.LowLevel.hasher_write_str),
+        };
+
         fn generateHasherLowLevel(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
-            const HasherOp = enum(u16) {
-                dict_pseudo_seed = @intFromEnum(lir.LowLevel.dict_pseudo_seed),
-                hasher_finish = @intFromEnum(lir.LowLevel.hasher_finish),
-                hasher_write_bool = @intFromEnum(lir.LowLevel.hasher_write_bool),
-                hasher_write_u8 = @intFromEnum(lir.LowLevel.hasher_write_u8),
-                hasher_write_u16 = @intFromEnum(lir.LowLevel.hasher_write_u16),
-                hasher_write_u32 = @intFromEnum(lir.LowLevel.hasher_write_u32),
-                hasher_write_u64 = @intFromEnum(lir.LowLevel.hasher_write_u64),
-                hasher_write_i8 = @intFromEnum(lir.LowLevel.hasher_write_i8),
-                hasher_write_i16 = @intFromEnum(lir.LowLevel.hasher_write_i16),
-                hasher_write_i32 = @intFromEnum(lir.LowLevel.hasher_write_i32),
-                hasher_write_i64 = @intFromEnum(lir.LowLevel.hasher_write_i64),
-                hasher_write_f32 = @intFromEnum(lir.LowLevel.hasher_write_f32),
-                hasher_write_f64 = @intFromEnum(lir.LowLevel.hasher_write_f64),
-                hasher_write_u128 = @intFromEnum(lir.LowLevel.hasher_write_u128),
-                hasher_write_i128 = @intFromEnum(lir.LowLevel.hasher_write_i128),
-                hasher_write_dec = @intFromEnum(lir.LowLevel.hasher_write_dec),
-                hasher_write_bytes = @intFromEnum(lir.LowLevel.hasher_write_bytes),
-                hasher_write_str = @intFromEnum(lir.LowLevel.hasher_write_str),
-            };
+            if (comptime word_size < 8) return self.generateHasherLowLevelWide64(ll, args);
             switch (narrowEnum(HasherOp, ll.op)) {
                 .dict_pseudo_seed => {
                     if (args.len != 0) unreachable;
@@ -8966,7 +9144,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 if (mode == .last) {
                     // Element is at ptr + (len-1) * elem_size
                     const idx_reg = try self.allocTempGeneral();
-                    try self.codegen.emit.movRegReg(word, idx_reg, len_reg);
+                    try self.emitMovRegReg(idx_reg, len_reg);
                     try self.codegen.emitSubImm(word, idx_reg, idx_reg, 1);
                     if (elem_size != 1) {
                         const size_reg = try self.allocTempGeneral();
@@ -9152,7 +9330,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // addr = ptr + index * elem_size
             const addr_reg = try self.allocTempGeneral();
-            try self.codegen.emit.movRegReg(word, addr_reg, len_reg);
+            try self.emitMovRegReg(addr_reg, len_reg);
             self.codegen.freeGeneral(len_reg);
 
             if (elem_size != 1) {
@@ -9816,11 +9994,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitStoreStack(word, dest_offset, reg);
                     switch (signedness) {
                         .signed => {
-                            if (comptime isa.binaryIs(.aarch64)) {
-                                try self.codegen.emit.asrRegRegImm(word, high_reg, reg, word_bits - 1);
-                            } else {
-                                try self.emitMovRegReg(high_reg, reg);
-                                try self.codegen.emit.sarRegImm8(word, high_reg, word_bits - 1);
+                            switch (isa) {
+                                .aarch64 => try self.codegen.emit.asrRegRegImm(word, high_reg, reg, word_bits - 1),
+                                .x86_64 => {
+                                    try self.emitMovRegReg(high_reg, reg);
+                                    try self.codegen.emit.sarRegImm8(word, high_reg, word_bits - 1);
+                                },
+                                .arm32 => try self.codegen.emitAsrImm(word, high_reg, reg, word_bits - 1),
                             }
                         },
                         .unsigned => try self.codegen.emitLoadImm(high_reg, 0),
@@ -10407,8 +10587,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         /// Integer binary operation (including `num_abs_diff`) on an I64 or
-        /// U64 wider than the target word, held as a register pair or in
-        /// memory (D6's `Wide64`). Only a 32-bit target has one; J1 lowers it.
+        /// U64 wider than the target word: D6's memory-resident `Wide64`,
+        /// computed in a register pair (low word first) and stored to a fresh
+        /// slot. Division goes to D7's `__aeabi_*` helpers.
         fn generateWide64IntBinop(
             self: *Self,
             op: lir.LowLevel,
@@ -10416,8 +10597,351 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             rhs_loc: ValueLocation,
             operand_layout: layout.Idx,
         ) Allocator.Error!ValueLocation {
-            _ = .{ self, op, lhs_loc, rhs_loc, operand_layout };
-            @compileError("arm32: TODO Wide64 integer arithmetic (J1)");
+            if (comptime isa != .arm32) @compileError("the Wide64 pair lowering is written for arm32");
+            const signed = scalarIntShape(operand_layout).?.signed;
+            if (op == .num_abs_diff) return self.generateWide64AbsDiff(lhs_loc, rhs_loc, signed);
+            const family_entry = CheckedArithmetic.classify(op);
+            const checked_op = crashingBinaryOp(op);
+            switch (narrowEnum(IntBinOp, plainBinaryOp(op))) {
+                .num_plus, .num_minus => |add_sub| {
+                    const is_add = add_sub == .num_plus;
+                    const a = try self.loadWide64Pair(lhs_loc);
+                    const b = try self.loadWide64Pair(rhs_loc);
+                    if (is_add) {
+                        try self.codegen.emit.addsRegRegReg(a.lo, a.lo, b.lo);
+                        try self.codegen.emit.adcsRegRegReg(a.hi, a.hi, b.hi);
+                    } else {
+                        try self.codegen.emit.subsRegRegReg(a.lo, a.lo, b.lo);
+                        try self.codegen.emit.sbcsRegRegReg(a.hi, a.hi, b.hi);
+                    }
+                    self.freeWide64Pair(b);
+                    const overflow: Condition = if (signed)
+                        CodeGen.condOverflow()
+                    else if (is_add)
+                        CodeGen.condUnsignedAddOverflow()
+                    else
+                        CodeGen.condUnsignedSubOverflow();
+                    return self.finishWide64Overflowing(a, overflow, operand_layout, family_entry, checked_op);
+                },
+                .num_times => {
+                    const wraps = if (family_entry) |entry| entry.mode != .crash_on_overflow and entry.mode != .overflows else checked_op == null;
+                    if (wraps) {
+                        const a = try self.loadWide64Pair(lhs_loc);
+                        const b = try self.loadWide64Pair(rhs_loc);
+                        const result = try self.allocWide64Pair();
+                        // The low 64 bits of the product: lo*lo in full, plus
+                        // both cross products' low words into the high word.
+                        try self.codegen.emit.umull(result.lo, result.hi, a.lo, b.lo);
+                        try self.codegen.emit.mlaRegRegRegReg(result.hi, a.lo, b.hi, result.hi);
+                        try self.codegen.emit.mlaRegRegRegReg(result.hi, a.hi, b.lo, result.hi);
+                        self.freeWide64Pair(a);
+                        self.freeWide64Pair(b);
+                        return self.storeWide64Pair(result, operand_layout);
+                    }
+                    const result = try self.emitWide64MulChecked(lhs_loc, rhs_loc, signed);
+                    return self.finishWide64Overflowing(result, CodeGen.condNotEqual(), operand_layout, family_entry, checked_op);
+                },
+                .num_div_by, .num_div_trunc_by, .num_rem_by, .num_mod_by => |div_op| {
+                    const lhs_offset = try self.wide64StackOffset(lhs_loc);
+                    const rhs_offset = try self.wide64StackOffset(rhs_loc);
+                    if (checked_op) |tag| {
+                        const b = try self.loadWide64Pair(.{ .stack = .{ .offset = rhs_offset, .size = .qword, .layout_idx = operand_layout } });
+                        const scratch = try self.allocTempGeneral();
+                        try self.codegen.emit.dataProc(.al, .orr, true, scratch, b.lo, .{ .reg = b.hi });
+                        try self.emitCrashOnCond(CodeGen.condEqual(), checkedZeroDenominatorMessage(tag, operand_layout));
+                        if (signed and (div_op == .num_div_by or div_op == .num_div_trunc_by)) {
+                            // I64 minimum divided by -1 overflows. (Its
+                            // remainder is 0, which the helper returns.)
+                            try self.codegen.emit.andRegRegReg(scratch, b.lo, b.hi);
+                            try self.codegen.emit.cmnRegModImm(scratch, arm32.ModImm.of(1));
+                            const rhs_not_neg_one = try self.codegen.emitJumpIfNotEqual();
+                            const a = try self.loadWide64Pair(.{ .stack = .{ .offset = lhs_offset, .size = .qword, .layout_idx = operand_layout } });
+                            try self.codegen.emit.eorRegRegModImm(a.hi, a.hi, arm32.ModImm.of(0x8000_0000));
+                            try self.codegen.emit.dataProc(.al, .orr, true, a.hi, a.hi, .{ .reg = a.lo });
+                            try self.emitCrashOnCond(CodeGen.condEqual(), checkedOverflowMessage(tag));
+                            self.freeWide64Pair(a);
+                            try self.codegen.patchJump(rhs_not_neg_one, self.codegen.currentOffset());
+                        }
+                        self.codegen.freeGeneral(scratch);
+                        self.freeWide64Pair(b);
+                    }
+                    // Quotient in r0:r1, remainder in r2:r3.
+                    var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+                    try builder.addMem64Arg(frame_ptr, lhs_offset);
+                    try builder.addMem64Arg(frame_ptr, rhs_offset);
+                    try self.callAeabiHelper(&builder, if (signed) .__aeabi_ldivmod else .__aeabi_uldivmod);
+                    const slot = self.codegen.allocStackSlot(8);
+                    const wants_quotient = div_op == .num_div_by or div_op == .num_div_trunc_by;
+                    try self.codegen.emitStoreStack(word, slot, if (wants_quotient) .r0 else .r2);
+                    try self.codegen.emitStoreStack(word, slot + word_size, if (wants_quotient) .r1 else .r3);
+                    if (div_op == .num_mod_by and signed) {
+                        // Mathematical modulo takes the divisor's sign: add
+                        // the divisor to a non-zero remainder of the other sign.
+                        const rem = try self.loadWide64Pair(.{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = operand_layout } });
+                        const b = try self.loadWide64Pair(.{ .stack = .{ .offset = rhs_offset, .size = .qword, .layout_idx = operand_layout } });
+                        const scratch = try self.allocTempGeneral();
+                        try self.codegen.emit.dataProc(.al, .orr, true, scratch, rem.lo, .{ .reg = rem.hi });
+                        const zero_patch = try self.codegen.emitJumpIfEqual();
+                        try self.codegen.emit.dataProc(.al, .eor, true, scratch, rem.hi, .{ .reg = b.hi });
+                        const same_sign_patch = try self.codegen.emitCondJump(.pl);
+                        try self.codegen.emit.addsRegRegReg(rem.lo, rem.lo, b.lo);
+                        try self.codegen.emit.adcRegRegReg(rem.hi, rem.hi, b.hi);
+                        try self.codegen.emitStoreStack(word, slot, rem.lo);
+                        try self.codegen.emitStoreStack(word, slot + word_size, rem.hi);
+                        const done = self.codegen.currentOffset();
+                        try self.codegen.patchJump(zero_patch, done);
+                        try self.codegen.patchJump(same_sign_patch, done);
+                        self.codegen.freeGeneral(scratch);
+                        self.freeWide64Pair(b);
+                        self.freeWide64Pair(rem);
+                    }
+                    return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = operand_layout } };
+                },
+                .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by => |shift_op| {
+                    const a = try self.loadWide64Pair(lhs_loc);
+                    // The count is taken modulo 64. Register shifts read the
+                    // count's bottom byte and give 0 (LSL/LSR) or the sign
+                    // (ASR) for 32 or more, so a negative `32 - n` or `n - 32`
+                    // contributes nothing to an LSL/LSR term.
+                    const count = try self.ensureInGeneralReg(rhs_loc);
+                    try self.codegen.emit.andRegRegModImm(count, count, arm32.ModImm.of(63));
+                    const t = try self.allocTempGeneral();
+                    if (shift_op == .num_shift_left_by) {
+                        try self.emitArm32ShiftReg(a.hi, a.hi, .lsl, count);
+                        try self.codegen.emit.subRegRegModImm(t, count, arm32.ModImm.of(32));
+                        try self.codegen.emit.dataProc(.al, .orr, false, a.hi, a.hi, .{ .shift_reg = .{ .rm = a.lo, .kind = .lsl, .rs = t } });
+                        try self.codegen.emit.rsbRegRegModImm(t, count, arm32.ModImm.of(32));
+                        try self.codegen.emit.dataProc(.al, .orr, false, a.hi, a.hi, .{ .shift_reg = .{ .rm = a.lo, .kind = .lsr, .rs = t } });
+                        try self.emitArm32ShiftReg(a.lo, a.lo, .lsl, count);
+                    } else if (shift_op == .num_shift_right_zf_by or !signed) {
+                        try self.emitArm32ShiftReg(a.lo, a.lo, .lsr, count);
+                        try self.codegen.emit.subRegRegModImm(t, count, arm32.ModImm.of(32));
+                        try self.codegen.emit.dataProc(.al, .orr, false, a.lo, a.lo, .{ .shift_reg = .{ .rm = a.hi, .kind = .lsr, .rs = t } });
+                        try self.codegen.emit.rsbRegRegModImm(t, count, arm32.ModImm.of(32));
+                        try self.codegen.emit.dataProc(.al, .orr, false, a.lo, a.lo, .{ .shift_reg = .{ .rm = a.hi, .kind = .lsl, .rs = t } });
+                        try self.emitArm32ShiftReg(a.hi, a.hi, .lsr, count);
+                    } else {
+                        // ASR by 32 or more fills with the sign instead of
+                        // giving 0, so a count of 32 or more replaces the low
+                        // word with `hi ASR (n - 32)`.
+                        try self.emitArm32ShiftReg(a.lo, a.lo, .lsr, count);
+                        try self.codegen.emit.rsbRegRegModImm(t, count, arm32.ModImm.of(32));
+                        try self.codegen.emit.dataProc(.al, .orr, false, a.lo, a.lo, .{ .shift_reg = .{ .rm = a.hi, .kind = .lsl, .rs = t } });
+                        try self.codegen.emit.subsRegRegModImm(t, count, arm32.ModImm.of(32));
+                        try self.codegen.emit.dataProc(.ge, .mov, false, a.lo, .r0, .{ .shift_reg = .{ .rm = a.hi, .kind = .asr, .rs = t } });
+                        try self.emitArm32ShiftReg(a.hi, a.hi, .asr, count);
+                    }
+                    self.codegen.freeGeneral(t);
+                    self.codegen.freeGeneral(count);
+                    return self.storeWide64Pair(a, operand_layout);
+                },
+                .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor => |logic_op| {
+                    const a = try self.loadWide64Pair(lhs_loc);
+                    const b = try self.loadWide64Pair(rhs_loc);
+                    const data_op: arm32.DataOp = if (logic_op == .num_bitwise_and)
+                        .@"and"
+                    else if (logic_op == .num_bitwise_or)
+                        .orr
+                    else
+                        .eor;
+                    try self.codegen.emit.dataProc(.al, data_op, false, a.lo, a.lo, .{ .reg = b.lo });
+                    try self.codegen.emit.dataProc(.al, data_op, false, a.hi, a.hi, .{ .reg = b.hi });
+                    self.freeWide64Pair(b);
+                    return self.storeWide64Pair(a, operand_layout);
+                },
+                .num_is_eq => {
+                    const a = try self.loadWide64Pair(lhs_loc);
+                    const b = try self.loadWide64Pair(rhs_loc);
+                    try self.codegen.emit.eorRegRegReg(a.lo, a.lo, b.lo);
+                    try self.codegen.emit.eorRegRegReg(a.hi, a.hi, b.hi);
+                    try self.codegen.emit.dataProc(.al, .orr, true, a.lo, a.lo, .{ .reg = a.hi });
+                    self.freeWide64Pair(b);
+                    self.codegen.freeGeneral(a.hi);
+                    try self.codegen.emitSetCond(a.lo, CodeGen.condEqual());
+                    return .{ .general_reg = a.lo };
+                },
+                .num_is_lt, .num_is_lte, .num_is_gt, .num_is_gte => |cmp_op| {
+                    // CMP/SBCS computes `x - y` across the pair, leaving the
+                    // flags a single 64-bit compare would. `>` and `<=` swap
+                    // the operands to use `<` and `>=`.
+                    const swap = cmp_op == .num_is_gt or cmp_op == .num_is_lte;
+                    const x = try self.loadWide64Pair(if (swap) rhs_loc else lhs_loc);
+                    const y = try self.loadWide64Pair(if (swap) lhs_loc else rhs_loc);
+                    try self.codegen.emit.cmpRegReg(x.lo, y.lo);
+                    try self.codegen.emit.sbcsRegRegReg(x.hi, x.hi, y.hi);
+                    self.freeWide64Pair(y);
+                    self.codegen.freeGeneral(x.hi);
+                    const less = cmp_op == .num_is_lt or cmp_op == .num_is_gt;
+                    const cond: Condition = if (less)
+                        (if (signed) CodeGen.condLess() else CodeGen.condBelow())
+                    else
+                        (if (signed) CodeGen.condGreaterOrEqual() else CodeGen.condAboveOrEqual());
+                    try self.codegen.emitSetCond(x.lo, cond);
+                    return .{ .general_reg = x.lo };
+                },
+            }
+        }
+
+        /// A Wide64 in a register pair for the length of one operation.
+        const Wide64Pair = struct { lo: GeneralReg, hi: GeneralReg };
+
+        fn allocWide64Pair(self: *Self) Allocator.Error!Wide64Pair {
+            const lo = try self.allocTempGeneral();
+            return .{ .lo = lo, .hi = try self.allocTempGeneral() };
+        }
+
+        fn freeWide64Pair(self: *Self, pair: Wide64Pair) void {
+            self.codegen.freeGeneral(pair.lo);
+            self.codegen.freeGeneral(pair.hi);
+        }
+
+        /// Load a Wide64 (memory-resident or an immediate) into a fresh pair.
+        fn loadWide64Pair(self: *Self, loc: ValueLocation) Allocator.Error!Wide64Pair {
+            switch (loc) {
+                .immediate_i64 => |val| {
+                    const bits: u64 = @bitCast(val);
+                    const pair = try self.allocWide64Pair();
+                    try self.codegen.emitLoadImm(pair.lo, @as(u32, @truncate(bits)));
+                    try self.codegen.emitLoadImm(pair.hi, @as(u32, @truncate(bits >> 32)));
+                    return pair;
+                },
+                .stack, .immediate_f64, .float_reg, .general_reg, .vector_reg, .stack_i128, .stack_str, .list_stack, .immediate_f32, .immediate_i128, .noreturn => {
+                    const offset = try self.wide64StackOffset(loc);
+                    const pair = try self.allocWide64Pair();
+                    try self.codegen.emitLoadStack(word, pair.lo, offset);
+                    try self.codegen.emitLoadStack(word, pair.hi, offset + word_size);
+                    return pair;
+                },
+            }
+        }
+
+        /// Store a pair to a fresh slot and free it: the memory-resident result.
+        fn storeWide64Pair(self: *Self, pair: Wide64Pair, value_layout: layout.Idx) Allocator.Error!ValueLocation {
+            const slot = self.codegen.allocStackSlot(8);
+            try self.codegen.emitStoreStack(word, slot, pair.lo);
+            try self.codegen.emitStoreStack(word, slot + word_size, pair.hi);
+            self.freeWide64Pair(pair);
+            return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = value_layout } };
+        }
+
+        /// `dst = src <kind> count`, the count read from a register.
+        fn emitArm32ShiftReg(self: *Self, dst: GeneralReg, src: GeneralReg, kind: arm32.ShiftKind, count: GeneralReg) Allocator.Error!void {
+            try self.codegen.emit.dataProc(.al, .mov, false, dst, .r0, .{ .shift_reg = .{ .rm = src, .kind = kind, .rs = count } });
+        }
+
+        /// Finish an add, subtract or multiply whose overflow `cond` holds in
+        /// the flags, the way `generateIntBinop` finishes a word-sized one:
+        /// return the overflow flag (binding the value to the pending result
+        /// target), crash on overflow, or wrap.
+        fn finishWide64Overflowing(
+            self: *Self,
+            result: Wide64Pair,
+            overflow: Condition,
+            operand_layout: layout.Idx,
+            family_entry: ?CheckedArithmetic.FamilyEntry,
+            checked_op: ?lir.LowLevel,
+        ) Allocator.Error!ValueLocation {
+            if (family_entry) |entry| {
+                if (entry.mode == .overflows) {
+                    const flag = try self.allocTempGeneral();
+                    try self.codegen.emitSetCond(flag, overflow);
+                    const value = try self.storeWide64Pair(result, operand_layout);
+                    if (self.pending_overflow_result_target) |result_target| try self.bindAssignedLocal(result_target, value);
+                    return .{ .general_reg = flag };
+                }
+                if (entry.mode == .crash_on_overflow) try self.emitCrashOnCond(overflow, checkedOverflowMessage(entry.op));
+            } else if (checked_op) |tag| try self.emitCrashOnCond(overflow, checkedOverflowMessage(tag));
+            return self.storeWide64Pair(result, operand_layout);
+        }
+
+        /// The low 64 bits of a 64x64 product, with the flags left so that
+        /// `ne` holds exactly when the product does not fit the type. The
+        /// full 128-bit unsigned product is w3:w2:w1:w0; a signed product's
+        /// high half subtracts each operand where the other is negative, and
+        /// fits when it is the low half's sign spread.
+        fn emitWide64MulChecked(self: *Self, lhs_loc: ValueLocation, rhs_loc: ValueLocation, signed: bool) Allocator.Error!Wide64Pair {
+            const a = try self.loadWide64Pair(lhs_loc);
+            const b = try self.loadWide64Pair(rhs_loc);
+            const result = try self.allocWide64Pair();
+            const t = try self.allocTempGeneral();
+            const h = try self.allocTempGeneral();
+            const u_lo = try self.allocTempGeneral();
+            const u_hi = try self.allocTempGeneral();
+            // w0 and the carry into word 1.
+            try self.codegen.emit.umull(result.lo, t, a.lo, b.lo);
+            // h:t = t + a.lo * b.hi
+            try self.codegen.emitLoadImm(h, 0);
+            try self.codegen.emit.umlal(t, h, a.lo, b.hi);
+            // h:t += a.hi * b.lo, carrying into word 3.
+            try self.codegen.emit.umull(u_lo, u_hi, a.hi, b.lo);
+            try self.codegen.emit.addsRegRegReg(result.hi, t, u_lo);
+            try self.codegen.emit.adcsRegRegReg(h, h, u_hi);
+            // w3:w2 = carry:h + a.hi * b.hi
+            // MOV without S keeps the carry for the ADC.
+            try self.codegen.emit.movRegModImm(u_hi, arm32.ModImm.of(0));
+            try self.codegen.emit.dataProc(.al, .adc, false, u_hi, u_hi, .{ .imm = arm32.ModImm.of(0) });
+            self.codegen.freeGeneral(t);
+            const w2 = h;
+            const w3 = u_hi;
+            try self.codegen.emit.umlal(w2, w3, a.hi, b.hi);
+            if (signed) {
+                // w3:w2 -= b where a < 0, and -= a where b < 0.
+                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, b.lo, .{ .shift_imm = .{ .rm = a.hi, .kind = .asr, .amount = 31 } });
+                try self.codegen.emit.subsRegRegReg(w2, w2, u_lo);
+                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, b.hi, .{ .shift_imm = .{ .rm = a.hi, .kind = .asr, .amount = 31 } });
+                try self.codegen.emit.sbcRegRegReg(w3, w3, u_lo);
+                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, a.lo, .{ .shift_imm = .{ .rm = b.hi, .kind = .asr, .amount = 31 } });
+                try self.codegen.emit.subsRegRegReg(w2, w2, u_lo);
+                try self.codegen.emit.dataProc(.al, .@"and", false, u_lo, a.hi, .{ .shift_imm = .{ .rm = b.hi, .kind = .asr, .amount = 31 } });
+                try self.codegen.emit.sbcRegRegReg(w3, w3, u_lo);
+                try self.codegen.emit.dataProc(.al, .eor, false, w2, w2, .{ .shift_imm = .{ .rm = result.hi, .kind = .asr, .amount = 31 } });
+                try self.codegen.emit.dataProc(.al, .eor, false, w3, w3, .{ .shift_imm = .{ .rm = result.hi, .kind = .asr, .amount = 31 } });
+            }
+            try self.codegen.emit.dataProc(.al, .orr, true, w2, w2, .{ .reg = w3 });
+            self.codegen.freeGeneral(u_lo);
+            self.codegen.freeGeneral(w2);
+            self.codegen.freeGeneral(w3);
+            self.freeWide64Pair(a);
+            self.freeWide64Pair(b);
+            return result;
+        }
+
+        /// `num_abs_diff` on a Wide64: `a - b`, negated when `a < b`. The
+        /// result is the unsigned type of the same width.
+        fn generateWide64AbsDiff(self: *Self, a_loc: ValueLocation, b_loc: ValueLocation, signed: bool) Allocator.Error!ValueLocation {
+            const a = try self.loadWide64Pair(a_loc);
+            const b = try self.loadWide64Pair(b_loc);
+            try self.codegen.emit.subsRegRegReg(a.lo, a.lo, b.lo);
+            try self.codegen.emit.sbcsRegRegReg(a.hi, a.hi, b.hi);
+            self.freeWide64Pair(b);
+            const in_order = try self.codegen.emitCondJump(if (signed) CodeGen.condGreaterOrEqual() else CodeGen.condAboveOrEqual());
+            try self.emitWide64NegatePair(a);
+            try self.codegen.patchJump(in_order, self.codegen.currentOffset());
+            return self.storeWide64Pair(a, .u64);
+        }
+
+        /// Two's-complement negation of a pair in place.
+        fn emitWide64NegatePair(self: *Self, pair: Wide64Pair) Allocator.Error!void {
+            try self.codegen.emit.rsbsRegRegModImm(pair.lo, pair.lo, arm32.ModImm.of(0));
+            try self.codegen.emit.rscRegRegModImm(pair.hi, pair.hi, arm32.ModImm.of(0));
+        }
+
+        /// D7's run-time helpers: compiler-rt symbols with fixed register
+        /// conventions (the division helpers return the remainder in r2:r3;
+        /// the conversions use the base PCS, so floats travel in core
+        /// registers).
+        const AeabiHelper = enum { __aeabi_ldivmod, __aeabi_uldivmod, __aeabi_l2d, __aeabi_ul2d, __aeabi_l2f, __aeabi_ul2f };
+
+        fn callAeabiHelper(self: *Self, builder: *Builder, helper: AeabiHelper) Allocator.Error!void {
+            try self.spillAllVectorLocals();
+            switch (self.generation_mode) {
+                // Native execution runs arm32 code only on an arm32 host,
+                // which links compiler-rt and so defines every helper.
+                .native_execution => if (comptime builtin.cpu.arch.isArm()) switch (helper) {
+                    inline .__aeabi_ldivmod, .__aeabi_uldivmod, .__aeabi_l2d, .__aeabi_ul2d, .__aeabi_l2f, .__aeabi_ul2f => |h| try builder.call(@intFromPtr(@extern(*const fn () callconv(.c) void, .{ .name = @tagName(h) }))),
+                } else unreachable,
+                .shim_execution, .object_file => try builder.callRelocatable(try self.codegen.symbols.intern(self.allocator, @tagName(helper)), &self.codegen),
+            }
         }
 
         /// Save a call's scalar result wider than the target word (I64/U64 on a
@@ -10448,20 +10972,140 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
         }
 
-        /// Unary integer operation (negate, bitwise not, absolute value) on an
-        /// I64 or U64 wider than the target word (D6's `Wide64`). Only a
-        /// 32-bit target has one; J1 lowers it.
+        /// The unary integer low-levels that reach `generateWide64IntUnary`.
+        const Wide64UnaryOp = enum(u16) {
+            num_negate = @intFromEnum(lir.LowLevel.num_negate),
+            num_bitwise_not = @intFromEnum(lir.LowLevel.num_bitwise_not),
+            num_abs = @intFromEnum(lir.LowLevel.num_abs),
+            num_count_one_bits = @intFromEnum(lir.LowLevel.num_count_one_bits),
+            num_count_leading_zero_bits = @intFromEnum(lir.LowLevel.num_count_leading_zero_bits),
+            num_count_trailing_zero_bits = @intFromEnum(lir.LowLevel.num_count_trailing_zero_bits),
+        };
+
+        /// Unary integer operation (negate, bitwise not, absolute value, bit
+        /// counts) on an I64 or U64 wider than the target word (D6's
+        /// memory-resident `Wide64`), computed in a register pair.
         fn generateWide64IntUnary(self: *Self, op: lir.LowLevel, src_loc: ValueLocation, operand_layout: layout.Idx) Allocator.Error!ValueLocation {
-            _ = .{ self, op, src_loc, operand_layout };
-            @compileError("arm32: TODO Wide64 unary integer operations (J1)");
+            if (comptime isa != .arm32) @compileError("the Wide64 pair lowering is written for arm32");
+            const a = try self.loadWide64Pair(src_loc);
+            switch (narrowEnum(Wide64UnaryOp, op)) {
+                .num_negate => try self.emitWide64NegatePair(a),
+                .num_bitwise_not => {
+                    try self.codegen.emit.mvnRegReg(a.lo, a.lo);
+                    try self.codegen.emit.mvnRegReg(a.hi, a.hi);
+                },
+                .num_abs => {
+                    try self.codegen.emit.cmpRegModImm(a.hi, arm32.ModImm.of(0));
+                    const non_negative = try self.codegen.emitCondJump(CodeGen.condGreaterOrEqual());
+                    try self.emitWide64NegatePair(a);
+                    try self.codegen.patchJump(non_negative, self.codegen.currentOffset());
+                },
+                .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits => {
+                    // A U8 count. For leading zeros the low word's count
+                    // is added only when the high word is zero (its count is
+                    // then 32), and the reverse for trailing zeros.
+                    const result = try self.allocTempGeneral();
+                    const other = try self.allocTempGeneral();
+                    switch (narrowEnum(BitCountOp, op)) {
+                        .num_count_one_bits => {
+                            try self.emitPopcountWord(result, a.lo);
+                            try self.emitPopcountWord(other, a.hi);
+                            try self.codegen.emit.addRegRegReg(result, result, other);
+                        },
+                        .num_count_leading_zero_bits => {
+                            try self.emitClzWord(result, a.hi);
+                            try self.emitClzWord(other, a.lo);
+                            try self.codegen.emit.cmpRegModImm(a.hi, arm32.ModImm.of(0));
+                            try self.codegen.emit.dataProc(.eq, .add, false, result, result, .{ .reg = other });
+                        },
+                        .num_count_trailing_zero_bits => {
+                            try self.codegen.emitCtzWord(result, a.lo);
+                            try self.codegen.emitCtzWord(other, a.hi);
+                            try self.codegen.emit.cmpRegModImm(a.lo, arm32.ModImm.of(0));
+                            try self.codegen.emit.dataProc(.eq, .add, false, result, result, .{ .reg = other });
+                        },
+                    }
+                    self.codegen.freeGeneral(other);
+                    self.freeWide64Pair(a);
+                    return .{ .general_reg = result };
+                },
+            }
+            return self.storeWide64Pair(a, operand_layout);
         }
 
         /// Integer conversion, or integer-to-float conversion, with a side
-        /// wider than the target word: I64/U64 on a 32-bit target, a register
-        /// pair or memory operand (D6's `Wide64`). J1 lowers it.
+        /// wider than the target word: I64/U64 on a 32-bit target (D6's
+        /// memory-resident `Wide64`). A 64-bit integer converts to a float
+        /// through D7's `__aeabi_*` helpers.
         fn generateWide64IntConversion(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
-            _ = .{ self, ll, args };
-            @compileError("arm32: TODO Wide64 integer conversions (J1)");
+            if (comptime isa != .arm32) @compileError("the Wide64 pair lowering is written for arm32");
+            const spec = numeric_conversion.getConversionSpec(ll.op).?;
+            const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+            const src_shape: ScalarIntShape = .{ .bits = @intCast(spec.src.bits()), .signed = spec.src.isSigned() };
+            switch (spec.dst) {
+                .f32, .f64 => {
+                    std.debug.assert(spec.src.bits() == 64);
+                    const is_f32 = spec.dst == .f32;
+                    var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+                    try builder.addMem64Arg(frame_ptr, try self.wide64StackOffset(src_loc));
+                    try self.callAeabiHelper(&builder, switch (spec.src) {
+                        .i64 => if (is_f32) .__aeabi_l2f else .__aeabi_l2d,
+                        .u64 => if (is_f32) .__aeabi_ul2f else .__aeabi_ul2d,
+                        .i8, .i16, .i32, .i128, .u8, .u16, .u32, .u128, .f32, .f64, .dec => unreachable,
+                    });
+                    // The base PCS returns the float in r0 (F32) or r0:r1.
+                    const freg = try self.allocTempFloat();
+                    if (is_f32) {
+                        try self.codegen.emit.vmovSFromCore(freg.sLow(), .r0);
+                    } else {
+                        try self.codegen.emit.vmovDFromCorePair(freg, .r0, .r1);
+                    }
+                    return .{ .float_reg = .{ .reg = freg, .width = if (is_f32) .f32 else .f64 } };
+                },
+                .i128, .u128 => {
+                    // The two words of the source, then its sign (or zero)
+                    // in both higher words.
+                    const a = try self.loadWide64Pair(src_loc);
+                    const slot = self.codegen.allocStackSlot(16);
+                    try self.codegen.emitStoreStack(word, slot, a.lo);
+                    try self.codegen.emitStoreStack(word, slot + word_size, a.hi);
+                    if (src_shape.signed) {
+                        try self.codegen.emitAsrImm(word, a.hi, a.hi, word_bits - 1);
+                    } else {
+                        try self.codegen.emitLoadImm(a.hi, 0);
+                    }
+                    try self.codegen.emitStoreStack(word, slot + 2 * word_size, a.hi);
+                    try self.codegen.emitStoreStack(word, slot + 3 * word_size, a.hi);
+                    self.freeWide64Pair(a);
+                    return .{ .stack_i128 = slot };
+                },
+                .i8, .i16, .i32, .u8, .u16, .u32 => {
+                    // Keep the low word, masked to the destination.
+                    std.debug.assert(spec.src.bits() == 64);
+                    const reg = try self.allocTempGeneral();
+                    switch (src_loc) {
+                        .immediate_i64 => |val| try self.codegen.emitLoadImm(reg, @as(u32, @truncate(@as(u64, @bitCast(val))))),
+                        .stack, .immediate_f64, .float_reg, .general_reg, .vector_reg, .stack_i128, .stack_str, .list_stack, .immediate_f32, .immediate_i128, .noreturn => try self.codegen.emitLoadStack(word, reg, try self.wide64StackOffset(src_loc)),
+                    }
+                    const dst_bits = spec.dst.bits();
+                    if (dst_bits < word_bits) {
+                        const shift_amount: u8 = word_bits - dst_bits;
+                        try self.codegen.emitShlImm(word, reg, reg, shift_amount);
+                        try self.codegen.emitLsrImm(word, reg, reg, shift_amount);
+                    }
+                    return .{ .general_reg = reg };
+                },
+                .i64, .u64 => {
+                    // Extend a narrower source; copy a 64-bit one, whose bits
+                    // are the result's.
+                    if (src_shape.bits < 64) {
+                        const slot = try self.wide64StackOffsetFromShape(src_loc, src_shape);
+                        return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = ll.ret_layout } };
+                    }
+                    return self.storeWide64Pair(try self.loadWide64Pair(src_loc), ll.ret_layout);
+                },
+                .dec => unreachable,
+            }
         }
 
         /// Convert the signed word in `src_reg` to a float in `freg`.
@@ -13809,7 +14453,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Move register to register (architecture-specific)
         fn emitMovRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
-            try self.codegen.emit.movRegReg(word, dst, src);
+            switch (isa) {
+                .x86_64, .aarch64 => try self.codegen.emit.movRegReg(word, dst, src),
+                .arm32 => try self.codegen.emit.movRegReg(dst, src),
+            }
         }
 
         /// Keep the low `disc_size` (1 or 2) bytes of `disc_reg`; `mask` is the
@@ -13922,7 +14569,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// which handles all pattern types (bind, wildcard, tag, struct, list, as_pattern, etc.).
         /// Emit a compare of two registers
         fn emitCmpReg(self: *Self, reg1: GeneralReg, reg2: GeneralReg) Allocator.Error!void {
-            try self.codegen.emit.cmpRegReg(word, reg1, reg2);
+            switch (isa) {
+                .x86_64, .aarch64 => try self.codegen.emit.cmpRegReg(word, reg1, reg2),
+                .arm32 => try self.codegen.emit.cmpRegReg(reg1, reg2),
+            }
         }
 
         fn storeDiscriminantToPtr(self: *Self, ptr_reg: GeneralReg, offset: u32, value: u16, disc_size: u8) Allocator.Error!void {
@@ -14309,7 +14959,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .byte => try self.codegen.emitLoadStackW8(reg, offset),
                 .word => try self.codegen.emitLoadStackW16(reg, offset),
                 .dword => try self.codegen.emitLoadStack(.w32, reg, offset),
-                .qword => try self.codegen.emitLoadStack(wide64_reg_width, reg, offset),
+                .qword => if (comptime word_size == 8) try self.codegen.emitLoadStack(wide64_reg_width, reg, offset) else unreachable, // a register holds at most a word; a Wide64 is memory-resident (D6)
             }
         }
 
@@ -14343,7 +14993,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitLoadW16(dst, base_reg, offset);
                 },
                 .dword => try self.codegen.emitLoad(.w32, dst, base_reg, offset),
-                .qword => try self.codegen.emitLoad(wide64_reg_width, dst, base_reg, offset),
+                .qword => if (comptime word_size == 8) try self.codegen.emitLoad(wide64_reg_width, dst, base_reg, offset) else unreachable, // a register holds at most a word; a Wide64 is memory-resident (D6)
             }
         }
 
@@ -14357,7 +15007,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitStoreW16(base_reg, offset, src);
                 },
                 .dword => try self.codegen.emitStore(.w32, base_reg, offset, src),
-                .qword => try self.codegen.emitStore(wide64_reg_width, base_reg, offset, src),
+                .qword => if (comptime word_size == 8) try self.codegen.emitStore(wide64_reg_width, base_reg, offset, src) else unreachable, // a register holds at most a word; a Wide64 is memory-resident (D6)
             }
         }
 
@@ -16817,7 +17467,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.callBuiltin(&builder, .erased_callable_repack);
                 }
                 const heap_ptr = try self.allocTempGeneral();
-                try self.codegen.emit.movRegReg(word, heap_ptr, ret_reg_0);
+                try self.emitMovRegReg(heap_ptr, ret_reg_0);
                 return .{ .general_reg = heap_ptr };
             }
 
@@ -17492,10 +18142,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 }
             }
 
-            // Default: a scalar in one register. A scalar wider than the word
-            // (I64/U64/F64 on a 32-bit target) is a Wide64, whose passing J1
-            // decides.
-            if (comptime word_size < 8) @compileError("arm32: TODO count the registers of a Wide64 scalar argument (J1)");
+            // Default: a scalar in one register, or on a 32-bit target one
+            // register per word of a wider scalar (I64/U64/F64, D6's Wide64).
+            if (comptime word_size < 8) {
+                if (arg_layout) |al| {
+                    const size = self.getLayoutSize(self.runtimeRepresentationLayoutIdx(al));
+                    if (size > word_size) return @intCast(size / word_size);
+                }
+            }
             return 1;
         }
 
@@ -17558,7 +18212,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     if (arg_layout == .f32) {
                         const bits_reg = try self.materializeF32BitsInGeneralReg(arg_loc);
                         if (bits_reg != temp_reg) {
-                            try self.codegen.emit.movRegReg(word, temp_reg, bits_reg);
+                            try self.emitMovRegReg(temp_reg, bits_reg);
                             self.codegen.freeGeneral(bits_reg);
                         }
                     } else {
@@ -18822,11 +19476,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// `U64` Roc types it as. A 64-bit word already is one; a 32-bit
         /// target zero-extends it into a 64-bit value.
         fn wordAsU64(self: *Self, reg: GeneralReg) Allocator.Error!ValueLocation {
-            _ = self;
-            return switch (isa) {
-                .x86_64, .aarch64 => .{ .general_reg = reg },
-                .arm32 => @compileError("arm32: TODO zero-extend a word into a U64 value"),
-            };
+            if (comptime word_size == 8) return .{ .general_reg = reg };
+            const slot = self.codegen.allocStackSlot(8);
+            try self.emitStoreWordAsU64(frame_ptr, slot, reg);
+            self.codegen.freeGeneral(reg);
+            return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = .u64 } };
         }
 
         /// Store a genuinely 64-bit immediate (D6's `Wide64`) at
@@ -18904,6 +19558,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     if (float.width == .f32) {
                         try self.codegen.emitStoreStackF32(slot, float.reg);
                         try self.codegen.emitLoadStack(.w32, reg, slot);
+                    } else if (comptime word_size < 8) {
+                        // An F64 is a Wide64 on a 32-bit target, which never
+                        // enters one general register (D6).
+                        unreachable;
                     } else {
                         try self.codegen.emitStoreStackF64(slot, float.reg);
                         try self.codegen.emitLoadStack(wide64_reg_width, reg, slot);
@@ -19236,7 +19894,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// This is used when the original result pointer (X0/RDI) may have been clobbered
         fn storeResultToSavedPtr(self: *Self, loc: ValueLocation, result_layout: layout.Idx, saved_ptr_reg: GeneralReg) Allocator.Error!void {
             switch (result_layout) {
-                .i64, .u64 => {
+                .i64, .u64 => if (comptime word_size < 8) {
+                    try self.storeWide64ToPtr(loc, result_layout, saved_ptr_reg);
+                } else {
                     const reg = try self.ensureInGeneralReg(loc);
                     try self.emitStoreScalarToPtr(saved_ptr_reg, reg, 8);
                 },
@@ -19266,7 +19926,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitAsrImm(word, reg, reg, word_bits - 8);
                     try self.emitStoreScalarToPtr(saved_ptr_reg, reg, 1);
                 },
-                .f64 => {
+                .f64 => if (comptime word_size < 8) {
+                    try self.storeWide64ToPtr(loc, result_layout, saved_ptr_reg);
+                } else {
                     switch (loc) {
                         .float_reg => |float| {
                             if (float.width != .f64) std.debug.panic("LIR/codegen invariant violated: storing F32 register as F64", .{});
@@ -19718,7 +20380,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         1 => try self.codegen.emitStoreStackW8(dest_offset, reg),
                         2 => try self.codegen.emitStoreStackW16(dest_offset, reg),
                         4 => try self.codegen.emitStoreStack(.w32, dest_offset, reg),
-                        8 => try self.codegen.emitStoreStack(wide64_reg_width, dest_offset, reg),
+                        8 => if (comptime word_size == 8) try self.codegen.emitStoreStack(wide64_reg_width, dest_offset, reg) else unreachable, // a register holds at most a word (D6)
                         else => unreachable,
                     }
                     self.codegen.freeGeneral(reg);
@@ -19827,7 +20489,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         fn emitAddPtrImmAny(self: *Self, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
             if (imm == 0) {
-                if (dst != src) try self.codegen.emit.movRegReg(word, dst, src);
+                if (dst != src) try self.emitMovRegReg(dst, src);
                 return;
             }
 
@@ -20041,7 +20703,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                 },
                 4 => try self.emitStoreToPtr(.w32, src_reg, ptr_reg, 0),
-                8 => try self.emitStoreToPtr(wide64_store_width, src_reg, ptr_reg, 0),
+                8 => if (comptime word_size == 8) try self.emitStoreToPtr(wide64_store_width, src_reg, ptr_reg, 0) else unreachable, // a register holds at most a word (D6)
                 else => if (builtin.mode == .Debug) {
                     std.debug.panic("LIR/codegen invariant violated: scalar result size {d} is not register-sized", .{size});
                 } else unreachable,
@@ -21493,10 +22155,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                 }
             }
-            // Default: a scalar in one register. A scalar wider than the word
-            // (I64/U64/F64 on a 32-bit target) is a Wide64, whose passing J1
-            // decides.
-            if (comptime word_size < 8) @compileError("arm32: TODO count the registers of a Wide64 scalar argument (J1)");
+            // Default: a scalar in one register, or on a 32-bit target one
+            // register per word of a wider scalar (I64/U64/F64, D6's Wide64).
+            if (comptime word_size < 8) {
+                const size = self.getLayoutSize(runtime_layout_idx);
+                if (size > word_size) return @intCast(size / word_size);
+            }
             return 1;
         }
 
@@ -22068,7 +22732,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                             }
                         },
                         .opaque_ptr => try self.moveOneRegToReturn(loc),
-                        .vector => {
+                        // A 16-byte vector exceeds `max_internal_return_size` on a
+                        // 32-bit target, so it returns through the result pointer.
+                        .vector => if (comptime word_size < 8) unreachable else {
                             const stack_offset: i32 = switch (loc) {
                                 .stack => |s| s.offset,
                                 .stack_i128 => |off| off,
@@ -22149,7 +22815,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             switch (loc) {
                 .general_reg => |reg| {
                     if (reg != ret_reg) {
-                        try self.codegen.emit.movRegReg(word, ret_reg, reg);
+                        try self.emitMovRegReg(ret_reg, reg);
                     }
                 },
                 .stack => |s| {
@@ -22367,7 +23033,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             end: i32,
 
             fn finish(scratch: *@This(), owner: *Self) void {
-                scratch.end = if (comptime isa.binaryIs(.aarch64))
+                scratch.end = if (comptime isa == .aarch64)
                     @max(scratch.end, owner.codegen.stack_offset)
                 else
                     @min(scratch.end, owner.codegen.stack_offset);
@@ -23732,7 +24398,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         fn emitAddUsizeImm(self: *Self, dst: GeneralReg, src: GeneralReg, imm: usize) Allocator.Error!void {
             if (imm == 0) {
-                if (dst != src) try self.codegen.emit.movRegReg(word, dst, src);
+                if (dst != src) try self.emitMovRegReg(dst, src);
                 return;
             }
             if (imm <= @as(usize, @intCast(std.math.maxInt(i32)))) {

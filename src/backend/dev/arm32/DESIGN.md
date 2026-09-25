@@ -30,7 +30,10 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J1b: frame builders (deferred and forward) | Done |
 | J1b: AAPCS32 `CallBuilder` (pairs, C.5, VFP back-filling, arm32 call emitters) | Done |
 | J1b: AAPCS32 C-ABI classifier and physical assignment (`layout/abi/arm32.zig`, `Target.arm32`, `PhysicalArg.split`) | Done |
-| J1c-J1f: driver sites, Wide64 pairs, NEON lowering, acceptance test | Not started |
+| J1c: the driver's calls, returns, entry wrappers, helpers and two-way ISA tests | Done |
+| J1d: `Wide64` lowering (arithmetic, overflow, division, shifts, compares, unary ops, conversions, F64 bits) | Done |
+| J1d: four-word i128/Dec | In progress |
+| J1e-J1f: NEON lowering, acceptance test | Not started |
 | J2-J4: gates, qemu execution, lock-in | Not started |
 
 Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
@@ -311,15 +314,15 @@ either the type's range (sub-word) or `word_flags` (word-sized: the flags, or a
 multiply's high product). So on arm32 an I32 takes the flag path that I64
 takes on the 64-bit ISAs, without naming either type. An integer wider than
 the word (I64/U64 on arm32) never enters that path: on 32-bit targets only,
-`generateIntBinop` sends it to `generateWide64IntBinop`, which J1 implements
-with pair sequences and the D7 helpers. Shift counts are masked for word-sized
+`generateIntBinop` sends it to `generateWide64IntBinop` (see "Wide64
+lowering" below). Shift counts are masked for word-sized
 types too, because an A32 register shift by 32 or more gives zero rather than
 wrapping the count.
 
 Conversions follow the same rule, reading both widths from
 `numeric_conversion.getConversionSpec`: within the word they extend or mask by
 `word_bits - n`; with a side wider than the word they go to
-`generateWide64IntConversion` (J1). An unsigned source narrower than the word
+`generateWide64IntConversion`. An unsigned source narrower than the word
 converts to float with the signed instruction, a word-sized one with the
 unsigned conversion, so U32 moves to the unsigned path on arm32.
 
@@ -328,6 +331,49 @@ names `wide64_reg_width` instead of `.w64`. It equals `word` on the 64-bit
 targets and is a compile error on 32-bit ones, so `grep wide64_reg_width` is
 J1's list of `Wide64` sites to lower as pairs, beside `binaryIs` and the
 `generateWide64*` entry points.
+
+### Wide64 lowering (J1d)
+
+A `Wide64` is memory-resident: a `.stack` location of size `.qword`, or an
+`immediate_i64`/`immediate_f64`. Each operation loads the operands into
+register pairs (`loadWide64Pair`, low word first), computes, and stores the
+result to a fresh slot (`storeWide64Pair`), so no pair outlives one operation
+and the one-word `general_reg` invariant holds. `wide64StackOffset` gives the
+eight bytes of any `Wide64` location, storing an immediate or an F64 register
+first.
+
+- Add and subtract are `ADDS`/`ADCS` and `SUBS`/`SBCS`; the final flags give
+  overflow exactly as a 64-bit instruction would (`vs` signed, `hs` for an
+  unsigned add, `lo` for an unsigned subtract), and
+  `finishWide64Overflowing` then returns the flag, crashes or wraps as
+  `generateIntBinop` does for a word.
+- A wrapping multiply is `UMULL` plus two `MLA`s. A checked one builds the
+  full 128-bit unsigned product (`UMULL`, `UMLAL`, `UMULL`, the carry, then
+  `UMLAL`); a signed product's high half subtracts each operand where the
+  other is negative, and the product fits when that half is the low half's
+  sign spread.
+- Division, remainder and modulo call `__aeabi_ldivmod`/`__aeabi_uldivmod`
+  (quotient r0:r1, remainder r2:r3), after the zero and `MIN / -1` crash
+  checks of the checked forms. The helper already returns remainder 0 for
+  `MIN % -1`, so only division checks it. Signed modulo adds the divisor to a
+  non-zero remainder of the other sign.
+- Shifts mask the count to 6 bits and are branchless: a register shift reads
+  the count's bottom byte and gives 0 (LSL/LSR) for 32 or more, so the
+  cross-word terms `x << (n - 32)` and `x >> (32 - n)` vanish when they should.
+  An arithmetic shift right fills with the sign instead, so for `n >= 32` a
+  conditional `MOVGE lo, hi, ASR (n - 32)` replaces the low word.
+- Compares are `CMP lo; SBCS hi` (with `>` and `<=` swapping operands);
+  equality ORs the two words' XORs.
+- Unary ops negate with `RSBS`/`RSC`, and bit counts combine the words' counts
+  (`clz(hi) + (hi == 0 ? clz(lo) : 0)`, and the reverse for trailing zeros).
+- A 64-bit integer converts to a float through `__aeabi_l2d`/`ul2d`/`l2f`/
+  `ul2f`, which use the base PCS: the result comes back in r0 or r0:r1 and is
+  moved to a VFP register. `f64_to_bits` stores the double and, when `VCMP`
+  of it with itself is unordered, overwrites it with the canonical NaN.
+
+`callAeabiHelper` calls them: by symbol for object files and the shim (Zig's
+compiler-rt defines them, `roc_default_compiler_rt.o` in a link), by address
+when natively executing on an arm host.
 
 A genuinely 64-bit memory field written from an immediate
 (`StrFromUtf8Layout`'s tags) goes through `emitStoreImm64`, which is already
