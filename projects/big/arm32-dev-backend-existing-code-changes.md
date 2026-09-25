@@ -203,3 +203,11 @@ check could gate every later commit.
   `int_try` extension into its builtin's 64-bit argument names
   `wide64_reg_width`. Needed because 16-byte copies are word copies on every
   target, while i128 halves and 64-bit scalars do not fit an arm32 register.
+- `LirCodeGen.zig` (structural equality): a field of at most a word is
+  compared in one register, a larger one in word-sized XOR-accumulated
+  chunks (it was 8 bytes and 8-byte chunks); discriminants load a word unless
+  that would read past the union and are masked below the word; result
+  booleans, list lengths, pointers, loop counters and offsets use words and
+  word slots. Needed because an 8-byte field does not fit an arm32 register,
+  and the rest are word-sized values. A discriminant stored in eight bytes is
+  a variant index, so its low word is its value on every target.
