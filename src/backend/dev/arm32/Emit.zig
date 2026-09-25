@@ -48,6 +48,308 @@ pub const Condition = enum(u4) {
     }
 };
 
+/// Lane size of an Advanced SIMD (NEON) integer operation: the `size` field.
+pub const NeonSize = enum(u2) {
+    i8 = 0,
+    i16 = 1,
+    i32 = 2,
+    i64 = 3,
+
+    /// Lane width in bits.
+    pub fn bits(self: NeonSize) u7 {
+        return @as(u7, 8) << @intFromEnum(self);
+    }
+};
+
+/// Advanced SIMD "three registers of the same length" operations whose
+/// encoding takes a lane size. `_s`/`_u` select the signed or unsigned form
+/// (the U bit). For `vshl_*`/`vrshl_*` the second source (`m`) is the value
+/// and the first (`n`) holds the per-lane shift counts, as in `VSHL Qd, Qm,
+/// Qn`.
+pub const NeonThreeSame = enum {
+    vadd,
+    vsub,
+    vqadd_s,
+    vqadd_u,
+    vqsub_s,
+    vqsub_u,
+    vrhadd_s,
+    vrhadd_u,
+    vcgt_s,
+    vcgt_u,
+    vcge_s,
+    vcge_u,
+    vshl_s,
+    vshl_u,
+    vrshl_s,
+    vrshl_u,
+    vmax_s,
+    vmax_u,
+    vmin_s,
+    vmin_u,
+    vabd_s,
+    vabd_u,
+    vceq,
+    vtst,
+    vmul,
+    vmul_p8,
+    vqdmulh,
+    vqrdmulh,
+    vpadd,
+    vpmax_s,
+    vpmax_u,
+    vpmin_s,
+    vpmin_u,
+
+    const Fields = struct { u: u1, opc: u4, o1: u1 };
+
+    fn fields(self: NeonThreeSame) Fields {
+        return switch (self) {
+            .vadd => .{ .u = 0, .opc = 0x8, .o1 = 0 },
+            .vsub => .{ .u = 1, .opc = 0x8, .o1 = 0 },
+            .vqadd_s => .{ .u = 0, .opc = 0x0, .o1 = 1 },
+            .vqadd_u => .{ .u = 1, .opc = 0x0, .o1 = 1 },
+            .vqsub_s => .{ .u = 0, .opc = 0x2, .o1 = 1 },
+            .vqsub_u => .{ .u = 1, .opc = 0x2, .o1 = 1 },
+            .vrhadd_s => .{ .u = 0, .opc = 0x1, .o1 = 0 },
+            .vrhadd_u => .{ .u = 1, .opc = 0x1, .o1 = 0 },
+            .vcgt_s => .{ .u = 0, .opc = 0x3, .o1 = 0 },
+            .vcgt_u => .{ .u = 1, .opc = 0x3, .o1 = 0 },
+            .vcge_s => .{ .u = 0, .opc = 0x3, .o1 = 1 },
+            .vcge_u => .{ .u = 1, .opc = 0x3, .o1 = 1 },
+            .vshl_s => .{ .u = 0, .opc = 0x4, .o1 = 0 },
+            .vshl_u => .{ .u = 1, .opc = 0x4, .o1 = 0 },
+            .vrshl_s => .{ .u = 0, .opc = 0x5, .o1 = 0 },
+            .vrshl_u => .{ .u = 1, .opc = 0x5, .o1 = 0 },
+            .vmax_s => .{ .u = 0, .opc = 0x6, .o1 = 0 },
+            .vmax_u => .{ .u = 1, .opc = 0x6, .o1 = 0 },
+            .vmin_s => .{ .u = 0, .opc = 0x6, .o1 = 1 },
+            .vmin_u => .{ .u = 1, .opc = 0x6, .o1 = 1 },
+            .vabd_s => .{ .u = 0, .opc = 0x7, .o1 = 0 },
+            .vabd_u => .{ .u = 1, .opc = 0x7, .o1 = 0 },
+            .vceq => .{ .u = 1, .opc = 0x8, .o1 = 1 },
+            .vtst => .{ .u = 0, .opc = 0x8, .o1 = 1 },
+            .vmul => .{ .u = 0, .opc = 0x9, .o1 = 1 },
+            .vmul_p8 => .{ .u = 1, .opc = 0x9, .o1 = 1 },
+            .vqdmulh => .{ .u = 0, .opc = 0xB, .o1 = 0 },
+            .vqrdmulh => .{ .u = 1, .opc = 0xB, .o1 = 0 },
+            .vpadd => .{ .u = 0, .opc = 0xB, .o1 = 1 },
+            .vpmax_s => .{ .u = 0, .opc = 0xA, .o1 = 0 },
+            .vpmax_u => .{ .u = 1, .opc = 0xA, .o1 = 0 },
+            .vpmin_s => .{ .u = 0, .opc = 0xA, .o1 = 1 },
+            .vpmin_u => .{ .u = 1, .opc = 0xA, .o1 = 1 },
+        };
+    }
+
+    /// Whether ARMv7 NEON defines this operation for `size`.
+    fn allows(self: NeonThreeSame, size: NeonSize) bool {
+        return switch (self) {
+            .vadd, .vsub, .vqadd_s, .vqadd_u, .vqsub_s, .vqsub_u, .vshl_s, .vshl_u, .vrshl_s, .vrshl_u => true,
+            .vmul_p8 => size == .i8,
+            .vqdmulh, .vqrdmulh => size == .i16 or size == .i32,
+            .vrhadd_s, .vrhadd_u, .vcgt_s, .vcgt_u, .vcge_s, .vcge_u, .vmax_s, .vmax_u, .vmin_s, .vmin_u, .vabd_s, .vabd_u, .vceq, .vtst, .vmul, .vpadd, .vpmax_s, .vpmax_u, .vpmin_s, .vpmin_u => size != .i64,
+        };
+    }
+
+    /// Pairwise operations exist only on D registers.
+    fn pairwise(self: NeonThreeSame) bool {
+        return switch (self) {
+            .vpadd, .vpmax_s, .vpmax_u, .vpmin_s, .vpmin_u => true,
+            .vadd, .vsub, .vqadd_s, .vqadd_u, .vqsub_s, .vqsub_u, .vrhadd_s, .vrhadd_u, .vcgt_s, .vcgt_u, .vcge_s, .vcge_u, .vshl_s, .vshl_u, .vrshl_s, .vrshl_u, .vmax_s, .vmax_u, .vmin_s, .vmin_u, .vabd_s, .vabd_u, .vceq, .vtst, .vmul, .vmul_p8, .vqdmulh, .vqrdmulh => false,
+        };
+    }
+};
+
+/// Advanced SIMD bitwise operations (three registers, no lane size).
+pub const NeonLogic = enum {
+    vand,
+    vbic,
+    vorr,
+    vorn,
+    veor,
+    vbsl,
+    vbit,
+    vbif,
+
+    fn uSize(self: NeonLogic) struct { u: u1, size: u2 } {
+        return switch (self) {
+            .vand => .{ .u = 0, .size = 0 },
+            .vbic => .{ .u = 0, .size = 1 },
+            .vorr => .{ .u = 0, .size = 2 },
+            .vorn => .{ .u = 0, .size = 3 },
+            .veor => .{ .u = 1, .size = 0 },
+            .vbsl => .{ .u = 1, .size = 1 },
+            .vbit => .{ .u = 1, .size = 2 },
+            .vbif => .{ .u = 1, .size = 3 },
+        };
+    }
+};
+
+/// Advanced SIMD "three registers of different lengths" long operations:
+/// a Q destination from two D sources whose lanes are `size`.
+pub const NeonThreeDiff = enum {
+    vaddl_s,
+    vaddl_u,
+    vsubl_s,
+    vsubl_u,
+    vabal_s,
+    vabal_u,
+    vabdl_s,
+    vabdl_u,
+    vmlal_s,
+    vmlal_u,
+    vmull_s,
+    vmull_u,
+    vmull_p8,
+
+    fn fields(self: NeonThreeDiff) struct { u: u1, opc: u4 } {
+        return switch (self) {
+            .vaddl_s => .{ .u = 0, .opc = 0x0 },
+            .vaddl_u => .{ .u = 1, .opc = 0x0 },
+            .vsubl_s => .{ .u = 0, .opc = 0x2 },
+            .vsubl_u => .{ .u = 1, .opc = 0x2 },
+            .vabal_s => .{ .u = 0, .opc = 0x5 },
+            .vabal_u => .{ .u = 1, .opc = 0x5 },
+            .vabdl_s => .{ .u = 0, .opc = 0x7 },
+            .vabdl_u => .{ .u = 1, .opc = 0x7 },
+            .vmlal_s => .{ .u = 0, .opc = 0x8 },
+            .vmlal_u => .{ .u = 1, .opc = 0x8 },
+            .vmull_s => .{ .u = 0, .opc = 0xC },
+            .vmull_u => .{ .u = 1, .opc = 0xC },
+            .vmull_p8 => .{ .u = 0, .opc = 0xE },
+        };
+    }
+};
+
+/// Advanced SIMD "two registers, miscellaneous" operations whose source and
+/// destination have the same shape.
+pub const NeonTwoMisc = enum {
+    vrev64,
+    vrev32,
+    vrev16,
+    vpaddl_s,
+    vpaddl_u,
+    vcls,
+    vclz,
+    vcnt,
+    vmvn,
+    vpadal_s,
+    vpadal_u,
+    vqabs,
+    vqneg,
+    vcgt_zero,
+    vcge_zero,
+    vceq_zero,
+    vcle_zero,
+    vclt_zero,
+    vabs,
+    vneg,
+    vswp,
+    vtrn,
+    vuzp,
+    vzip,
+
+    /// Bits 17:16 and bits 10:7 of the encoding.
+    fn fields(self: NeonTwoMisc) struct { a: u2, b: u4 } {
+        return switch (self) {
+            .vrev64 => .{ .a = 0, .b = 0x0 },
+            .vrev32 => .{ .a = 0, .b = 0x1 },
+            .vrev16 => .{ .a = 0, .b = 0x2 },
+            .vpaddl_s => .{ .a = 0, .b = 0x4 },
+            .vpaddl_u => .{ .a = 0, .b = 0x5 },
+            .vcls => .{ .a = 0, .b = 0x8 },
+            .vclz => .{ .a = 0, .b = 0x9 },
+            .vcnt => .{ .a = 0, .b = 0xA },
+            .vmvn => .{ .a = 0, .b = 0xB },
+            .vpadal_s => .{ .a = 0, .b = 0xC },
+            .vpadal_u => .{ .a = 0, .b = 0xD },
+            .vqabs => .{ .a = 0, .b = 0xE },
+            .vqneg => .{ .a = 0, .b = 0xF },
+            .vcgt_zero => .{ .a = 1, .b = 0x0 },
+            .vcge_zero => .{ .a = 1, .b = 0x1 },
+            .vceq_zero => .{ .a = 1, .b = 0x2 },
+            .vcle_zero => .{ .a = 1, .b = 0x3 },
+            .vclt_zero => .{ .a = 1, .b = 0x4 },
+            .vabs => .{ .a = 1, .b = 0x6 },
+            .vneg => .{ .a = 1, .b = 0x7 },
+            .vswp => .{ .a = 2, .b = 0x0 },
+            .vtrn => .{ .a = 2, .b = 0x1 },
+            .vuzp => .{ .a = 2, .b = 0x2 },
+            .vzip => .{ .a = 2, .b = 0x3 },
+        };
+    }
+};
+
+/// Advanced SIMD narrowing moves: a D destination from a Q source. The lane
+/// size is the destination's.
+pub const NeonNarrow = enum {
+    vmovn,
+    vqmovun,
+    vqmovn_s,
+    vqmovn_u,
+
+    /// Bits 7:6 of the encoding.
+    fn op(self: NeonNarrow) u2 {
+        return switch (self) {
+            .vmovn => 0,
+            .vqmovun => 1,
+            .vqmovn_s => 2,
+            .vqmovn_u => 3,
+        };
+    }
+};
+
+/// Advanced SIMD right shifts by an immediate, same shape in and out.
+pub const NeonShiftRight = enum {
+    vshr_s,
+    vshr_u,
+    vsra_s,
+    vsra_u,
+    vrshr_s,
+    vrshr_u,
+    vrsra_s,
+    vrsra_u,
+
+    fn fields(self: NeonShiftRight) struct { u: u1, opc: u4 } {
+        return switch (self) {
+            .vshr_s => .{ .u = 0, .opc = 0x0 },
+            .vshr_u => .{ .u = 1, .opc = 0x0 },
+            .vsra_s => .{ .u = 0, .opc = 0x1 },
+            .vsra_u => .{ .u = 1, .opc = 0x1 },
+            .vrshr_s => .{ .u = 0, .opc = 0x2 },
+            .vrshr_u => .{ .u = 1, .opc = 0x2 },
+            .vrsra_s => .{ .u = 0, .opc = 0x3 },
+            .vrsra_u => .{ .u = 1, .opc = 0x3 },
+        };
+    }
+};
+
+/// Advanced SIMD narrowing right shifts by an immediate: a D destination
+/// from a Q source. The lane size is the destination's.
+pub const NeonShiftNarrow = enum {
+    vshrn,
+    vrshrn,
+    vqshrun,
+    vqrshrun,
+    vqshrn_s,
+    vqshrn_u,
+    vqrshrn_s,
+    vqrshrn_u,
+
+    fn fields(self: NeonShiftNarrow) struct { u: u1, opc: u4, bit6: u1 } {
+        return switch (self) {
+            .vshrn => .{ .u = 0, .opc = 0x8, .bit6 = 0 },
+            .vrshrn => .{ .u = 0, .opc = 0x8, .bit6 = 1 },
+            .vqshrun => .{ .u = 1, .opc = 0x8, .bit6 = 0 },
+            .vqrshrun => .{ .u = 1, .opc = 0x8, .bit6 = 1 },
+            .vqshrn_s => .{ .u = 0, .opc = 0x9, .bit6 = 0 },
+            .vqshrn_u => .{ .u = 1, .opc = 0x9, .bit6 = 0 },
+            .vqrshrn_s => .{ .u = 0, .opc = 0x9, .bit6 = 1 },
+            .vqrshrn_u => .{ .u = 1, .opc = 0x9, .bit6 = 1 },
+        };
+    }
+};
+
 /// A32 data-processing opcodes.
 pub const DataOp = enum(u4) {
     @"and" = 0x0,
@@ -1242,6 +1544,346 @@ pub fn Emit(comptime target: RocTarget) type {
         /// VPOP {d<first>-d<first+count-1>} (VLDMIA sp!)
         pub fn vpop(self: *Self, first: DReg, count: u5) Allocator.Error!void {
             try self.vfpPushPop(0x0CBD0B00, first, count);
+        }
+
+        // Advanced SIMD (NEON). Unconditional encodings (1111 prefix). A Q
+        // register is encoded as the D register holding its low half.
+
+        const NeonField = struct {
+            four: u4,
+            one: u1,
+
+            fn d(reg: DReg) NeonField {
+                return .{ .four = @intCast(reg.enc() & 15), .one = @intCast(reg.enc() >> 4) };
+            }
+
+            fn q(reg: QReg) NeonField {
+                return d(reg.dLow());
+            }
+        };
+
+        /// 1111 001U 0 D sz Vn Vd opc N Q M o1 Vm
+        fn neonThreeSameFields(self: *Self, u: u1, size: u2, opc: u4, o1: u1, quad: bool, vd: NeonField, vn: NeonField, vm: NeonField) Allocator.Error!void {
+            const inst: u32 = 0xF2000000 |
+                (@as(u32, u) << 24) |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, size) << 20) |
+                (@as(u32, vn.four) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, opc) << 8) |
+                (@as(u32, vn.one) << 7) |
+                (@as(u32, @intFromBool(quad)) << 6) |
+                (@as(u32, vm.one) << 5) |
+                (@as(u32, o1) << 4) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// <op>.<size> Qd, Qn, Qm (see `NeonThreeSame` for the shift forms'
+        /// operand order)
+        pub fn neonThreeSameQ(self: *Self, op: NeonThreeSame, size: NeonSize, dst: QReg, n: QReg, m: QReg) Allocator.Error!void {
+            std.debug.assert(op.allows(size) and !op.pairwise());
+            const f = op.fields();
+            try self.neonThreeSameFields(f.u, @intFromEnum(size), f.opc, f.o1, true, .q(dst), .q(n), .q(m));
+        }
+
+        /// <op>.<size> Dd, Dn, Dm
+        pub fn neonThreeSameD(self: *Self, op: NeonThreeSame, size: NeonSize, dst: DReg, n: DReg, m: DReg) Allocator.Error!void {
+            std.debug.assert(op.allows(size));
+            const f = op.fields();
+            try self.neonThreeSameFields(f.u, @intFromEnum(size), f.opc, f.o1, false, .d(dst), .d(n), .d(m));
+        }
+
+        /// <op> Qd, Qn, Qm (bitwise; VORR Qd, Qm, Qm is a register move)
+        pub fn neonLogicQ(self: *Self, op: NeonLogic, dst: QReg, n: QReg, m: QReg) Allocator.Error!void {
+            const f = op.uSize();
+            try self.neonThreeSameFields(f.u, f.size, 0x1, 1, true, .q(dst), .q(n), .q(m));
+        }
+
+        /// <op> Dd, Dn, Dm (bitwise)
+        pub fn neonLogicD(self: *Self, op: NeonLogic, dst: DReg, n: DReg, m: DReg) Allocator.Error!void {
+            const f = op.uSize();
+            try self.neonThreeSameFields(f.u, f.size, 0x1, 1, false, .d(dst), .d(n), .d(m));
+        }
+
+        /// <op>.<size> Qd, Dn, Dm: 1111 001U 1 D sz Vn Vd opc N 0 M 0 Vm
+        pub fn neonThreeDiff(self: *Self, op: NeonThreeDiff, size: NeonSize, dst: QReg, n: DReg, m: DReg) Allocator.Error!void {
+            std.debug.assert(size != .i64 and (op != .vmull_p8 or size == .i8));
+            const f = op.fields();
+            const vd = NeonField.q(dst);
+            const vn = NeonField.d(n);
+            const vm = NeonField.d(m);
+            const inst: u32 = 0xF2800000 |
+                (@as(u32, f.u) << 24) |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, @intFromEnum(size)) << 20) |
+                (@as(u32, vn.four) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, f.opc) << 8) |
+                (@as(u32, vn.one) << 7) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// 1111 0011 1 D 11 size A Vd 0 B Q M 0 Vm (B = bits 10:7)
+        fn neonTwoMiscFields(self: *Self, size: u2, a: u2, b_bits: u4, bit6: u1, vd: NeonField, vm: NeonField) Allocator.Error!void {
+            const inst: u32 = 0xF3B00000 |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, size) << 18) |
+                (@as(u32, a) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, b_bits) << 7) |
+                (@as(u32, bit6) << 6) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// <op>.<size> Qd, Qm
+        pub fn neonTwoMiscQ(self: *Self, op: NeonTwoMisc, size: NeonSize, dst: QReg, src: QReg) Allocator.Error!void {
+            const f = op.fields();
+            try self.neonTwoMiscFields(@intFromEnum(size), f.a, f.b, 1, .q(dst), .q(src));
+        }
+
+        /// <op>.<size> Dd, Dm
+        pub fn neonTwoMiscD(self: *Self, op: NeonTwoMisc, size: NeonSize, dst: DReg, src: DReg) Allocator.Error!void {
+            const f = op.fields();
+            try self.neonTwoMiscFields(@intFromEnum(size), f.a, f.b, 0, .d(dst), .d(src));
+        }
+
+        /// <op> Dd, Qm narrowing to `size` lanes
+        pub fn neonNarrow(self: *Self, op: NeonNarrow, size: NeonSize, dst: DReg, src: QReg) Allocator.Error!void {
+            std.debug.assert(size != .i64);
+            const code = op.op();
+            try self.neonTwoMiscFields(@intFromEnum(size), 2, @as(u4, 0x4) | (code >> 1), @intCast(code & 1), .d(dst), .q(src));
+        }
+
+        /// 1111 001U 1 D imm6 Vd opc L Q M 1 Vm
+        fn neonShiftImmFields(self: *Self, u: u1, imm6: u6, opc: u4, l: u1, bit6: u1, vd: NeonField, vm: NeonField) Allocator.Error!void {
+            const inst: u32 = 0xF2800010 |
+                (@as(u32, u) << 24) |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, imm6) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, opc) << 8) |
+                (@as(u32, l) << 7) |
+                (@as(u32, bit6) << 6) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// L:imm6 for a right shift by `amount` (1..lane bits).
+        fn neonRightShiftImm(size: NeonSize, amount: u7) struct { l: u1, imm6: u6 } {
+            std.debug.assert(amount >= 1 and amount <= size.bits());
+            if (size == .i64) return .{ .l = 1, .imm6 = @intCast(64 - @as(u8, amount)) };
+            return .{ .l = 0, .imm6 = @intCast(2 * @as(u8, size.bits()) - amount) };
+        }
+
+        /// L:imm6 for a left shift by `amount` (0..lane bits - 1).
+        fn neonLeftShiftImm(size: NeonSize, amount: u7) struct { l: u1, imm6: u6 } {
+            std.debug.assert(amount < size.bits());
+            if (size == .i64) return .{ .l = 1, .imm6 = @intCast(amount) };
+            return .{ .l = 0, .imm6 = @intCast(@as(u8, size.bits()) + amount) };
+        }
+
+        /// <op>.<size> Qd, Qm, #amount (1..lane bits)
+        pub fn neonShiftRightQ(self: *Self, op: NeonShiftRight, size: NeonSize, dst: QReg, src: QReg, amount: u7) Allocator.Error!void {
+            const f = op.fields();
+            const imm = neonRightShiftImm(size, amount);
+            try self.neonShiftImmFields(f.u, imm.imm6, f.opc, imm.l, 1, .q(dst), .q(src));
+        }
+
+        /// VSHL.I<size> Qd, Qm, #amount (0..lane bits - 1)
+        pub fn neonShiftLeftQ(self: *Self, size: NeonSize, dst: QReg, src: QReg, amount: u7) Allocator.Error!void {
+            const imm = neonLeftShiftImm(size, amount);
+            try self.neonShiftImmFields(0, imm.imm6, 0x5, imm.l, 1, .q(dst), .q(src));
+        }
+
+        /// <op> Dd, Qm, #amount narrowing to `size` lanes (1..lane bits)
+        pub fn neonShiftNarrow(self: *Self, op: NeonShiftNarrow, size: NeonSize, dst: DReg, src: QReg, amount: u7) Allocator.Error!void {
+            std.debug.assert(size != .i64);
+            const f = op.fields();
+            const imm = neonRightShiftImm(size, amount);
+            try self.neonShiftImmFields(f.u, imm.imm6, f.opc, 0, f.bit6, .d(dst), .q(src));
+        }
+
+        /// VSHLL.<sign><size> Qd, Dm, #amount (0..lane bits - 1; 0 is VMOVL)
+        pub fn neonShiftLeftLong(self: *Self, signedness: std.builtin.Signedness, size: NeonSize, dst: QReg, src: DReg, amount: u7) Allocator.Error!void {
+            std.debug.assert(size != .i64);
+            const imm = neonLeftShiftImm(size, amount);
+            try self.neonShiftImmFields(@intFromBool(signedness == .unsigned), imm.imm6, 0xA, 0, 0, .q(dst), .d(src));
+        }
+
+        /// 1111 001 i 1 D 000 imm3 Vd cmode 0 Q op 1 imm4
+        fn neonModImm(self: *Self, dst: QReg, cmode: u4, op: u1, imm8: u8) Allocator.Error!void {
+            const vd = NeonField.q(dst);
+            const inst: u32 = 0xF2800050 |
+                (@as(u32, imm8 >> 7) << 24) |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, (imm8 >> 4) & 7) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, cmode) << 8) |
+                (@as(u32, op) << 5) |
+                (imm8 & 15);
+            try self.emit32(inst);
+        }
+
+        /// VMOV.I8 Qd, #imm (every byte lane)
+        pub fn vmovI8Q(self: *Self, dst: QReg, imm: u8) Allocator.Error!void {
+            try self.neonModImm(dst, 0xE, 0, imm);
+        }
+
+        /// VMOV.I64 Qd, #mask: byte i of each 64-bit lane is 0xFF when bit i
+        /// of `byte_mask` is set, else 0
+        pub fn vmovI64Q(self: *Self, dst: QReg, byte_mask: u8) Allocator.Error!void {
+            try self.neonModImm(dst, 0xE, 1, byte_mask);
+        }
+
+        /// VEXT.8 Qd, Qn, Qm, #bytes: bytes `bytes..` of Qn:Qm (Qn low)
+        pub fn vextQ(self: *Self, dst: QReg, n: QReg, m: QReg, bytes: u4) Allocator.Error!void {
+            const vd = NeonField.q(dst);
+            const vn = NeonField.q(n);
+            const vm = NeonField.q(m);
+            const inst: u32 = 0xF2B00040 |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, vn.four) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, bytes) << 8) |
+                (@as(u32, vn.one) << 7) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// VTBL.8 Dd, {Dn..Dn+count-1}, Dm (out-of-range indices give 0)
+        pub fn vtbl(self: *Self, dst: DReg, table_first: DReg, count: u3, index: DReg) Allocator.Error!void {
+            std.debug.assert(count >= 1 and count <= 4 and @as(u6, table_first.enc()) + count <= 32);
+            const vd = NeonField.d(dst);
+            const vn = NeonField.d(table_first);
+            const vm = NeonField.d(index);
+            const inst: u32 = 0xF3B00800 |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, vn.four) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, count - 1) << 8) |
+                (@as(u32, vn.one) << 7) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// VDUP.<size> Qd, Rt: cond 1110 1 b Q 0 Vd Rt 1011 D 0 e 1 0000
+        pub fn vdupQFromCore(self: *Self, size: NeonSize, dst: QReg, src: GeneralReg) Allocator.Error!void {
+            std.debug.assert(src != .r13 and src != .r15);
+            const be: struct { b: u1, e: u1 } = switch (size) {
+                .i8 => .{ .b = 1, .e = 0 },
+                .i16 => .{ .b = 0, .e = 1 },
+                .i32 => .{ .b = 0, .e = 0 },
+                .i64 => unreachable,
+            };
+            const vd = NeonField.q(dst);
+            const inst: u32 = condBits(.al) |
+                0x0EA00B10 |
+                (@as(u32, be.b) << 22) |
+                (@as(u32, vd.four) << 16) |
+                (@as(u32, src.enc()) << 12) |
+                (@as(u32, vd.one) << 7) |
+                (@as(u32, be.e) << 5);
+            try self.emit32(inst);
+        }
+
+        /// imm4 naming lane `lane` of a D register with `size` lanes, as
+        /// VDUP (scalar) encodes it.
+        fn neonLaneImm4(size: NeonSize, lane: u3) u4 {
+            return switch (size) {
+                .i8 => (@as(u4, lane) << 1) | 1,
+                .i16 => (@as(u4, @intCast(lane)) << 2) | 2,
+                .i32 => (@as(u4, @intCast(lane)) << 3) | 4,
+                .i64 => unreachable,
+            };
+        }
+
+        /// VDUP.<size> Qd, Dm[lane]
+        pub fn vdupQFromLane(self: *Self, size: NeonSize, dst: QReg, src: DReg, lane: u3) Allocator.Error!void {
+            std.debug.assert(@as(u8, lane) < 64 / @as(u8, size.bits()));
+            const vd = NeonField.q(dst);
+            const vm = NeonField.d(src);
+            const inst: u32 = 0xF3B00C40 |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, neonLaneImm4(size, lane)) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// opc1:opc2 selecting lane `lane` of `size` in VMOV (core <-> scalar).
+        fn neonScalarOpc(size: NeonSize, lane: u3) struct { opc1: u2, opc2: u2 } {
+            std.debug.assert(@as(u8, lane) < 64 / @as(u8, size.bits()));
+            return switch (size) {
+                .i8 => .{ .opc1 = 0b10 | @as(u2, @intCast(lane >> 2)), .opc2 = @intCast(lane & 3) },
+                .i16 => .{ .opc1 = @intCast(lane >> 1), .opc2 = (@as(u2, @intCast(lane & 1)) << 1) | 1 },
+                .i32 => .{ .opc1 = @intCast(lane), .opc2 = 0 },
+                .i64 => unreachable,
+            };
+        }
+
+        /// VMOV.<size> Dd[lane], Rt: cond 1110 0 opc1 0 Vd Rt 1011 D opc2 1 0000
+        pub fn vmovLaneFromCore(self: *Self, size: NeonSize, dst: DReg, lane: u3, src: GeneralReg) Allocator.Error!void {
+            std.debug.assert(src != .r13 and src != .r15);
+            const opc = neonScalarOpc(size, lane);
+            const vd = NeonField.d(dst);
+            const inst: u32 = condBits(.al) |
+                0x0E000B10 |
+                (@as(u32, opc.opc1) << 21) |
+                (@as(u32, vd.four) << 16) |
+                (@as(u32, src.enc()) << 12) |
+                (@as(u32, vd.one) << 7) |
+                (@as(u32, opc.opc2) << 5);
+            try self.emit32(inst);
+        }
+
+        /// VMOV.<sign><size> Rt, Dn[lane] (32-bit lanes take no sign):
+        /// cond 1110 U opc1 1 Vn Rt 1011 N opc2 1 0000
+        pub fn vmovCoreFromLane(self: *Self, signedness: std.builtin.Signedness, size: NeonSize, dst: GeneralReg, src: DReg, lane: u3) Allocator.Error!void {
+            std.debug.assert(dst != .r13 and dst != .r15);
+            const opc = neonScalarOpc(size, lane);
+            const u: u1 = if (size == .i32) 0 else @intFromBool(signedness == .unsigned);
+            const vn = NeonField.d(src);
+            const inst: u32 = condBits(.al) |
+                0x0E100B10 |
+                (@as(u32, u) << 23) |
+                (@as(u32, opc.opc1) << 21) |
+                (@as(u32, vn.four) << 16) |
+                (@as(u32, dst.enc()) << 12) |
+                (@as(u32, vn.one) << 7) |
+                (@as(u32, opc.opc2) << 5);
+            try self.emit32(inst);
+        }
+
+        /// VLD1/VST1.8 {Dd, Dd+1}, [Rn] (no alignment requirement, no
+        /// writeback): 1111 0100 0 D L 0 Rn Vd 1010 00 00 1111
+        fn neonLoadStoreQ(self: *Self, load: bool, reg: QReg, base: GeneralReg) Allocator.Error!void {
+            std.debug.assert(base != .r15);
+            const vd = NeonField.q(reg);
+            const inst: u32 = 0xF4000A0F |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, @intFromBool(load)) << 21) |
+                (@as(u32, base.enc()) << 16) |
+                (@as(u32, vd.four) << 12);
+            try self.emit32(inst);
+        }
+
+        /// VLD1.8 {Qd}, [Rn]
+        pub fn vld1Q(self: *Self, dst: QReg, base: GeneralReg) Allocator.Error!void {
+            try self.neonLoadStoreQ(true, dst, base);
+        }
+
+        /// VST1.8 {Qd}, [Rn]
+        pub fn vst1Q(self: *Self, src: QReg, base: GeneralReg) Allocator.Error!void {
+            try self.neonLoadStoreQ(false, src, base);
         }
     }; // end of struct returned by Emit
 }

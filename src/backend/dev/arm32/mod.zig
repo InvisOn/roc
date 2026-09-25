@@ -23,6 +23,14 @@ pub const Condition = @import("Emit.zig").Condition;
 pub const ModImm = @import("Emit.zig").ModImm;
 pub const MemForm = @import("Emit.zig").MemForm;
 pub const fitsImmediate = @import("Emit.zig").fitsImmediate;
+pub const NeonSize = @import("Emit.zig").NeonSize;
+pub const NeonThreeSame = @import("Emit.zig").NeonThreeSame;
+pub const NeonLogic = @import("Emit.zig").NeonLogic;
+pub const NeonThreeDiff = @import("Emit.zig").NeonThreeDiff;
+pub const NeonTwoMisc = @import("Emit.zig").NeonTwoMisc;
+pub const NeonNarrow = @import("Emit.zig").NeonNarrow;
+pub const NeonShiftRight = @import("Emit.zig").NeonShiftRight;
+pub const NeonShiftNarrow = @import("Emit.zig").NeonShiftNarrow;
 
 /// Emit type for musl (static) arm32 Linux
 pub const MuslEmit = Emit(.arm32musl);

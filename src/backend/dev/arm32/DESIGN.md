@@ -20,7 +20,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | A1, register budget: temporaries allocated by the per-arch `CodeGen`, D10 high-water mark | Done |
 | A1, `CC` register seam and facade for ISA-neutral helpers | Done |
 | A1 facade for i128/SIMD/overflow/entry strategies | Deferred to A2 and the NEON batch |
-| Track B, NEON batch | Not started |
+| Track B, NEON batch: the Advanced SIMD encoder families, 147 oracle entries | Done |
 | A3: ELF32/REL writer, `.ARM.attributes`, `R_ARM_*` relocation kinds, DWARF address width | Done |
 | A2: width model (`WORD`, `Wide64`, four-word i128) | Classification done outside SIMD: every non-SIMD `.w64` is `word`, a word loop, or `wide64_reg_width`/`wide64_store_width`; the SIMD sites move with the NEON batch; pair lowering is J1's |
 | Track C: arm32 runtime objects, `_start`, glibc stub, CLI tables, test-platform manifests and musl runtime | Done |
@@ -124,6 +124,19 @@ NEON batch define signatures that fit all three ISAs.
     the offset the relocations attach to.
   - The `CC` namespace carries D5's constants for `CallingConvention` and
     `FrameBuilder`.
+  - NEON is encoded per encoding family rather than per mnemonic: one
+    emitter per family and register shape (`neonThreeSameQ`/`D`,
+    `neonLogicQ`/`D`, `neonThreeDiff`, `neonTwoMiscQ`/`D`, `neonNarrow`,
+    `neonShiftRightQ`, `neonShiftLeftQ`, `neonShiftNarrow`,
+    `neonShiftLeftLong`), with the operation as an enum (`NeonThreeSame`,
+    `NeonTwoMisc`, ...) that owns its opcode bits, plus single emitters for
+    the one-off forms (`vmovI8Q`, `vmovI64Q`, `vextQ`, `vtbl`,
+    `vdupQFromCore`, `vdupQFromLane`, `vmovLaneFromCore`, `vmovCoreFromLane`,
+    `vld1Q`, `vst1Q`). Each enum knows which lane sizes ARMv7 defines it for,
+    and the emitter asserts that, so a request for an instruction the floor
+    lacks (for example `VMAX.S64`) fails at the call site rather than
+    producing a different instruction. The oracle has at least one entry per
+    enum member.
 - `Call.zig`: AAPCS32 register roles and allocation masks. The pool is r0-r3
   (caller-saved) plus r4-r10 (callee-saved); r11 is the frame pointer and r12
   the scratch register, excluded from allocation as x86_64's R11 and
@@ -433,7 +446,39 @@ tests anything:
   trusted. Recursive types, for example, must be nominal (`:=`); a recursive
   structural alias is rejected.
 
+### NEON on the ARMv7 floor: what the SIMD ops map to
+
+The 55 SIMD `LowLevel` ops must be native on arm32 (D2). Most have a direct
+ARMv7 NEON instruction on Q registers; the gaps are almost all 64-bit lanes,
+which ARMv7 NEON supports only for add, subtract, saturating add/subtract,
+shifts and bitwise operations. J1 composes the rest from the encoders above:
+
+| Ops | ARMv7 NEON |
+|---|---|
+| add/sub (wrap, sat), and/or/xor/not, bit_select | `VADD`/`VSUB`/`VQADD`/`VQSUB` (all sizes), `VAND`/`VORR`/`VEOR`/`VMVN`/`VBSL` |
+| shl/shr/shr_zf, shr_rounded by a count | `VSHL`/`VRSHL` by a register of counts from `VDUP` (a negative count shifts right); all sizes |
+| min/max, abs_diff, avg_rounded, eq/gt/gte | `VMIN`/`VMAX`/`VABD`/`VRHADD`/`VCEQ`/`VCGT`/`VCGE` for 8-32-bit lanes; 64-bit lanes are composed (compare via `VQSUB.U64` or a subtract and sign spread with `VSHR.S64 #63`, select with `VBSL`) |
+| neg_wrap, abs_wrap | `VNEG`/`VABS` for 8-32; 64-bit: `VSUB` from a `VMOV.I8 #0` zero, and a sign-spread `VEOR`/`VSUB` |
+| mul_wrap | `VMUL.I8/16/32`; 64-bit lanes from `VMULL.U32`, `VREV64.32`, `VMUL.I32`, `VPADDL.U32`, `VSHL.I64 #32` and `VMLAL.U32` |
+| mul_high, mul_wide_lo/hi, mul_q15_sat | `VMULL.S/U` on the D halves, `VSHRN`/`VUZP`; `VQRDMULH.S16` |
+| dot_pairs(_sat), sad, pairwise_add_widen, sum_lanes(_wrap) | `VMULL` + `VPADD`/`VPADDL`/`VPADAL` chains, `VQADD`; `VABDL` + `VPADAL`; `VPADD` on D halves |
+| interleave, even/odd lanes, reverse_lanes | `VZIP`/`VUZP` (both operands are rewritten in place), `VREV64` + `VEXT #8` |
+| table_lookup, concat_shift_bytes | two `VTBL.8` over a `{Dn, Dn+1}` table (out-of-range indices already give 0), `VEXT.8` |
+| widen, narrow_wrap/sat | `VMOVL` (`VSHLL #0`), `VMOVN`/`VQMOVN`/`VQMOVUN` |
+| bitmask | `VSHR` to the sign bit, `VAND` with a bit-weight constant, `VPADD` chains, core move |
+| splat, get/with_lane, load/store, u128 bits | `VDUP` (core or lane), `VMOV` lane↔core, `VMOV` D↔core pair for 64-bit lanes, `VLD1`/`VST1.8` (no alignment requirement), `VMOV` D↔core pairs |
+| clmul_lo/hi | composed from `VMULL.P8`, `VEOR` and `VEXT` (D2 already notes ARMv7 has no 64-bit polynomial multiply) |
+
 ### A32 encoding facts that bit, or would have
+
+- A Q register has no encoding of its own: `Qn` is written as the D
+  register of its low half (`D:Vd = 2n`), and bit 6 selects the Q form.
+- `VSHL`/`VRSHL` by register take the shift counts in `Vn` and the value in
+  `Vm`, the reverse of the other three-register operations' operand order.
+- `VMOVN`, `VQMOVN`, `VSHRN` and friends encode the destination's lane size,
+  while their assembler suffix names the source's (`VMOVN.I16` has size 8).
+- An immediate right shift of `n` bits encodes `2 * esize - n` in `imm6`
+  (`64 - n` with `L = 1` for 64-bit lanes); a left shift encodes `esize + n`.
 
 - LLVM keeps every `BL` relocatable (`R_ARM_CALL`), even to a local label, so
   the linker can interwork with Thumb. The oracle accepts exactly the

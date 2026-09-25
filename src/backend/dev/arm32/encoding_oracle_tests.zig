@@ -1386,3 +1386,1179 @@ test "arm32 encoding: vpop {d17-d20}" {
     // ecfd1b08
     try std.testing.expectEqualSlices(u8, &.{ 0x08, 0x1b, 0xfd, 0xec }, e.buf.items);
 }
+
+test "arm32 encoding: vadd.i8 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vadd, .i8, .q0, .q1, .q2);
+    // f2020844
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x08, 0x02, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vadd.i64 q8, q9, q15" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vadd, .i64, .q8, .q9, .q15);
+    // f27208ee
+    try std.testing.expectEqualSlices(u8, &.{ 0xee, 0x08, 0x72, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vsub.i16 q3, q4, q5" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vsub, .i16, .q3, .q4, .q5);
+    // f318684a
+    try std.testing.expectEqualSlices(u8, &.{ 0x4a, 0x68, 0x18, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vsub.i64 q0, q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vsub, .i64, .q0, .q0, .q1);
+    // f3300842
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x08, 0x30, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqadd.s8 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vqadd_s, .i8, .q0, .q1, .q2);
+    // f2020054
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x00, 0x02, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vqadd.u64 q10, q11, q12" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vqadd_u, .i64, .q10, .q11, .q12);
+    // f37640f8
+    try std.testing.expectEqualSlices(u8, &.{ 0xf8, 0x40, 0x76, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqsub.s32 q1, q2, q3" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vqsub_s, .i32, .q1, .q2, .q3);
+    // f2242256
+    try std.testing.expectEqualSlices(u8, &.{ 0x56, 0x22, 0x24, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vqsub.u64 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vqsub_u, .i64, .q0, .q1, .q2);
+    // f3320254
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x02, 0x32, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vrhadd.s16 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vrhadd_s, .i16, .q0, .q1, .q2);
+    // f2120144
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x01, 0x12, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vrhadd.u8 q14, q13, q12" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vrhadd_u, .i8, .q14, .q13, .q12);
+    // f34ac1e8
+    try std.testing.expectEqualSlices(u8, &.{ 0xe8, 0xc1, 0x4a, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcgt.s8 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vcgt_s, .i8, .q0, .q1, .q2);
+    // f2020344
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x03, 0x02, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vcgt.u32 q8, q1, q9" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vcgt_u, .i32, .q8, .q1, .q9);
+    // f3620362
+    try std.testing.expectEqualSlices(u8, &.{ 0x62, 0x03, 0x62, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcge.s16 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vcge_s, .i16, .q0, .q1, .q2);
+    // f2120354
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x03, 0x12, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vcge.u8 q2, q3, q4" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vcge_u, .i8, .q2, .q3, .q4);
+    // f3064358
+    try std.testing.expectEqualSlices(u8, &.{ 0x58, 0x43, 0x06, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vshl.s32 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vshl_s, .i32, .q0, .q2, .q1);
+    // f2240442
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x04, 0x24, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vshl.u64 q8, q9, q10" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vshl_u, .i64, .q8, .q10, .q9);
+    // f37404e2
+    try std.testing.expectEqualSlices(u8, &.{ 0xe2, 0x04, 0x74, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vrshl.s8 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vrshl_s, .i8, .q0, .q2, .q1);
+    // f2040542
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x05, 0x04, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vrshl.u16 q3, q4, q5" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vrshl_u, .i16, .q3, .q5, .q4);
+    // f31a6548
+    try std.testing.expectEqualSlices(u8, &.{ 0x48, 0x65, 0x1a, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmax.s8 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vmax_s, .i8, .q0, .q1, .q2);
+    // f2020644
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x06, 0x02, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmax.u32 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vmax_u, .i32, .q0, .q1, .q2);
+    // f3220644
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x06, 0x22, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmin.s16 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vmin_s, .i16, .q0, .q1, .q2);
+    // f2120654
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x06, 0x12, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmin.u8 q15, q14, q13" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vmin_u, .i8, .q15, .q14, .q13);
+    // f34ce6fa
+    try std.testing.expectEqualSlices(u8, &.{ 0xfa, 0xe6, 0x4c, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vabd.s32 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vabd_s, .i32, .q0, .q1, .q2);
+    // f2220744
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x07, 0x22, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vabd.u16 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vabd_u, .i16, .q0, .q1, .q2);
+    // f3120744
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x07, 0x12, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vceq.i32 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vceq, .i32, .q0, .q1, .q2);
+    // f3220854
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x08, 0x22, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vtst.8 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vtst, .i8, .q0, .q1, .q2);
+    // f2020854
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x08, 0x02, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmul.i16 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vmul, .i16, .q0, .q1, .q2);
+    // f2120954
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x09, 0x12, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmul.p8 q8, q9, q10" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vmul_p8, .i8, .q8, .q9, .q10);
+    // f34209f4
+    try std.testing.expectEqualSlices(u8, &.{ 0xf4, 0x09, 0x42, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqdmulh.s16 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vqdmulh, .i16, .q0, .q1, .q2);
+    // f2120b44
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x0b, 0x12, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vqrdmulh.s32 q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vqrdmulh, .i32, .q0, .q1, .q2);
+    // f3220b44
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x0b, 0x22, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqrdmulh.s16 q3, q4, q5" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameQ(.vqrdmulh, .i16, .q3, .q4, .q5);
+    // f3186b4a
+    try std.testing.expectEqualSlices(u8, &.{ 0x4a, 0x6b, 0x18, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vadd.i32 d0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameD(.vadd, .i32, .d0, .d1, .d2);
+    // f2210802
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x08, 0x21, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vpadd.i8 d0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameD(.vpadd, .i8, .d0, .d1, .d2);
+    // f2010b12
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x0b, 0x01, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vpadd.i32 d16, d17, d31" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameD(.vpadd, .i32, .d16, .d17, .d31);
+    // f2610bbf
+    try std.testing.expectEqualSlices(u8, &.{ 0xbf, 0x0b, 0x61, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vpmax.s16 d0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameD(.vpmax_s, .i16, .d0, .d1, .d2);
+    // f2110a02
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x0a, 0x11, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vpmax.u8 d0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameD(.vpmax_u, .i8, .d0, .d1, .d2);
+    // f3010a02
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x0a, 0x01, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vpmin.s32 d0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameD(.vpmin_s, .i32, .d0, .d1, .d2);
+    // f2210a12
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x0a, 0x21, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vpmin.u16 d0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeSameD(.vpmin_u, .i16, .d0, .d1, .d2);
+    // f3110a12
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x0a, 0x11, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vand q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vand, .q0, .q1, .q2);
+    // f2020154
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x01, 0x02, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vbic q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vbic, .q0, .q1, .q2);
+    // f2120154
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x01, 0x12, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vorr q8, q9, q10" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vorr, .q8, .q9, .q10);
+    // f26201f4
+    try std.testing.expectEqualSlices(u8, &.{ 0xf4, 0x01, 0x62, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vorr q1, q15, q15" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vorr, .q1, .q15, .q15);
+    // f22e21fe
+    try std.testing.expectEqualSlices(u8, &.{ 0xfe, 0x21, 0x2e, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vorn q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vorn, .q0, .q1, .q2);
+    // f2320154
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x01, 0x32, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: veor q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.veor, .q0, .q1, .q2);
+    // f3020154
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x01, 0x02, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vbsl q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vbsl, .q0, .q1, .q2);
+    // f3120154
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x01, 0x12, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vbit q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vbit, .q0, .q1, .q2);
+    // f3220154
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x01, 0x22, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vbif q0, q1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicQ(.vbif, .q0, .q1, .q2);
+    // f3320154
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x01, 0x32, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: veor d16, d17, d18" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonLogicD(.veor, .d16, .d17, .d18);
+    // f34101b2
+    try std.testing.expectEqualSlices(u8, &.{ 0xb2, 0x01, 0x41, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vaddl.s8 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vaddl_s, .i8, .q0, .d1, .d2);
+    // f2810002
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x00, 0x81, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vaddl.u16 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vaddl_u, .i16, .q0, .d1, .d2);
+    // f3910002
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x00, 0x91, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vsubl.s32 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vsubl_s, .i32, .q0, .d1, .d2);
+    // f2a10202
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x02, 0xa1, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vsubl.u8 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vsubl_u, .i8, .q0, .d1, .d2);
+    // f3810202
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x02, 0x81, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vabal.s16 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vabal_s, .i16, .q0, .d1, .d2);
+    // f2910502
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x05, 0x91, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vabal.u8 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vabal_u, .i8, .q0, .d1, .d2);
+    // f3810502
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x05, 0x81, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vabdl.s8 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vabdl_s, .i8, .q0, .d1, .d2);
+    // f2810702
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x07, 0x81, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vabdl.u16 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vabdl_u, .i16, .q0, .d1, .d2);
+    // f3910702
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x07, 0x91, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmlal.s32 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vmlal_s, .i32, .q0, .d1, .d2);
+    // f2a10802
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x08, 0xa1, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmlal.u32 q8, d17, d18" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vmlal_u, .i32, .q8, .d17, .d18);
+    // f3e108a2
+    try std.testing.expectEqualSlices(u8, &.{ 0xa2, 0x08, 0xe1, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmull.s16 q0, d1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vmull_s, .i16, .q0, .d1, .d2);
+    // f2910c02
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x0c, 0x91, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmull.u32 q15, d30, d31" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vmull_u, .i32, .q15, .d30, .d31);
+    // f3eeecaf
+    try std.testing.expectEqualSlices(u8, &.{ 0xaf, 0xec, 0xee, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmull.p8 q8, d17, d31" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonThreeDiff(.vmull_p8, .i8, .q8, .d17, .d31);
+    // f2c10eaf
+    try std.testing.expectEqualSlices(u8, &.{ 0xaf, 0x0e, 0xc1, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vrev64.8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vrev64, .i8, .q0, .q1);
+    // f3b00042
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x00, 0xb0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vrev32.16 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vrev32, .i16, .q0, .q1);
+    // f3b400c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x00, 0xb4, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vrev16.8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vrev16, .i8, .q0, .q1);
+    // f3b00142
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x01, 0xb0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vpaddl.s8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vpaddl_s, .i8, .q0, .q1);
+    // f3b00242
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x02, 0xb0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vpaddl.u32 q8, q9" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vpaddl_u, .i32, .q8, .q9);
+    // f3f802e2
+    try std.testing.expectEqualSlices(u8, &.{ 0xe2, 0x02, 0xf8, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcls.s16 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vcls, .i16, .q0, .q1);
+    // f3b40442
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x04, 0xb4, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vclz.i32 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vclz, .i32, .q0, .q1);
+    // f3b804c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x04, 0xb8, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcnt.8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vcnt, .i8, .q0, .q1);
+    // f3b00542
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x05, 0xb0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmvn q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vmvn, .i8, .q0, .q1);
+    // f3b005c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x05, 0xb0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vpadal.s16 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vpadal_s, .i16, .q0, .q1);
+    // f3b40642
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x06, 0xb4, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vpadal.u8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vpadal_u, .i8, .q0, .q1);
+    // f3b006c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x06, 0xb0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqabs.s8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vqabs, .i8, .q0, .q1);
+    // f3b00742
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x07, 0xb0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqneg.s32 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vqneg, .i32, .q0, .q1);
+    // f3b807c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x07, 0xb8, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcgt.s8 q0, q1, #0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vcgt_zero, .i8, .q0, .q1);
+    // f3b10042
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x00, 0xb1, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcge.s16 q0, q1, #0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vcge_zero, .i16, .q0, .q1);
+    // f3b500c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x00, 0xb5, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vceq.i32 q0, q1, #0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vceq_zero, .i32, .q0, .q1);
+    // f3b90142
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x01, 0xb9, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcle.s8 q0, q1, #0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vcle_zero, .i8, .q0, .q1);
+    // f3b101c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x01, 0xb1, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vclt.s16 q0, q1, #0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vclt_zero, .i16, .q0, .q1);
+    // f3b50242
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x02, 0xb5, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vabs.s8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vabs, .i8, .q0, .q1);
+    // f3b10342
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x03, 0xb1, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vneg.s32 q10, q11" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vneg, .i32, .q10, .q11);
+    // f3f943e6
+    try std.testing.expectEqualSlices(u8, &.{ 0xe6, 0x43, 0xf9, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vswp q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vswp, .i8, .q0, .q1);
+    // f3b20042
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x00, 0xb2, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vtrn.8 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vtrn, .i8, .q0, .q1);
+    // f3b200c2
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x00, 0xb2, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vuzp.16 q0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vuzp, .i16, .q0, .q1);
+    // f3b60142
+    try std.testing.expectEqualSlices(u8, &.{ 0x42, 0x01, 0xb6, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vzip.32 q8, q9" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscQ(.vzip, .i32, .q8, .q9);
+    // f3fa01e2
+    try std.testing.expectEqualSlices(u8, &.{ 0xe2, 0x01, 0xfa, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vrev64.32 d0, d1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscD(.vrev64, .i32, .d0, .d1);
+    // f3b80001
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x00, 0xb8, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vzip.8 d16, d17" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscD(.vzip, .i8, .d16, .d17);
+    // f3f201a1
+    try std.testing.expectEqualSlices(u8, &.{ 0xa1, 0x01, 0xf2, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vcnt.8 d30, d31" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonTwoMiscD(.vcnt, .i8, .d30, .d31);
+    // f3f0e52f
+    try std.testing.expectEqualSlices(u8, &.{ 0x2f, 0xe5, 0xf0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmovn.i16 d0, q1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonNarrow(.vmovn, .i8, .d0, .q1);
+    // f3b20202
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x02, 0xb2, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmovn.i64 d17, q9" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonNarrow(.vmovn, .i32, .d17, .q9);
+    // f3fa1222
+    try std.testing.expectEqualSlices(u8, &.{ 0x22, 0x12, 0xfa, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqmovun.s32 d1, q2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonNarrow(.vqmovun, .i16, .d1, .q2);
+    // f3b61244
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x12, 0xb6, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqmovn.s64 d2, q3" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonNarrow(.vqmovn_s, .i32, .d2, .q3);
+    // f3ba2286
+    try std.testing.expectEqualSlices(u8, &.{ 0x86, 0x22, 0xba, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqmovn.u16 d16, q9" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonNarrow(.vqmovn_u, .i8, .d16, .q9);
+    // f3f202e2
+    try std.testing.expectEqualSlices(u8, &.{ 0xe2, 0x02, 0xf2, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vshr.s8 q0, q1, #1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vshr_s, .i8, .q0, .q1, 1);
+    // f28f0052
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x00, 0x8f, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vshr.u16 q0, q1, #16" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vshr_u, .i16, .q0, .q1, 16);
+    // f3900052
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x00, 0x90, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vshr.s64 q8, q9, #63" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vshr_s, .i64, .q8, .q9, 63);
+    // f2c100f2
+    try std.testing.expectEqualSlices(u8, &.{ 0xf2, 0x00, 0xc1, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vsra.s32 q0, q1, #5" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vsra_s, .i32, .q0, .q1, 5);
+    // f2bb0152
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x01, 0xbb, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vsra.u64 q0, q1, #64" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vsra_u, .i64, .q0, .q1, 64);
+    // f38001d2
+    try std.testing.expectEqualSlices(u8, &.{ 0xd2, 0x01, 0x80, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vrshr.s64 q0, q1, #1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vrshr_s, .i64, .q0, .q1, 1);
+    // f2bf02d2
+    try std.testing.expectEqualSlices(u8, &.{ 0xd2, 0x02, 0xbf, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vrshr.u8 q0, q1, #8" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vrshr_u, .i8, .q0, .q1, 8);
+    // f3880252
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x02, 0x88, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vrsra.s16 q0, q1, #3" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vrsra_s, .i16, .q0, .q1, 3);
+    // f29d0352
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x03, 0x9d, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vrsra.u32 q0, q1, #32" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftRightQ(.vrsra_u, .i32, .q0, .q1, 32);
+    // f3a00352
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x03, 0xa0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vshl.i8 q0, q1, #0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftQ(.i8, .q0, .q1, 0);
+    // f2880552
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x05, 0x88, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vshl.i16 q0, q1, #15" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftQ(.i16, .q0, .q1, 15);
+    // f29f0552
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x05, 0x9f, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vshl.i32 q0, q1, #31" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftQ(.i32, .q0, .q1, 31);
+    // f2bf0552
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x05, 0xbf, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vshl.i64 q8, q9, #63" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftQ(.i64, .q8, .q9, 63);
+    // f2ff05f2
+    try std.testing.expectEqualSlices(u8, &.{ 0xf2, 0x05, 0xff, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vshrn.i16 d0, q1, #8" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vshrn, .i8, .d0, .q1, 8);
+    // f2880812
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x08, 0x88, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vrshrn.i32 d1, q2, #1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vrshrn, .i16, .d1, .q2, 1);
+    // f29f1854
+    try std.testing.expectEqualSlices(u8, &.{ 0x54, 0x18, 0x9f, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vqshrun.s64 d2, q3, #32" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vqshrun, .i32, .d2, .q3, 32);
+    // f3a02816
+    try std.testing.expectEqualSlices(u8, &.{ 0x16, 0x28, 0xa0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqrshrun.s16 d3, q4, #4" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vqrshrun, .i8, .d3, .q4, 4);
+    // f38c3858
+    try std.testing.expectEqualSlices(u8, &.{ 0x58, 0x38, 0x8c, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqshrn.s32 d0, q1, #16" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vqshrn_s, .i16, .d0, .q1, 16);
+    // f2900912
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x09, 0x90, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vqshrn.u64 d0, q1, #1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vqshrn_u, .i32, .d0, .q1, 1);
+    // f3bf0912
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x09, 0xbf, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vqrshrn.s16 d0, q1, #8" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vqrshrn_s, .i8, .d0, .q1, 8);
+    // f2880952
+    try std.testing.expectEqualSlices(u8, &.{ 0x52, 0x09, 0x88, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vqrshrn.u32 d16, q9, #2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftNarrow(.vqrshrn_u, .i16, .d16, .q9, 2);
+    // f3de0972
+    try std.testing.expectEqualSlices(u8, &.{ 0x72, 0x09, 0xde, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmovl.s8 q0, d1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftLong(.signed, .i8, .q0, .d1, 0);
+    // f2880a11
+    try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x0a, 0x88, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmovl.u16 q1, d2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftLong(.unsigned, .i16, .q1, .d2, 0);
+    // f3902a12
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x2a, 0x90, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmovl.u32 q8, d31" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftLong(.unsigned, .i32, .q8, .d31, 0);
+    // f3e00a3f
+    try std.testing.expectEqualSlices(u8, &.{ 0x3f, 0x0a, 0xe0, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vshll.s32 q8, d17, #31" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftLong(.signed, .i32, .q8, .d17, 31);
+    // f2ff0a31
+    try std.testing.expectEqualSlices(u8, &.{ 0x31, 0x0a, 0xff, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vshll.u8 q2, d3, #7" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.neonShiftLeftLong(.unsigned, .i8, .q2, .d3, 7);
+    // f38f4a13
+    try std.testing.expectEqualSlices(u8, &.{ 0x13, 0x4a, 0x8f, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.i8 q0, #0xff" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovI8Q(.q0, 0xff);
+    // f3870e5f
+    try std.testing.expectEqualSlices(u8, &.{ 0x5f, 0x0e, 0x87, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.i8 q9, #0x0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovI8Q(.q9, 0x00);
+    // f2c02e50
+    try std.testing.expectEqualSlices(u8, &.{ 0x50, 0x2e, 0xc0, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.i8 q1, #0x81" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovI8Q(.q1, 0x81);
+    // f3802e51
+    try std.testing.expectEqualSlices(u8, &.{ 0x51, 0x2e, 0x80, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.i64 q0, #0xff00ff00ff00ff00" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovI64Q(.q0, 0xaa);
+    // f3820e7a
+    try std.testing.expectEqualSlices(u8, &.{ 0x7a, 0x0e, 0x82, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.i64 q15, #0xffffffffffffffff" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovI64Q(.q15, 0xff);
+    // f3c7ee7f
+    try std.testing.expectEqualSlices(u8, &.{ 0x7f, 0xee, 0xc7, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vext.8 q0, q1, q2, #8" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vextQ(.q0, .q1, .q2, 8);
+    // f2b20844
+    try std.testing.expectEqualSlices(u8, &.{ 0x44, 0x08, 0xb2, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vext.8 q8, q9, q15, #15" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vextQ(.q8, .q9, .q15, 15);
+    // f2f20fee
+    try std.testing.expectEqualSlices(u8, &.{ 0xee, 0x0f, 0xf2, 0xf2 }, e.buf.items);
+}
+
+test "arm32 encoding: vtbl.8 d0, {d2, d3}, d4" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vtbl(.d0, .d2, 2, .d4);
+    // f3b20904
+    try std.testing.expectEqualSlices(u8, &.{ 0x04, 0x09, 0xb2, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vtbl.8 d16, {d17}, d18" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vtbl(.d16, .d17, 1, .d18);
+    // f3f108a2
+    try std.testing.expectEqualSlices(u8, &.{ 0xa2, 0x08, 0xf1, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vtbl.8 d1, {d28, d29, d30, d31}, d0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vtbl(.d1, .d28, 4, .d0);
+    // f3bc1b80
+    try std.testing.expectEqualSlices(u8, &.{ 0x80, 0x1b, 0xbc, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vdup.8 q0, r1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vdupQFromCore(.i8, .q0, .r1);
+    // eee01b10
+    try std.testing.expectEqualSlices(u8, &.{ 0x10, 0x1b, 0xe0, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vdup.16 q9, r12" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vdupQFromCore(.i16, .q9, .r12);
+    // eea2cbb0
+    try std.testing.expectEqualSlices(u8, &.{ 0xb0, 0xcb, 0xa2, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vdup.32 q15, r0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vdupQFromCore(.i32, .q15, .r0);
+    // eeae0b90
+    try std.testing.expectEqualSlices(u8, &.{ 0x90, 0x0b, 0xae, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vdup.8 q0, d1[7]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vdupQFromLane(.i8, .q0, .d1, 7);
+    // f3bf0c41
+    try std.testing.expectEqualSlices(u8, &.{ 0x41, 0x0c, 0xbf, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vdup.16 q1, d17[3]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vdupQFromLane(.i16, .q1, .d17, 3);
+    // f3be2c61
+    try std.testing.expectEqualSlices(u8, &.{ 0x61, 0x2c, 0xbe, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vdup.32 q8, d31[1]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vdupQFromLane(.i32, .q8, .d31, 1);
+    // f3fc0c6f
+    try std.testing.expectEqualSlices(u8, &.{ 0x6f, 0x0c, 0xfc, 0xf3 }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.8 d0[7], r1" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovLaneFromCore(.i8, .d0, 7, .r1);
+    // ee601b70
+    try std.testing.expectEqualSlices(u8, &.{ 0x70, 0x1b, 0x60, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.8 d1[2], r0" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovLaneFromCore(.i8, .d1, 2, .r0);
+    // ee410b50
+    try std.testing.expectEqualSlices(u8, &.{ 0x50, 0x0b, 0x41, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.16 d17[2], r2" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovLaneFromCore(.i16, .d17, 2, .r2);
+    // ee212bb0
+    try std.testing.expectEqualSlices(u8, &.{ 0xb0, 0x2b, 0x21, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.32 d31[1], r12" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovLaneFromCore(.i32, .d31, 1, .r12);
+    // ee2fcb90
+    try std.testing.expectEqualSlices(u8, &.{ 0x90, 0xcb, 0x2f, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.u8 r0, d1[5]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovCoreFromLane(.unsigned, .i8, .r0, .d1, 5);
+    // eef10b30
+    try std.testing.expectEqualSlices(u8, &.{ 0x30, 0x0b, 0xf1, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.s8 r1, d2[0]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovCoreFromLane(.signed, .i8, .r1, .d2, 0);
+    // ee521b10
+    try std.testing.expectEqualSlices(u8, &.{ 0x10, 0x1b, 0x52, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.u16 r2, d16[3]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovCoreFromLane(.unsigned, .i16, .r2, .d16, 3);
+    // eeb02bf0
+    try std.testing.expectEqualSlices(u8, &.{ 0xf0, 0x2b, 0xb0, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.s16 r3, d17[1]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovCoreFromLane(.signed, .i16, .r3, .d17, 1);
+    // ee113bf0
+    try std.testing.expectEqualSlices(u8, &.{ 0xf0, 0x3b, 0x11, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vmov.32 r4, d31[1]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vmovCoreFromLane(.unsigned, .i32, .r4, .d31, 1);
+    // ee3f4b90
+    try std.testing.expectEqualSlices(u8, &.{ 0x90, 0x4b, 0x3f, 0xee }, e.buf.items);
+}
+
+test "arm32 encoding: vld1.8 {d0, d1}, [r0]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vld1Q(.q0, .r0);
+    // f4200a0f
+    try std.testing.expectEqualSlices(u8, &.{ 0x0f, 0x0a, 0x20, 0xf4 }, e.buf.items);
+}
+
+test "arm32 encoding: vld1.8 {d16, d17}, [sp]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vld1Q(.q8, .r13);
+    // f46d0a0f
+    try std.testing.expectEqualSlices(u8, &.{ 0x0f, 0x0a, 0x6d, 0xf4 }, e.buf.items);
+}
+
+test "arm32 encoding: vst1.8 {d2, d3}, [r11]" {
+    var e = E.init(std.testing.allocator);
+    defer e.deinit();
+    try e.vst1Q(.q1, .r11);
+    // f40b2a0f
+    try std.testing.expectEqualSlices(u8, &.{ 0x0f, 0x2a, 0x0b, 0xf4 }, e.buf.items);
+}
