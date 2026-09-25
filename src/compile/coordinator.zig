@@ -5898,6 +5898,7 @@ pub const Coordinator = struct {
                 .module_name = task.module_name,
             } },
             error.EmptyCode,
+            error.FlushInstructionCacheFailed,
             error.Internal,
             error.RuntimeError,
             error.LockedMemoryLimitExceeded,
