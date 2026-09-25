@@ -100,6 +100,12 @@ Set `TMPDIR` to a writable directory for the snapshot tool (it refuses to run
 without one). `zig build` steps rebuild what they need; direct binaries under
 `zig-out/bin/` are faster when iterating.
 
+Every driver edit rebuilds the compiler, the snapshot tool and the eval runner,
+and `.zig-cache` keeps every version: a day of Track A iterations grew it past
+200 GB and filled the disk (Zig then crashes with "DWARF TODO: 'NoSpaceLeft'").
+Check `du -sh .zig-cache` now and then; `rm -rf .zig-cache` is safe and costs
+one full rebuild.
+
 ### Encoder
 
 With the tool (preferred):

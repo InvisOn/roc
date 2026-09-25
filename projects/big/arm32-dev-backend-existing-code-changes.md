@@ -211,3 +211,13 @@ check could gate every later commit.
   word slots. Needed because an 8-byte field does not fit an arm32 register,
   and the rest are word-sized values. A discriminant stored in eight bytes is
   a variant index, so its low word is its value on every target.
+- `LirCodeGen.zig` (call and return paths): an argument's or result's
+  register count is its size in words (`calcArgRegCount`,
+  `calcParamRegCount`, `aggregateArgRegisterPressure`; i128 and vectors are
+  `16 / word_size`), and spills, caller-stack copies, multi-register loads and
+  stores, and stack-argument offsets move one word per register. The i128 and
+  vector register pairs name `wide64_reg_width`. On 32-bit targets, scalar
+  arguments and results wider than the word go to J1
+  (`saveWide64CallReturnValue`, `moveWide64ToReturn`, the scalar count).
+  Needed because the internal convention's "register" is a word, and 8-byte
+  units would split or drop half of every multi-register value on arm32.
