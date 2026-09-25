@@ -606,11 +606,9 @@ jobs:
 
       # J3a of projects/big/arm32-dev-backend.md: the eval corpus run by a
       # compiler built for arm32 under qemu on the dev backend's CPU floor
-      # (cortex-a9: ARMv7-A, NEON, VFPv3-D32, no integer divide). Allowed to
-      # fail until J3 makes it required.
+      # (cortex-a9: ARMv7-A, NEON, VFPv3-D32, no integer divide).
       - name: Install qemu (arm32)
         if: matrix.target == 'arm-linux-musleabihf'
-        continue-on-error: true
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
@@ -621,12 +619,10 @@ jobs:
       # fails, saying to remove the workaround, once it is gone.
       - name: Check the Zig arm nested-struct ABI workaround is still needed
         if: matrix.target == 'arm-linux-musleabihf'
-        continue-on-error: true
         run: zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig
 
       - name: Build the eval runner for arm32
         if: matrix.target == 'arm-linux-musleabihf'
-        continue-on-error: true
         uses: ./.github/actions/flaky-retry
         with:
           command: zig build build-test-eval-runner build-test-eval-host-effects-runner -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast
@@ -634,8 +630,11 @@ jobs:
 
       - name: Run the eval corpus on arm32 under qemu
         if: matrix.target == 'arm-linux-musleabihf'
-        continue-on-error: true
         run: qemu-arm-static -cpu cortex-a9 zig-out/bin/eval-test-runner --timeout 300000
+
+      - name: Run the host-effects corpus on arm32 under qemu
+        if: matrix.target == 'arm-linux-musleabihf'
+        run: qemu-arm-static -cpu cortex-a9 zig-out/bin/eval-host-effects-runner
 
   # Test cross-compilation with Roc's cross-compilation system (musl + glibc)
   roc-cross-compile:

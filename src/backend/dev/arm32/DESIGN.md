@@ -43,7 +43,8 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J2: D2 floor asserted where code is generated | Done: `arm32/Emit.zig` checks Zig's arm baseline at comptime (see D2 under "Decisions as implemented") |
 | J2: gate-consistency test (`supportsTarget` against the `dev_object` snapshot lines) | Moved to J4: it cannot hold until J4 regenerates the arm32 snapshot lines |
 | J3b: `--cross-run`/`--cross-runner` in the CLI runner | Done; all 121 `test/fx` programs run correctly under qemu (the fx host works around a Zig 0.16 arm ABI bug) |
-| J3a, J3c, J4 | Not started |
+| J3a: `host_lir_codegen_available` for arm; the eval runner, host-effects runner and backend tests built for arm32 | Done: under qemu, eval 2171/2171 (dev 2030 evaluations, as on x86_64), host effects 86/86, backend tests 892 passed. On the Raspberry Pi 3: host effects 86/86, eval 2169/2171 with dev 2028 of the 2028 evaluations it reached; the two others ran out of memory while compiling (issues note). Wasm evaluation is unavailable in a 32-bit process (issues note) |
+| J3c, J4 | Not started |
 
 `roc build --opt=dev --target=arm32musl` and `--target=arm32linux` build real
 programs through the arm32 code generator. Every `dev_object` snapshot still
@@ -215,6 +216,17 @@ concrete or amended them.
   features, and that `std.Target.Cpu.baseline` for the target has NEON and
   lacks `hwdiv`/`hwdiv_arm`. The existing `src/target/mod.zig` test pins the
   resolved query the same way at run time.
+- **Far addresses are formed in LR (D5, amended).** D5 gives r12 two jobs:
+  the driver's fixed scratch register (the return pointer while a result is
+  copied out, the data register of stack-argument copies) and the register a
+  memory access forms an out-of-range address in (A32 reaches ±4095 bytes
+  from a base; halfword, doubleword and VFP forms less). A large aggregate
+  needs both at once, and the second clobbers the first. Every arm32 frame
+  saves LR in its prologue and returns by popping PC, and the frame policy is
+  always `.always`, so LR is free inside a body. `Call.ADDRESS_SCRATCH_REG =
+  LR` now forms far addresses, and the address is consumed by the very next
+  load or store, so it is never live across a call. r12 is then an ordinary
+  base or data register at any offset.
 - **Word division (D7).** The floor has no `SDIV`/`UDIV` (D2), so a word
   divide or remainder calls `__aeabi_idivmod`/`__aeabi_uidivmod` (quotient
   r0, remainder r1) through `emitWordDivRem`; signed modulo keeps its divisor
@@ -586,6 +598,23 @@ and the 16 `dev_object` snapshot sources.
 |-----|---------------------|-------------------|
 | arm32 (AAPCS32) | 9 / 11 | 7 / 12 |
 
+J3a extends the measurement to the eval corpus, which the arm32 compiler
+compiles and runs in process. Two lowerings exceeded the pool there, and
+both now have arm32-specific sequences that use fewer registers (the 64-bit
+targets keep their sequences, so their bytes do not change):
+
+- A string-interpolation pattern holds the source string's four shape
+  registers, a cursor and the capture start across its steps. Copying a
+  small capture took four more temporaries, 11 in all, plus whatever the
+  procedure had live. `emitStoreSmallStrCaptureWordPair` copies the bytes
+  last to first with the capture length as the counter, through two
+  temporaries.
+- The wrapping 128-bit multiply called the checked multiply wrapper, which
+  stores a saturated value on overflow, not the wrapped product (a
+  miscompile, not a budget problem, found by the same run).
+  `emitI128MulWrapWords` computes the low 128 bits from 32-bit words with
+  one `UMAAL` per partial product, through four registers.
+
 The general peak is `dev_object_many_args` (argument marshalling). The float
 peak is the NEON lowering in the SIMD corpus. Before J2, the checked 64-bit
 multiply (`emitWide64MulChecked`) held both operand pairs in registers and
@@ -657,8 +686,8 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 
 ## Next steps
 
-J1 and J2 are done. Next, in plan order: J3a (the eval suite on an arm32
-host, under qemu and on the Raspberry Pi), J3c, then J4 (regenerate the
-arm32 `dev_object` snapshot lines, add the gate-consistency test, update
-design.md). Every Track A change must leave both byte-identity oracles
+J1, J2 and J3a are done. Next, in plan order: J3c (the cross-compile int
+lane made required), the float-ABI and atomics battery on real hardware, then
+J4 (regenerate the arm32 `dev_object` snapshot lines, add the
+gate-consistency test, update design.md). Every Track A change must leave both byte-identity oracles
 unchanged.
