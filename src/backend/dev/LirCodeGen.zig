@@ -12257,7 +12257,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.codegen.emitOr(word, work, work, sent);
                         self.codegen.freeGeneral(sent);
                     }
-                    try self.codegen.emitCtz64(result, work);
+                    try self.codegen.emitCtzWord(result, work);
                 },
             }
             self.codegen.freeGeneral(work);
@@ -12301,8 +12301,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .num_count_trailing_zero_bits => {
                     // result = ctz(low) + (low == 0 ? ctz(high) : 0)
                     const tz_high = try self.allocTempGeneral();
-                    try self.codegen.emitCtz64(result, parts.low);
-                    try self.codegen.emitCtz64(tz_high, parts.high);
+                    try self.codegen.emitCtzWord(result, parts.low);
+                    try self.codegen.emitCtzWord(tz_high, parts.high);
                     const is_zero = try self.allocTempGeneral();
                     const zero_reg = try self.allocTempGeneral();
                     try self.codegen.emitLoadImm(zero_reg, 0);

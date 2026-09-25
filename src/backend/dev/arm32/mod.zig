@@ -39,6 +39,9 @@ pub const LinuxEmit = Emit(.arm32linux);
 
 pub const Call = @import("Call.zig");
 
+/// Target-parameterized code generator.
+pub const CodeGen = @import("CodeGen.zig").CodeGen;
+
 test "arm32 module imports" {
     std.testing.refAllDecls(@This());
     _ = @import("encoding_oracle_tests.zig");
