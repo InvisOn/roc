@@ -1112,13 +1112,17 @@ test "ObjectFileCompiler runtime static-root pack owns only reachable canonical 
     const text = "immutable runtime data survives its producer";
     const identity = lir.ProcIdentity.forTest(717);
     inline for (.{ RocTarget.x64linux, RocTarget.arm64linux, comptime RocTarget.detectNative() }) |target| {
+        // The descriptor and layouts use the target's word: the native target
+        // may be 32-bit.
+        const target_usize = comptime @import("base").target.TargetUsize.fromPtrBitWidth(target.ptrBitWidth());
+        const word = comptime target_usize.size();
         var result = producer: {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             var store = LirStore.init(a);
             defer store.deinit();
-            var layouts = try layout.Store.init(a, .u64);
+            var layouts = try layout.Store.init(a, target_usize);
             defer layouts.deinit();
             const local = try store.addLocal(.{ .layout_idx = .str });
             const ret = try store.addCFStmt(.{ .ret = .{ .value = local } });
@@ -1134,10 +1138,11 @@ test "ObjectFileCompiler runtime static-root pack owns only reachable canonical 
                 .body = body,
                 .ret_layout = .str,
             });
-            const descriptor = try a.alloc(u8, 24);
+            const descriptor = try a.alloc(u8, 3 * word);
             @memset(descriptor, 0);
-            std.mem.writeInt(u64, descriptor[8..16], text.len << 1, .little);
-            std.mem.writeInt(u64, descriptor[16..24], text.len, .little);
+            const Word = if (word == 8) u64 else u32;
+            std.mem.writeInt(Word, descriptor[word..][0..word], text.len << 1, .little);
+            std.mem.writeInt(Word, descriptor[2 * word ..][0..word], text.len, .little);
             const backing = try a.alloc(u8, 16 + text.len);
             @memset(backing[0..16], 0);
             @memcpy(backing[16..], text);
@@ -1203,7 +1208,7 @@ test "ObjectFileCompiler runtime static-root pack owns only reachable canonical 
         // A different consumer has neither the procedure ordinal nor any static table.
         var store = LirStore.init(allocator);
         defer store.deinit();
-        var layouts = try layout.Store.init(allocator, .u64);
+        var layouts = try layout.Store.init(allocator, target_usize);
         defer layouts.deinit();
         const CG = LirCodeGenMod.LirCodeGen(target);
         var receiver = try CG.init(allocator, &store, &layouts, .{}, &.{}, .default);

@@ -26913,7 +26913,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const size = self.getLayoutSize(layout_idx);
             if (size == 0) return 0;
 
-            const abi_size = @as(u32, self.calcParamRegCount(layout_idx)) * 8;
+            const abi_size = @as(u32, self.calcParamRegCount(layout_idx)) * word_size;
             return @max(size, abi_size);
         }
 
@@ -28104,8 +28104,26 @@ fn addBinaryLowLevelProc(
     operand_layout: layout.Idx,
     ret_layout: layout.Idx,
 ) Allocator.Error!lir.LIR.LirProcSpecId {
-    const lhs = try addLocal(store, operand_layout);
-    const rhs = try addLocal(store, operand_layout);
+    return addMixedBinaryLowLevelProc(store, op, lhs_value, rhs_value, operand_layout, operand_layout, ret_layout);
+}
+
+/// A shift of a `value_layout` value by a `U8` amount, the only amount type
+/// the shift builtins take (`shl_wrap : I64, U8 -> I64`).
+fn addShiftProc(store: *LirStore, op: lir.LowLevel, value: i64, amount: u8, value_layout: layout.Idx) Allocator.Error!lir.LIR.LirProcSpecId {
+    return addMixedBinaryLowLevelProc(store, op, value, amount, value_layout, .u8, value_layout);
+}
+
+fn addMixedBinaryLowLevelProc(
+    store: *LirStore,
+    op: lir.LowLevel,
+    lhs_value: i64,
+    rhs_value: i64,
+    lhs_layout: layout.Idx,
+    rhs_layout: layout.Idx,
+    ret_layout: layout.Idx,
+) Allocator.Error!lir.LIR.LirProcSpecId {
+    const lhs = try addLocal(store, lhs_layout);
+    const rhs = try addLocal(store, rhs_layout);
     const result = try addLocal(store, ret_layout);
     const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
     const args = try store.addLocalSpan(&.{ lhs, rhs });
@@ -28118,12 +28136,12 @@ fn addBinaryLowLevelProc(
     } });
     const assign_rhs = try store.addCFStmt(.{ .assign_literal = .{
         .target = rhs,
-        .value = .{ .i64_literal = .{ .value = rhs_value, .layout_idx = operand_layout } },
+        .value = .{ .i64_literal = .{ .value = rhs_value, .layout_idx = rhs_layout } },
         .next = assign_op,
     } });
     const assign_lhs = try store.addCFStmt(.{ .assign_literal = .{
         .target = lhs,
-        .value = .{ .i64_literal = .{ .value = lhs_value, .layout_idx = operand_layout } },
+        .value = .{ .i64_literal = .{ .value = lhs_value, .layout_idx = lhs_layout } },
         .next = assign_rhs,
     } });
     return try addNoArgProc(store, assign_lhs, ret_layout);
@@ -28199,7 +28217,7 @@ fn deadTempChainFrameSize(temp_count: u32, step_value: i64) Allocator.Error!u32 
 }
 
 test "frame size tracks peak liveness, not total temporary count" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
     const step_value: i64 = 3;
     const long_temps: u32 = 512;
     {
@@ -28270,7 +28288,7 @@ test "stack reuse does not allocate declaration-only join parameters" {
         defer cg.deinit();
         try cg.compileAllProcSpecs(store.getProcSpecs());
         size.* = cg.proc_registry.get(@intFromEnum(proc)).?.frame_size;
-        if (comptime builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) {
+        if (comptime host_lir_codegen_available) {
             try std.testing.expectEqual(@as(u64, 42), try runRootU64(&store, &state.layout_store, proc, .u64));
         }
     }
@@ -28338,7 +28356,7 @@ test "stack reuse bounds locals and call scratch on both native architectures" {
             try std.testing.expect(sizes[1] < 4096);
         }
     }
-    if (comptime builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) {
+    if (comptime host_lir_codegen_available) {
         var store = LirStore.init(allocator);
         defer store.deinit();
         var state = try TestLayoutState.init(allocator);
@@ -28473,9 +28491,7 @@ fn runRootFloatBits(
 }
 
 test "dev keeps every float NaN payload" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28493,9 +28509,7 @@ test "dev keeps every float NaN payload" {
 }
 
 test "dev lowering: init_uninitialized writes poison pattern" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28539,9 +28553,7 @@ fn freshTestJoinPointId(next: *u32) lir.LIR.JoinPointId {
 }
 
 test "code generator initialization" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28554,9 +28566,7 @@ test "code generator initialization" {
 }
 
 test "Boxy dictionary thunks are emitted only for producer-named workers" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28595,7 +28605,7 @@ test "Boxy dictionary thunks are emitted only for producer-named workers" {
 }
 
 test "Boxy thunk artifact splice preserves worker namespace in both orders and across packs" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
     const artifacts = @import("ProcArtifact.zig");
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28688,9 +28698,7 @@ test "Boxy thunk artifact splice preserves worker namespace in both orders and a
 }
 
 test "statement environments restore nested bindings and overwrites without allocation" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28752,9 +28760,7 @@ test "statement environments restore nested bindings and overwrites without allo
 }
 
 test "statement environments spill vectors before marks and undo arm spills in reverse" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28804,9 +28810,7 @@ test "statement environments spill vectors before marks and undo arm spills in r
 }
 
 test "statement environment journal survives procedure scopes" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28829,9 +28833,7 @@ test "statement environment journal survives procedure scopes" {
 }
 
 test "vector spill residency is independent of scalar local count" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28864,9 +28866,7 @@ test "vector spill residency is independent of scalar local count" {
 }
 
 test "proc params and mutable list cells use distinct stack slots" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -28927,9 +28927,7 @@ test "proc params and mutable list cells use distinct stack slots" {
 }
 
 test "immutable aliases share storage but aliases of mutable locals do not" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29152,9 +29150,7 @@ test "AArch64 compare immediate accepts large bit masks" {
 }
 
 test "two-arg proc list join loop returns full length" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29320,9 +29316,7 @@ test "two-arg proc list join loop returns full length" {
 }
 
 test "ptr_alloca slot is zeroed and ptr_store/ptr_load round trip" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29391,9 +29385,7 @@ test "ptr_alloca slot is zeroed and ptr_store/ptr_load round trip" {
 }
 
 test "box_alloc_zeroed cell is zeroed, writable through ptr_cast, and freed by decref" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29479,9 +29471,7 @@ test "box_alloc_zeroed cell is zeroed, writable through ptr_cast, and freed by d
 }
 
 test "generate i64 literal" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29494,9 +29484,7 @@ test "generate i64 literal" {
 }
 
 test "generate bool literal" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29519,9 +29507,7 @@ test "generate bool literal" {
 }
 
 test "tag payload bind invariant rejects mismatched pattern layout" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29556,9 +29542,7 @@ test "tag payload bind invariant rejects mismatched pattern layout" {
 }
 
 test "generate addition" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29571,9 +29555,7 @@ test "generate addition" {
 }
 
 test "dev backend detects u64 multiplication overflow" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29589,9 +29571,7 @@ test "dev backend detects u64 multiplication overflow" {
 }
 
 test "dev backend fuses overflow predicate with matching wrapping result" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29647,9 +29627,7 @@ test "dev backend fuses overflow predicate with matching wrapping result" {
 }
 
 test "dev lowering keeps F32 addition in binary32 locations" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29662,9 +29640,7 @@ test "dev lowering keeps F32 addition in binary32 locations" {
 }
 
 test "record equality uses layout-aware comparison" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29739,9 +29715,7 @@ test "record equality uses layout-aware comparison" {
 }
 
 test "generate modulo" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29754,9 +29728,7 @@ test "generate modulo" {
 }
 
 test "generate shift left" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29764,14 +29736,12 @@ test "generate shift left" {
     var test_state = try TestLayoutState.init(allocator);
     defer test_state.deinit();
 
-    const proc = try addBinaryLowLevelProc(&store, .num_shift_left_by, 1, 4, .i64, .i64);
+    const proc = try addShiftProc(&store, .num_shift_left_by, 1, 4, .i64);
     try std.testing.expectEqual(@as(i64, 16), try runRootI64(&store, &test_state.layout_store, proc));
 }
 
 test "generate shift right" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29779,14 +29749,12 @@ test "generate shift right" {
     var test_state = try TestLayoutState.init(allocator);
     defer test_state.deinit();
 
-    const proc = try addBinaryLowLevelProc(&store, .num_shift_right_by, -8, 1, .i64, .i64);
+    const proc = try addShiftProc(&store, .num_shift_right_by, -8, 1, .i64);
     try std.testing.expectEqual(@as(i64, -4), try runRootI64(&store, &test_state.layout_store, proc));
 }
 
 test "generate shift right zero-fill" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29795,7 +29763,7 @@ test "generate shift right zero-fill" {
     defer test_state.deinit();
 
     const lhs_bits: i64 = @bitCast(@as(u64, 0x8000_0000_0000_0000));
-    const proc = try addBinaryLowLevelProc(&store, .num_shift_right_zf_by, lhs_bits, 63, .u64, .u64);
+    const proc = try addShiftProc(&store, .num_shift_right_zf_by, lhs_bits, 63, .u64);
     try std.testing.expectEqual(@as(u64, 1), try runRootU64(&store, &test_state.layout_store, proc, .u64));
 }
 
@@ -29803,13 +29771,13 @@ test "generate shift right zero-fill" {
 // (as an unsigned bit pattern), so both signed and unsigned expectations can be
 // compared directly.
 const ShiftHarness = struct {
-    fn run(op: lir.LowLevel, lhs: i64, rhs: i64, operand_layout: layout.Idx, comptime width: u7) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
+    fn run(op: lir.LowLevel, lhs: i64, rhs: u8, operand_layout: layout.Idx, comptime width: u7) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
         const allocator = std.testing.allocator;
         var store = LirStore.init(allocator);
         defer store.deinit();
         var test_state = try TestLayoutState.init(allocator);
         defer test_state.deinit();
-        const proc = try addBinaryLowLevelProc(&store, op, lhs, rhs, operand_layout, operand_layout);
+        const proc = try addShiftProc(&store, op, lhs, rhs, operand_layout);
         const raw = try runRootU64(&store, &test_state.layout_store, proc, operand_layout);
         return if (width == 64) raw else raw & ((@as(u64, 1) << width) - 1);
     }
@@ -29822,9 +29790,7 @@ const ShiftHarness = struct {
 };
 
 test "generate shift modulo - unsigned widths" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
     const H = ShiftHarness;
     const shl = lir.LowLevel.num_shift_left_by;
     const shr = lir.LowLevel.num_shift_right_by;
@@ -29883,9 +29849,7 @@ test "generate shift modulo - unsigned widths" {
 }
 
 test "generate shift modulo - signed widths" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
     const H = ShiftHarness;
     const shl = lir.LowLevel.num_shift_left_by;
     const shr = lir.LowLevel.num_shift_right_by;
@@ -29918,9 +29882,7 @@ test "generate shift modulo - signed widths" {
 }
 
 test "generate unary minus" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -29933,9 +29895,7 @@ test "generate unary minus" {
 }
 
 test "generate bit-count ops (popcount/clz/ctz)" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     const Case = struct { op: lir.LowLevel, value: i64, layout: layout.Idx, expected: u8 };
@@ -30038,9 +29998,7 @@ test "generate bit-count ops (popcount/clz/ctz)" {
 }
 
 test "entrypoint arg offsets preserve Roc alignment order" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -30059,9 +30017,7 @@ test "entrypoint arg offsets preserve Roc alignment order" {
 }
 
 test "entrypoint param slots round aggregates to ABI word width" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -30079,9 +30035,11 @@ test "entrypoint param slots round aggregates to ABI word width" {
     var codegen = try HostLirCodeGen.init(allocator, &store, &test_state.layout_store, .{}, &.{}, .default);
     defer codegen.deinit();
 
-    try std.testing.expectEqual(@as(u32, 16), codegen.entrypointParamSlotSize(aggregate_layout));
-    try std.testing.expectEqual(@as(u32, 24), codegen.entrypointParamSlotSize(.str));
-    try std.testing.expectEqual(@as(u32, 8), codegen.entrypointParamSlotSize(.bool));
+    // A 12-byte aggregate takes two 8-byte words or three 4-byte words.
+    const word = @sizeOf(usize);
+    try std.testing.expectEqual(@as(u32, if (word == 8) 16 else 12), codegen.entrypointParamSlotSize(aggregate_layout));
+    try std.testing.expectEqual(@as(u32, 3 * word), codegen.entrypointParamSlotSize(.str));
+    try std.testing.expectEqual(@as(u32, word), codegen.entrypointParamSlotSize(.bool));
 }
 
 test "aarch64 hosted HFA and HVA returns expose V0 through V3" {
@@ -30093,21 +30051,21 @@ test "aarch64 hosted HFA and HVA returns expose V0 through V3" {
 
 /// Complete argument registers a hosted callee saw for its narrow parameters.
 const NarrowHostedArgRegisters = struct {
-    u8_register: u64 = 0,
-    i8_register: u64 = 0,
-    u16_register: u64 = 0,
-    i16_register: u64 = 0,
+    u8_register: usize = 0,
+    i8_register: usize = 0,
+    u16_register: usize = 0,
+    i16_register: usize = 0,
 };
 
 var narrow_hosted_arg_registers: NarrowHostedArgRegisters = .{};
 
-/// Hosted callee declared over the full argument registers, so it observes every
+/// Hosted callee declared over the full (word-sized) argument registers, so it observes every
 /// bit the caller placed there rather than only the bits the Roc types describe.
 fn observeNarrowHostedArgs(
-    u8_register: u64,
-    i8_register: u64,
-    u16_register: u64,
-    i16_register: u64,
+    u8_register: usize,
+    i8_register: usize,
+    u16_register: usize,
+    i16_register: usize,
 ) callconv(.c) i64 {
     narrow_hosted_arg_registers = .{
         .u8_register = u8_register,
@@ -30243,9 +30201,7 @@ fn addHostedCallRoot(
 }
 
 test "issue 10748: hosted call promotes narrow integer arguments in registers" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -30270,16 +30226,14 @@ test "issue 10748: hosted call promotes narrow integer arguments in registers" {
 
     // C promotes each of these to `int`, so the callee is entitled to read the
     // complete low 32 bits of the register.
-    try std.testing.expectEqual(@as(u64, 3), narrow_hosted_arg_registers.u8_register);
-    try std.testing.expectEqual(@as(u64, 0xFFFF_FFFD), narrow_hosted_arg_registers.i8_register);
-    try std.testing.expectEqual(@as(u64, 0x0102), narrow_hosted_arg_registers.u16_register);
-    try std.testing.expectEqual(@as(u64, 0xFFFF_FFFE), narrow_hosted_arg_registers.i16_register);
+    try std.testing.expectEqual(@as(usize, 3), narrow_hosted_arg_registers.u8_register);
+    try std.testing.expectEqual(@as(usize, 0xFFFF_FFFD), narrow_hosted_arg_registers.i8_register);
+    try std.testing.expectEqual(@as(usize, 0x0102), narrow_hosted_arg_registers.u16_register);
+    try std.testing.expectEqual(@as(usize, 0xFFFF_FFFE), narrow_hosted_arg_registers.i16_register);
 }
 
 test "issue 10748: hosted call promotes narrow integer arguments that overflow to the stack" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
-        return error.SkipZigTest;
-    }
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
@@ -30352,7 +30306,7 @@ test "symbol producer caches reuse identities and reset with generated code" {
 }
 
 test "dev explicit procedure demand leaves runtime-only body uncompiled" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
     defer store.deinit();
@@ -30680,7 +30634,7 @@ test "independent fragment symbolic hooks record actual context use" {
 }
 
 test "branch location checkpoints restore only changed bindings in a wide procedure" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    if (comptime !host_lir_codegen_available) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
     defer store.deinit();
