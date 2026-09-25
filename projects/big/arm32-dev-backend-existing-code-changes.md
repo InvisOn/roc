@@ -313,3 +313,15 @@ check could gate every later commit.
   call and C-ABI entry paths and unreachable in the interpreter trampoline
   (x86_64 and aarch64 hosts only). Needed so hosted calls and entrypoints
   have an arm32 calling convention; no other target produces `split`.
+- `LirCodeGen.zig` (J1c, first groups): the driver selects arm32's `CodeGen`,
+  register types, `Condition` and stack alignment, and its top-level arm32
+  refusal is gone (nothing instantiates `LirCodeGen(.arm32musl)` until J2).
+  Two-way ISA tests in the scalar and memory helpers become exhaustive
+  switches or facade calls: byte/halfword loads and stores, register shifts,
+  population count and leading zeros, discriminant loads and masks
+  (`emitMaskDiscriminant`), flag-setting add/subtract, word multiply
+  overflow (`smull`/`umull`), abs and abs_diff, float immediates and
+  word-to-float conversions, and return-pointer copies. Where the facade
+  emits exactly what a two-way branch did (the x86_64 and aarch64 byte and
+  halfword loads and stores), the branch becomes the facade call. Needed
+  because each two-way test was a compile error for arm32.
