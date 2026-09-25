@@ -169,6 +169,26 @@ print on arm in Debug test binaries run under qemu. The backend tests print
 their totals when the binary runs directly under `qemu-arm-static`. The
 build step alone reports a failure because one wasm test writes to stderr.
 
+## `ci/ssh_cross_runner.sh`
+
+**Purpose:** runs cross-built test programs on a real board instead of
+under qemu. It copies each program to `/tmp` on the host over `scp`, runs it
+with `ssh`, passes stdin, stdout, stderr and the exit status through, and
+deletes the copy.
+
+**Usage:**
+
+```
+ROC_CROSS_SSH_HOST=user@board zig build run-test-cli -- --suite platforms \
+    --filter test/fx/ --cross-target=arm32musl --cross-opt=dev --cross-run \
+    --cross-runner=$PWD/ci/ssh_cross_runner.sh --threads 3
+```
+
+The runner path must be absolute: the CLI runner starts each program in a
+per-test work directory. The board needs key-based ssh login without
+prompts. Every argument is quoted for the remote shell, because the runner
+passes the expected-output spec (spaces and `|`) as a single argument.
+
 ## `eval-test-runner --write-dev-code-hashes` / `--check-dev-code-hashes`
 
 **Purpose:** the golden byte-identity oracle for Track A: every eval case that

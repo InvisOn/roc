@@ -421,5 +421,10 @@ Fix each one in its own commit, and remove its entry in that commit.
   cannot run in a 32-bit process" above for the cause and the options). The
   fix belongs in bytebox's memory reservation; remove the gate in
   `eval.backendAvailable` in the same commit.
+- **`run-test-cli --cross-runner` needs an absolute path.** The runner starts
+  each program in a per-test work directory, so a relative runner such as
+  `ci/ssh_cross_runner.sh` is not found and reports an infra error. Fix in
+  `parallel_cli_runner.zig`: resolve the runner path against the directory
+  the runner was started in.
 - **Probe apps that read stdin block without input.** Any ad-hoc
   build-and-run script must redirect stdin (`</dev/null`) and use a timeout.
