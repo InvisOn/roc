@@ -616,6 +616,14 @@ jobs:
           sudo apt-get install -y qemu-user-static
           qemu-arm-static -cpu help | grep -E '^ *cortex-a9$'
 
+      # Detects when Zig fixes the arm nested-struct ABI bug that
+      # test/fx/platform/host.zig works around: the probe expects the bug and
+      # fails, saying to remove the workaround, once it is gone.
+      - name: Check the Zig arm nested-struct ABI workaround is still needed
+        if: matrix.target == 'arm-linux-musleabihf'
+        continue-on-error: true
+        run: zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig
+
       - name: Build the eval runner for arm32
         if: matrix.target == 'arm-linux-musleabihf'
         continue-on-error: true
