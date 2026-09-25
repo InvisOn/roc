@@ -10,12 +10,14 @@ Steps:
   3. `zig cc -target arm-linux-musleabihf` links it with a C `main` through
      LLD against musl.
   4. `qemu-arm-static -cpu cortex-a9` (the dev backend's CPU floor: ARMv7-A,
-     NEON, no hardware divide) runs it; the program must print the smoke
-     message and report that the function returned 42.
+     NEON, no hardware divide) runs it, or, with `--ssh HOST`, a real 32-bit
+     ARM Linux device does; the program must print the smoke message and
+     report that the function returned 42.
 
     python3 ci/arm32_link_smoke.py              # all four steps
     python3 ci/arm32_link_smoke.py --no-run     # steps 1-3 (no qemu needed)
     python3 ci/arm32_link_smoke.py --keep DIR   # keep the object and executable
+    python3 ci/arm32_link_smoke.py --ssh aj@rocit.local  # run on a device
 
 Needs Zig 0.16.0 (as `zig` or `$ZIG`) and, for step 4, `qemu-arm-static` or
 `qemu-arm` on PATH (`$QEMU_ARM` overrides).
@@ -64,11 +66,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-run", action="store_true", help="stop after linking; do not run under qemu")
     parser.add_argument("--keep", metavar="DIR", help="copy the object and executable into DIR")
+    parser.add_argument("--ssh", metavar="HOST", help="run on a 32-bit ARM Linux device over ssh instead of qemu")
     args = parser.parse_args()
+    if args.ssh and args.no_run:
+        fail("--ssh and --no-run contradict each other")
     zig = os.environ.get("ZIG", "zig")
 
     qemu = None
-    if not args.no_run:
+    if not args.no_run and not args.ssh:
         qemu = os.environ.get("QEMU_ARM") or shutil.which("qemu-arm-static") or shutil.which("qemu-arm")
         if qemu is None:
             fail("no qemu-arm-static or qemu-arm on PATH; install qemu-user-static or pass --no-run")
@@ -109,13 +114,20 @@ def main():
             print("NOT RUN: --no-run given; the executable was not executed")
             return 0
 
-        # 4. Run on the dev backend's CPU floor.
-        result = subprocess.run([qemu, "-cpu", "cortex-a9", exe], capture_output=True, text=True)
+        # 4. Run on the dev backend's CPU floor, or on a device.
+        if args.ssh:
+            remote = "/tmp/arm32_link_smoke.%d" % os.getpid()
+            run(["scp", "-q", "-o", "BatchMode=yes", exe, "%s:%s" % (args.ssh, remote)])
+            result = subprocess.run(["ssh", "-o", "BatchMode=yes", args.ssh, "%s; status=$?; rm -f %s; exit $status" % (remote, remote)], capture_output=True, text=True)
+            where = "ssh " + args.ssh
+        else:
+            result = subprocess.run([qemu, "-cpu", "cortex-a9", exe], capture_output=True, text=True)
+            where = "%s -cpu cortex-a9" % os.path.basename(qemu)
         if result.returncode != 0:
             fail("the executable exited %d\n%s%s" % (result.returncode, result.stdout, result.stderr))
         if MESSAGE not in result.stdout or "roc_link_smoke returned 42" not in result.stdout:
             fail("unexpected output:\n" + result.stdout)
-        print("ok   ran under %s -cpu cortex-a9:" % os.path.basename(qemu))
+        print("ok   ran on %s:" % where)
         for line in result.stdout.splitlines():
             print("       " + line)
     return 0
