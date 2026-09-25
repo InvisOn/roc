@@ -31,6 +31,14 @@ pub const LINK_REG: GeneralReg = .r14;
 /// clobber it, so it is never live across a call.
 pub const SCRATCH_REG: GeneralReg = .r12;
 
+/// The register an out-of-range memory access forms its address in. Every
+/// procedure saves LR in its prologue and returns by popping PC, so LR is free
+/// inside a body; a formed address is consumed by the very next load or
+/// store, so it is never live across a call either. Using LR rather than
+/// `SCRATCH_REG` leaves r12 usable as the base or the data register of an
+/// access at any offset.
+pub const ADDRESS_SCRATCH_REG: GeneralReg = LINK_REG;
+
 /// Registers used for passing integer/pointer arguments (in order)
 pub const GENERAL_PARAM_REGS = [_]GeneralReg{ .r0, .r1, .r2, .r3 };
 
