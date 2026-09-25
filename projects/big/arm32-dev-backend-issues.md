@@ -182,6 +182,21 @@ the dev backend. The first 32-bit native target will be the first to run the
 shared native code (object writing, relocation widths, DWARF, the driver's
 literal 8s) at 32-bit width.
 
+### A checked I64 multiply takes 10 of arm32's 11 temporaries
+
+`emitWide64MulChecked` holds both operand pairs, the result pair and four
+partial-product registers at once. It runs between statements, where the
+pool is otherwise free, but any caller that keeps a register live across it
+would exhaust the pool (an invariant panic, not a miscompile). Reloading an
+operand word from its slot would free two registers if that ever happens.
+
+### Shim execution does not resolve `__aeabi_*` yet
+
+`callAeabiHelper` emits a relocation to the helper's name in shim mode, like
+every other runtime symbol. Shim mode only runs for the compiler's host, so
+this matters only for a compiler running on arm32; its shim would have to
+resolve those names against compiler-rt.
+
 ### Test skip guards are keyed on the host architecture
 
 `LirCodeGen.zig` tests skip unless `builtin.cpu.arch` is x86_64 or aarch64
