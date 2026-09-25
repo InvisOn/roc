@@ -411,6 +411,7 @@ const CustomCase = enum {
     list_builtin_inlined,
     default_platform_linux_disassembly,
     default_platform_build_x64glibc,
+    default_platform_build_x64glibc_dev,
     default_platform_build_arm64glibc,
     default_platform_build_x64freebsd,
     default_platform_build_x64netbsd,
@@ -1724,6 +1725,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "list builtins inline in native --opt=speed build", .body = .{ .custom = .list_builtin_inlined } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build default platform x64musl matches direct write assembly", .skip = .{ .always = "TODO: direct-write default-platform codegen" }, .body = .{ .custom = .default_platform_linux_disassembly } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build default platform x64glibc succeeds", .body = .{ .custom = .default_platform_build_x64glibc } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc build --opt=dev default platform x64glibc links statically and runs", .body = .{ .custom = .default_platform_build_x64glibc_dev } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build default platform arm64glibc succeeds", .body = .{ .custom = .default_platform_build_arm64glibc } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10598: roc build default platform x64freebsd succeeds", .body = .{ .custom = .default_platform_build_x64freebsd } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10598: roc build default platform x64netbsd succeeds", .body = .{ .custom = .default_platform_build_x64netbsd } },
@@ -3405,12 +3407,13 @@ fn runCustomCase(
         .issue_11133_llvm_emit_scaling => customIssue11133LlvmEmitScaling(io, allocator, &env, &timer, timeout_ms),
         .list_builtin_inlined => customListBuiltinInlined(io, allocator, &env, &timer, timeout_ms),
         .default_platform_linux_disassembly => customDefaultPlatformLinuxDisassembly(io, allocator, &env, &timer, timeout_ms),
-        .default_platform_build_x64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .x64glibc),
-        .default_platform_build_arm64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .arm64glibc),
-        .default_platform_build_x64freebsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .x64freebsd),
-        .default_platform_build_x64netbsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .x64netbsd),
+        .default_platform_build_x64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .x64glibc),
+        .default_platform_build_x64glibc_dev => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .dev, .x64glibc),
+        .default_platform_build_arm64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .arm64glibc),
+        .default_platform_build_x64freebsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .x64freebsd),
+        .default_platform_build_x64netbsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .x64netbsd),
         .default_platform_build_x64openbsd_rejected => customDefaultPlatformOpenBsdRejected(io, allocator, &env, &timer, timeout_ms),
-        .default_platform_build_wasm32 => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .wasm32),
+        .default_platform_build_wasm32 => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .wasm32),
         .default_platform_wasm32_archive_reproducible => customDefaultPlatformWasm32ArchiveReproducible(io, allocator, &env, &timer, timeout_ms),
         .native_build_thread_count_reproducible => customNativeBuildThreadCountReproducible(io, allocator, &env, &timer, timeout_ms),
         .native_build_artifact_round_trip => customNativeBuildArtifactRoundTrip(io, allocator, &env, &timer, timeout_ms),
@@ -5831,6 +5834,7 @@ fn customDefaultPlatformBuild(
     env: *const CaseEnv,
     timer: *harness.Timer,
     timeout_ms: u64,
+    backend: OptMode,
     target: DefaultPlatformTarget,
 ) ?TestResult {
     if (!target.canBuildOnHost()) {
@@ -5852,12 +5856,14 @@ fn customDefaultPlatformBuild(
         return customInfraFailure(allocator, timer, "failed to allocate target arg: {}", .{err});
     const out_arg = outputArg(allocator, output_path) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate output arg: {}", .{err});
+    const opt_arg = std.fmt.allocPrint(allocator, "--opt={s}", .{backend.cliName()}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate opt arg: {}", .{err});
 
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = app_path, .data = default_platform_echo_app }) catch |err|
         return customInfraFailure(allocator, timer, "failed to write default platform app: {}", .{err});
 
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
-        .args = &.{ "build", "--opt=speed", "--no-cache", target_arg, out_arg },
+        .args = &.{ "build", opt_arg, "--no-cache", target_arg, out_arg },
         .roc_file = app_path,
         .contains = &.{.{ .stream = .stdout, .text = "successfully building" }},
     })) |failure| return failure;
