@@ -29,7 +29,8 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J1a: `arm32/CodeGen.zig`: allocator pools, stack slots, the ISA-neutral facade | Done |
 | J1b: frame builders (deferred and forward) | Done |
 | J1b: AAPCS32 `CallBuilder` (pairs, C.5, VFP back-filling, arm32 call emitters) | Done |
-| J1b: C-ABI classifier (`layout/abi`); J1c-J1f: driver sites, Wide64 pairs, NEON lowering, acceptance test | Not started |
+| J1b: AAPCS32 C-ABI classifier and physical assignment (`layout/abi/arm32.zig`, `Target.arm32`, `PhysicalArg.split`) | Done |
+| J1c-J1f: driver sites, Wide64 pairs, NEON lowering, acceptance test | Not started |
 | J2-J4: gates, qemu execution, lock-in | Not started |
 
 Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
