@@ -245,3 +245,9 @@ check could gate every later commit.
   discriminant read name the Wide64 widths. Needed because each of these is
   either a register-sized value (a word) or a 64-bit value a 32-bit register
   cannot hold.
+- `LirCodeGen.zig` (scalar bit counts): `generateBitCountScalar` counts
+  integers up to a word with masks, adjustments and sentinels relative to
+  `word_bits` (wider ones go to `generateWide64IntUnary` on 32-bit targets);
+  `emitPopcount64`/`emitClz64` become `emitPopcountWord`/`emitClzWord` with
+  word-width SWAR constants. Needed because the 64-bit constants and the
+  `64 - width` adjustments are wrong for a 32-bit register.

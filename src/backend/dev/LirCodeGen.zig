@@ -12142,7 +12142,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         /// dst = number of set bits in the full 64-bit value `src`.
-        fn emitPopcount64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+        fn emitPopcountWord(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
             // POPCNT is an SSE4.2-era instruction, so an x86 target at the
             // baseline CPU level counts bits the same way aarch64 does.
             const use_swar = comptime isa.binaryIs(.aarch64);
@@ -12154,63 +12154,63 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 // x = src
                 try self.emitMovRegReg(dst, src);
                 // x = x - ((x >> 1) & 0x5555555555555555)
-                try self.codegen.emitLsrImm(.w64, t, dst, 1);
-                try self.codegen.emitLoadImm(m, @bitCast(@as(u64, 0x5555555555555555)));
-                try self.codegen.emitAnd(.w64, t, t, m);
-                try self.codegen.emitSub(.w64, dst, dst, t);
+                try self.codegen.emitLsrImm(word, t, dst, 1);
+                try self.codegen.emitLoadImm(m, wordOfU128(0x55555555555555555555555555555555, 0));
+                try self.codegen.emitAnd(word, t, t, m);
+                try self.codegen.emitSub(word, dst, dst, t);
                 // x = (x & 0x3333...) + ((x >> 2) & 0x3333...)
-                try self.codegen.emitLoadImm(m, @bitCast(@as(u64, 0x3333333333333333)));
-                try self.codegen.emitAnd(.w64, t, dst, m);
-                try self.codegen.emitLsrImm(.w64, dst, dst, 2);
-                try self.codegen.emitAnd(.w64, dst, dst, m);
-                try self.codegen.emitAdd(.w64, dst, dst, t);
+                try self.codegen.emitLoadImm(m, wordOfU128(0x33333333333333333333333333333333, 0));
+                try self.codegen.emitAnd(word, t, dst, m);
+                try self.codegen.emitLsrImm(word, dst, dst, 2);
+                try self.codegen.emitAnd(word, dst, dst, m);
+                try self.codegen.emitAdd(word, dst, dst, t);
                 // x = (x + (x >> 4)) & 0x0f0f...
-                try self.codegen.emitLsrImm(.w64, t, dst, 4);
-                try self.codegen.emitAdd(.w64, dst, dst, t);
-                try self.codegen.emitLoadImm(m, @bitCast(@as(u64, 0x0f0f0f0f0f0f0f0f)));
-                try self.codegen.emitAnd(.w64, dst, dst, m);
-                // count = (x * 0x0101...) >> 56
-                try self.codegen.emitLoadImm(m, @bitCast(@as(u64, 0x0101010101010101)));
-                try self.codegen.emitMul(.w64, dst, dst, m);
-                try self.codegen.emitLsrImm(.w64, dst, dst, 56);
+                try self.codegen.emitLsrImm(word, t, dst, 4);
+                try self.codegen.emitAdd(word, dst, dst, t);
+                try self.codegen.emitLoadImm(m, wordOfU128(0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f, 0));
+                try self.codegen.emitAnd(word, dst, dst, m);
+                // count = (x * 0x0101...) >> (word_bits - 8)
+                try self.codegen.emitLoadImm(m, wordOfU128(0x01010101010101010101010101010101, 0));
+                try self.codegen.emitMul(word, dst, dst, m);
+                try self.codegen.emitLsrImm(word, dst, dst, word_bits - 8);
                 self.codegen.freeGeneral(t);
                 self.codegen.freeGeneral(m);
             } else {
-                try self.codegen.emit.popcntRegReg(.w64, dst, src);
+                try self.codegen.emit.popcntRegReg(word, dst, src);
             }
         }
 
-        /// dst = number of leading zero bits of the full 64-bit value `src`
-        /// (64 when `src` is zero).
-        fn emitClz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+        /// dst = number of leading zero bits of the full word `src`
+        /// (`word_bits` when `src` is zero).
+        fn emitClzWord(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
             if (comptime isa.binaryIs(.aarch64)) {
-                try self.codegen.emit.clzRegReg(.w64, dst, src);
+                try self.codegen.emit.clzRegReg(word, dst, src);
                 return;
             }
             if (self.codegen.cpu_level == .v1) {
                 // BSR reports the index of the highest set bit, so the leading
-                // zero count is `63 - index`. Selecting -1 for a zero operand
-                // carries that arithmetic to the 64 LZCNT reports.
+                // zero count is `word_bits - 1 - index`. Selecting -1 for a zero operand
+                // carries that arithmetic to the word_bits LZCNT reports.
                 const t = try self.allocTempGeneral();
                 try self.codegen.emitLoadImm(t, -1);
-                try self.codegen.emit.bsrRegReg(.w64, dst, src);
-                try self.codegen.emit.cmovcc(.equal, .w64, dst, t);
-                try self.codegen.emitLoadImm(t, 63);
+                try self.codegen.emit.bsrRegReg(word, dst, src);
+                try self.codegen.emit.cmovcc(.equal, word, dst, t);
+                try self.codegen.emitLoadImm(t, word_bits - 1);
                 // Subtract into the temp: `dst` is the right-hand operand here,
                 // so making it the destination would overwrite it first.
-                try self.codegen.emitSub(.w64, t, t, dst);
+                try self.codegen.emitSub(word, t, t, dst);
                 try self.emitMovRegReg(dst, t);
                 self.codegen.freeGeneral(t);
                 return;
             }
-            try self.codegen.emit.lzcntRegReg(.w64, dst, src);
+            try self.codegen.emit.lzcntRegReg(word, dst, src);
         }
 
-        /// Lower a bit-count op on a scalar integer (width 8..64). The operand is
-        /// masked to its width so a sign-extended narrow value cannot corrupt the
-        /// count; leading-zero subtracts the (64 - width) bits outside the
-        /// operand, and trailing-zero ORs a sentinel bit so a zero operand yields
-        /// the width rather than 64. The result is a U8 in a general register.
+        /// Lower a bit-count op on a scalar integer that fits one register (width
+        /// 8..word_bits). The operand is masked to its width so a sign-extended
+        /// narrow value cannot corrupt the count; leading-zero subtracts the
+        /// (word_bits - width) bits outside the operand, and trailing-zero ORs a
+        /// sentinel bit so a zero operand yields the width rather than word_bits. The result is a U8 in a general register.
         fn generateBitCountScalar(self: *Self, op: lir.LowLevel, inner_loc: ValueLocation, operand_layout: layout.Idx) Allocator.Error!ValueLocation {
             const width: u8 = switch (operand_layout) {
                 .u8, .i8 => 8,
@@ -12219,36 +12219,39 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .u64, .i64 => 64,
                 .bool, .str, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => unreachable,
             };
+            if (comptime word_bits < 64) {
+                if (width > word_bits) return self.generateWide64IntUnary(op, inner_loc, operand_layout);
+            }
             const src_reg = try self.ensureInGeneralReg(inner_loc);
             const work = try self.allocTempGeneral();
             try self.emitMovRegReg(work, src_reg);
             self.codegen.freeGeneral(src_reg);
-            if (width < 64) {
+            if (width < word_bits) {
                 const mask_reg = try self.allocTempGeneral();
                 const mask: i64 = @bitCast((@as(u64, 1) << @intCast(width)) - 1);
                 try self.codegen.emitLoadImm(mask_reg, mask);
-                try self.codegen.emitAnd(.w64, work, work, mask_reg);
+                try self.codegen.emitAnd(word, work, work, mask_reg);
                 self.codegen.freeGeneral(mask_reg);
             }
             const result = try self.allocTempGeneral();
             switch (narrowEnum(BitCountOp, op)) {
                 .num_count_one_bits => {
-                    try self.emitPopcount64(result, work);
+                    try self.emitPopcountWord(result, work);
                 },
                 .num_count_leading_zero_bits => {
-                    try self.emitClz64(result, work);
-                    if (width < 64) {
+                    try self.emitClzWord(result, work);
+                    if (width < word_bits) {
                         const adj = try self.allocTempGeneral();
-                        try self.codegen.emitLoadImm(adj, @intCast(64 - @as(u32, width)));
-                        try self.codegen.emitSub(.w64, result, result, adj);
+                        try self.codegen.emitLoadImm(adj, @intCast(word_bits - @as(u32, width)));
+                        try self.codegen.emitSub(word, result, result, adj);
                         self.codegen.freeGeneral(adj);
                     }
                 },
                 .num_count_trailing_zero_bits => {
-                    if (width < 64) {
+                    if (width < word_bits) {
                         const sent = try self.allocTempGeneral();
                         try self.codegen.emitLoadImm(sent, @bitCast(@as(u64, 1) << @intCast(width)));
-                        try self.codegen.emitOr(.w64, work, work, sent);
+                        try self.codegen.emitOr(word, work, work, sent);
                         self.codegen.freeGeneral(sent);
                     }
                     try self.codegen.emitCtz64(result, work);
@@ -12272,16 +12275,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             switch (narrowEnum(BitCountOp, op)) {
                 .num_count_one_bits => {
                     const hi_count = try self.allocTempGeneral();
-                    try self.emitPopcount64(result, parts.low);
-                    try self.emitPopcount64(hi_count, parts.high);
+                    try self.emitPopcountWord(result, parts.low);
+                    try self.emitPopcountWord(hi_count, parts.high);
                     try self.codegen.emitAdd(word, result, result, hi_count);
                     self.codegen.freeGeneral(hi_count);
                 },
                 .num_count_leading_zero_bits => {
                     // result = clz(high) + (high == 0 ? clz(low) : 0)
                     const lz_low = try self.allocTempGeneral();
-                    try self.emitClz64(result, parts.high);
-                    try self.emitClz64(lz_low, parts.low);
+                    try self.emitClzWord(result, parts.high);
+                    try self.emitClzWord(lz_low, parts.low);
                     const is_zero = try self.allocTempGeneral();
                     const zero_reg = try self.allocTempGeneral();
                     try self.codegen.emitLoadImm(zero_reg, 0);
