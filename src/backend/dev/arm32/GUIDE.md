@@ -159,6 +159,19 @@ Track A change is a bug. For an intended codegen change, regenerate with
 `./zig-out/bin/snapshot --update-expected <file>` and `--write-dev-code-hashes`,
 and review the diff.
 
+The eval corpus barely reaches the SIMD kernels, so a change to SIMD lowering
+also needs the exhaustive SIMD corpus compared by its code bytes. Build it
+before and after the change for both 64-bit targets and compare `.text`
+(symbol names differ between compiler builds; code bytes must not):
+
+```
+for t in x64musl arm64musl; do
+  ./zig-out/bin/roc build --opt=dev --no-cache --target=$t --output=out-$t test/simd/differential.roc
+  zig objcopy -O binary --only-section=.text out-$t out-$t.text
+done
+# rebuild roc with the change, repeat into other names, then: cmp before.text after.text
+```
+
 These hashes do not depend on the compiler's git revision (procedure symbol
 names are canonicalized). To confirm that by hand, temporarily replace
 `getCompilerVersionGit(b)` in `build.zig` with a fixed string, rebuild both
