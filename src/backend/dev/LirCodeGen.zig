@@ -5077,7 +5077,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     } else {
                         if (comptime word_bits < 64) {
                             if (scalarIntShape(ll.ret_layout)) |shape| {
-                                if (shape.bits > word_bits) return self.generateWide64IntUnary(ll.op, inner_loc, ll.ret_layout);
+                                // `num_negate_checked`'s check is emitted above; what
+                                // remains is the plain negation.
+                                if (shape.bits > word_bits) return self.generateWide64IntUnary(.num_negate, inner_loc, ll.ret_layout);
                             }
                         }
                         const src_reg = try self.ensureInGeneralReg(inner_loc);
@@ -12764,16 +12766,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.callI128WrapperWords(LowLevelBuiltins.decBinaryArith(.dec_mul), slot, &.{ lhs, rhs }, null);
                         return result;
                     }
-                    // The checked multiply wrappers store the wrapped product
-                    // and return the overflow flag, so a wrapping multiply
-                    // uses them too and ignores the flag.
-                    try self.callI128WrapperWords(LowLevelBuiltins.checkedMul128(is_unsigned), slot, &.{ lhs, rhs }, null);
-                    if (family_entry) |entry| {
-                        if (entry.mode == .crash_on_overflow or entry.mode == .overflows) {
+                    if (family_entry) |entry| switch (entry.mode) {
+                        // The checked multiply wrappers return the overflow
+                        // flag; the value they store on overflow is saturated,
+                        // which these modes never read.
+                        .crash_on_overflow, .overflows => {
+                            try self.callI128WrapperWords(LowLevelBuiltins.checkedMul128(is_unsigned), slot, &.{ lhs, rhs }, null);
                             try self.codegen.emitCmpImm(ret_reg_0, 0);
                             return self.finishOverflowFamily(result, CodeGen.condNotEqual(), entry);
-                        }
+                        },
+                        .wrap, .proven_cannot_overflow => {},
                     } else if (checked_op != null) unreachable;
+                    try self.emitI128MulWrapWords(slot, lhs, rhs);
                     return result;
                 },
                 .num_div_by, .num_div_trunc_by => |div_op| {
@@ -13018,6 +13022,39 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// the result goes to the 16-byte `result_slot`, each operand's `u64`
         /// halves come from its slot as register or stack pairs
         /// (`addMem64Arg`), and a shift count follows the operands.
+        /// The low 128 bits of the product of the four-word values at `lhs`
+        /// and `rhs`, stored at `result_slot` (a fresh slot): schoolbook
+        /// multiplication over 32-bit words, one UMAAL per partial product
+        /// below 2^128. The low 128 bits of a two's-complement product equal
+        /// the unsigned product's, so this is the wrapping multiply for I128
+        /// and U128 alike.
+        fn emitI128MulWrapWords(self: *Self, result_slot: i32, lhs: i32, rhs: i32) Allocator.Error!void {
+            if (comptime isa != .arm32) @compileError("the four-word multiply is written for arm32");
+            const a = try self.allocTempGeneral();
+            const b = try self.allocTempGeneral();
+            const lo = try self.allocTempGeneral();
+            const hi = try self.allocTempGeneral();
+            defer self.codegen.freeGeneral(hi);
+            defer self.codegen.freeGeneral(lo);
+            defer self.codegen.freeGeneral(b);
+            defer self.codegen.freeGeneral(a);
+
+            try self.codegen.emitLoadImm(lo, 0);
+            for (0..4) |k| try self.codegen.emitStoreStack(word, result_slot + @as(i32, @intCast(k)) * word_size, lo);
+            for (0..4) |i| {
+                const i_off = @as(i32, @intCast(i)) * word_size;
+                try self.codegen.emitLoadStack(word, a, lhs + i_off);
+                try self.codegen.emitLoadImm(hi, 0);
+                for (0..4 - i) |j| {
+                    const j_off = @as(i32, @intCast(j)) * word_size;
+                    try self.codegen.emitLoadStack(word, b, rhs + j_off);
+                    try self.codegen.emitLoadStack(word, lo, result_slot + i_off + j_off);
+                    try self.codegen.emit.umaal(lo, hi, a, b);
+                    try self.codegen.emitStoreStack(word, result_slot + i_off + j_off, lo);
+                }
+            }
+        }
+
         fn callI128WrapperWords(self: *Self, builtin_fn: BuiltinFn, result_slot: i32, operands: []const i32, count: ?GeneralReg) Allocator.Error!void {
             var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
             try builder.addLeaArg(frame_ptr, result_slot);
@@ -25836,7 +25873,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.emitCmpImm(source_is_small_reg, 0);
             const heap_patch = try self.codegen.emitCondJump(CodeGen.condEqual());
 
-            try self.emitStoreSmallStrCapture(dest_offset, source_bytes_reg, start_reg, capture_len_reg);
+            if (comptime word_bits < 64) {
+                try self.emitStoreSmallStrCaptureWordPair(dest_offset, source_bytes_reg, start_reg, end_reg, capture_len_reg);
+            } else {
+                try self.emitStoreSmallStrCapture(dest_offset, source_bytes_reg, start_reg, capture_len_reg);
+            }
             const done_patch = try self.codegen.emitJump();
 
             const heap_offset = self.codegen.currentOffset();
@@ -25885,6 +25926,51 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.patchJump(done_patch, done_offset);
 
             try self.emitMovRegReg(byte_reg, capture_len_reg);
+            try self.emitAddUsizeImm(byte_reg, byte_reg, 0x80);
+            try self.codegen.emitStoreW8(frame_ptr, dest_offset + @as(i32, small_str_max_len), byte_reg);
+        }
+
+        /// `emitStoreSmallStrCapture` for a target whose register pool cannot
+        /// hold four more temporaries on top of a string match's live state
+        /// (D10): the bytes are copied last to first with `capture_len_reg`
+        /// as the counter, through two temporaries. `capture_len_reg` is
+        /// consumed; the length byte is recomputed from `end_reg - start_reg`.
+        /// The heap path that also reads `capture_len_reg` is the other side
+        /// of the small/heap branch, so it never sees the consumed value.
+        fn emitStoreSmallStrCaptureWordPair(
+            self: *Self,
+            dest_offset: i32,
+            source_bytes_reg: GeneralReg,
+            start_reg: GeneralReg,
+            end_reg: GeneralReg,
+            capture_len_reg: GeneralReg,
+        ) Allocator.Error!void {
+            try self.zeroStackArea(dest_offset, roc_str_size);
+
+            const addr_reg = try self.allocTempGeneral();
+            const byte_reg = try self.allocTempGeneral();
+            defer self.codegen.freeGeneral(byte_reg);
+            defer self.codegen.freeGeneral(addr_reg);
+
+            const loop_start = self.codegen.currentOffset();
+            try self.codegen.emitCmpImm(capture_len_reg, 0);
+            const done_patch = try self.codegen.emitCondJump(CodeGen.condEqual());
+            try self.codegen.emitSubImm(word, capture_len_reg, capture_len_reg, 1);
+            try self.emitMovRegReg(addr_reg, source_bytes_reg);
+            try self.codegen.emitAddRegs(word, addr_reg, addr_reg, start_reg);
+            try self.codegen.emitAddRegs(word, addr_reg, addr_reg, capture_len_reg);
+            try self.codegen.emitLoadW8(byte_reg, addr_reg, 0);
+            try self.codegen.emitLeaStack(addr_reg, dest_offset);
+            try self.codegen.emitAddRegs(word, addr_reg, addr_reg, capture_len_reg);
+            try self.codegen.emitStoreW8(addr_reg, 0, byte_reg);
+            const back_patch = try self.codegen.emitJump();
+            try self.codegen.patchJump(back_patch, loop_start);
+
+            const done_offset = self.codegen.currentOffset();
+            try self.codegen.patchJump(done_patch, done_offset);
+
+            try self.emitMovRegReg(byte_reg, end_reg);
+            try self.codegen.emitSubRegs(word, byte_reg, byte_reg, start_reg);
             try self.emitAddUsizeImm(byte_reg, byte_reg, 0x80);
             try self.codegen.emitStoreW8(frame_ptr, dest_offset + @as(i32, small_str_max_len), byte_reg);
         }
@@ -27865,19 +27951,16 @@ pub const X64ElfLirCodeGen = LirCodeGen(.x64elf);
 pub const host_lir_codegen_target = RocTarget.detectNative();
 
 /// Whether this compiler build has a fast native dev backend for the target it
-/// is being compiled to run on.
-///
-/// 32-bit ARM builds intentionally report false for now. The long-term fix is
-/// for dev builds on those targets to route through LLVM rather than trying to
-/// instantiate a nonexistent fast native backend.
+/// is being compiled to run on: x86_64, aarch64 and arm32 (ARMv7-A with NEON;
+/// see the Scope of projects/big/arm32-dev-backend.md). Every other host
+/// architecture has none and reports false.
 pub const host_lir_codegen_available =
     switch (host_lir_codegen_target.toCpuArch()) {
-        .x86_64, .aarch64, .aarch64_be => true,
+        .x86_64, .aarch64, .aarch64_be, .arm => true,
         .alpha,
         .amdgcn,
         .arc,
         .arceb,
-        .arm,
         .armeb,
         .avr,
         .bpfeb,

@@ -148,6 +148,27 @@ zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static \
 
 CI runs it in `ci_zig.yml`. It is skipped on non-arm targets.
 
+## Running the test runners on arm32 (J3a)
+
+The eval runners and the Zig module tests run as arm32 programs under
+qemu-user or on an ARMv7 board:
+
+```
+zig build build-test-eval-runner build-test-eval-host-effects-runner \
+    -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast --prefix <dir>
+qemu-arm-static -cpu cortex-a9 <dir>/bin/eval-test-runner --timeout 300000
+qemu-arm-static -cpu cortex-a9 <dir>/bin/eval-host-effects-runner
+zig build run-test-zig-module-backend -Dtarget=arm-linux-musleabihf -fqemu
+```
+
+Use a separate `--prefix`, so the arm32 binaries do not replace the host's in
+`zig-out/bin`. Use ReleaseFast or ReleaseSafe: a Debug runner does not link
+(issues note). ReleaseSafe prints the evaluator's own diagnostics (for
+example why a backend failed) and panic stack traces, which Zig does not
+print on arm in Debug test binaries run under qemu. The backend tests print
+their totals when the binary runs directly under `qemu-arm-static`. The
+build step alone reports a failure because one wasm test writes to stderr.
+
 ## `eval-test-runner --write-dev-code-hashes` / `--check-dev-code-hashes`
 
 **Purpose:** the golden byte-identity oracle for Track A: every eval case that

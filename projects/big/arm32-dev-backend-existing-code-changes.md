@@ -424,3 +424,45 @@ check could gate every later commit.
 - `cli/test/parallel_cli_runner.zig` (J3b): `--cross-run` and
   `--cross-runner`, and the cross build's stderr expectations filtered by
   backend (a fix to Track D's `--cross-opt`).
+- `ExecutableMemory.zig` (J3a, D12): memory is published to the instruction
+  stream through `instruction_cache.flush` before it is made executable. The
+  flush (`cacheflush` syscall on arm Linux, `dc cvau`/`ic ivau` on aarch64
+  Linux, the OS calls on macOS and Windows, nothing on x86) moved from
+  `src/machine_code_shim/` to `src/backend/dev/instruction_cache.zig` so the
+  shim and `ExecutableMemory` share it. This also adds the flush on aarch64,
+  which previously relied on the kernel's maintenance at `mprotect`. The new
+  `error.FlushInstructionCacheFailed` is added to every error set that
+  enumerated `ExecutableMemory`'s errors.
+- `sljmp` (J3a): an A32 setjmp/longjmp for arm Linux (R4-R11, SP, LR,
+  D8-D15), so the compile-time evaluator's crash recovery works on an
+  arm32 compiler.
+- `HostSplice.zig` and `machine_code_shim/main.zig` (J3a): an A32 jump stub
+  (`ldr pc, [pc, #-4]` and the target word); HostSplice's tests skip on
+  `host_lir_codegen_available` instead of naming x86_64 and aarch64.
+- `Relocation.zig` (J3a): `applyRelocations`/`applyRelocationsWithContext`
+  take the ISA the code was generated for, and every relocation site is
+  patched by that ISA's rule. Before, a `linked_function` site was
+  recognised by its bytes (an `E8` before the operand meant x86_64, a `bl`
+  opcode meant aarch64) and every 4-byte `jmp_to_return` was treated as an
+  aarch64 branch. On arm32 that guess is unsound (an A32 `stmda` has `E8` in
+  its top byte), and the rule against heuristics forbids it anyway. arm32
+  patches A32 `bl`/`b` displacements (PC + 8); `local_data` is `abs32` on
+  arm32. The in-process callers (HostSplice, the machine-code shim) pass the
+  host ISA; the tests pass the ISA of the bytes they patch.
+- `WasmCodeGen.zig` (J3a): the test-only ULEB reader shifts by
+  `Log2Int(usize)`, not `u6`, so the backend tests compile on a 32-bit host.
+- `LirCodeGen.zig` (J3a): `entrypointParamSlotSize` rounds by the target
+  word, not a literal 8 (an A2 miss; byte-identical on the 64-bit targets).
+  Tests that ran only on x86_64/aarch64 hosts now run on every host with a
+  dev backend: the shift tests build LIR with a `U8` amount, as the shift
+  builtins do; the narrow-argument observer reads word-sized registers; the
+  static-root pack test builds its descriptor at the target's word size.
+- `builtins/native_runtime_libcalls.zig` (J3a): on an arm32 host, `resolve`
+  binds the `__aeabi_*` helpers the arm32 dev backend calls (D7) to the
+  compiler's own compiler-rt.
+- `eval/mod.zig` and `eval/test/parallel_runner.zig` (J3a): the wasm eval
+  backend is available only on 64-bit hosts. Roc's wasm modules declare no
+  memory maximum, so bytebox reserves wasm32's full 4 GiB of linear memory,
+  which a 32-bit process cannot hold (`Uninstantiable64BitLimitsOn32BitArch`).
+  The runner asks `eval.backendAvailable(.wasm)` instead of hardcoding true,
+  so on an arm32 host wasm reports `not_implemented` like an absent backend.
