@@ -335,3 +335,13 @@ check could gate every later commit.
   stack-argument base (fp, as on x86_64). Branch-island, veneer and stub
   bookkeeping becomes explicitly aarch64-only. Needed because each two-way
   test was a compile error for arm32.
+- `LirCodeGen.zig` (J1c, call and return paths): the internal return limit
+  is two *words* (`max_internal_return_words * word_size`, 16 bytes as before
+  on 64-bit targets), so on arm32 an I64 returns in r0:r1
+  (`saveWide64CallReturnValue`/`moveWide64ToReturn`) and anything wider,
+  including i128 and vectors, through the result pointer; the i128/vector
+  two-register return paths are therefore 64-bit-only. `internal_ret_regs`,
+  `float_ret_reg` and `emitMoveFloat` replace per-site ISA register lists;
+  the AAPCS64 even-register rule for i128 arguments is explicitly
+  aarch64-only, and an arm32 i128 argument is four words on the generic
+  path. Needed because each two-way test was a compile error for arm32.
