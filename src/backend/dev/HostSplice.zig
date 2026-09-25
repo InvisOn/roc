@@ -24,6 +24,7 @@ const StaticDataExport = @import("StaticDataExport.zig").StaticDataExport;
 const StaticDataImage = @import("StaticDataImage.zig").StaticDataImage;
 const relocation_mod = @import("Relocation.zig");
 const ExecutableMemory = @import("ExecutableMemory.zig").ExecutableMemory;
+const isaOf = @import("isa.zig").isaOf;
 const SpliceSource = @import("ObjectFileCompiler.zig").SpliceSource;
 const spliceExternalProcs = @import("ObjectFileCompiler.zig").spliceExternalProcs;
 
@@ -274,7 +275,7 @@ pub const HostSplice = struct {
 
         for (relocations.items) |relocation| {
             const resolver: relocation_mod.SymbolResolverContext = if (relocation == .linked_data) Binder.resolveData else Binder.resolve;
-            relocation_mod.applyRelocationsWithContext(image[0..code.len], binder.image_base, &.{relocation}, &binder, resolver) catch |err| switch (err) {
+            relocation_mod.applyRelocationsWithContext(comptime isaOf(LirCodeGenMod.host_lir_codegen_target), image[0..code.len], binder.image_base, &.{relocation}, &binder, resolver) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.UnresolvedSymbol => return error.UnresolvedSymbol,
                 error.InvalidOffset, error.UnsupportedRelocationEncoding, error.MisalignedBranchTarget, error.BranchOutOfRange => return error.InvalidRelocation,
@@ -450,6 +451,12 @@ fn writeStub(stub: *[stub_size]u8, target: usize) void {
         std.mem.writeInt(u32, stub[0..4], 0x58000050, .little);
         std.mem.writeInt(u32, stub[4..8], 0xD61F0200, .little);
         std.mem.writeInt(u64, stub[8..16], target, .little);
+    } else if (builtin.cpu.arch == .arm) {
+        // `ldr pc, [pc, #-4]`: PC reads as this instruction + 8, so the load
+        // takes the word that follows it. A load into PC interworks, so the
+        // target may be Thumb code.
+        std.mem.writeInt(u32, stub[0..4], 0xE51FF004, .little);
+        std.mem.writeInt(u32, stub[4..8], @intCast(target), .little);
     } else unreachable;
 }
 
@@ -464,7 +471,7 @@ test "compiler functions resolve and the dict seed is the evaluator's zero" {
 }
 
 test "a stub jumps to its target" {
-    if (builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    if (comptime !LirCodeGenMod.host_lir_codegen_available) return error.SkipZigTest;
     const Target = struct {
         fn answer() callconv(.c) u64 {
             return 42;
@@ -542,7 +549,7 @@ test "comptime hook bindings are explicit for every private ABI symbol" {
     try std.testing.expectEqual(Binding.image, try binder.classify("roc__proc_example"));
     try std.testing.expectEqual(@as(?usize, 4104), binder.address("roc__proc_example"));
 
-    if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) {
+    if (comptime LirCodeGenMod.host_lir_codegen_available) {
         var executable = try ExecutableMemory.initWritable(targets.count() * stub_size, stub_size, 0);
         defer executable.deinit();
         binder.image_base = @intFromPtr(executable.memory.ptr);
@@ -565,7 +572,7 @@ test "comptime hook bindings are explicit for every private ABI symbol" {
 }
 
 test "static bindings link pointer cells without copying mutable slots" {
-    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    if (comptime !LirCodeGenMod.host_lir_codegen_available) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var store = lir.LirStore.init(allocator);
     defer store.deinit();
