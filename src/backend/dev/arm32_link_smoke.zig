@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) void {
 }
 
 /// The smoke object's bytes, owned by the caller.
-pub fn buildObject(gpa: std.mem.Allocator) ![]u8 {
+pub fn buildObject(gpa: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     var e = arm32.MuslEmit.init(gpa);
     defer e.deinit();
     // push {r4, lr}: keeps SP 8-byte aligned across the call (AAPCS32).
@@ -96,5 +96,5 @@ test "the smoke object is an ARM ELF32 relocatable with the hard-float EABI flag
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, object[16..18], .little)); // ET_REL
     try std.testing.expectEqual(@as(u16, 40), std.mem.readInt(u16, object[18..20], .little)); // EM_ARM
     try std.testing.expectEqual(@as(u32, 0x0500_0400), std.mem.readInt(u32, object[36..40], .little)); // EABI5, hard float
-    try std.testing.expect(std.mem.indexOf(u8, object, message) != null);
+    try std.testing.expect(std.mem.find(u8, object, message) != null);
 }
