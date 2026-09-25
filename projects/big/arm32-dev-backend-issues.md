@@ -135,6 +135,15 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 
 ## Open: risks for the remaining arm32 work
 
+### Baseline of the arm32 eval lane before J1
+
+`zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf
+-Doptimize=ReleaseFast`, run with `qemu-arm-static -cpu cortex-a9 ...
+--timeout 300000` (2026-09-25): 51 passed, 2120 failed, 0 crashed. Every
+failure is `UnsupportedPlatform` (the dev backend has no arm32 code
+generator), so the compiler's front end and interpreter already run on a
+32-bit host; J1-J3 turn the failures into passes.
+
 ### Target data laid out with the host's word
 
 Code generation sometimes sizes *target* data with the *host's* `usize`, which

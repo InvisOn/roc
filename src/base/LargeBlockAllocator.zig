@@ -81,8 +81,11 @@ fn classOf(len: usize) u6 {
     return @intCast(std.math.log2_int_ceil(usize, len));
 }
 
+/// Bytes in a block of `class`. Only cached classes (at most
+/// `max_class_log2`) have a capacity, so the shift fits `usize` on every host.
 fn classCapacity(class: u6) usize {
-    return @as(usize, 1) << class;
+    std.debug.assert(class <= max_class_log2);
+    return @as(usize, 1) << @intCast(class);
 }
 
 fn isLarge(len: usize, alignment: Alignment) bool {

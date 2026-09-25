@@ -36,6 +36,16 @@ The driver now derives every such layout from the builtins struct scaled by
 the target word (`erased_layout`), with a compile-time check that each field
 is pointer-sized. No effect on today's targets.
 
+### `LargeBlockAllocator` shifted by a 64-bit-host class type
+
+`src/base/LargeBlockAllocator.zig`'s `classCapacity` shifted a `usize` by a
+`u6`, which only compiles where `usize` is 64 bits, so the compiler itself
+(the eval runner, via `zig build -Dtarget=arm-linux-musleabihf`) did not build
+for a 32-bit host. Cached classes never exceed `max_class_log2` (30), so the
+shift is cast to `usize`'s shift type after asserting that. Needed for the
+Track D/J3a lane that runs the eval corpus on arm32 under qemu. No effect on
+64-bit hosts.
+
 ### Plan documents failed `run-check-tidy` (`12be3758d5`)
 
 Spaced em dashes and missing or duplicate top-level titles in
