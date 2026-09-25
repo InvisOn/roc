@@ -4188,9 +4188,11 @@ fn processDevObjectSnapshot(
                 hash_results[i].hash_hex = std.fmt.bytesToHex(hash, .lower);
                 hash_results[i].supported = true;
                 result.allocator.free(result.object_bytes);
-            } else |_| {
-                hash_results[i].hash_hex = undefined;
-                hash_results[i].supported = false;
+            } else |err| {
+                // The architecture check above admits only targets the dev
+                // backend serves, so every error here is a real failure.
+                std.log.err("Dev object compilation failed for {s}: {}", .{ field.name, err });
+                return error.CompilationFailed;
             }
         }
     }
