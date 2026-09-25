@@ -10,10 +10,6 @@ jobs:
   # Cross-compile all fx platform tests from all host platforms
   roc-cross-compile:
     runs-on: ${{ matrix.host }}
-    # arm32 goes through the dev backend, which gains arm32 code generation in
-    # J1-J2 of projects/big/arm32-dev-backend.md; its lane may fail until J3
-    # makes it required.
-    continue-on-error: ${{ matrix.target == 'arm32musl' }}
     strategy:
       fail-fast: false
       matrix:
@@ -101,7 +97,6 @@ jobs:
   test-int-on-target:
     needs: [roc-cross-compile]
     runs-on: ${{ matrix.target_os }}
-    continue-on-error: ${{ matrix.target == 'arm32musl' }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,11 +112,15 @@ jobs:
           # Test arm32musl executables under qemu on the dev backend's CPU
           # floor. cortex-a9 is ARMv7-A with NEON and VFPv3-D32 and without
           # integer divide, so an instruction above the floor (SDIV/UDIV,
-          # VFPv4) raises SIGILL instead of running silently.
+          # VFPv4) raises SIGILL instead of running silently. Every arm32
+          # app must also print what the x64musl app built on the Linux host
+          # prints (J3c of projects/big/arm32-dev-backend.md), apart from the
+          # heap addresses the app prints, which differ between any two runs.
           - target: arm32musl
             target_os: ubuntu-24.04
             arch: arm32
             run_prefix: qemu-arm-static -cpu cortex-a9
+            reference_app: int_app_x64musl_ubuntu-24.04
     steps:
       - name: Install qemu (arm32)
         if: matrix.target == 'arm32musl'
@@ -136,6 +135,12 @@ jobs:
           pattern: cross-compiled-*-${{ matrix.target }}
           merge-multiple: true
 
+      - name: Download the reference app
+        if: matrix.reference_app
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: cross-compiled-ubuntu-24.04-x64musl
+
       - name: List downloaded files
         run: |
           echo "Downloaded cross-compiled executables:"
@@ -148,16 +153,28 @@ jobs:
 
           echo "Testing ${{ matrix.target }} executables on ${{ matrix.target_os }} (${{ matrix.arch }})"
 
+          reference_app="${{ matrix.reference_app }}"
+          if [ -n "$reference_app" ]; then
+            chmod +x "$reference_app"
+            ./"$reference_app" | sed -E 's/0x[0-9a-f]+/0xADDRESS/g' > expected_stdout.txt
+          fi
+
           # Test int apps from all host platforms
           for int_app in int_app_${{ matrix.target }}_*; do
             if [ -f "$int_app" ]; then
               echo ""
               echo "Testing $int_app:"
               chmod +x "$int_app"
-              if ${{ matrix.run_prefix }} ./"$int_app"; then
-                echo "✅ $int_app: SUCCESS"
-                success_count=$((success_count + 1))
+              if ${{ matrix.run_prefix }} ./"$int_app" > actual_stdout.txt; then
+                cat actual_stdout.txt
+                if [ -n "$reference_app" ] && ! diff -u expected_stdout.txt <(sed -E 's/0x[0-9a-f]+/0xADDRESS/g' actual_stdout.txt); then
+                  echo "❌ $int_app: stdout differs from $reference_app"
+                else
+                  echo "✅ $int_app: SUCCESS"
+                  success_count=$((success_count + 1))
+                fi
               else
+                cat actual_stdout.txt
                 echo "❌ $int_app: FAILED"
               fi
               total_count=$((total_count + 1))

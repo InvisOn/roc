@@ -44,7 +44,8 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J2: gate-consistency test (`supportsTarget` against the `dev_object` snapshot lines) | Moved to J4: it cannot hold until J4 regenerates the arm32 snapshot lines |
 | J3b: `--cross-run`/`--cross-runner` in the CLI runner | Done; all 121 `test/fx` programs run correctly under qemu (the fx host works around a Zig 0.16 arm ABI bug) |
 | J3a: `host_lir_codegen_available` for arm; the eval runner, host-effects runner and backend tests built for arm32 | Done: under qemu, eval 2171/2171 (dev 2030 evaluations, as on x86_64), host effects 86/86, backend tests 892 passed. On the Raspberry Pi 3: host effects 86/86, eval 2169/2171 with dev 2028 of the 2028 evaluations it reached; the two others ran out of memory while compiling (issues note). Wasm evaluation is unavailable in a 32-bit process (issues note) |
-| J3c, J4 | Not started |
+| J3c: the `ci_cross_compile.yml` arm32 lanes are required, and the on-target job compares each arm32 int app's stdout with the Linux-built x64musl app's | Done locally (Linux host, qemu); the macOS and Windows hosts are first checked by CI. The int app prints heap addresses, which the comparison masks |
+| J4 | Not started |
 
 `roc build --opt=dev --target=arm32musl` and `--target=arm32linux` build real
 programs through the arm32 code generator. Every `dev_object` snapshot still
@@ -686,8 +687,7 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 
 ## Next steps
 
-J1, J2 and J3a are done. Next, in plan order: J3c (the cross-compile int
-lane made required), the float-ABI and atomics battery on real hardware, then
-J4 (regenerate the arm32 `dev_object` snapshot lines, add the
+J1, J2, J3a and J3c are done. Next, in plan order: the float-ABI and atomics
+battery on real hardware (the residual risk J3 names), then J4 (regenerate the arm32 `dev_object` snapshot lines, add the
 gate-consistency test, update design.md). Every Track A change must leave both byte-identity oracles
 unchanged.
