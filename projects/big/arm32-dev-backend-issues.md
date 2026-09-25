@@ -244,6 +244,13 @@ them.
   rebuilds the `HostRecord`. A struct with one struct field has the same C
   ABI as that field on every target, so the Roc side is unchanged. The switch
   is `work_around_zig_arm_nested_struct_bug` (true only on arm).
+- **How we find out it is fixed:** two tripwires, so nobody has to reread
+  this note. `test/fx/platform/zig_arm_nested_struct_abi_probe.zig` expects
+  the bug and fails, saying to remove the workaround, once Zig passes nested
+  structs correctly; the arm32 CI lane runs it under qemu. And `host.zig`
+  refuses to compile for arm on any Zig other than the one the bug was
+  confirmed on (`confirmed_on`, 0.16.0), with a message giving the probe
+  command, so an upgrade forces the check.
 - **When Zig is fixed:** set `work_around_zig_arm_nested_struct_bug` to
   `false` and rerun `zig build run-test-cli -- --suite platforms --filter
   test/fx/ --cross-target=arm32musl --cross-opt=dev --cross-run

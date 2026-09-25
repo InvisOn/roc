@@ -394,7 +394,9 @@ check could gate every later commit.
   `work_around_zig_arm_nested_struct_bug`, because Zig 0.16 passes a nested
   by-value `extern struct` off-ABI on arm (issues note). Unchanged on other
   targets. When Zig is fixed, set the switch to false and follow the comment
-  there.
+  there. A probe test (`zig_arm_nested_struct_abi_probe.zig`, run by the
+  arm32 CI lane) fails once the bug is fixed, and the host refuses to compile
+  for arm on a Zig other than 0.16.0 until the probe is rerun.
 - `echo_platform/mod.zig`: the default platform's Linux build header
   declares `arm32musl` and `arm32linux` (its runtime objects existed since
   Track C), so a program without a `platform` header builds for arm32; a
