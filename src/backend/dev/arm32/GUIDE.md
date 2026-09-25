@@ -222,6 +222,32 @@ Today this prints "The native object backend does not support the 'arm'
 architecture" (expected until J2). `roc build --target=arm32musl` without
 `--opt=dev` uses LLVM and keeps its 64-bit-only diagnostic by design.
 
+Through the CLI test runner, the same lane CI runs (Track D):
+
+```
+zig build run-test-cli -- --suite platforms --filter test/int/ --cross-target=arm32musl --cross-opt=dev
+zig build run-test-cli -- --suite platforms --filter test/fx/ --cross-target=arm32musl --cross-opt=dev
+```
+
+`--cross-opt=<dev|size|speed>` passes `--opt=` to every cross build (without
+it the runner uses `roc build`'s default). Only the `int` and `fx` platforms
+list arm32musl, because only they declare it. Today every case fails in the
+build phase with the message above.
+
+### CI lanes (Track D)
+
+`ci_cross_compile.yml` adds `arm32musl` to the cross-compile matrix (built
+with `--opt=dev`) and a `test-int-on-target` row that installs
+`qemu-user-static` and runs each int app as `qemu-arm-static -cpu cortex-a9`.
+`ci_zig.yml`'s `arm-linux-musleabihf` lane also builds the eval runners for
+arm32 and runs the eval corpus under the same qemu CPU. All arm32 jobs and
+steps are `continue-on-error` until J3. To reproduce the qemu run locally:
+
+```
+zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast --prefix out-arm
+qemu-arm-static -cpu cortex-a9 out-arm/bin/eval-test-runner --timeout 300000
+```
+
 ### Register budget
 
 `general_high_water` and `float_high_water` on each `CodeGen` hold the most

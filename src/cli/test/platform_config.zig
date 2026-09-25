@@ -51,6 +51,7 @@ pub const all_cross_targets = [_][]const u8{
     "arm64v1musl",
     "x64glibc",
     "arm64glibc",
+    "arm32musl",
 };
 
 /// Standard targets for platforms with glibc support
@@ -63,6 +64,13 @@ const targets_with_glibc = [_]TargetInfo{
     .{ .name = "arm64glibc", .requires_linux = true },
 };
 
+/// The arm32 target, declared by the int and fx test platforms (their
+/// `targets` include arm32musl with vendored musl runtime objects).
+const arm32_target = [_]TargetInfo{.{ .name = "arm32musl", .requires_linux = false }};
+
+/// Targets of the int platform
+const targets_int = targets_with_glibc ++ arm32_target;
+
 /// Targets for fx platforms (musl + Windows)
 const targets_fx = [_]TargetInfo{
     .{ .name = "x64musl", .requires_linux = false },
@@ -72,6 +80,9 @@ const targets_fx = [_]TargetInfo{
     .{ .name = "x64win", .requires_linux = false },
     .{ .name = "arm64win", .requires_linux = false },
 };
+
+/// Targets of the fx platform
+const targets_fx_with_arm32 = targets_fx ++ arm32_target;
 
 /// Fx-open platform test apps - test effectful apps with open union errors and List(Str) args
 const fx_open_tests = [_]SimpleTestSpec{
@@ -160,7 +171,7 @@ pub const platforms = [_]PlatformConfig{
     .{
         .name = "int",
         .base_dir = "test/int",
-        .targets = &targets_with_glibc,
+        .targets = &targets_int,
         .test_apps = .{ .single = "app.roc" },
         .supports_native_exec = true,
         .supports_io_specs = false,
@@ -182,7 +193,7 @@ pub const platforms = [_]PlatformConfig{
     .{
         .name = "fx",
         .base_dir = "test/fx",
-        .targets = &targets_fx,
+        .targets = &targets_fx_with_arm32,
         .test_apps = .{ .spec_list = &fx_test_specs.io_spec_tests },
         .supports_native_exec = true,
         .supports_io_specs = true,
@@ -247,6 +258,13 @@ test "findTarget works" {
 
     const nonexistent = findTarget(int_platform, "x64windows");
     try std.testing.expect(nonexistent == null);
+}
+
+test "arm32musl is a cross target of exactly the platforms that declare it" {
+    try std.testing.expect(findTarget(findPlatform("int").?, "arm32musl") != null);
+    try std.testing.expect(findTarget(findPlatform("fx").?, "arm32musl") != null);
+    try std.testing.expect(findTarget(findPlatform("str").?, "arm32musl") == null);
+    try std.testing.expect(findTarget(findPlatform("fx-open").?, "arm32musl") == null);
 }
 
 test "fx platform has io specs" {
