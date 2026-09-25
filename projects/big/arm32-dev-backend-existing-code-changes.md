@@ -232,3 +232,16 @@ check could gate every later commit.
   `str_count_utf8_bytes`'s U64 result name `wide64_reg_width`. Needed because
   these are pointers, lengths and bytes on every target, except the named
   64-bit values, which a 32-bit target holds as two words.
+- `LirCodeGen.zig` (value locations, parameters, erased calls, entry
+  wrappers): a `.stack` location's default size is `word_value_size` (it was
+  `.qword`), so `.qword` always means a genuine 8-byte value, and the sized
+  loads and stores name `wide64_reg_width`/`wide64_store_width` for it.
+  `ensureInGeneralReg`, `moveToReg`, `stabilize`, `emitCmpReg`,
+  `emitMovRegReg`, parameter binding, erased calls, packed erased functions
+  and the entry wrappers move words; immediates go through `emitStoreImm64`
+  and word loops; narrowing shifts are `word_bits - n`, with zero shifts
+  skipped (A32 encodes an immediate `ASR #0` as `ASR #32`). F64 bits, u64
+  builtin results (`scalarRetReg`), 8-byte C-ABI pieces and a U64
+  discriminant read name the Wide64 widths. Needed because each of these is
+  either a register-sized value (a word) or a 64-bit value a 32-bit register
+  cannot hold.

@@ -109,6 +109,20 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   invariant violation. That is best-effort recovery in a compiler stage.
 - **Fix direction:** make those arms invariant failures.
 
+### A string result stored from one register
+
+- **Where:** `src/backend/dev/LirCodeGen.zig`, `storeResultToSavedPtr`'s
+  `.str` arm, the catch-all over non-stack locations (commented "Fallback for
+  non-stack string location").
+- **Effect:** a RocStr is three words; for any location that is not
+  `.stack`/`.stack_str` this loads one register (the bytes pointer, via
+  `ensureInGeneralReg`) and stores only that word, leaving the length and
+  capacity unwritten. Either such locations never reach it (then the arm
+  should be an invariant failure) or they do and the result is corrupt. It is
+  a fallback in a compiler stage, which AGENTS.md forbids.
+- **Fix direction:** make the arm an invariant failure and fix any producer
+  that reaches it.
+
 ### Redundant narrowing before byte stores
 
 - **Where:** `src/backend/dev/LirCodeGen.zig`, `storeResultToSavedPtr`'s `.u8`
