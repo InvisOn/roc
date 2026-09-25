@@ -190,3 +190,16 @@ check could gate every later commit.
   targets. Needed because on arm32 U32 is word-sized (a signed conversion of
   it is wrong above 2^31) and 64-bit sources and destinations do not fit a
   register.
+- `LirCodeGen.zig` (i128 and unary integers): the `I128Parts` functions
+  (`generateI128Binop`, comparisons, equality, bit counts, absolute
+  difference, the `callI128*`/`callDec*` result loads, `getI128Parts`) name
+  `wide64_reg_width` for their halves and `word` for the booleans, flags and
+  counts they compute. `storeI128ToMem`, `storeWideScalarToStackOffset` and
+  `boxyI128LiteralSlot` copy and store 16 bytes word by word
+  (`storeI128ImmToMem`, `copyStackI128ToMem`, `storeI128ImmToStack`,
+  `copyStackI128ToStack`, `wordOfU128`). Scalar negate, bitwise not, `abs`
+  and `abs_diff` use words and, on 32-bit targets, route integers wider than
+  the word to `generateWide64IntUnary`/`generateWide64IntBinop`; the
+  `int_try` extension into its builtin's 64-bit argument names
+  `wide64_reg_width`. Needed because 16-byte copies are word copies on every
+  target, while i128 halves and 64-bit scalars do not fit an arm32 register.
