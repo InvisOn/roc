@@ -21974,7 +21974,7 @@ fn scanBody(allocator: Allocator, body: []const u8, literal: i64) ScanError!Body
 
 fn readUleb(bytes: []const u8, cursor: *usize) ScanError!usize {
     var result: usize = 0;
-    var shift: u6 = 0;
+    var shift: std.math.Log2Int(usize) = 0;
     while (true) {
         if (cursor.* >= bytes.len) return error.TruncatedBody;
         const byte = bytes[cursor.*];
