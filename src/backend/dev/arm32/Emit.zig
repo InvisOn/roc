@@ -475,6 +475,22 @@ pub fn Emit(comptime target: RocTarget) type {
     if (target.toCpuArch() != .arm) {
         @compileError("arm32.Emit requires an arm32 target");
     }
+    // The CPU floor (D2): NEON hosts vector locals, and without `hwdiv` word
+    // division calls `__aeabi_*` helpers. Roc names no CPU floor of its own
+    // for arm32 (`RocTarget.cpuContract`), so the target gets Zig's arm
+    // baseline; if a Zig upgrade moves that baseline, the code generated here
+    // must move with it.
+    comptime {
+        const arch = target.toCpuArch();
+        const os: std.Target.Os = .{ .tag = target.toOsTag(), .version_range = .{ .none = {} } };
+        const baseline = std.Target.Cpu.baseline(arch, os);
+        if (target.requiredRuntimeCpuFeatures().count() != 0)
+            @compileError("arm32.Emit assumes Zig's arm baseline, but " ++ target.toName() ++ " names CPU features of its own");
+        if (!baseline.has(.arm, .neon))
+            @compileError("arm32.Emit lowers SIMD to NEON, but Zig's arm baseline for " ++ target.toName() ++ " lacks NEON");
+        if (baseline.hasAny(.arm, &.{ .hwdiv, .hwdiv_arm }))
+            @compileError("arm32.Emit divides through __aeabi helpers, but Zig's arm baseline for " ++ target.toName() ++ " has hwdiv");
+    }
 
     return struct {
         const Self = @This();
