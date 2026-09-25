@@ -135,6 +135,9 @@ pub fn call(
                 if (end > max_stack_bytes) return Error.TooManyStackBytes;
                 @memcpy(stack[stack_value.offset..end], value[0..stack_value.size]);
             },
+            // Only AAPCS32 splits a value, and this trampoline serves
+            // x86_64 and aarch64 hosts.
+            .split => unreachable,
             .registers => |pieces| {
                 for (pieces) |assigned| {
                     const piece = assigned.piece;

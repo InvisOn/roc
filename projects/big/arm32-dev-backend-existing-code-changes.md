@@ -305,3 +305,11 @@ check could gate every later commit.
   `blx rN`, BL with an `R_ARM_CALL` relocation) and the ISA-specific stores
   and scratch moves go through exhaustive switches. Needed because the six
   arm32 sites were compile errors and the two-way tests had no arm32 answer.
+- `layout/abi/call.zig`, `layout/abi/mod.zig`, new `layout/abi/arm32.zig`:
+  the AAPCS32 VFP C-ABI target (`Target.arm32`): classification (fundamental
+  words and pairs, VFP candidates, vectors, composites) and physical
+  assignment (C.3 even pairs, C.5 splits, VFP back-filling, result pointer
+  in r0). `PhysicalArg` gains `split`, handled by the dev backend's hosted
+  call and C-ABI entry paths and unreachable in the interpreter trampoline
+  (x86_64 and aarch64 hosts only). Needed so hosted calls and entrypoints
+  have an arm32 calling convention; no other target produces `split`.
