@@ -28201,6 +28201,32 @@ test "one-register integers range-check below the word and use flags at the word
     }
 }
 
+test "arm32: LirCodeGen instantiates with the D5 register map and 32-bit sizes" {
+    const Gen = LirCodeGen(.arm32musl);
+    try std.testing.expect(@FieldType(Gen, "codegen") == arm32.CodeGen(.arm32musl));
+    try std.testing.expectEqual(arm32.GeneralReg.r11, Gen.CC.BASE_PTR);
+    try std.testing.expectEqual(arm32.GeneralReg.r12, Gen.CC.SCRATCH_REG);
+    try std.testing.expectEqual(@as(u7, 32), Gen.word_bits);
+    // RocStr is three words: bytes, capacity, length.
+    try std.testing.expectEqual(8, Gen.strFieldOffset("length"));
+    try std.testing.expectEqual(@as(u32, 8), Gen.call_stack_alignment);
+}
+
+// Compiling for arm32 type-checks the whole arm32 driver: every
+// `binaryIs`, `wide64_reg_width` and `wide64_store_width` reference it reaches
+// is a compile error on a 32-bit target.
+test "arm32: a proc compiles through LirCodeGen(.arm32musl)" {
+    const allocator = std.testing.allocator;
+    var store = LirStore.init(allocator);
+    defer store.deinit();
+    var state = try TestLayoutState.init(allocator);
+    defer state.deinit();
+    _ = try addSineChainProc(&store, allocator, 8);
+    var cg = try LirCodeGen(.arm32musl).init(allocator, &store, &state.layout_store, .{}, &.{}, .default);
+    defer cg.deinit();
+    try cg.compileAllProcSpecs(store.getProcSpecs());
+}
+
 test "stack reuse bounds locals and call scratch on both native architectures" {
     const allocator = std.testing.allocator;
     inline for (.{ RocTarget.x64linux, RocTarget.x64win, RocTarget.arm64mac, RocTarget.arm64win }) |target| {
