@@ -100,4 +100,30 @@ for forbidden_symbol in roc_builtins_simd_eval roc_builtins_simd_load_16; do
     fi
 done
 
-echo "optimized x86-64 and AArch64 and both dev backends contain native packed SIMD lowering"
+# The same exhaustive corpus through the arm32 dev backend (NEON on the
+# ARMv7-A floor). It is self-checking, so under qemu it also executes every
+# SIMD op against the reference implementation.
+"$roc_bin" build --opt=dev --target=arm32musl --no-cache --output="$tmp_dir/simd-differential-arm32" test/simd/differential.roc >/dev/null
+for forbidden_symbol in roc_builtins_simd_eval roc_builtins_simd_load_16; do
+    if strings "$tmp_dir/simd-differential-arm32" | grep -Fq "$forbidden_symbol"; then
+        echo "dev arm32 integer SIMD binary still links deleted helper ${forbidden_symbol}" >&2
+        exit 1
+    fi
+done
+if command -v llvm-objdump >/dev/null 2>&1; then
+    llvm-objdump -d --no-show-raw-insn "$tmp_dir/simd-differential-arm32" >"$tmp_dir/arm32-disassembly"
+    for instruction in vadd.i8 vtbl.8 vzip.8 vqrdmulh.s16 vmull.u32; do
+        if ! grep -Fq "${instruction}" "$tmp_dir/arm32-disassembly"; then
+            echo "dev arm32 integer SIMD corpus is missing native ${instruction}" >&2
+            exit 1
+        fi
+    done
+fi
+if command -v qemu-arm-static >/dev/null 2>&1; then
+    if ! echo | qemu-arm-static -cpu cortex-a9 "$tmp_dir/simd-differential-arm32" | grep -Fq "PASS simd differential"; then
+        echo "dev arm32 SIMD differential corpus failed under qemu" >&2
+        exit 1
+    fi
+fi
+
+echo "optimized x86-64 and AArch64 and the x86-64, AArch64 and arm32 dev backends contain native packed SIMD lowering"
