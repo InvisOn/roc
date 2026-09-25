@@ -243,15 +243,17 @@ them.
 
 ### Remaining `test/fx` failures on arm32 (J3b)
 
-With `--cross-run --cross-runner=qemu-arm-static`, 19 of 121 programs fail
-at run time. 16 call `Host.get_greeting!` and hit the Zig ABI bug above:
+With `--cross-run --cross-runner=qemu-arm-static`, 105 of 121 programs pass.
+The 16 failures all call `Host.get_greeting!` and hit the Zig ABI bug above:
 `match_str_return`, `question_mark_operator`, `empty_list_get`,
 `dict_pseudo_seed_repro`, `zst_nested_singleton_shapes`, `list_method_get`,
 `dbg_corrupts_recursive_tag_union`, `hosted_effect_opaque_with_data`,
 `early_return_rc`, `float_comparison`, the four `match_guard_*`,
-`cross_module_recursive_nominal`, `test_no_dbg`. Three do not and are open:
-`issue_10038_comptime_dict_transitions`, `inspect_dict_set`,
-`leak_list_str_ops`.
+`cross_module_recursive_nominal`, `test_no_dbg`. (Three others,
+`issue_10038_comptime_dict_transitions`, `inspect_dict_set` and
+`leak_list_str_ops`, were arm32 bugs: `list_sublist`'s record window passed
+as single words, and the list incref RC helper reading the list at 64-bit
+word offsets.)
 
 ### A `u64` builtin parameter passed as one register is not caught
 
