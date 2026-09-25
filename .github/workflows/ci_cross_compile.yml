@@ -74,6 +74,15 @@ jobs:
           echo "Cross-compiling int platform from ${{ matrix.host }} to ${{ matrix.target }}"
           ./zig-out/bin/roc build --target=${{ matrix.target }} ${{ matrix.target == 'arm32musl' && '--opt=dev' || '' }} --output=int_app_${{ matrix.target }}_${{ matrix.host }} test/int/app.roc
 
+      # arm32 glibc (arm32linux) cross builds need a Linux host; the
+      # executable needs the target's /lib/ld-linux-armhf.so.3 to run, so this
+      # lane only builds it.
+      - name: Cross-compile int platform test app for arm32linux (glibc)
+        if: matrix.target == 'arm32musl' && runner.os == 'Linux'
+        run: |
+          zig build run-test-cli -- --suite platforms --filter test/int/ --cross-target=arm32linux --cross-opt=dev
+          ./zig-out/bin/roc build --target=arm32linux --opt=dev --output=int_app_arm32linux_${{ matrix.host }} test/int/app.roc
+
       - name: Cross-compile int platform test app (Windows)
         if: runner.os == 'Windows'
         run: |

@@ -29,7 +29,9 @@ const musl_cross_targets = [_]CrossTarget{
 const glibc_cross_targets = [_]CrossTarget{
     .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
     .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
-    .{ .name = "arm32glibc", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
+    // Named for its RocTarget (arm32linux): test platforms key their
+    // `targets/<name>/` directories by target name.
+    .{ .name = "arm32linux", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
 };
 
 /// Windows cross-compile targets
@@ -7837,8 +7839,8 @@ fn addMainExe(
             b.getInstallStep().dependOn(copy_step);
         }
 
-        // Generate glibc stubs for gnu targets
-        if (cross_target.query.abi == .gnu) {
+        // Generate glibc stubs for gnu targets (including arm's gnueabihf)
+        if (cross_target.query.abi.?.isGnu()) {
             const glibc_stub = generateGlibcStub(b, cross_resolved_target, cross_target.name);
             if (glibc_stub) |stub| {
                 b.getInstallStep().dependOn(&stub.step);
