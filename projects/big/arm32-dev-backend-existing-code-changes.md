@@ -160,3 +160,19 @@ check could gate every later commit.
   words (value, layout, descriptor) instead of the literal offsets 0/8/16 and
   stride 24. A new `boxy_abi` test pins that shape. Needed because descriptors
   and dictionaries are pointers, and the literal layout is the 64-bit one.
+- `LirCodeGen.zig` (one-register integer arithmetic): `generateIntBinop`
+  and its overflow helpers use words, narrow by `word_bits - n`, and choose
+  between a range check and a flag or high-product check with
+  `intOverflowCheck` (sub-word versus word-sized) instead of naming
+  `.u32`/`.i64`; `emitCheckedI64Mul`/`emitCheckedU64Mul` become
+  `emitCheckedSignedWordMul`/`emitCheckedUnsignedWordMul`. On 32-bit targets
+  an integer wider than the word goes to `generateWide64IntBinop` (J1). Needed
+  because on arm32 I32 is word-sized (a range check against 2^32-1 in a 32-bit
+  register cannot detect overflow) and I64 does not fit a register.
+- `LirCodeGen.zig` (low-level pointer sites): `List.mapCanReuse` and the
+  list-map, list-replace, list-set and list-concat ZST paths, byte-index
+  addressing in `num_from_le_bytes`, the compare result, and every allocation's
+  saved heap pointer use words; `str_from_utf8` fills `StrFromUtf8Layout` by
+  `@offsetOf` and stores its two `u64` tags with `emitStoreImm64`. Needed
+  because these are pointers, indices and word copies, and the tags are
+  genuine 64-bit fields that a 32-bit target writes as two words.
