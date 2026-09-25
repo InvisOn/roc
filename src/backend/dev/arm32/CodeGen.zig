@@ -13,7 +13,8 @@
 //! and so are handed out only by `allocVector`.
 //!
 //! Every memory access honours its form's offset range (`fitsImmediate`);
-//! out of range, the address is formed in r12 first. Division is not here:
+//! out of range, the address is formed in LR first (`Call.ADDRESS_SCRATCH_REG`),
+//! so r12 can be the base or the data register of any access. Division is not here:
 //! ARMv7-A without the integer-divide extension divides by calling the
 //! `__aeabi_*` helpers (D7), which the driver models as calls.
 
@@ -48,6 +49,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
     const Emit = EmitMod.Emit(target);
     const scratch: GeneralReg = Call.SCRATCH_REG;
+    const address_scratch: GeneralReg = Call.ADDRESS_SCRATCH_REG;
     const fp: GeneralReg = Call.BASE_PTR_REG;
 
     return struct {
@@ -324,13 +326,13 @@ pub fn CodeGen(comptime target: RocTarget) type {
         }
 
         /// The base and offset an access of `form` at `base + offset` uses:
-        /// the original pair when the offset is in range, otherwise r12
+        /// the original pair when the offset is in range, otherwise LR
         /// holding the address and offset 0.
         fn reachable(self: *Self, form: MemForm, base: GeneralReg, offset: i32) Allocator.Error!struct { base: GeneralReg, offset: i32 } {
             if (fitsImmediate(form, offset)) return .{ .base = base, .offset = offset };
-            std.debug.assert(base != scratch);
-            try self.emitAddrOf(scratch, base, offset);
-            return .{ .base = scratch, .offset = 0 };
+            std.debug.assert(base != address_scratch);
+            try self.emitAddrOf(address_scratch, base, offset);
+            return .{ .base = address_scratch, .offset = 0 };
         }
 
         pub fn emitLoadDataAddress(self: *Self, dst: GeneralReg, symbol: SymbolTable.Id) Allocator.Error!void {
@@ -644,7 +646,6 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
         /// Store a word to [base_reg + offset]
         pub fn emitStore(self: *Self, comptime _: anytype, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
-            std.debug.assert(src != scratch or fitsImmediate(.word, offset));
             const at = try self.reachable(.word, base_reg, offset);
             try self.emit.strRegMem(src, at.base, at.offset);
         }
@@ -660,13 +661,11 @@ pub fn CodeGen(comptime target: RocTarget) type {
         }
 
         pub fn emitStoreW8(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
-            std.debug.assert(src != scratch or fitsImmediate(.byte, offset));
             const at = try self.reachable(.byte, base_reg, offset);
             try self.emit.strbRegMem(src, at.base, at.offset);
         }
 
         pub fn emitStoreW16(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
-            std.debug.assert(src != scratch or fitsImmediate(.halfword, offset));
             const at = try self.reachable(.halfword, base_reg, offset);
             try self.emit.strhRegMem(src, at.base, at.offset);
         }
@@ -1004,7 +1003,9 @@ test "vectors take q8-q15 first, then the scalar pool; scalars never get q8-q15"
     try std.testing.expectEqual(FloatReg.d20, cg.allocVector().?);
 }
 
-test "stack accesses in range use fp directly, out of range go through r12" {
+test "stack accesses in range use fp directly, out of range go through lr" {
+    // LR, not r12, forms the address, so r12 stays usable as a base or
+    // data register at any offset.
     var cg = MuslCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     var e = MuslEmit.init(std.testing.allocator);
@@ -1013,23 +1014,26 @@ test "stack accesses in range use fp directly, out of range go through r12" {
     try cg.emitLoadStack(.w32, .r0, -4095);
     try e.ldrRegMem(.r0, .r11, -4095);
     try cg.emitLoadStack(.w32, .r1, -4096);
-    try e.subRegRegModImm(.r12, .r11, ModImm.of(4096));
-    try e.ldrRegMem(.r1, .r12, 0);
+    try e.subRegRegModImm(.lr, .r11, ModImm.of(4096));
+    try e.ldrRegMem(.r1, .lr, 0);
     try cg.emitStoreStackW16(-255, .r2);
     try e.strhRegMem(.r2, .r11, -255);
     try cg.emitStoreStackW16(-257, .r2);
-    try e.movRegImm32(.r12, @bitCast(@as(i32, -257)));
-    try e.addRegRegReg(.r12, .r11, .r12);
-    try e.strhRegMem(.r2, .r12, 0);
+    try e.movRegImm32(.lr, @bitCast(@as(i32, -257)));
+    try e.addRegRegReg(.lr, .r11, .lr);
+    try e.strhRegMem(.r2, .lr, 0);
     try cg.emitStoreStackF64(-1020, .d2);
     try e.vstrF64(.d2, .r11, -1020);
     try cg.emitLoadStackF32(.d4, -1022);
-    try e.movRegImm32(.r12, @bitCast(@as(i32, -1022)));
-    try e.addRegRegReg(.r12, .r11, .r12);
-    try e.vldrF32(.s8, .r12, 0);
+    try e.movRegImm32(.lr, @bitCast(@as(i32, -1022)));
+    try e.addRegRegReg(.lr, .r11, .lr);
+    try e.vldrF32(.s8, .lr, 0);
     try cg.emitLoadStackV128(.d6, -32);
-    try e.subRegRegModImm(.r12, .r11, ModImm.of(32));
-    try e.vld1Q(.q3, .r12);
+    try e.subRegRegModImm(.lr, .r11, ModImm.of(32));
+    try e.vld1Q(.q3, .lr);
+    try cg.emitStore(.w32, .r11, -8192, .r12);
+    try e.subRegRegModImm(.lr, .r11, ModImm.of(8192));
+    try e.strRegMem(.r12, .lr, 0);
     try expectCode(&cg, &e);
 }
 
