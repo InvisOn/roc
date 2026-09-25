@@ -78,6 +78,7 @@ ELF32 writer and every arm32 relocation kind, linked by LLD and executed.
 python3 ci/arm32_link_smoke.py            # build, check, link, run under qemu
 python3 ci/arm32_link_smoke.py --no-run   # stop after linking
 python3 ci/arm32_link_smoke.py --keep DIR # also copy the .o and executable to DIR
+python3 ci/arm32_link_smoke.py --ssh aj@rocit.local  # run on a real device instead of qemu
 ```
 
 **Steps it reports:** builds the object with `zig run` on
@@ -87,7 +88,9 @@ python3 ci/arm32_link_smoke.py --keep DIR # also copy the .o and executable to D
 requires the smoke message and "roc_link_smoke returned 42". Needs
 `qemu-user-static` for the run step (`sudo apt-get install qemu-user-static`);
 without it the tool fails unless `--no-run` is given, and `--no-run` prints
-"NOT RUN" rather than passing silently.
+"NOT RUN" rather than passing silently. `--ssh HOST` copies the executable to `/tmp` on a
+32-bit ARM Linux device with `scp`, runs it with `ssh` (key-based login, no
+prompts) and deletes it; qemu is not needed then.
 
 ## `ci/vendor_musl_runtime.py`
 

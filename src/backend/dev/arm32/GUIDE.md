@@ -167,7 +167,15 @@ tools, rerun both checks (they must still pass), and restore `build.zig`.
 python3 ci/arm32_link_smoke.py            # encoder + ELF32 + LLD + qemu (needs qemu-arm-static)
 python3 ci/arm32_link_smoke.py --no-run   # without qemu
 python3 ci/arm32_link_smoke.py --keep out # keep the .o and executable
+python3 ci/arm32_link_smoke.py --ssh aj@rocit.local  # on real hardware
 ```
+
+A Raspberry Pi 3 B+ running 32-bit Raspberry Pi OS (armv7l, NEON,
+VFPv3-D32; it also has hardware divide, which the backend's floor does not
+use) is reachable as `aj@rocit.local`. Any static arm32musl executable can be
+run there with `scp FILE aj@rocit.local:/tmp/ && ssh aj@rocit.local /tmp/FILE`.
+Once J2 lands, this is how `roc build --opt=dev --target=arm32musl` output is
+checked on hardware as well as under qemu.
 
 By hand, on any arm32 object:
 
