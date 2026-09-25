@@ -2338,3 +2338,13 @@ pub fn roc_boxy_call_dict(
         },
     }
 }
+
+test "RocBoxyCallArg is three words with the layout in the second" {
+    // The dev backend cannot import this module, so LirCodeGen.generateCallDict
+    // writes RocBoxyCallArg entries from this shape scaled by the target word.
+    const word = @sizeOf(usize);
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(RocBoxyCallArg, "value"));
+    try std.testing.expectEqual(@as(usize, word), @offsetOf(RocBoxyCallArg, "layout"));
+    try std.testing.expectEqual(@as(usize, 2 * word), @offsetOf(RocBoxyCallArg, "desc"));
+    try std.testing.expectEqual(@as(usize, 3 * word), @sizeOf(RocBoxyCallArg));
+}
