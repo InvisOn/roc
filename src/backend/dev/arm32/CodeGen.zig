@@ -8,7 +8,9 @@
 //! for the prologue); r11 is the frame pointer and r12 the scratch register,
 //! never allocated. Float temporaries are the even D registers d0, d2, d4 and
 //! d6: each is also a Q register (q0-q3) and has an S view, so any allocated
-//! `FloatReg` can hold an f32, an f64 or a 128-bit vector.
+//! `FloatReg` can hold an f32, an f64 or a 128-bit vector. Vectors also have
+//! q8-q15 (d16-d30 even, caller-saved under AAPCS32), which have no S view
+//! and so are handed out only by `allocVector`.
 //!
 //! Every memory access honours its form's offset range (`fitsImmediate`);
 //! out of range, the address is formed in r12 first. Division is not here:
@@ -62,13 +64,21 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// Caller-saved general registers available as temporaries: r0-r3.
         pub const INITIAL_FREE_GENERAL: u32 = Call.CALLER_SAVED_GENERAL_MASK;
 
-        /// Float temporaries: d0, d2, d4, d6 (q0-q3). Odd D registers are the
-        /// high halves of those Q registers and are never allocated alone.
-        pub const INITIAL_FREE_FLOAT: u32 =
+        /// Float temporaries with S views: d0, d2, d4, d6 (q0-q3). Odd D
+        /// registers are the high halves of those Q registers and are never
+        /// allocated alone.
+        pub const SCALAR_FLOAT_MASK: u32 =
             (1 << @intFromEnum(DReg.d0)) |
             (1 << @intFromEnum(DReg.d2)) |
             (1 << @intFromEnum(DReg.d4)) |
             (1 << @intFromEnum(DReg.d6));
+
+        /// Vector-only temporaries: d16, d18, ..., d30 (q8-q15). They have no
+        /// S view, so an f32 never lives there.
+        pub const VECTOR_ONLY_FLOAT_MASK: u32 = 0x5555_0000;
+
+        /// Every float temporary.
+        pub const INITIAL_FREE_FLOAT: u32 = SCALAR_FLOAT_MASK | VECTOR_ONLY_FLOAT_MASK;
 
         /// Callee-saved general registers available after r0-r3: r4-r10.
         pub const CALLEE_SAVED_GENERAL_MASK: u32 = Call.CALLEE_SAVED_GENERAL_MASK;
@@ -210,8 +220,21 @@ pub fn CodeGen(comptime target: RocTarget) type {
             self.callee_saved_available &= ~bit;
         }
 
+        /// A float register for an f32 or f64: one with an S view.
         pub fn allocFloat(self: *Self) ?FloatReg {
-            const bit = takeLowest(&self.free_float) orelse return null;
+            return self.takeFloat(SCALAR_FLOAT_MASK);
+        }
+
+        /// A float register for a 128-bit vector: q8-q15 first, keeping
+        /// q0-q3 for scalars.
+        pub fn allocVector(self: *Self) ?FloatReg {
+            return self.takeFloat(VECTOR_ONLY_FLOAT_MASK) orelse self.takeFloat(SCALAR_FLOAT_MASK);
+        }
+
+        fn takeFloat(self: *Self, pool: u32) ?FloatReg {
+            var available = self.free_float & pool;
+            const bit = takeLowest(&available) orelse return null;
+            self.free_float &= ~(@as(u32, 1) << bit);
             return @enumFromInt(bit);
         }
 
@@ -955,6 +978,24 @@ test "float temporaries are the even D registers d0-d6, each a Q register" {
     try std.testing.expect(cg.allocFloat() == null);
     cg.freeFloat(.d4);
     try std.testing.expectEqual(FloatReg.d4, cg.allocTempFloat());
+}
+
+test "vectors take q8-q15 first, then the scalar pool; scalars never get q8-q15" {
+    var cg = MuslCodeGen.init(std.testing.allocator, .default);
+    defer cg.deinit();
+    var index: u6 = 16;
+    while (index <= 30) : (index += 2) {
+        const got = cg.allocVector().?;
+        try std.testing.expectEqual(@as(FloatReg, @enumFromInt(@as(u5, @intCast(index)))), got);
+        try std.testing.expect(!got.hasSViews());
+    }
+    // The vector-only pool is empty: vectors fall back to d0.
+    try std.testing.expectEqual(FloatReg.d0, cg.allocVector().?);
+    // Scalars still get only registers with S views.
+    try std.testing.expectEqual(FloatReg.d2, cg.allocFloat().?);
+    cg.freeFloat(.d20);
+    try std.testing.expectEqual(FloatReg.d4, cg.allocFloat().?);
+    try std.testing.expectEqual(FloatReg.d20, cg.allocVector().?);
 }
 
 test "stack accesses in range use fp directly, out of range go through r12" {

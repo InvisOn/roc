@@ -6093,6 +6093,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             bits: u128,
             protected_mask: u32,
         ) Allocator.Error!AcquiredVector {
+            if (comptime isa == .arm32) {
+                // Built in a frame slot and loaded with VLD1.
+                const slot = try self.boxyI128LiteralSlot(@bitCast(bits));
+                const vector = try self.allocTempVector(protected_mask);
+                try self.codegen.emitLoadStackV128(vector, slot);
+                return .{ .reg = vector, .temporary = true };
+            }
             const result = try self.allocTempVector(protected_mask);
             const low_reg = try self.allocTempGeneral();
             defer self.codegen.freeGeneral(low_reg);
@@ -6198,6 +6205,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             src: GeneralReg,
             kind: builtins.simd.Kind,
         ) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                // A 64-bit lane is a Wide64, splatted from memory by
+                // `emitSimdSplatWide64`.
+                std.debug.assert(kind.laneBits() < 64);
+                return self.codegen.emit.vdupQFromCore(neonSize(kind), neonQ(dst), src);
+            }
             if (comptime isa.binaryIs(.x86_64)) {
                 try self.codegen.emit.movVectorFromGeneral(dst, src, kind.laneBits() == 64);
                 if (self.codegen.cpu_level == .v1) {
@@ -6240,6 +6253,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn generateSimdSplat(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
             const kind = self.simdKindForLayout(ll.ret_layout) orelse unreachable;
             const scalar_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+            if (comptime isa == .arm32) {
+                if (kind.laneBits() == 64) {
+                    const splat = try self.allocTempVector(0);
+                    try self.emitSimdSplatWide64(splat, try self.wide64StackOffset(scalar_loc));
+                    return .{ .vector_reg = .{ .reg = splat, .kind = kind } };
+                }
+            }
             const scalar = try self.ensureInGeneralReg(scalar_loc);
             defer self.codegen.freeGeneral(scalar);
             const result = try self.allocTempVector(0);
@@ -6287,6 +6307,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdGetLane(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdGetLaneNeon(args);
             const vector_local = GuardedList.at(args, 0);
             const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
             const vector = try self.acquireVectorLocal(vector_local, kind, 0);
@@ -6327,6 +6348,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdWithLane(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdWithLaneNeon(args);
             const vector_local = GuardedList.at(args, 0);
             const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
             std.debug.assert(self.simdKindForLayout(ll.ret_layout) == kind);
@@ -6377,12 +6399,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             return .{ .vector_reg = .{ .reg = result, .kind = kind } };
         }
 
+        /// The lane-rearranging SIMD low-levels.
+        const RearrangeOp = enum(u16) {
+            simd_even_lanes = @intFromEnum(lir.LowLevel.simd_even_lanes),
+            simd_odd_lanes = @intFromEnum(lir.LowLevel.simd_odd_lanes),
+            simd_reverse_lanes = @intFromEnum(lir.LowLevel.simd_reverse_lanes),
+        };
+
         fn generateSimdRearrange(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
-            const RearrangeOp = enum(u16) {
-                simd_even_lanes = @intFromEnum(lir.LowLevel.simd_even_lanes),
-                simd_odd_lanes = @intFromEnum(lir.LowLevel.simd_odd_lanes),
-                simd_reverse_lanes = @intFromEnum(lir.LowLevel.simd_reverse_lanes),
-            };
+            if (comptime isa == .arm32) return self.generateSimdRearrangeNeon(ll, args);
             const op = narrowEnum(RearrangeOp, ll.op);
             const lhs_local = GuardedList.at(args, 0);
             const kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
@@ -6434,6 +6459,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdTableLookup(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdTableLookupNeon(args);
             const kind = self.simdKindForLayout(ll.ret_layout) orelse unreachable;
             std.debug.assert(kind == .u8x16);
             const table = try self.acquireVectorLocal(GuardedList.at(args, 0), .u8x16, 0);
@@ -6485,10 +6511,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.codegen.patchJump(case_patches[shift], self.codegen.currentOffset());
                 if (shift == 0) {
                     try self.codegen.emitMoveV128(result, lhs.reg);
-                } else if (comptime isa.binaryIs(.x86_64)) {
-                    try self.codegen.emit.vexRegRegRegImm8(.map_0f3a, .p66, false, 0x0F, result, rhs.reg, lhs.reg, @intCast(shift));
-                } else {
-                    try self.codegen.emit.simdThreeReg(0x6E000000 | (@as(u32, @intCast(shift)) << 11), result, lhs.reg, rhs.reg);
+                } else switch (isa) {
+                    .x86_64 => try self.codegen.emit.vexRegRegRegImm8(.map_0f3a, .p66, false, 0x0F, result, rhs.reg, lhs.reg, @intCast(shift)),
+                    .aarch64 => try self.codegen.emit.simdThreeReg(0x6E000000 | (@as(u32, @intCast(shift)) << 11), result, lhs.reg, rhs.reg),
+                    .arm32 => try self.codegen.emit.vextQ(neonQ(result), neonQ(lhs.reg), neonQ(rhs.reg), @intCast(shift)),
                 }
                 done_patches[shift] = try self.codegen.emitJump();
             }
@@ -6506,6 +6532,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             high: bool,
             protected_mask: u32,
         ) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                // VMOVL (VSHLL #0) of the chosen D half.
+                return self.codegen.emit.neonShiftLeftLong(
+                    if (source_kind.isSigned()) .signed else .unsigned,
+                    neonSize(source_kind),
+                    neonQ(dst),
+                    if (high) neonHigh(src) else src,
+                    0,
+                );
+            }
             if (comptime isa.binaryIs(.aarch64)) {
                 const size_opcode: u32 = switch (source_kind.laneBits()) {
                     8 => 0x00080000,
@@ -6562,14 +6598,17 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.emitX86PackedBinary(.map_0f, if (high) 0x6D else 0x6C, dst, dst, odd_product);
         }
 
+        /// The SIMD multiply low-levels.
+        const MultiplyOp = enum(u16) {
+            simd_mul_wrap = @intFromEnum(lir.LowLevel.simd_mul_wrap),
+            simd_mul_high = @intFromEnum(lir.LowLevel.simd_mul_high),
+            simd_mul_q15_sat = @intFromEnum(lir.LowLevel.simd_mul_q15_sat),
+            simd_mul_wide_lo = @intFromEnum(lir.LowLevel.simd_mul_wide_lo),
+            simd_mul_wide_hi = @intFromEnum(lir.LowLevel.simd_mul_wide_hi),
+        };
+
         fn generateSimdMultiply(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
-            const MultiplyOp = enum(u16) {
-                simd_mul_wrap = @intFromEnum(lir.LowLevel.simd_mul_wrap),
-                simd_mul_high = @intFromEnum(lir.LowLevel.simd_mul_high),
-                simd_mul_q15_sat = @intFromEnum(lir.LowLevel.simd_mul_q15_sat),
-                simd_mul_wide_lo = @intFromEnum(lir.LowLevel.simd_mul_wide_lo),
-                simd_mul_wide_hi = @intFromEnum(lir.LowLevel.simd_mul_wide_hi),
-            };
+            if (comptime isa == .arm32) return self.generateSimdMultiplyNeon(ll, args);
             const op = narrowEnum(MultiplyOp, ll.op);
             const lhs_local = GuardedList.at(args, 0);
             const source_kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
@@ -6659,14 +6698,17 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             return .{ .vector_reg = .{ .reg = result, .kind = destination_kind } };
         }
 
+        /// The SIMD low-levels that change the lane width.
+        const WidthChangeOp = enum(u16) {
+            simd_widen_lo = @intFromEnum(lir.LowLevel.simd_widen_lo),
+            simd_widen_hi = @intFromEnum(lir.LowLevel.simd_widen_hi),
+            simd_pairwise_add_widen = @intFromEnum(lir.LowLevel.simd_pairwise_add_widen),
+            simd_narrow_wrap = @intFromEnum(lir.LowLevel.simd_narrow_wrap),
+            simd_narrow_sat = @intFromEnum(lir.LowLevel.simd_narrow_sat),
+        };
+
         fn generateSimdWidthChange(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
-            const WidthChangeOp = enum(u16) {
-                simd_widen_lo = @intFromEnum(lir.LowLevel.simd_widen_lo),
-                simd_widen_hi = @intFromEnum(lir.LowLevel.simd_widen_hi),
-                simd_pairwise_add_widen = @intFromEnum(lir.LowLevel.simd_pairwise_add_widen),
-                simd_narrow_wrap = @intFromEnum(lir.LowLevel.simd_narrow_wrap),
-                simd_narrow_sat = @intFromEnum(lir.LowLevel.simd_narrow_sat),
-            };
+            if (comptime isa == .arm32) return self.generateSimdWidthChangeNeon(ll, args);
             const op = narrowEnum(WidthChangeOp, ll.op);
             const lhs_local = GuardedList.at(args, 0);
             const source_kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
@@ -6788,12 +6830,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             return .{ .vector_reg = .{ .reg = result, .kind = destination_kind } };
         }
 
+        /// The SIMD dot-product and sum-of-differences low-levels.
+        const DotOp = enum(u16) {
+            simd_dot_pairs = @intFromEnum(lir.LowLevel.simd_dot_pairs),
+            simd_dot_pairs_sat = @intFromEnum(lir.LowLevel.simd_dot_pairs_sat),
+            simd_sad = @intFromEnum(lir.LowLevel.simd_sad),
+        };
+
         fn generateSimdDot(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
-            const DotOp = enum(u16) {
-                simd_dot_pairs = @intFromEnum(lir.LowLevel.simd_dot_pairs),
-                simd_dot_pairs_sat = @intFromEnum(lir.LowLevel.simd_dot_pairs_sat),
-                simd_sad = @intFromEnum(lir.LowLevel.simd_sad),
-            };
+            if (comptime isa == .arm32) return self.generateSimdDotNeon(ll, args);
             const op = narrowEnum(DotOp, ll.op);
             const lhs_local = GuardedList.at(args, 0);
             const lhs_kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
@@ -6873,6 +6918,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdBitmask(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdBitmaskNeon(args);
             const vector_local = GuardedList.at(args, 0);
             const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
             const vector = try self.acquireVectorLocal(vector_local, kind, 0);
@@ -6946,6 +6992,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdShift(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdShiftNeon(ll, args);
             const vector_local = GuardedList.at(args, 0);
             const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
             const vector = try self.acquireVectorLocal(vector_local, kind, 0);
@@ -7086,6 +7133,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdRoundedShift(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdRoundedShiftNeon(args);
             const vector_local = GuardedList.at(args, 0);
             const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
             std.debug.assert(kind == .i16x8 or kind == .i32x4);
@@ -7180,6 +7228,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdSum(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdSumNeon(args);
             const vector_local = GuardedList.at(args, 0);
             const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
             const vector = try self.acquireVectorLocal(vector_local, kind, 0);
@@ -7881,6 +7930,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdClmul(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdClmulNeon(ll, args);
             const lhs = try self.acquireVectorLocal(GuardedList.at(args, 0), .u64x2, 0);
             defer self.releaseAcquiredVector(lhs);
             var protected = floatRegMask(lhs.reg);
@@ -7995,6 +8045,730 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.emit.vexRegRegReg(map, .p66, false, opcode, dst, lhs, rhs);
         }
 
+        // arm32 NEON lowering of the SIMD low-levels (J1e). A vector lives in a
+        // Q register, named by its even low D register (`FloatReg`); 64-bit
+        // lanes that ARMv7 NEON lacks are composed from 32-bit and saturating
+        // forms, and a 64-bit lane scalar is a memory-resident Wide64 (D6).
+
+        /// The Q view of a vector register, an even D register.
+        fn neonQ(reg: FloatReg) arm32.QReg {
+            std.debug.assert(@intFromEnum(reg) % 2 == 0);
+            return @enumFromInt(@intFromEnum(reg) / 2);
+        }
+
+        /// The high D half of a vector register.
+        fn neonHigh(reg: FloatReg) FloatReg {
+            return neonQ(reg).dHigh();
+        }
+
+        fn neonSize(kind: builtins.simd.Kind) arm32.NeonSize {
+            return switch (kind.laneBits()) {
+                8 => .i8,
+                16 => .i16,
+                32 => .i32,
+                64 => .i64,
+                else => unreachable,
+            };
+        }
+
+        /// A U64 that the operation's contract keeps in range of a word (a
+        /// lane or byte index) as its low word, in a fresh register.
+        fn wordOfInBoundsU64(self: *Self, loc: ValueLocation) Allocator.Error!GeneralReg {
+            const reg = try self.allocTempGeneral();
+            switch (loc) {
+                .immediate_i64 => |val| try self.codegen.emitLoadImm(reg, @as(u32, @truncate(@as(u64, @bitCast(val))))),
+                .stack => |s| try self.codegen.emitLoadStack(word, reg, s.offset),
+                // A U64 is a Wide64, which is memory-resident or an immediate (D6).
+                .general_reg, .float_reg, .vector_reg, .stack_i128, .stack_str, .list_stack, .immediate_f32, .immediate_f64, .immediate_i128, .noreturn => unreachable,
+            }
+            return reg;
+        }
+
+        /// Both 64-bit lanes of `dst` from the Wide64 at `offset`.
+        fn emitSimdSplatWide64(self: *Self, dst: FloatReg, offset: i32) Allocator.Error!void {
+            try self.codegen.emitLoadStackF64(dst, offset);
+            try self.codegen.emit.vmovF64(neonHigh(dst), dst);
+        }
+
+        /// `dst = a > b` on 64-bit lanes. Signed: `b - a` saturated keeps
+        /// its sign, which VSHR #63 spreads. Unsigned: `a - b` saturated is
+        /// non-zero exactly when `a > b`.
+        fn emitNeonGt64(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg, signed: bool, protected_mask: u32) Allocator.Error!void {
+            const e = &self.codegen.emit;
+            const t = try self.allocTempVector(protected_mask | floatRegMask(dst) | floatRegMask(a) | floatRegMask(b));
+            defer self.codegen.freeFloat(t);
+            if (signed) {
+                try e.neonThreeSameQ(.vqsub_s, .i64, neonQ(t), neonQ(b), neonQ(a));
+                try e.neonShiftRightQ(.vshr_s, .i64, neonQ(dst), neonQ(t), 63);
+                return;
+            }
+            try e.neonThreeSameQ(.vqsub_u, .i64, neonQ(t), neonQ(a), neonQ(b));
+            try self.emitNeonIsZero64(dst, t, protected_mask | floatRegMask(a) | floatRegMask(b));
+            try e.neonTwoMiscQ(.vmvn, .i8, neonQ(dst), neonQ(dst));
+        }
+
+        /// `dst = (src == 0)` on 64-bit lanes: both 32-bit halves zero.
+        /// Clobbers `src`.
+        fn emitNeonIsZero64(self: *Self, dst: FloatReg, src: FloatReg, protected_mask: u32) Allocator.Error!void {
+            const e = &self.codegen.emit;
+            try e.neonTwoMiscQ(.vceq_zero, .i32, neonQ(src), neonQ(src));
+            const swapped = try self.allocTempVector(protected_mask | floatRegMask(dst) | floatRegMask(src));
+            defer self.codegen.freeFloat(swapped);
+            try e.neonTwoMiscQ(.vrev64, .i32, neonQ(swapped), neonQ(src));
+            try e.neonLogicQ(.vand, neonQ(dst), neonQ(src), neonQ(swapped));
+        }
+
+        fn emitBasicSimdVectorNeon(
+            self: *Self,
+            op: BasicSimdOp,
+            kind: builtins.simd.Kind,
+            dst: FloatReg,
+            lhs: FloatReg,
+            rhs: ?FloatReg,
+            third: ?FloatReg,
+            protected_mask: u32,
+        ) Allocator.Error!void {
+            const e = &self.codegen.emit;
+            const size = neonSize(kind);
+            const signed = kind.isSigned();
+            const wide = kind.laneBits() == 64;
+            const d = neonQ(dst);
+            const a = neonQ(lhs);
+            const protect = protected_mask | floatRegMask(dst) | floatRegMask(lhs) |
+                (if (rhs) |r| floatRegMask(r) else 0) | (if (third) |r| floatRegMask(r) else 0);
+            switch (op) {
+                .simd_add_wrap => try e.neonThreeSameQ(.vadd, size, d, a, neonQ(rhs.?)),
+                .simd_sub_wrap => try e.neonThreeSameQ(.vsub, size, d, a, neonQ(rhs.?)),
+                .simd_add_sat => try e.neonThreeSameQ(if (signed) .vqadd_s else .vqadd_u, size, d, a, neonQ(rhs.?)),
+                .simd_sub_sat => try e.neonThreeSameQ(if (signed) .vqsub_s else .vqsub_u, size, d, a, neonQ(rhs.?)),
+                .simd_neg_wrap => if (!wide) {
+                    try e.neonTwoMiscQ(.vneg, size, d, a);
+                } else {
+                    const zero = try self.allocTempVector(protect);
+                    defer self.codegen.freeFloat(zero);
+                    try e.vmovI8Q(neonQ(zero), 0);
+                    try e.neonThreeSameQ(.vsub, .i64, d, neonQ(zero), a);
+                },
+                .simd_abs_wrap => if (!wide) {
+                    try e.neonTwoMiscQ(.vabs, size, d, a);
+                } else {
+                    // (a ^ sign) - sign
+                    const sign = try self.allocTempVector(protect);
+                    defer self.codegen.freeFloat(sign);
+                    try e.neonShiftRightQ(.vshr_s, .i64, neonQ(sign), a, 63);
+                    try e.neonLogicQ(.veor, d, a, neonQ(sign));
+                    try e.neonThreeSameQ(.vsub, .i64, d, d, neonQ(sign));
+                },
+                .simd_min, .simd_max => if (!wide) {
+                    const is_max = op == .simd_max;
+                    const neon_op: arm32.NeonThreeSame = if (is_max) (if (signed) .vmax_s else .vmax_u) else (if (signed) .vmin_s else .vmin_u);
+                    try e.neonThreeSameQ(neon_op, size, d, a, neonQ(rhs.?));
+                } else {
+                    // Select through a `lhs > rhs` mask.
+                    const mask = try self.allocTempVector(protect);
+                    defer self.codegen.freeFloat(mask);
+                    try self.emitNeonGt64(mask, lhs, rhs.?, signed, protect);
+                    const take, const other = if (op == .simd_max) .{ lhs, rhs.? } else .{ rhs.?, lhs };
+                    try e.neonLogicQ(.vbsl, neonQ(mask), neonQ(take), neonQ(other));
+                    try self.codegen.emitMoveV128(dst, mask);
+                },
+                // Both compare the lanes' bit patterns as unsigned.
+                .simd_abs_diff => if (!wide) {
+                    try e.neonThreeSameQ(.vabd_u, size, d, a, neonQ(rhs.?));
+                } else {
+                    const up = try self.allocTempVector(protect);
+                    defer self.codegen.freeFloat(up);
+                    const down = try self.allocTempVector(protect | floatRegMask(up));
+                    defer self.codegen.freeFloat(down);
+                    try e.neonThreeSameQ(.vqsub_u, .i64, neonQ(up), a, neonQ(rhs.?));
+                    try e.neonThreeSameQ(.vqsub_u, .i64, neonQ(down), neonQ(rhs.?), a);
+                    try e.neonLogicQ(.vorr, d, neonQ(up), neonQ(down));
+                },
+                .simd_avg_rounded => if (!wide) {
+                    try e.neonThreeSameQ(.vrhadd_u, size, d, a, neonQ(rhs.?));
+                } else {
+                    // (a | b) - ((a ^ b) >> 1), which cannot overflow.
+                    const diff = try self.allocTempVector(protect);
+                    defer self.codegen.freeFloat(diff);
+                    const either = try self.allocTempVector(protect | floatRegMask(diff));
+                    defer self.codegen.freeFloat(either);
+                    try e.neonLogicQ(.veor, neonQ(diff), a, neonQ(rhs.?));
+                    try e.neonShiftRightQ(.vshr_u, .i64, neonQ(diff), neonQ(diff), 1);
+                    try e.neonLogicQ(.vorr, neonQ(either), a, neonQ(rhs.?));
+                    try e.neonThreeSameQ(.vsub, .i64, d, neonQ(either), neonQ(diff));
+                },
+                .simd_and => try e.neonLogicQ(.vand, d, a, neonQ(rhs.?)),
+                .simd_or => try e.neonLogicQ(.vorr, d, a, neonQ(rhs.?)),
+                .simd_xor => try e.neonLogicQ(.veor, d, a, neonQ(rhs.?)),
+                .simd_not => try e.neonTwoMiscQ(.vmvn, .i8, d, a),
+                .simd_bit_select => {
+                    // VBSL selects by the destination's bits.
+                    std.debug.assert(dst != rhs.? and dst != third.?);
+                    try self.codegen.emitMoveV128(dst, lhs);
+                    try e.neonLogicQ(.vbsl, d, neonQ(rhs.?), neonQ(third.?));
+                },
+                .simd_eq_lanes => if (!wide) {
+                    try e.neonThreeSameQ(.vceq, size, d, a, neonQ(rhs.?));
+                } else {
+                    // Both 32-bit halves equal.
+                    const halves = try self.allocTempVector(protect);
+                    defer self.codegen.freeFloat(halves);
+                    const swapped = try self.allocTempVector(protect | floatRegMask(halves));
+                    defer self.codegen.freeFloat(swapped);
+                    try e.neonThreeSameQ(.vceq, .i32, neonQ(halves), a, neonQ(rhs.?));
+                    try e.neonTwoMiscQ(.vrev64, .i32, neonQ(swapped), neonQ(halves));
+                    try e.neonLogicQ(.vand, d, neonQ(halves), neonQ(swapped));
+                },
+                .simd_gt_lanes => if (!wide) {
+                    try e.neonThreeSameQ(if (signed) .vcgt_s else .vcgt_u, size, d, a, neonQ(rhs.?));
+                } else {
+                    try self.emitNeonGt64(dst, lhs, rhs.?, signed, protect);
+                },
+                .simd_gte_lanes => if (!wide) {
+                    try e.neonThreeSameQ(if (signed) .vcge_s else .vcge_u, size, d, a, neonQ(rhs.?));
+                } else {
+                    // a >= b is not (b > a).
+                    try self.emitNeonGt64(dst, rhs.?, lhs, signed, protect);
+                    try e.neonTwoMiscQ(.vmvn, .i8, d, d);
+                },
+                .simd_interleave_lo, .simd_interleave_hi => {
+                    const high = op == .simd_interleave_hi;
+                    std.debug.assert(dst != rhs.?);
+                    if (wide) {
+                        const source_half: FloatReg = if (high) neonHigh(lhs) else lhs;
+                        const other_half: FloatReg = if (high) neonHigh(rhs.?) else rhs.?;
+                        try e.vmovF64(dst, source_half);
+                        try e.vmovF64(neonHigh(dst), other_half);
+                    } else {
+                        // VZIP rewrites both registers: the low interleave in
+                        // the first, the high one in the second.
+                        const second = try self.allocTempVector(protect);
+                        defer self.codegen.freeFloat(second);
+                        try self.codegen.emitMoveV128(dst, lhs);
+                        try self.codegen.emitMoveV128(second, rhs.?);
+                        try e.neonTwoMiscQ(.vzip, size, d, neonQ(second));
+                        if (high) try self.codegen.emitMoveV128(dst, second);
+                    }
+                },
+            }
+        }
+
+        fn generateSimdGetLaneNeon(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const vector_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
+            const vector = try self.acquireVectorLocal(vector_local, kind, 0);
+            defer self.releaseAcquiredVector(vector);
+            var protected = floatRegMask(vector.reg);
+            const index = try self.wordOfInBoundsU64(try self.emitValueLocal(GuardedList.at(args, 1)));
+            defer self.codegen.freeGeneral(index);
+            const lane_bytes: u8 = @intCast(kind.laneBits() / 8);
+            if (lane_bytes > 1) try self.codegen.emitShlImm(word, index, index, @ctz(lane_bytes));
+
+            // Byte indices of the lane, looked up with VTBL (0 when out of
+            // range, as on the other targets).
+            const indices = try self.allocTempVector(protected);
+            defer self.codegen.freeFloat(indices);
+            protected |= floatRegMask(indices);
+            try e.vdupQFromCore(.i8, neonQ(indices), index);
+            const ramp = try self.materializeVectorConstant(simdByteRamp(), protected);
+            try e.neonThreeSameQ(.vadd, .i8, neonQ(indices), neonQ(indices), neonQ(ramp.reg));
+            self.releaseAcquiredVector(ramp);
+            const shuffled = try self.allocTempVector(protected);
+            defer self.codegen.freeFloat(shuffled);
+            try e.vtbl(shuffled, vector.reg, 2, indices);
+
+            if (kind.laneBits() == 64) {
+                const slot = self.codegen.allocStackSlot(8);
+                try self.codegen.emitStoreStackF64(slot, shuffled);
+                return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = if (kind.isSigned()) .i64 else .u64 } };
+            }
+            const result = try self.allocTempGeneral();
+            try e.vmovCoreFromLane(.unsigned, neonSize(kind), result, shuffled, 0);
+            return .{ .general_reg = result };
+        }
+
+        fn generateSimdWithLaneNeon(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const vector_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
+            const vector = try self.acquireVectorLocal(vector_local, kind, 0);
+            defer self.releaseAcquiredVector(vector);
+            var protected = floatRegMask(vector.reg);
+            const index = try self.wordOfInBoundsU64(try self.emitValueLocal(GuardedList.at(args, 1)));
+            defer self.codegen.freeGeneral(index);
+            const scalar_loc = try self.emitValueLocal(GuardedList.at(args, 2));
+
+            // The lane's mask: its bytes' lane numbers equal the index.
+            const mask = try self.allocTempVector(protected);
+            defer self.codegen.freeFloat(mask);
+            protected |= floatRegMask(mask);
+            {
+                const index_vector = try self.allocTempVector(protected);
+                defer self.codegen.freeFloat(index_vector);
+                try e.vdupQFromCore(.i8, neonQ(index_vector), index);
+                const lane_indices = try self.materializeVectorConstant(simdLaneIndexBytes(kind), protected | floatRegMask(index_vector));
+                defer self.releaseAcquiredVector(lane_indices);
+                try e.neonThreeSameQ(.vceq, .i8, neonQ(mask), neonQ(lane_indices.reg), neonQ(index_vector));
+            }
+
+            const splat = try self.allocTempVector(protected);
+            defer self.codegen.freeFloat(splat);
+            protected |= floatRegMask(splat);
+            if (kind.laneBits() == 64) {
+                try self.emitSimdSplatWide64(splat, try self.wide64StackOffset(scalar_loc));
+            } else {
+                const scalar = try self.ensureInGeneralReg(scalar_loc);
+                defer self.codegen.freeGeneral(scalar);
+                try e.vdupQFromCore(neonSize(kind), neonQ(splat), scalar);
+            }
+            const result = try self.allocTempVector(protected);
+            try self.codegen.emitMoveV128(result, mask);
+            try e.neonLogicQ(.vbsl, neonQ(result), neonQ(splat), neonQ(vector.reg));
+            return .{ .vector_reg = .{ .reg = result, .kind = kind } };
+        }
+
+        fn generateSimdRearrangeNeon(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const op = narrowEnum(RearrangeOp, ll.op);
+            const lhs_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
+            const lhs = try self.acquireVectorLocal(lhs_local, kind, 0);
+            defer self.releaseAcquiredVector(lhs);
+            var protected = floatRegMask(lhs.reg);
+            var rhs: ?AcquiredVector = null;
+            if (op != .simd_reverse_lanes) {
+                rhs = try self.acquireVectorLocal(GuardedList.at(args, 1), kind, protected);
+                protected |= floatRegMask(rhs.?.reg);
+            }
+            defer if (rhs) |value| self.releaseAcquiredVector(value);
+            const result = try self.allocTempVector(protected);
+            protected |= floatRegMask(result);
+            const r = neonQ(result);
+            switch (op) {
+                .simd_reverse_lanes => {
+                    // Reverse within each half, then swap the halves.
+                    if (kind.laneBits() == 64) {
+                        try e.vextQ(r, neonQ(lhs.reg), neonQ(lhs.reg), 8);
+                    } else {
+                        try e.neonTwoMiscQ(.vrev64, neonSize(kind), r, neonQ(lhs.reg));
+                        try e.vextQ(r, r, r, 8);
+                    }
+                },
+                .simd_even_lanes, .simd_odd_lanes => {
+                    const odd = op == .simd_odd_lanes;
+                    if (kind.laneBits() == 64) {
+                        try e.vmovF64(result, if (odd) neonHigh(lhs.reg) else lhs.reg);
+                        try e.vmovF64(neonHigh(result), if (odd) neonHigh(rhs.?.reg) else rhs.?.reg);
+                    } else {
+                        // VUZP leaves the even lanes in the first register and
+                        // the odd lanes in the second.
+                        const second = try self.allocTempVector(protected);
+                        defer self.codegen.freeFloat(second);
+                        try self.codegen.emitMoveV128(result, lhs.reg);
+                        try self.codegen.emitMoveV128(second, rhs.?.reg);
+                        try e.neonTwoMiscQ(.vuzp, neonSize(kind), r, neonQ(second));
+                        if (odd) try self.codegen.emitMoveV128(result, second);
+                    }
+                },
+            }
+            return .{ .vector_reg = .{ .reg = result, .kind = kind } };
+        }
+
+        fn generateSimdTableLookupNeon(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            const table = try self.acquireVectorLocal(GuardedList.at(args, 0), .u8x16, 0);
+            defer self.releaseAcquiredVector(table);
+            var protected = floatRegMask(table.reg);
+            const indices = try self.acquireVectorLocal(GuardedList.at(args, 1), .u8x16, protected);
+            defer self.releaseAcquiredVector(indices);
+            protected |= floatRegMask(indices.reg);
+            const result = try self.allocTempVector(protected);
+            // VTBL gives 0 for an index past the 16-byte table.
+            try self.codegen.emit.vtbl(result, table.reg, 2, indices.reg);
+            try self.codegen.emit.vtbl(neonHigh(result), table.reg, 2, neonHigh(indices.reg));
+            return .{ .vector_reg = .{ .reg = result, .kind = .u8x16 } };
+        }
+
+        fn generateSimdMultiplyNeon(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const op = narrowEnum(MultiplyOp, ll.op);
+            const lhs_local = GuardedList.at(args, 0);
+            const source_kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
+            const destination_kind = self.simdKindForLayout(ll.ret_layout) orelse source_kind;
+            const lhs = try self.acquireVectorLocal(lhs_local, source_kind, 0);
+            defer self.releaseAcquiredVector(lhs);
+            var protected = floatRegMask(lhs.reg);
+            const rhs = try self.acquireVectorLocal(GuardedList.at(args, 1), source_kind, protected);
+            defer self.releaseAcquiredVector(rhs);
+            protected |= floatRegMask(rhs.reg);
+            const result = try self.allocTempVector(protected);
+            protected |= floatRegMask(result);
+            const size = neonSize(source_kind);
+            const signed = source_kind.isSigned();
+            switch (op) {
+                // No 64-bit lane type has a lane-wise multiply.
+                .simd_mul_wrap => try e.neonThreeSameQ(.vmul, size, neonQ(result), neonQ(lhs.reg), neonQ(rhs.reg)),
+                // (2ab + 2^15) >> 16, saturated: VQRDMULH.S16.
+                .simd_mul_q15_sat => try e.neonThreeSameQ(.vqrdmulh, .i16, neonQ(result), neonQ(lhs.reg), neonQ(rhs.reg)),
+                .simd_mul_wide_lo, .simd_mul_wide_hi => {
+                    const high = op == .simd_mul_wide_hi;
+                    try e.neonThreeDiff(
+                        if (signed) .vmull_s else .vmull_u,
+                        size,
+                        neonQ(result),
+                        if (high) neonHigh(lhs.reg) else lhs.reg,
+                        if (high) neonHigh(rhs.reg) else rhs.reg,
+                    );
+                },
+                .simd_mul_high => {
+                    // Widening products of each half, then their high halves.
+                    const low_product = try self.allocTempVector(protected);
+                    defer self.codegen.freeFloat(low_product);
+                    const high_product = try self.allocTempVector(protected | floatRegMask(low_product));
+                    defer self.codegen.freeFloat(high_product);
+                    const multiply: arm32.NeonThreeDiff = if (signed) .vmull_s else .vmull_u;
+                    try e.neonThreeDiff(multiply, size, neonQ(low_product), lhs.reg, rhs.reg);
+                    try e.neonThreeDiff(multiply, size, neonQ(high_product), neonHigh(lhs.reg), neonHigh(rhs.reg));
+                    try e.neonShiftNarrow(.vshrn, size, result, neonQ(low_product), source_kind.laneBits());
+                    try e.neonShiftNarrow(.vshrn, size, neonHigh(result), neonQ(high_product), source_kind.laneBits());
+                },
+            }
+            return .{ .vector_reg = .{ .reg = result, .kind = destination_kind } };
+        }
+
+        fn generateSimdWidthChangeNeon(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const op = narrowEnum(WidthChangeOp, ll.op);
+            const lhs_local = GuardedList.at(args, 0);
+            const source_kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
+            const destination_kind = self.simdKindForLayout(ll.ret_layout) orelse unreachable;
+            const lhs = try self.acquireVectorLocal(lhs_local, source_kind, 0);
+            defer self.releaseAcquiredVector(lhs);
+            var protected = floatRegMask(lhs.reg);
+            var rhs: ?AcquiredVector = null;
+            if (op == .simd_narrow_wrap or op == .simd_narrow_sat) {
+                rhs = try self.acquireVectorLocal(GuardedList.at(args, 1), source_kind, protected);
+                protected |= floatRegMask(rhs.?.reg);
+            }
+            defer if (rhs) |value| self.releaseAcquiredVector(value);
+            const result = try self.allocTempVector(protected);
+            switch (op) {
+                .simd_widen_lo, .simd_widen_hi => try self.emitSimdWiden(result, lhs.reg, source_kind, op == .simd_widen_hi, protected),
+                .simd_pairwise_add_widen => try e.neonTwoMiscQ(
+                    if (source_kind.isSigned()) .vpaddl_s else .vpaddl_u,
+                    neonSize(source_kind),
+                    neonQ(result),
+                    neonQ(lhs.reg),
+                ),
+                .simd_narrow_wrap, .simd_narrow_sat => {
+                    const narrow: arm32.NeonNarrow = if (op == .simd_narrow_wrap)
+                        .vmovn
+                    else if (destination_kind.isSigned())
+                        .vqmovn_s
+                    else if (source_kind.isSigned())
+                        .vqmovun
+                    else
+                        .vqmovn_u;
+                    const size = neonSize(destination_kind);
+                    try e.neonNarrow(narrow, size, result, neonQ(lhs.reg));
+                    try e.neonNarrow(narrow, size, neonHigh(result), neonQ(rhs.?.reg));
+                },
+            }
+            return .{ .vector_reg = .{ .reg = result, .kind = destination_kind } };
+        }
+
+        fn generateSimdDotNeon(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const op = narrowEnum(DotOp, ll.op);
+            const lhs_local = GuardedList.at(args, 0);
+            const lhs_kind = self.simdKindForLayout(self.localLayout(lhs_local)) orelse unreachable;
+            const rhs_local = GuardedList.at(args, 1);
+            const rhs_kind = self.simdKindForLayout(self.localLayout(rhs_local)) orelse unreachable;
+            const result_kind = self.simdKindForLayout(ll.ret_layout) orelse unreachable;
+            const lhs = try self.acquireVectorLocal(lhs_local, lhs_kind, 0);
+            defer self.releaseAcquiredVector(lhs);
+            var protected = floatRegMask(lhs.reg);
+            const rhs = try self.acquireVectorLocal(rhs_local, rhs_kind, protected);
+            defer self.releaseAcquiredVector(rhs);
+            protected |= floatRegMask(rhs.reg);
+            const result = try self.allocTempVector(protected);
+            protected |= floatRegMask(result);
+            const x = try self.allocTempVector(protected);
+            defer self.codegen.freeFloat(x);
+            const y = try self.allocTempVector(protected | floatRegMask(x));
+            defer self.codegen.freeFloat(y);
+            // Each half of the operands gives one half of the result.
+            for ([_]bool{ false, true }) |high| {
+                const a: FloatReg = if (high) neonHigh(lhs.reg) else lhs.reg;
+                const b: FloatReg = if (high) neonHigh(rhs.reg) else rhs.reg;
+                const out: FloatReg = if (high) neonHigh(result) else result;
+                switch (op) {
+                    .simd_dot_pairs => {
+                        // I16 products widened to I32, then adjacent pairs.
+                        try e.neonThreeDiff(.vmull_s, .i16, neonQ(x), a, b);
+                        try e.neonThreeSameD(.vpadd, .i32, out, x, neonHigh(x));
+                    },
+                    .simd_dot_pairs_sat => {
+                        // U8 x I8 products fit I16; adjacent pairs are summed in
+                        // I32 and narrowed with saturation.
+                        try e.neonShiftLeftLong(.unsigned, .i8, neonQ(x), a, 0);
+                        try e.neonShiftLeftLong(.signed, .i8, neonQ(y), b, 0);
+                        try e.neonThreeSameQ(.vmul, .i16, neonQ(x), neonQ(x), neonQ(y));
+                        try e.neonTwoMiscQ(.vpaddl_s, .i16, neonQ(x), neonQ(x));
+                        try e.neonNarrow(.vqmovn_s, .i16, out, neonQ(x));
+                    },
+                    .simd_sad => {
+                        // Eight absolute differences summed into one U64.
+                        try e.neonThreeDiff(.vabdl_u, .i8, neonQ(x), a, b);
+                        try e.neonTwoMiscQ(.vpaddl_u, .i16, neonQ(x), neonQ(x));
+                        try e.neonTwoMiscQ(.vpaddl_u, .i32, neonQ(x), neonQ(x));
+                        try e.neonThreeSameD(.vadd, .i64, out, x, neonHigh(x));
+                    },
+                }
+            }
+            return .{ .vector_reg = .{ .reg = result, .kind = result_kind } };
+        }
+
+        /// Lane i of each 64-bit half holds 1 << i: the bitmask weights of
+        /// that half's lanes.
+        fn simdHalfLaneWeights(kind: builtins.simd.Kind) u128 {
+            const half = kind.laneCount() / 2;
+            var bits: u128 = 0;
+            for (0..kind.laneCount()) |lane| {
+                bits = builtins.simd.withLane(bits, kind, @intCast(lane), @as(u64, 1) << @intCast(lane % half));
+            }
+            return bits;
+        }
+
+        fn generateSimdBitmaskNeon(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const vector_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
+            const vector = try self.acquireVectorLocal(vector_local, kind, 0);
+            defer self.releaseAcquiredVector(vector);
+            const protected = floatRegMask(vector.reg);
+            const size = neonSize(kind);
+            // Each lane's sign bit as 0 or 1, weighted by its place in its half
+            // and summed per half: the half's bits of the mask.
+            const bits = try self.allocTempVector(protected);
+            defer self.codegen.freeFloat(bits);
+            try e.neonShiftRightQ(.vshr_u, size, neonQ(bits), neonQ(vector.reg), kind.laneBits() - 1);
+            if (kind.laneBits() < 64) {
+                const weights = try self.materializeVectorConstant(simdHalfLaneWeights(kind), protected | floatRegMask(bits));
+                try e.neonThreeSameQ(.vmul, size, neonQ(bits), neonQ(bits), neonQ(weights.reg));
+                self.releaseAcquiredVector(weights);
+                var lane: arm32.NeonSize = size;
+                while (lane != .i64) : (lane = @enumFromInt(@intFromEnum(lane) + 1)) {
+                    try e.neonTwoMiscQ(.vpaddl_u, lane, neonQ(bits), neonQ(bits));
+                }
+            }
+            const result = try self.allocTempGeneral();
+            const high = try self.allocTempGeneral();
+            defer self.codegen.freeGeneral(high);
+            try e.vmovCoreFromLane(.unsigned, .i32, result, bits, 0);
+            try e.vmovCoreFromLane(.unsigned, .i32, high, neonHigh(bits), 0);
+            try self.codegen.emitShlImm(word, high, high, @intCast(kind.laneCount() / 2));
+            try self.codegen.emitOrRegs(word, result, result, high);
+            return .{ .general_reg = result };
+        }
+
+        fn generateSimdShiftNeon(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const vector_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
+            const vector = try self.acquireVectorLocal(vector_local, kind, 0);
+            defer self.releaseAcquiredVector(vector);
+            var protected = floatRegMask(vector.reg);
+            const raw_count = try self.ensureInGeneralReg(try self.emitValueLocal(GuardedList.at(args, 1)));
+            defer self.codegen.freeGeneral(raw_count);
+            // The count modulo the lane width; VSHL by a negative count
+            // shifts right, arithmetically for VSHL.S.
+            const count = try self.allocTempGeneral();
+            defer self.codegen.freeGeneral(count);
+            try e.dataProc(.al, .@"and", false, count, raw_count, .{ .imm = arm32.ModImm.encode(@as(u32, kind.laneBits()) - 1).? });
+            if (ll.op != .simd_shl_wrap) try e.rsbRegRegModImm(count, count, arm32.ModImm.of(0));
+            // VSHL reads the bottom byte of each lane of the counts.
+            const counts = try self.allocTempVector(protected);
+            defer self.codegen.freeFloat(counts);
+            protected |= floatRegMask(counts);
+            try e.vdupQFromCore(.i8, neonQ(counts), count);
+            const result = try self.allocTempVector(protected);
+            const arithmetic = ll.op == .simd_shr_wrap and kind.isSigned();
+            try e.neonThreeSameQ(if (arithmetic) .vshl_s else .vshl_u, neonSize(kind), neonQ(result), neonQ(counts), neonQ(vector.reg));
+            return .{ .vector_reg = .{ .reg = result, .kind = kind } };
+        }
+
+        fn generateSimdRoundedShiftNeon(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const vector_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
+            std.debug.assert(kind == .i16x8 or kind == .i32x4);
+            const vector = try self.acquireVectorLocal(vector_local, kind, 0);
+            defer self.releaseAcquiredVector(vector);
+            var protected = floatRegMask(vector.reg);
+            const count = try self.ensureInGeneralReg(try self.emitValueLocal(GuardedList.at(args, 1)));
+            defer self.codegen.freeGeneral(count);
+            const result = try self.allocTempVector(protected);
+            protected |= floatRegMask(result);
+
+            // A count of the lane width or more gives 0. Below it, VRSHL.S by
+            // the negated count is the rounding shift (x + 2^(n-1)) >> n,
+            // computed without overflow, and a zero count leaves x.
+            try self.codegen.emitCmpImm(count, kind.laneBits());
+            const out_of_range = try self.codegen.emitCondJump(CodeGen.condAboveOrEqual());
+            const negated = try self.allocTempGeneral();
+            try e.rsbRegRegModImm(negated, count, arm32.ModImm.of(0));
+            const counts = try self.allocTempVector(protected);
+            try e.vdupQFromCore(.i8, neonQ(counts), negated);
+            self.codegen.freeGeneral(negated);
+            try e.neonThreeSameQ(.vrshl_s, neonSize(kind), neonQ(result), neonQ(counts), neonQ(vector.reg));
+            self.codegen.freeFloat(counts);
+            const done = try self.codegen.emitJump();
+            try self.codegen.patchJump(out_of_range, self.codegen.currentOffset());
+            try e.vmovI8Q(neonQ(result), 0);
+            try self.codegen.patchJump(done, self.codegen.currentOffset());
+            return .{ .vector_reg = .{ .reg = result, .kind = kind } };
+        }
+
+        fn generateSimdSumNeon(self: *Self, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const vector_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
+            const vector = try self.acquireVectorLocal(vector_local, kind, 0);
+            defer self.releaseAcquiredVector(vector);
+            const signed = kind.isSigned();
+            // Pairwise widening adds up to two 64-bit sums, then their sum.
+            const sums = try self.allocTempVector(floatRegMask(vector.reg));
+            defer self.codegen.freeFloat(sums);
+            try self.codegen.emitMoveV128(sums, vector.reg);
+            var lane = neonSize(kind);
+            while (lane != .i64) : (lane = @enumFromInt(@intFromEnum(lane) + 1)) {
+                try e.neonTwoMiscQ(if (signed) .vpaddl_s else .vpaddl_u, lane, neonQ(sums), neonQ(sums));
+            }
+            try e.neonThreeSameD(.vadd, .i64, sums, sums, neonHigh(sums));
+            // Sums of 8- and 16-bit lanes are 32-bit scalars; wider ones are
+            // Wide64s.
+            if (kind.laneBits() <= 16) {
+                const result = try self.allocTempGeneral();
+                try e.vmovCoreFromLane(.unsigned, .i32, result, sums, 0);
+                return .{ .general_reg = result };
+            }
+            const slot = self.codegen.allocStackSlot(8);
+            try self.codegen.emitStoreStackF64(slot, sums);
+            return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = if (signed) .i64 else .u64 } };
+        }
+
+        fn generateSimdClmulNeon(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            const e = &self.codegen.emit;
+            const lhs = try self.acquireVectorLocal(GuardedList.at(args, 0), .u64x2, 0);
+            defer self.releaseAcquiredVector(lhs);
+            var protected = floatRegMask(lhs.reg);
+            const rhs = try self.acquireVectorLocal(GuardedList.at(args, 1), .u64x2, protected);
+            defer self.releaseAcquiredVector(rhs);
+            protected |= floatRegMask(rhs.reg);
+            const high = ll.op == .simd_clmul_hi;
+            const a_half: FloatReg = if (high) neonHigh(lhs.reg) else lhs.reg;
+            const b_half: FloatReg = if (high) neonHigh(rhs.reg) else rhs.reg;
+
+            // ARMv7 has no 64-bit polynomial multiply (D2). Shift-and-add over
+            // the 64 bits of b: `a` is the 128-bit multiplicand shifted left
+            // once per step, `b` holds b in both lanes shifted right once per
+            // step, and each step XORs `a` into the result when b's low bit
+            // is set.
+            var regs: [5]FloatReg = undefined;
+            for (&regs) |*reg| {
+                reg.* = try self.allocTempVector(protected);
+                protected |= floatRegMask(reg.*);
+            }
+            const result, const a, const b, const mask, const carry = regs;
+            defer for (regs[1..]) |reg| self.codegen.freeFloat(reg);
+            try e.vmovI8Q(neonQ(result), 0);
+            try e.vmovI8Q(neonQ(a), 0);
+            try e.vmovF64(a, a_half);
+            try e.vmovF64(b, b_half);
+            try e.vmovF64(neonHigh(b), b_half);
+            const steps = try self.allocTempGeneral();
+            defer self.codegen.freeGeneral(steps);
+            try self.codegen.emitLoadImm(steps, 64);
+            const loop = self.codegen.currentOffset();
+            // mask = b's low bit, spread over each lane
+            try e.neonShiftLeftQ(.i64, neonQ(mask), neonQ(b), 63);
+            try e.neonShiftRightQ(.vshr_s, .i64, neonQ(mask), neonQ(mask), 63);
+            try e.neonLogicQ(.vand, neonQ(mask), neonQ(a), neonQ(mask));
+            try e.neonLogicQ(.veor, neonQ(result), neonQ(result), neonQ(mask));
+            // a <<= 1 across the lanes: the low lane's top bit moves into the
+            // high lane.
+            try e.neonShiftRightQ(.vshr_u, .i64, neonQ(carry), neonQ(a), 63);
+            try e.vmovI8Q(neonQ(mask), 0);
+            try e.vextQ(neonQ(carry), neonQ(mask), neonQ(carry), 8);
+            try e.neonShiftLeftQ(.i64, neonQ(a), neonQ(a), 1);
+            try e.neonLogicQ(.vorr, neonQ(a), neonQ(a), neonQ(carry));
+            try e.neonShiftRightQ(.vshr_u, .i64, neonQ(b), neonQ(b), 1);
+            try e.subsRegRegModImm(steps, steps, arm32.ModImm.of(1));
+            const again = try self.codegen.emitCondJump(CodeGen.condNotEqual());
+            try self.codegen.patchJump(again, loop);
+            return .{ .vector_reg = .{ .reg = result, .kind = .u64x2 } };
+        }
+
+        /// `simd_store_16` or `simd_append_16` on a 32-bit target: the vector
+        /// and a U64 index travel as `u64` pairs.
+        fn generateSimdListCallNeon(self: *Self, ll: anytype, args: anytype, comptime which: enum { store, append }) Allocator.Error!ValueLocation {
+            const vector_local = GuardedList.at(args, 0);
+            const kind = self.simdKindForLayout(self.localLayout(vector_local)) orelse unreachable;
+            const vector_slot = self.codegen.allocStackSlot(16);
+            {
+                const vector = try self.acquireVectorLocal(vector_local, kind, 0);
+                defer self.releaseAcquiredVector(vector);
+                try self.codegen.emitStoreStackV128(vector_slot, vector.reg);
+            }
+            const list_offset = try self.simdListOffset(GuardedList.at(args, 1));
+            const index_offset: ?i32 = if (which == .store) try self.wide64StackOffset(try self.emitValueLocal(GuardedList.at(args, 2))) else null;
+            const result_offset = self.codegen.allocStackSlot(roc_list_size);
+            var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+            try builder.addLeaArg(frame_ptr, result_offset);
+            try builder.addMem64Arg(frame_ptr, vector_slot);
+            try builder.addMem64Arg(frame_ptr, vector_slot + 8);
+            try builder.addMemArg(frame_ptr, list_offset);
+            try builder.addMemArg(frame_ptr, list_offset + wordOffset(1));
+            try builder.addMemArg(frame_ptr, list_offset + wordOffset(2));
+            switch (which) {
+                .store => {
+                    try builder.addMem64Arg(frame_ptr, index_offset.?);
+                    try builder.addImmArg(@intFromEnum(builtins.utils.UpdateMode.Immutable));
+                    try self.callBuiltin(&builder, .simd_store_16);
+                },
+                .append => {
+                    try builder.addImmArg(updateModeImmForArg1(ll.unique_args));
+                    try self.callBuiltin(&builder, .simd_append_16);
+                },
+            }
+            return .{ .list_stack = .{ .struct_offset = result_offset, .data_offset = 0, .num_elements = 0 } };
+        }
+
+        /// The lane-wise SIMD low-levels that `emitBasicSimdVector` lowers.
+        const BasicSimdOp = enum(u16) {
+            simd_add_wrap = @intFromEnum(lir.LowLevel.simd_add_wrap),
+            simd_sub_wrap = @intFromEnum(lir.LowLevel.simd_sub_wrap),
+            simd_add_sat = @intFromEnum(lir.LowLevel.simd_add_sat),
+            simd_sub_sat = @intFromEnum(lir.LowLevel.simd_sub_sat),
+            simd_neg_wrap = @intFromEnum(lir.LowLevel.simd_neg_wrap),
+            simd_abs_wrap = @intFromEnum(lir.LowLevel.simd_abs_wrap),
+            simd_min = @intFromEnum(lir.LowLevel.simd_min),
+            simd_max = @intFromEnum(lir.LowLevel.simd_max),
+            simd_abs_diff = @intFromEnum(lir.LowLevel.simd_abs_diff),
+            simd_avg_rounded = @intFromEnum(lir.LowLevel.simd_avg_rounded),
+            simd_and = @intFromEnum(lir.LowLevel.simd_and),
+            simd_or = @intFromEnum(lir.LowLevel.simd_or),
+            simd_xor = @intFromEnum(lir.LowLevel.simd_xor),
+            simd_not = @intFromEnum(lir.LowLevel.simd_not),
+            simd_bit_select = @intFromEnum(lir.LowLevel.simd_bit_select),
+            simd_eq_lanes = @intFromEnum(lir.LowLevel.simd_eq_lanes),
+            simd_gt_lanes = @intFromEnum(lir.LowLevel.simd_gt_lanes),
+            simd_gte_lanes = @intFromEnum(lir.LowLevel.simd_gte_lanes),
+            simd_interleave_lo = @intFromEnum(lir.LowLevel.simd_interleave_lo),
+            simd_interleave_hi = @intFromEnum(lir.LowLevel.simd_interleave_hi),
+        };
+
         fn emitBasicSimdVector(
             self: *Self,
             op: lir.LowLevel,
@@ -8005,29 +8779,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             third: ?FloatReg,
             protected_mask: u32,
         ) Allocator.Error!void {
-            const BasicSimdOp = enum(u16) {
-                simd_add_wrap = @intFromEnum(lir.LowLevel.simd_add_wrap),
-                simd_sub_wrap = @intFromEnum(lir.LowLevel.simd_sub_wrap),
-                simd_add_sat = @intFromEnum(lir.LowLevel.simd_add_sat),
-                simd_sub_sat = @intFromEnum(lir.LowLevel.simd_sub_sat),
-                simd_neg_wrap = @intFromEnum(lir.LowLevel.simd_neg_wrap),
-                simd_abs_wrap = @intFromEnum(lir.LowLevel.simd_abs_wrap),
-                simd_min = @intFromEnum(lir.LowLevel.simd_min),
-                simd_max = @intFromEnum(lir.LowLevel.simd_max),
-                simd_abs_diff = @intFromEnum(lir.LowLevel.simd_abs_diff),
-                simd_avg_rounded = @intFromEnum(lir.LowLevel.simd_avg_rounded),
-                simd_and = @intFromEnum(lir.LowLevel.simd_and),
-                simd_or = @intFromEnum(lir.LowLevel.simd_or),
-                simd_xor = @intFromEnum(lir.LowLevel.simd_xor),
-                simd_not = @intFromEnum(lir.LowLevel.simd_not),
-                simd_bit_select = @intFromEnum(lir.LowLevel.simd_bit_select),
-                simd_eq_lanes = @intFromEnum(lir.LowLevel.simd_eq_lanes),
-                simd_gt_lanes = @intFromEnum(lir.LowLevel.simd_gt_lanes),
-                simd_gte_lanes = @intFromEnum(lir.LowLevel.simd_gte_lanes),
-                simd_interleave_lo = @intFromEnum(lir.LowLevel.simd_interleave_lo),
-                simd_interleave_hi = @intFromEnum(lir.LowLevel.simd_interleave_hi),
-            };
             const basic_op = narrowEnum(BasicSimdOp, op);
+            if (comptime isa == .arm32) return self.emitBasicSimdVectorNeon(basic_op, kind, dst, lhs, rhs, third, protected_mask);
             if (comptime isa.binaryIs(.x86_64)) {
                 const r = rhs;
                 const compare_map: @TypeOf(self.codegen.emit).VexMap = if (kind.laneBits() == 64) .map_0f38 else .map_0f;
@@ -8252,7 +9005,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn generateSimdLoad(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
             const list_offset = try self.simdListOffset(GuardedList.at(args, 0));
             const index_loc = try self.emitValueLocal(GuardedList.at(args, 1));
-            const index_reg = try self.ensureInGeneralReg(index_loc);
+            // The index is in bounds, so on a 32-bit target it is the low word.
+            const index_reg = if (comptime word_size < 8) try self.wordOfInBoundsU64(index_loc) else try self.ensureInGeneralReg(index_loc);
             defer self.codegen.freeGeneral(index_reg);
             const bytes_reg = try self.allocTempGeneral();
             defer self.codegen.freeGeneral(bytes_reg);
@@ -8273,7 +9027,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 defer self.releaseAcquiredVector(vector);
                 const list_offset = try self.simdListOffset(GuardedList.at(args, 1));
                 const index_loc = try self.emitValueLocal(GuardedList.at(args, 2));
-                const index_reg = try self.ensureInGeneralReg(index_loc);
+                const index_reg = if (comptime word_size < 8) try self.wordOfInBoundsU64(index_loc) else try self.ensureInGeneralReg(index_loc);
                 defer self.codegen.freeGeneral(index_reg);
                 const bytes_reg = try self.allocTempGeneral();
                 defer self.codegen.freeGeneral(bytes_reg);
@@ -8283,6 +9037,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 return try self.emitValueLocal(GuardedList.at(args, 1));
             }
 
+            if (comptime isa == .arm32) return self.generateSimdListCallNeon(ll, args, .store);
             const vector = try self.simdArgParts(GuardedList.at(args, 0));
             defer self.codegen.freeGeneral(vector.low);
             defer self.codegen.freeGeneral(vector.high);
@@ -8305,6 +9060,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn generateSimdAppend(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            if (comptime isa == .arm32) return self.generateSimdListCallNeon(ll, args, .append);
             const vector = try self.simdArgParts(GuardedList.at(args, 0));
             defer self.codegen.freeGeneral(vector.low);
             defer self.codegen.freeGeneral(vector.high);
@@ -19874,8 +20630,17 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// range only when the shared FP/vector register file is genuinely
         /// exhausted. Registers in `protected_mask` are operands of the
         /// instruction currently being selected and cannot be spill victims.
+        /// A free register for a 128-bit vector. arm32 has vector-only
+        /// registers (q8-q15) besides the shared float pool.
+        fn allocVectorReg(self: *Self) ?FloatReg {
+            return switch (isa) {
+                .x86_64, .aarch64 => self.codegen.allocFloat(),
+                .arm32 => self.codegen.allocVector(),
+            };
+        }
+
         fn allocTempVector(self: *Self, protected_mask: u32) Allocator.Error!FloatReg {
-            if (self.codegen.allocFloat()) |reg| return reg;
+            if (self.allocVectorReg()) |reg| return reg;
 
             const spillable = self.vector_local_mask & ~protected_mask;
             if (spillable != 0) {
@@ -19888,7 +20653,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     unreachable;
                 };
                 try self.spillVectorLocalEntry(local_key);
-                return self.codegen.allocFloat() orelse unreachable;
+                return self.allocVectorReg() orelse unreachable;
             }
 
             std.debug.panic(

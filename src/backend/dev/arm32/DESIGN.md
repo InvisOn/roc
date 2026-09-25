@@ -33,7 +33,8 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J1c: the driver's calls, returns, entry wrappers, helpers and two-way ISA tests | Done |
 | J1d: `Wide64` lowering (arithmetic, overflow, division, shifts, compares, unary ops, conversions, F64 bits) | Done |
 | J1d: four-word i128/Dec, word division through `__aeabi_idivmod`, U64 window and discriminant values | Done |
-| J1e-J1f: NEON lowering, acceptance test | Not started |
+| J1e: NEON lowering of every SIMD op; q8-q15 as vector-only temporaries | Done (compiles; execution checked in J1f-J3) |
+| J1f: acceptance test, hello world under qemu and on the Pi | Not started |
 | J2-J4: gates, qemu execution, lock-in | Not started |
 
 Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
@@ -185,6 +186,13 @@ concrete or amended them.
   slot, so the arm32 driver calls the same wrappers as the 64-bit targets
   with every operand's halves read from its 16-byte slot
   (`callI128WrapperWords`).
+- **Vector-only temporaries (D5, amended).** D5's float pool is d0-d6
+  (q0-q3), four registers, which a three-operand SIMD op plus its
+  temporaries exhausts. q8-q15 (d16-d30) are caller-saved under AAPCS32 and
+  exist on the VFPv3-D32 floor (D2), but have no S views, so they are
+  vector-only: `CodeGen.allocVector` hands them out first and the shared pool
+  after them, while `allocFloat` (f32/f64) draws only from d0-d6. Calls spill
+  vector locals as before, so no callee-saved register is involved.
 - **Word division (D7).** The floor has no `SDIV`/`UDIV` (D2), so a word
   divide or remainder calls `__aeabi_idivmod`/`__aeabi_uidivmod` (quotient
   r0, remainder r1) through `emitWordDivRem`; signed modulo keeps its divisor
@@ -387,6 +395,40 @@ first.
 `callAeabiHelper` calls them: by symbol for object files and the shim (Zig's
 compiler-rt defines them, `roc_default_compiler_rt.o` in a link), by address
 when natively executing on an arm host.
+
+### NEON lowering (J1e)
+
+Each SIMD entry point in the driver routes on `comptime isa == .arm32` to a
+`...Neon` function (or, for the lane-wise ops, `emitBasicSimdVectorNeon`),
+leaving the x86_64 and aarch64 bodies untouched. A vector is a Q register
+named by its even low D register; `neonQ` and `neonHigh` give its Q view
+and high half.
+
+- 64-bit lanes, where ARMv7 lacks the instruction: equality is `VCEQ.I32`
+  ANDed with its `VREV64.32`; signed `>` is `VQSUB.S64 (b - a)` spread by
+  `VSHR.S64 #63`, unsigned `>` is a non-zero `VQSUB.U64 (a - b)`; `>=` is
+  the negated swap; min/max select with `VBSL` through that mask; negate,
+  abs, abs-diff and the rounding average are composed from subtracts,
+  shifts and saturating subtracts.
+- Lane indices and U64 scalars: an index is a U64 the op keeps in range, so
+  its low word is used (`wordOfInBoundsU64`); a 64-bit lane's scalar or
+  result is a Wide64, loaded into or stored from a D register
+  (`emitSimdSplatWide64`, `VSTR`).
+- `get_lane` looks the lane's bytes up with `VTBL` (an out-of-range index
+  gives 0, as on the other targets); `with_lane` selects through a `VCEQ.I8`
+  lane mask with `VBSL`.
+- Bitmask: `VSHR` to the sign bit, `VMUL` by per-half lane weights, then
+  `VPADDL` up to one 64-bit sum per half.
+- Shifts duplicate the count's byte with `VDUP.8` (VSHL reads each lane's
+  bottom byte; negative counts shift right); the rounding shift is `VRSHL.S`
+  by the negated count, with counts of the lane width or more giving 0.
+- Sums are a `VPADDL` chain to two 64-bit sums and a `VADD.I64`.
+- Carryless multiply has no instruction on ARMv7 (no `VMULL.P64`), so it is
+  a 64-step shift-and-XOR loop over Q registers, not the `VMULL.P8`
+  composition the plan sketched: simpler to get right, and the dev backend
+  does not optimize.
+- `simd_store_16`/`simd_append_16` pass the vector's halves and the U64
+  index as `u64` pairs.
 
 ### Four-word i128 and Dec (J1d)
 
