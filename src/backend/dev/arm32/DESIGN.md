@@ -35,23 +35,23 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J1d: four-word i128/Dec, word division through `__aeabi_idivmod`, U64 window and discriminant values | Done |
 | J1e: NEON lowering of every SIMD op; q8-q15 as vector-only temporaries | Done (compiles; execution checked in J1f-J3) |
 | J1f: acceptance tests (`LirCodeGen(.arm32musl)` instantiates with the D5 map; a proc compiles through it) | Done; the hand-linked hello world moved to J2, whose `roc build --opt=dev --target=arm32musl` links and runs real programs through the same code generator |
-| J2: `supportsTarget` gate, CLI and phase names, `--keep-temp`, arm32 runtime fixes found by real builds | Done (the snapshot tool keeps arm32 at `NOT_IMPLEMENTED` until J4) |
+| J2: `supportsTarget` gate, CLI and phase names, `--keep-temp`, arm32 runtime fixes found by real builds | Done (the snapshot tool kept arm32 at `NOT_IMPLEMENTED` until J4) |
 | J2: the default platform declares `arm32musl` and `arm32linux` | Done; a CLI case builds `baseline_cpu_smoke.roc` for arm32musl |
 | J2: `arm32linux` (glibc) on the int platform | Done; runs on the Pi, CI builds it on the Linux host |
 | J2: arm32 lane of `run-check-simd-codegen` | Done; the exhaustive SIMD corpus builds, contains NEON, and passes under qemu and on the Pi |
 | J2: D10 register budget over every program J2 builds | Done: general 9 / 11, float 7 / 12, no pool exhausted (see "The register budget is already tight on 64-bit targets") |
 | J2: D2 floor asserted where code is generated | Done: `arm32/Emit.zig` checks Zig's arm baseline at comptime (see D2 under "Decisions as implemented") |
-| J2: gate-consistency test (`supportsTarget` against the `dev_object` snapshot lines) | Moved to J4: it cannot hold until J4 regenerates the arm32 snapshot lines |
+| J2: gate-consistency test (`supportsTarget` against the `dev_object` snapshot lines) | Moved to J4 and done there |
 | J3b: `--cross-run`/`--cross-runner` in the CLI runner | Done; all 121 `test/fx` programs run correctly under qemu (the fx host works around a Zig 0.16 arm ABI bug) |
 | J3a: `host_lir_codegen_available` for arm; the eval runner, host-effects runner and backend tests built for arm32 | Done: under qemu, eval 2171/2171 (dev 2030 evaluations, as on x86_64), host effects 86/86, backend tests 892 passed. On the Raspberry Pi 3: host effects 86/86, eval 2169/2171 with dev 2028 of the 2028 evaluations it reached; the two others ran out of memory while compiling (issues note). Wasm evaluation is unavailable in a 32-bit process (issues note) |
 | J3c: the `ci_cross_compile.yml` arm32 lanes are required, and the on-target job compares each arm32 int app's stdout with the Linux-built x64musl app's | Done locally (Linux host, qemu); the macOS and Windows hosts are first checked by CI. The int app prints heap addresses, which the comparison masks |
 | J3: call-shape battery and real hardware (the residual risk J3 names) | Done: `test/fx/abi_call_shapes.roc` crosses the host boundary with each AAPCS32 argument and result shape (a register pair after an i32, an i64 on the stack, a record split by C.5, an f32 back-fill, nine f64s, a hidden result pointer, an F64 -> I64 -> F64 round trip). On a Raspberry Pi 3 (Cortex-A53, 32-bit Linux) all 122 fx programs pass through `ci/ssh_cross_runner.sh`, and the refcount builtins there run LDREX/STREX/DMB (refcounts are atomic unless proven single-threaded) |
-| J4 | Not started |
+| J4: lock-in | Done: the snapshot tool asks `devSupportsTarget` for every target, all 16 `dev_object` snapshots carry arm32 hashes (only `arm32*=` lines changed, stable across regeneration and `--debug`), the snapshot tool's gate-consistency test pins them to the gate, and design.md names ARM32 among the native dev backends and states its CPU floor |
 
 `roc build --opt=dev --target=arm32musl` and `--target=arm32linux` build real
-programs through the arm32 code generator. Every `dev_object` snapshot still
-prints `arm32*=NOT_IMPLEMENTED`: the plan regenerates those lines in J4, after
-J3's execution oracles have checked the code the hashes would lock in.
+programs through the arm32 code generator, and every `dev_object` snapshot
+locks its arm32 object bytes (J4, after J3's execution oracles had checked
+the code the hashes lock in).
 
 ## Where arm32 sits in the pipeline
 
@@ -688,6 +688,10 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 
 ## Next steps
 
-J1, J2 and J3 are done. Next, in plan order: J4 (regenerate the arm32 `dev_object` snapshot lines, add the
-gate-consistency test, update design.md). Every Track A change must leave both byte-identity oracles
-unchanged.
+Every unit of the plan is done. What remains is outside it: the annoyances
+listed at the end of `projects/big/arm32-dev-backend-issues.md` (each fixed in
+its own commit), rerunning the hardware checks on a Raspberry Pi 5 (4 GB of
+address space for a 32-bit process under a 64-bit kernel, so the two eval
+tests that run out of memory on the Pi 3 can run), and the wasm oracle on
+32-bit hosts (issues note). Every change to the shared driver must keep both
+byte-identity oracles unchanged.

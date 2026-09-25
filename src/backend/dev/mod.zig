@@ -6,6 +6,8 @@
 //! Supported architectures:
 //! - x86_64: Linux (System V ABI), macOS (System V ABI), Windows (Fastcall)
 //! - aarch64: Linux and macOS (AAPCS64)
+//! - arm32: Linux, musl and glibc (AAPCS32 hard-float, ARMv7-A with NEON;
+//!   see `arm32/DESIGN.md`)
 
 /// Exact procedure-local stack lifetime and slot planning.
 pub const StackPlan = @import("StackPlan.zig");
