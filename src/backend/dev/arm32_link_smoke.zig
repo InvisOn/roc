@@ -32,20 +32,29 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(2);
     }
 
+    const object = buildObject(gpa) catch |err| die("build the object", err);
+    defer gpa.free(object);
+    const file = std.Io.Dir.createFileAbsolute(init.io, args[1], .{}) catch |err| die("create the output file", err);
+    defer file.close(init.io);
+    file.writeStreamingAll(init.io, object) catch |err| die("write the output file", err);
+}
+
+/// The smoke object's bytes, owned by the caller.
+pub fn buildObject(gpa: std.mem.Allocator) ![]u8 {
     var e = arm32.MuslEmit.init(gpa);
     defer e.deinit();
     // push {r4, lr}: keeps SP 8-byte aligned across the call (AAPCS32).
-    e.push(arm32.GeneralReg.r4.listBit() | arm32.GeneralReg.lr.listBit()) catch |err| die("encode", err);
+    try e.push(arm32.GeneralReg.r4.listBit() | arm32.GeneralReg.lr.listBit());
     // r0 = &table
-    const table_addr_at = e.pcRelAddress(.r0) catch |err| die("encode", err);
+    const table_addr_at = try e.pcRelAddress(.r0);
     // r0 = table[0] (the message address, relocated by R_ARM_ABS32)
-    e.ldrRegMem(.r0, .r0, 0) catch |err| die("encode", err);
+    try e.ldrRegMem(.r0, .r0, 0);
     // puts(r0)
     const call_at = e.codeOffset();
-    e.bl(0) catch |err| die("encode", err);
+    try e.bl(0);
     // return 42
-    e.movRegImm32(.r0, 42) catch |err| die("encode", err);
-    e.pop(arm32.GeneralReg.r4.listBit() | arm32.GeneralReg.pc.listBit()) catch |err| die("encode", err);
+    try e.movRegImm32(.r0, 42);
+    try e.pop(arm32.GeneralReg.r4.listBit() | arm32.GeneralReg.pc.listBit());
 
     // .rodata: the message, then a word-aligned table holding its address.
     const message_z = message ++ "\x00";
@@ -53,29 +62,39 @@ pub fn main(init: std.process.Init) void {
     var rodata = [_]u8{0} ** (table_offset + 4);
     @memcpy(rodata[0..message_z.len], message_z);
 
-    var w = elf.ElfWriter.init(gpa, .arm, .none) catch |err| die("create the ELF writer", err);
+    var w = try elf.ElfWriter.init(gpa, .arm, .none);
     defer w.deinit();
     w.setCode(e.buf.items);
     w.setRodata(&rodata);
     // Local symbols precede global ones, as ELF requires.
-    const message_sym = w.addSymbol(.{ .name = "roc_link_smoke_message", .section = .rodata, .offset = 0, .size = message_z.len, .is_global = false, .is_function = false }) catch |err| die("write the object", err);
-    const table_sym = w.addSymbol(.{ .name = "roc_link_smoke_table", .section = .rodata, .offset = table_offset, .size = 4, .is_global = false, .is_function = false }) catch |err| die("write the object", err);
-    _ = w.addSymbol(.{ .name = "roc_link_smoke", .section = .text, .offset = 0, .size = e.buf.items.len, .is_global = true, .is_function = true }) catch |err| die("write the object", err);
-    const puts_sym = w.addExternalSymbol("puts") catch |err| die("write the object", err);
-    w.addTextDataRelocation(table_addr_at, table_sym, .arm_movw_prel) catch |err| die("write the object", err);
-    w.addTextDataRelocation(table_addr_at + 4, table_sym, .arm_movt_prel) catch |err| die("write the object", err);
-    w.addTextRelocation(call_at, puts_sym, -8) catch |err| die("write the object", err);
-    w.addRodataRelocation(table_offset, message_sym, 0) catch |err| die("write the object", err);
+    const message_sym = try w.addSymbol(.{ .name = "roc_link_smoke_message", .section = .rodata, .offset = 0, .size = message_z.len, .is_global = false, .is_function = false });
+    const table_sym = try w.addSymbol(.{ .name = "roc_link_smoke_table", .section = .rodata, .offset = table_offset, .size = 4, .is_global = false, .is_function = false });
+    _ = try w.addSymbol(.{ .name = "roc_link_smoke", .section = .text, .offset = 0, .size = e.buf.items.len, .is_global = true, .is_function = true });
+    const puts_sym = try w.addExternalSymbol("puts");
+    try w.addTextDataRelocation(table_addr_at, table_sym, .arm_movw_prel);
+    try w.addTextDataRelocation(table_addr_at + 4, table_sym, .arm_movt_prel);
+    try w.addTextRelocation(call_at, puts_sym, -8);
+    try w.addRodataRelocation(table_offset, message_sym, 0);
 
     var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    w.write(&out) catch |err| die("write the object", err);
-    const file = std.Io.Dir.createFileAbsolute(init.io, args[1], .{}) catch |err| die("create the output file", err);
-    defer file.close(init.io);
-    file.writeStreamingAll(init.io, out.items) catch |err| die("write the output file", err);
+    errdefer out.deinit(gpa);
+    try w.write(&out);
+    return out.toOwnedSlice(gpa);
 }
 
 fn die(what: []const u8, err: anytype) noreturn {
     std.debug.print("arm32_link_smoke: failed to {s}: {s}\n", .{ what, @errorName(err) });
     std.process.exit(1);
+}
+
+test "the smoke object is an ARM ELF32 relocatable with the hard-float EABI flags" {
+    const object = try buildObject(std.testing.allocator);
+    defer std.testing.allocator.free(object);
+    try std.testing.expectEqualSlices(u8, "\x7fELF", object[0..4]);
+    try std.testing.expectEqual(@as(u8, 1), object[4]); // ELFCLASS32
+    try std.testing.expectEqual(@as(u8, 1), object[5]); // little-endian
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, object[16..18], .little)); // ET_REL
+    try std.testing.expectEqual(@as(u16, 40), std.mem.readInt(u16, object[18..20], .little)); // EM_ARM
+    try std.testing.expectEqual(@as(u32, 0x0500_0400), std.mem.readInt(u32, object[36..40], .little)); // EABI5, hard float
+    try std.testing.expect(std.mem.indexOf(u8, object, message) != null);
 }
