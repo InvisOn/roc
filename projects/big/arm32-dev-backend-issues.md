@@ -204,12 +204,12 @@ loads one word at a time into two scratch registers, so it holds 8 registers
 at most. Over everything J2 builds, the arm32 general peak is now 9 / 11 (see
 the register budget section of `src/backend/dev/arm32/DESIGN.md`).
 
-### Shim execution does not resolve `__aeabi_*` yet
+### Shim execution did not resolve `__aeabi_*` (resolved in J3a)
 
 `callAeabiHelper` emits a relocation to the helper's name in shim mode, like
-every other runtime symbol. Shim mode only runs for the compiler's host, so
-this matters only for a compiler running on arm32; its shim would have to
-resolve those names against compiler-rt.
+every other runtime symbol. `native_runtime_libcalls.resolve` now binds those
+names to the compiler's own compiler-rt when the compiler runs on arm32, so
+in-process linking (HostSplice, the machine-code shim) resolves them.
 
 ### Test skip guards are keyed on the host architecture
 
@@ -321,3 +321,42 @@ builtin with a `u64` parameter needs the same.
   re-checking the Builtin module for each case.
 - The plan's claim that `roc build --help` names `dev` as the default `--opt`
   is stale: it names `speed`.
+
+### The wasm eval oracle cannot run in a 32-bit process
+
+Roc's wasm modules declare linear memory without a maximum, and bytebox
+reserves a module's whole possible memory up front: 4 GiB for wasm32. A
+32-bit process cannot hold that reservation, so the eval runner built for
+arm32 cannot execute wasm, and J3a's "same pass count as the host x86_64
+run" is measured over the interpreter and dev backends only. Declaring a
+maximum in the emitted modules would change the wasm backend's output and
+limit programs on every host, so it is not done for this; a bytebox that
+grows its memory without reserving the maximum would lift the restriction.
+
+### A Debug arm32 eval runner does not link
+
+`zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf` in Debug
+fails in LLD: "InputSection too large for range extension thunk". The runner
+links LLVM, and a Debug A32 image is larger than a B/BL range extension
+thunk can span. The plan's J3a acceptance measures D10 in "the Debug runner
+build"; J3a used ReleaseFast (as the CI lane does) and ReleaseSafe instead.
+That still checks D10: exhausting a register pool is a `std.debug.panic` in
+every build mode, not an assertion that Release builds drop.
+
+### Cross-built compilers fill `.zig-cache` quickly
+
+Each arm32 build of the eval runner leaves a 250-400 MB LLVM-linked binary in
+`.zig-cache/o`. During J3a the cache reached 229 GB and filled the disk.
+Deleting part of `.zig-cache/o` leaves manifests pointing at missing files,
+and Zig does not recover ("failed to check cache: FileNotFound"), so clear
+the whole directory instead.
+
+### Two eval tests need more memory than a 1 GB board has
+
+"inspect: inclusive numeric ranges all iterate" and "inspect: exclusive
+numeric ranges all iterate" compile ten `Iter.fold` range pipelines, one per
+integer width. Compiling them peaks at about 1.25 GB resident on x86_64 and
+870 MB in an arm32 build (under qemu). On the Raspberry Pi 3 (920 MB RAM plus
+zram swap) they fail with OutOfMemory during compilation, even with one
+worker; every other test passes there. This is the compiler front end's
+memory use, not arm32 code generation.
