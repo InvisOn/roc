@@ -360,3 +360,39 @@ integer width. Compiling them peaks at about 1.25 GB resident on x86_64 and
 zram swap) they fail with OutOfMemory during compilation, even with one
 worker; every other test passes there. This is the compiler front end's
 memory use, not arm32 code generation.
+
+## Annoyances to fix later
+
+Small frictions met while working, none blocking. Each says where it belongs.
+Fix each one in its own commit, and remove its entry in that commit.
+
+- **The backend test step always reports failure.** One wasm test prints to
+  stderr, so `zig build run-test-zig-module-backend` fails although every
+  test passes (see "WASM merge" above). Fix in the test: capture or drop the
+  debug print. Until then, run the test binary directly to read the totals.
+- **Line-number exclusions in build.zig's pattern checks go stale.** The
+  type-checker pattern check excludes lines of `inspected.zig`,
+  `Check.zig`, `store.zig` and `cir_to_lir.zig` by number, so any edit above
+  them breaks the check (J3a shifted `inspected.zig` by one line). Two of the
+  `inspected.zig` ranges (2475 and 3265-3276) already point at unrelated
+  lines. Fix by anchoring exclusions to a marker comment on the line instead
+  of a number.
+- **minici stops at the first failing phase and rebuilds everything first.**
+  A full run spends about 15 minutes in `build-ci` before the first check,
+  so each quick lint failure costs a full cycle. Run the `run-check-*`
+  phases directly first, and resume with `--minici-after <phase>`.
+- **`run-check-glue-abi` needs a Rust target that is not documented as a
+  prerequisite:** `rustup target add x86_64-unknown-linux-musl`. Add it to the
+  contributor setup notes.
+- **Zig does not print stack traces in arm Debug test binaries under qemu**
+  ("stack tracing is disabled"), so an arm32 test failure shows no location.
+  ReleaseSafe runners do print traces; a Debug runner does not link at all
+  (above). Worth a small helper step that builds a ReleaseSafe arm32 runner.
+- **`.zig-cache` fills the disk during cross builds** (above). A periodic
+  full clear, or a separate `--cache-dir` for arm32 cross builds that can be
+  deleted wholesale, would avoid it.
+- **The int app prints heap addresses,** so comparing its stdout across
+  targets needs masking (the J3c lane masks `0x…`). Printing a stable token
+  instead of the pointer would make the output directly comparable.
+- **Probe apps that read stdin block without input.** Any ad-hoc
+  build-and-run script must redirect stdin (`</dev/null`) and use a timeout.
