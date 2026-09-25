@@ -325,3 +325,13 @@ check could gate every later commit.
   emits exactly what a two-way branch did (the x86_64 and aarch64 byte and
   halfword loads and stores), the branch becomes the facade call. Needed
   because each two-way test was a compile error for arm32.
+- `LirCodeGen.zig` (J1c, proc and call plumbing): string, float and list
+  builtin results (AAPCS32 zero-extends narrow results; a `u64` result is a
+  Wide64 stored from r0:r1), RC string sign tests, float conversions and
+  square roots, local-slot alignment, proc/helper compilation (arm32 uses the
+  x86_64 deferred-prologue frame, so "x86_64" tests there become "not
+  aarch64"), call placeholders and retargeting (BL), PC-relative code and
+  data addresses (movw/movt/add rd, pc, patched in place), and the caller's
+  stack-argument base (fp, as on x86_64). Branch-island, veneer and stub
+  bookkeeping becomes explicitly aarch64-only. Needed because each two-way
+  test was a compile error for arm32.

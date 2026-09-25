@@ -1953,7 +1953,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Initialize stack_offset to reserve space for callee-saved area
             // (same convention as compileProcSpec—positive offsets, deferred prologue)
-            if (comptime isa.binaryIs(.x86_64)) {
+            if (comptime isa != .aarch64) {
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
                 // aarch64: FP-relative addressing
@@ -2005,7 +2005,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // Emit epilogue using DeferredFrameBuilder with actual stack usage
             const body_epilogue_offset = self.codegen.currentOffset();
             {
-                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
+                const actual_locals: u32 = if (comptime isa == .aarch64)
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -2026,7 +2026,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const prologue_start = self.codegen.currentOffset();
             var root_stack_alloc: u32 = 0;
             var root_frame_size: u32 = 0;
-            if (comptime isa.binaryIs(.x86_64)) {
+            if (comptime isa != .aarch64) {
                 const actual_locals_x86: u32 = @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
                 try self.codegen.emitPrologueWithAlloc(actual_locals_x86);
                 root_stack_alloc = actual_locals_x86;
@@ -2056,7 +2056,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.shiftPendingProcAddrs(body_start, body_end, prologue_size);
             self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
             self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-            if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+            if (comptime isa == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
             self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
             self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
 
@@ -2253,10 +2253,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitLoadImm(tag_reg, 1);
                     try self.codegen.emitAndRegs(word, tag_reg, tag_reg, cap_reg);
                     try self.codegen.emitCmpImm(tag_reg, 0);
-                    if (comptime isa.binaryIs(.aarch64)) {
-                        try self.codegen.emit.csel(word, result_reg, len_reg, result_reg, .ne);
-                    } else {
-                        try self.codegen.emit.cmovcc(.not_equal, word, result_reg, len_reg);
+                    switch (isa) {
+                        .aarch64 => try self.codegen.emit.csel(word, result_reg, len_reg, result_reg, .ne),
+                        .x86_64 => try self.codegen.emit.cmovcc(.not_equal, word, result_reg, len_reg),
+                        .arm32 => try self.codegen.emit.movRegRegCond(.ne, result_reg, len_reg),
                     }
 
                     return try self.wordAsU64(result_reg);
@@ -2699,7 +2699,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.callBuiltin(&builder, LowLevelBuiltins.listOp(.list_map_can_reuse));
 
                     const result_reg = try self.allocTempGeneral();
-                    if (comptime isa.binaryIs(.aarch64)) {
+                    if (comptime isa == .arm32) {
+                        // AAPCS32: the callee zero-extends a bool result in r0.
+                        try self.codegen.emit.movRegReg(result_reg, .r0);
+                    } else if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.movRegReg(word, result_reg, .X0);
                     } else {
                         try self.codegen.emit.movRegReg(word, result_reg, .RAX);
@@ -3461,7 +3464,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const dst_width: FloatWidth = if (ll.op == .f32_to_f64) .f64 else .f32;
                     const src_reg = try self.ensureInFloatReg(src_loc, src_width);
                     const result_reg = try self.allocTempFloat();
-                    if (comptime isa.binaryIs(.aarch64)) {
+                    if (comptime isa == .arm32) {
+                        if (dst_width == .f32) {
+                            try self.codegen.emit.vcvtF32FromF64(result_reg.sLow(), src_reg);
+                        } else {
+                            try self.codegen.emit.vcvtF64FromF32(result_reg, src_reg.sLow());
+                        }
+                    } else if (comptime isa.binaryIs(.aarch64)) {
                         try self.codegen.emit.fcvtFloatFloat(
                             if (dst_width == .f32) .single else .double,
                             result_reg,
@@ -5201,14 +5210,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     switch (ll.ret_layout) {
                         .f32 => {
-                            if (comptime isa.binaryIs(.aarch64)) {
+                            if (comptime isa == .arm32) {
+                                try self.codegen.emit.vsqrtF32(result_reg.sLow(), src_reg.sLow());
+                            } else if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.fsqrtRegReg(.single, result_reg, src_reg);
                             } else {
                                 try self.codegen.emit.sqrtssRegReg(result_reg, src_reg);
                             }
                         },
                         .f64 => {
-                            if (comptime isa.binaryIs(.aarch64)) {
+                            if (comptime isa == .arm32) {
+                                try self.codegen.emit.vsqrtF64(result_reg, src_reg);
+                            } else if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.fsqrtRegReg(.double, result_reg, src_reg);
                             } else {
                                 try self.codegen.emit.sqrtsdRegReg(result_reg, src_reg);
@@ -8377,6 +8390,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try builder.addMemArg(base_ptr, str_off + strFieldOffset("capacity_or_alloc_ptr"));
             try self.callBuiltinWithAdapter(&builder, adapter_addr, builtin_fn);
 
+            if (comptime isa == .arm32) {
+                // A u64 result comes back in r0:r1: a Wide64, kept in memory.
+                const slot = self.codegen.allocStackSlot(8);
+                try self.codegen.emitStoreStack(.w32, slot, .r0);
+                try self.codegen.emitStoreStack(.w32, slot + 4, .r1);
+                return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = .u64 } };
+            }
             // Result is in return register (X0 or RAX)
             const result_reg = try self.allocTempGeneral();
             if (comptime isa.binaryIs(.aarch64)) {
@@ -8396,13 +8416,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltin(&builder, builtin_fn);
 
             const result_reg = try self.allocTempGeneral();
-            if (comptime isa.binaryIs(.aarch64)) {
-                try self.codegen.emit.movRegReg(word, result_reg, .X0);
-            } else {
-                try self.codegen.emit.movRegReg(word, result_reg, .RAX);
-            }
-            if (comptime isa.binaryIs(.x86_64)) {
-                try self.codegen.emit.andRegImm32(result_reg, 0xff);
+            switch (isa) {
+                .aarch64 => try self.codegen.emit.movRegReg(word, result_reg, .X0),
+                .x86_64 => {
+                    try self.codegen.emit.movRegReg(word, result_reg, .RAX);
+                    try self.codegen.emit.andRegImm32(result_reg, 0xff);
+                },
+                // AAPCS32: the callee zero-extends a narrow result in r0.
+                .arm32 => try self.codegen.emit.movRegReg(result_reg, .r0),
             }
             return .{ .general_reg = result_reg };
         }
@@ -8423,7 +8444,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Result is in return register (X0 or RAX)
             const result_reg = try self.allocTempGeneral();
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .arm32) {
+                // AAPCS32: the callee zero-extends a bool result in r0.
+                try self.codegen.emit.movRegReg(result_reg, .r0);
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(word, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(word, result_reg, .RAX);
@@ -8451,7 +8475,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltinWithAdapter(&builder, adapter_addr, builtin_fn);
 
             const result_reg = try self.allocTempGeneral();
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .arm32) {
+                // AAPCS32: the callee zero-extends a bool result in r0.
+                try self.codegen.emit.movRegReg(result_reg, .r0);
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(word, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(word, result_reg, .RAX);
@@ -8474,7 +8501,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltinWithAdapter(&builder, adapter_addr, builtin_fn);
 
             const result_reg = try self.allocTempGeneral();
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .arm32) {
+                // AAPCS32: the callee zero-extends a bool result in r0.
+                try self.codegen.emit.movRegReg(result_reg, .r0);
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 try self.codegen.emit.movRegReg(word, result_reg, .X0);
             } else {
                 try self.codegen.emit.movRegReg(word, result_reg, .RAX);
@@ -10211,7 +10241,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const root_index = plan.representative(@intCast(i));
                 if (root_index != i or self.local_locations.contains(localKey(v.local))) continue;
                 const size = self.getLayoutSize(self.localLayout(v.local));
-                const alignment: u32 = if (comptime isa.binaryIs(.aarch64)) 16 else if (size > 8) 16 else 8;
+                const alignment: u32 = switch (isa) {
+                    .aarch64 => 16,
+                    .x86_64, .arm32 => if (size > 8) 16 else 8,
+                };
                 plan.values.items[i].size = std.mem.alignForward(u32, size, alignment);
             }
             try plan.solve();
@@ -11510,7 +11543,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.codegen.freeFloat(freg);
 
             const result_reg = try self.allocTempFloat();
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .arm32) {
+                // AAPCS32 VFP returns an f32 in s0 and an f64 in d0.
+                if (width == .f32) {
+                    if (result_reg != .d0) try self.codegen.emit.vmovF32(result_reg.sLow(), .s0);
+                } else if (result_reg != .d0) {
+                    try self.codegen.emit.vmovF64(result_reg, .d0);
+                }
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 if (result_reg != .V0) {
                     try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, result_reg, .V0);
                 }
@@ -11555,7 +11595,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.callBuiltin(&builder, builtin_fn);
 
             const result_reg = try self.allocTempFloat();
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .arm32) {
+                // AAPCS32 VFP returns an f32 in s0 and an f64 in d0.
+                if (width == .f32) {
+                    if (result_reg != .d0) try self.codegen.emit.vmovF32(result_reg.sLow(), .s0);
+                } else if (result_reg != .d0) {
+                    try self.codegen.emit.vmovF64(result_reg, .d0);
+                }
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 if (result_reg != .V0) {
                     try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, result_reg, .V0);
                 }
@@ -11810,13 +11857,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         const freg = try self.ensureInFloatReg(src_loc, src_width);
                         const base_reg = frame_ptr;
 
-                        if (comptime isa.binaryIs(.aarch64)) {
+                        if (comptime isa == .aarch64) {
                             if (freg != .V0) try self.codegen.emit.fmovRegReg(if (src_width == .f32) .single else .double, .V0, freg);
                         }
 
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addLeaArg(base_reg, result_offset);
-                        if (comptime !isa.binaryIs(.aarch64)) {
+                        if (comptime isa != .aarch64) {
                             if (src_width == .f32)
                                 try builder.addF32RegArg(freg)
                             else
@@ -11857,13 +11904,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         const freg = try self.ensureInFloatReg(src_loc, .f64);
                         const base_reg = frame_ptr;
 
-                        if (comptime isa.binaryIs(.aarch64)) {
+                        if (comptime isa == .aarch64) {
                             if (freg != .V0) try self.codegen.emit.fmovRegReg(.double, .V0, freg);
                         }
 
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addLeaArg(base_reg, result_offset);
-                        if (comptime !isa.binaryIs(.aarch64)) {
+                        if (comptime isa != .aarch64) {
                             try builder.addF64RegArg(freg);
                         }
                         try builder.addImmArg(@intCast(offsets.success));
@@ -12829,7 +12876,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                 try self.codegen.emitAndRegs(word, tmp_b, tmp_b, mask_reg);
                                 self.codegen.freeGeneral(mask_reg);
                             }
-                            if (comptime isa.binaryIs(.aarch64)) {
+                            if (comptime isa == .arm32) {
+                                try self.codegen.emit.eorRegRegReg(tmp_a, tmp_a, tmp_b);
+                                try self.codegen.emit.orrRegRegReg(xor_acc, xor_acc, tmp_a);
+                            } else if (comptime isa.binaryIs(.aarch64)) {
                                 try self.codegen.emit.eorRegRegReg(word, tmp_a, tmp_a, tmp_b);
                                 try self.codegen.emit.orrRegRegReg(word, xor_acc, xor_acc, tmp_a);
                             } else {
@@ -14322,7 +14372,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .call_offset = current,
                 .target_offset = target_offset,
             });
-            const form: CodeRefForm = if (comptime isa.binaryIs(.aarch64))
+            const form: CodeRefForm = if (comptime isa != .x86_64)
                 switch (try self.codegen.emitDirectCall(target_offset)) {
                     .call => .call,
                     .inline_call => .inline_call,
@@ -14377,7 +14427,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     // For targets outside the shifted body, or the current body's entry point,
                     // re-patch because only the call site moved.
-                    if (comptime isa.binaryIs(.aarch64)) {
+                    if (comptime isa != .x86_64) {
                         self.codegen.patchDirectCall(patch.call_offset, patch.target_offset);
                     } else {
                         // Patch CALL rel32 instruction (5 bytes: 0xE8 + 4-byte offset)
@@ -14493,6 +14543,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitInternalCodeAddress(self: *Self, ref_target: CodeRefTarget, target_offset: usize, dst_reg: GeneralReg) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                const current: usize = @intCast(try self.codegen.emit.pcRelAddress(dst_reg));
+                self.codegen.patchInternalCodeAddress(current, target_offset);
+                try self.internal_addr_patches.append(self.allocator, .{
+                    .instr_offset = current,
+                    .target_offset = target_offset,
+                });
+                try self.code_refs.append(self.allocator, .{ .site = current, .form = .addr, .target = ref_target });
+                return;
+            }
             if (comptime isa.binaryIs(.aarch64)) {
                 // The scratch register must be allocated before the anchor offset
                 // is read: allocation may emit spill code, and the anchor must be
@@ -14534,6 +14594,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitPendingProcAddress(self: *Self, target_proc: lir.LIR.LirProcSpecId, dst_reg: GeneralReg) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                // movw/movt/add rd, pc; the patcher rewrites the immediates.
+                const current: usize = @intCast(try self.codegen.emit.pcRelAddress(dst_reg));
+                try self.pending_proc_addrs.append(self.allocator, .{ .instr_offset = current, .target_proc = target_proc });
+                return;
+            }
             if (comptime isa.binaryIs(.aarch64)) {
                 // Reserve the 4-instruction PC-relative address sequence so the
                 // patcher can rewrite it once the target proc's code offset is
@@ -14573,10 +14639,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn emitPendingRcCall(self: *Self, helper: RcHelperVariant) Allocator.Error!void {
             const call_site = self.codegen.currentOffset();
             try self.pending_rc_calls.append(self.allocator, .{ .instr_offset = call_site, .target_key = helper.encode() });
-            if (comptime isa.binaryIs(.aarch64)) {
-                _ = try self.codegen.emitCallPlaceholder();
-            } else {
-                try self.codegen.emit.call(@bitCast(@as(i32, 0)));
+            switch (isa) {
+                .aarch64, .arm32 => _ = try self.codegen.emitCallPlaceholder(),
+                .x86_64 => try self.codegen.emit.call(@bitCast(@as(i32, 0))),
             }
         }
 
@@ -14586,6 +14651,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn emitPendingRcAddrKey(self: *Self, key: u64, dst_reg: GeneralReg) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                // movw/movt/add rd, pc; the patcher rewrites the immediates.
+                const current: usize = @intCast(try self.codegen.emit.pcRelAddress(dst_reg));
+                try self.pending_rc_addrs.append(self.allocator, .{ .instr_offset = current, .target_key = key });
+                return;
+            }
             if (comptime isa.binaryIs(.aarch64)) {
                 // Same 4-instruction sequence the patcher rewrites; the scratch
                 // register is allocated before the anchor offset is read because
@@ -14623,7 +14694,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer self.compiling_rc_helpers = false;
 
             while (self.rc_helper_worklist.pop()) |helper| {
-                if (comptime isa.binaryIs(.aarch64)) try self.emitBranchIslandIfNeeded();
+                if (comptime isa == .aarch64) try self.emitBranchIslandIfNeeded();
                 _ = try self.compileSingleRcHelper(helper);
             }
 
@@ -14814,14 +14885,19 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // A small string sets the sign bit of its length word.
             try self.codegen.emitLoad(word, len_reg, value_ptr_reg, strFieldOffset("length"));
 
-            const skip_patch = blk: {
-                if (comptime isa.binaryIs(.aarch64)) {
+            const skip_patch = blk: switch (isa) {
+                .aarch64 => {
                     try self.codegen.emit.cmpRegImm12(word, len_reg, 0);
                     break :blk try self.codegen.emitCondJump(.mi);
-                } else {
+                },
+                .x86_64 => {
                     try self.codegen.emit.testRegReg(word, len_reg, len_reg);
                     break :blk try self.codegen.emitCondJump(.sign);
-                }
+                },
+                .arm32 => {
+                    try self.codegen.emitCmpImm(len_reg, 0);
+                    break :blk try self.codegen.emitCondJump(.mi);
+                },
             };
 
             const data_ptr_reg = try self.allocTempGeneral();
@@ -14851,14 +14927,19 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // A small string sets the sign bit of its length word.
             try self.codegen.emitLoad(word, len_reg, value_ptr_reg, strFieldOffset("length"));
 
-            const skip_patch = blk: {
-                if (comptime isa.binaryIs(.aarch64)) {
+            const skip_patch = blk: switch (isa) {
+                .aarch64 => {
                     try self.codegen.emit.cmpRegImm12(word, len_reg, 0);
                     break :blk try self.codegen.emitCondJump(.mi);
-                } else {
+                },
+                .x86_64 => {
                     try self.codegen.emit.testRegReg(word, len_reg, len_reg);
                     break :blk try self.codegen.emitCondJump(.sign);
-                }
+                },
+                .arm32 => {
+                    try self.codegen.emitCmpImm(len_reg, 0);
+                    break :blk try self.codegen.emitCondJump(.mi);
+                },
             };
 
             const data_ptr_reg = try self.allocTempGeneral();
@@ -15270,7 +15351,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.runtime_ret_desc_local = null;
             self.uses_caller_stack_arg_base = false;
 
-            if (comptime isa.binaryIs(.x86_64)) {
+            if (comptime isa != .aarch64) {
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
                 self.codegen.stack_offset = 16 + CodeGen.CALLEE_SAVED_AREA_SIZE;
@@ -15307,7 +15388,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const body_epilogue_offset = self.codegen.currentOffset();
             {
-                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
+                const actual_locals: u32 = if (comptime isa == .aarch64)
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -15326,7 +15407,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             var helper_callee_saved_mask: u32 = 0;
             var helper_epilogue_offset: u32 = 0;
 
-            const final_offset = if (comptime isa.binaryIs(.x86_64)) blk: {
+            const final_offset = if (comptime isa != .aarch64) blk: {
                 const body_bytes = self.allocator.dupe(u8, self.codegen.emit.buf.items[body_start..body_end]) catch return error.OutOfMemory;
                 defer self.allocator.free(body_bytes);
 
@@ -15350,7 +15431,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -15381,7 +15462,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -15462,7 +15543,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.runtime_ret_desc_local = null;
             self.uses_caller_stack_arg_base = false;
 
-            if (comptime isa.binaryIs(.x86_64)) {
+            if (comptime isa != .aarch64) {
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
                 self.codegen.stack_offset = 16 + CodeGen.CALLEE_SAVED_AREA_SIZE;
@@ -15511,7 +15592,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const body_epilogue_offset = self.codegen.currentOffset();
             {
-                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
+                const actual_locals: u32 = if (comptime isa == .aarch64)
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -15530,7 +15611,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             var helper_callee_saved_mask: u32 = 0;
             var helper_epilogue_offset: u32 = 0;
 
-            const final_offset = if (comptime isa.binaryIs(.x86_64)) blk: {
+            const final_offset = if (comptime isa != .aarch64) blk: {
                 const body_bytes = self.allocator.dupe(u8, self.codegen.emit.buf.items[body_start..body_end]) catch return error.OutOfMemory;
                 defer self.allocator.free(body_bytes);
 
@@ -15554,7 +15635,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -15585,7 +15666,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
                 self.repatchInternalAddrPatches(body_start, body_end, prologue_size, body_start);
                 break :blk prologue_start;
@@ -17226,10 +17307,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .target_proc = target_proc,
             });
 
-            if (comptime isa.binaryIs(.aarch64)) {
-                _ = try self.codegen.emitCallPlaceholder();
-            } else {
-                try self.codegen.emit.call(@bitCast(@as(i32, 0)));
+            switch (isa) {
+                .aarch64, .arm32 => _ = try self.codegen.emitCallPlaceholder(),
+                .x86_64 => try self.codegen.emit.call(@bitCast(@as(i32, 0))),
             }
         }
 
@@ -20020,7 +20100,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn patchCallTarget(self: *Self, call_site: usize, target_offset: usize) Allocator.Error!void {
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .arm32) {
+                // Retarget the BL in place.
+                try self.codegen.patchCall(call_site, target_offset);
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 // A far target gets a veneer appended at the emission point.
                 const island_start = self.codegen.currentOffset();
                 try self.codegen.patchCall(call_site, target_offset);
@@ -20189,7 +20272,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                     unreachable;
                 }
-                if (comptime isa.binaryIs(.aarch64)) {
+                if (comptime isa == .aarch64) {
                     try self.emitBranchIslandIfNeeded();
                     try self.codegen.compactBranchSites();
                 }
@@ -20235,7 +20318,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                     unreachable;
                 }
-                if (comptime isa.binaryIs(.aarch64)) {
+                if (comptime isa == .aarch64) {
                     try self.emitBranchIslandIfNeeded();
                     try self.codegen.compactBranchSites();
                 }
@@ -20433,7 +20516,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // PHASE 1: Generate body first (to determine callee_saved_used)
             // Initialize stack_offset to reserve space for callee-saved area
-            if (comptime isa.binaryIs(.x86_64)) {
+            if (comptime isa != .aarch64) {
                 // Reserve 40 bytes for 5 callee-saved registers at fixed offsets
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
             } else {
@@ -20550,7 +20633,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try self.emitHotReloadLeaveForHostCallable(slot);
             }
             {
-                const actual_locals: u32 = if (comptime isa.binaryIs(.aarch64))
+                const actual_locals: u32 = if (comptime isa == .aarch64)
                     @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE)
                 else
                     @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
@@ -20563,8 +20646,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const body_end = self.codegen.currentOffset();
 
-            // PHASE 2: Extract body and prepend prologue (x86_64 only - uses deferred pattern)
-            if (comptime isa.binaryIs(.x86_64)) {
+            // PHASE 2: Extract body and prepend prologue (x86_64 and arm32: the
+            // deferred pattern with a fixed callee-saved area below the frame pointer)
+            if (comptime isa != .aarch64) {
                 // Save body bytes
                 const body_bytes = self.allocator.dupe(u8, self.codegen.emit.buf.items[body_start..body_end]) catch return error.OutOfMemory;
                 defer self.allocator.free(body_bytes);
@@ -20594,7 +20678,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 self.shiftPendingProcAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
 
                 // Re-patch internal calls/addr whose targets are outside the shifted body
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
@@ -20676,7 +20760,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 self.shiftPendingProcAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
-                if (comptime isa.binaryIs(.aarch64)) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
+                if (comptime isa == .aarch64) try self.codegen.shiftBranchSites(body_start, body_end, prologue_size);
 
                 // Re-patch internal calls/addr whose targets are outside the shifted body
                 self.repatchInternalCalls(body_start, body_end, prologue_size, body_start);
@@ -21364,7 +21448,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn markCallerStackArgBaseUsed(self: *Self) void {
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 const bit = @as(u32, 1) << @intFromEnum(caller_stack_arg_base_reg);
                 self.uses_caller_stack_arg_base = true;
                 self.codegen.callee_saved_used |= bit;
@@ -21373,7 +21457,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn callerStackArgBaseReg(self: *Self) GeneralReg {
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 self.markCallerStackArgBaseUsed();
                 return caller_stack_arg_base_reg;
             } else {
@@ -22288,7 +22372,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             defer scratch.finish(self);
             while (work.pop()) |item| switch (scratch.begin(self, item)) {
                 .node => |stmt_id| {
-                    if (comptime isa.binaryIs(.aarch64)) try self.emitBranchIslandIfNeeded();
+                    // Only aarch64's short conditional branches need islands.
+                    if (comptime isa == .aarch64) try self.emitBranchIslandIfNeeded();
                     const stmt_key = @intFromEnum(stmt_id);
                     if (self.stmt_locations.get(stmt_key)) |stmt_location| {
                         const patch = try self.codegen.emitJump();
@@ -23703,7 +23788,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn emitPendingMessageAddress(self: *Self, msg: []const u8, dst_reg: GeneralReg) Allocator.Error!void {
             self.assertImageOpen();
             const message_offset = try self.internMessage(msg);
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .arm32) {
+                // movw/movt/add rd, pc; the patcher rewrites the immediates.
+                const current: usize = @intCast(try self.codegen.emit.pcRelAddress(dst_reg));
+                try self.pending_message_addrs.append(self.allocator, .{ .instr_offset = current, .message_offset = message_offset });
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 // Reserve the 4-instruction PC-relative address sequence. The
                 // scratch register is allocated before the anchor offset is
                 // read because allocation may emit spill code.
@@ -25073,7 +25162,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             frame: ?AssembledFrame,
         ) Allocator.Error!usize {
             self.assertImageOpen();
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 const island_start = self.codegen.currentOffset();
                 try self.codegen.prepareForAppend(bytes.len);
                 try self.logBranchIsland(island_start);
@@ -25158,7 +25247,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const symbol = try self.internSymbolName(reference.target.rc_helper);
                 owned.target = .{ .rc_helper = self.symbolName(symbol) };
             }
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 if (reference.form == .call) {
                     try self.codegen.registerAssembledCallVeneer(reference.site, if (reference.veneer) |veneer| @as(usize, veneer) else null);
                 }
@@ -25277,13 +25366,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// Re-resolve one assembled reference to its target's new offset.
         pub fn patchAssembledRef(self: *Self, site: usize, form: CodeRefForm, ref_target: CodeRefTarget, target_offset: usize) Allocator.Error!void {
             switch (form) {
-                .call => if (comptime isa.binaryIs(.aarch64)) {
+                .call => if (comptime isa == .aarch64) {
                     try self.codegen.registerAssembledCallSite(site);
                     try self.patchCallTarget(site, target_offset);
                 } else {
                     try self.patchCallTarget(site, target_offset);
                 },
-                .inline_call => if (comptime isa.binaryIs(.aarch64)) {
+                // Only aarch64 emits a far call as an inline address sequence;
+                // an A32 BL reaches every target in a buffer.
+                .inline_call => if (comptime isa == .aarch64) {
                     self.codegen.patchDirectCall(site, target_offset);
                 } else unreachable,
                 .addr => self.codegen.patchInternalCodeAddress(site, target_offset),
@@ -25297,7 +25388,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         pub fn appendAssembledRelocation(self: *Self, relocation: Relocation) Allocator.Error!void {
             const reloc_index: u32 = @intCast(self.codegen.relocations.items.len);
             try self.codegen.relocations.append(self.allocator, relocation);
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 if (relocation == .linked_function) {
                     const loc: usize = @intCast(relocation.linked_function.offset);
                     if (self.codegen.isBlAt(loc)) try self.codegen.registerAssembledExternCall(loc, reloc_index);
@@ -25320,7 +25411,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// body's branch so a large body never loses its reachable reservation.
         pub fn artifactRelocations(self: *Self, allocator: Allocator) Allocator.Error![]Relocation {
             const relocations = try allocator.dupe(Relocation, self.getRelocations());
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 for (self.codegen.extern_stubs.items) |stub| {
                     const stub_start = relocations[stub.page_relocation].linked_data.offset;
                     if (self.artifactContainsExternStub(stub.call, stub_start)) continue;
@@ -25355,7 +25446,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             if (self.image_finished) return;
             try self.resolveAssembledSymbolicRefs();
             try self.placeMessagePool();
-            if (comptime isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 const island_start = self.codegen.currentOffset();
                 try self.codegen.finishImage();
                 try self.logBranchIsland(island_start);
