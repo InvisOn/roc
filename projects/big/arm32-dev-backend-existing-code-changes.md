@@ -389,6 +389,12 @@ check could gate every later commit.
   `list_sublist`'s `{ start, len }` record fields and the drop/take window
   slots pass as `u64` pairs; the list incref RC helper reads the list's
   words at `listFieldOffset` instead of the literal 0/8/16 (an A2 miss).
+- `test/fx/platform/host.zig` (temporary Zig workaround):
+  `hostedHostGetGreeting` takes the inner `RocStr` directly on arm32, behind
+  `work_around_zig_arm_nested_struct_bug`, because Zig 0.16 passes a nested
+  by-value `extern struct` off-ABI on arm (issues note). Unchanged on other
+  targets. When Zig is fixed, set the switch to false and follow the comment
+  there.
 - `echo_platform/mod.zig`: the default platform's Linux build header
   declares `arm32musl` and `arm32linux` (its runtime objects existed since
   Track C), so a program without a `platform` header builds for arm32; a

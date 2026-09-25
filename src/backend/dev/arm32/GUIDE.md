@@ -20,9 +20,10 @@ and its reason is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 - The shared driver (`LirCodeGen`) compiles for arm32 in full (J1), and
   `roc build --opt=dev --target=arm32musl` builds real programs (J2): the
   `int` platform's eleven checks pass under qemu and on a Raspberry Pi 3
-  (armv7l), and 120 of 121 `test/fx` programs build; 105 of them run
-  correctly under qemu, and the other 16 hit a Zig ABI bug in the Zig test
-  host (issues note).
+  (armv7l), and all 121 `test/fx` programs build and run correctly under
+  qemu. The fx host works around a Zig 0.16 arm ABI bug for one hosted
+  function (`work_around_zig_arm_nested_struct_bug` in
+  `test/fx/platform/host.zig`; issues note).
 - The default platform (a program with no `platform` header) builds for
   `arm32musl` and `arm32linux`: `test/cli/baseline_cpu_smoke.roc`, which
   exercises the NEON lowering, prints the same as on x64 under qemu and on

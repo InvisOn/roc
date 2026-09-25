@@ -236,15 +236,27 @@ them.
   fx host takes `HostRecord { name: RocStr }`, and 16 of the 19 failing
   `test/fx` programs call `Host.get_greeting!` (segfault in the host's
   `bufPrint`, fault address = the string's second word).
-- **Not changed in Roc:** matching Zig here would break AAPCS32 callers and
-  C hosts. The fix belongs upstream in Zig; a host could avoid it by taking
-  the inner struct flat (the ABI-identical `RocStr`), which is a decision for
-  the platform, not the compiler.
+- **Not changed in the compiler:** matching Zig here would break AAPCS32
+  callers and C hosts; the compiler follows AAPCS32.
+- **Worked around in the fx test host (temporary):** in
+  `test/fx/platform/host.zig`, `hostedHostGetGreeting` takes the inner
+  `RocStr` directly on arm32 (`HostGreetingArg`), and `hostRecordFromArg`
+  rebuilds the `HostRecord`. A struct with one struct field has the same C
+  ABI as that field on every target, so the Roc side is unchanged. The switch
+  is `work_around_zig_arm_nested_struct_bug` (true only on arm).
+- **When Zig is fixed:** set `work_around_zig_arm_nested_struct_bug` to
+  `false` and rerun `zig build run-test-cli -- --suite platforms --filter
+  test/fx/ --cross-target=arm32musl --cross-opt=dev --cross-run
+  --cross-runner=qemu-arm-static`; if all pass, delete the switch,
+  `HostGreetingArg` and `hostRecordFromArg`, and restore the plain signature
+  `fn hostedHostGetGreeting(host: HostRecord) callconv(.c) RocStr`. Other Zig
+  hosts that take a nested struct by value on arm32 need the same until then.
 
-### Remaining `test/fx` failures on arm32 (J3b)
+### `test/fx` on arm32 (J3b)
 
-With `--cross-run --cross-runner=qemu-arm-static`, 105 of 121 programs pass.
-The 16 failures all call `Host.get_greeting!` and hit the Zig ABI bug above:
+With `--cross-run --cross-runner=qemu-arm-static`, all 121 programs pass.
+Before the host workaround above, these 16 failed, all calling
+`Host.get_greeting!`:
 `match_str_return`, `question_mark_operator`, `empty_list_get`,
 `dict_pseudo_seed_repro`, `zst_nested_singleton_shapes`, `list_method_get`,
 `dbg_corrupts_recursive_tag_union`, `hosted_effect_opaque_with_data`,
