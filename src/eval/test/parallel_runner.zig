@@ -312,7 +312,7 @@ const FORKED_BACKEND_KILL_GRACE_MS: i64 = 5_000;
 const FORKED_BACKEND_KILL_POLL_NS: u64 = 10 * std.time.ns_per_ms;
 const LLVM_EVAL_LOCK_POLL_NS: u64 = 10 * std.time.ns_per_ms;
 const DEV_BACKEND_IMPLEMENTED = eval.backendAvailable(.dev);
-const WASM_BACKEND_IMPLEMENTED = true;
+const WASM_BACKEND_IMPLEMENTED = eval.backendAvailable(.wasm);
 const LLVM_BACKEND_IMPLEMENTED = eval.backendAvailable(.llvm);
 
 /// Set from `cli.verbose` in `main` after arg parsing. Read by `onTestStarted`,
