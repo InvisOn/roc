@@ -410,6 +410,13 @@ check could gate every later commit.
   there. A probe test (`zig_arm_nested_struct_abi_probe.zig`, run by the
   arm32 CI lane) fails once the bug is fixed, and the host refuses to compile
   for arm on a Zig other than 0.16.0 until the probe is rerun.
+- `build.zig` (arm32linux): the arm glibc cross target is named
+  `arm32linux`, its `RocTarget`, rather than Track C's `arm32glibc`, because
+  test platforms key their `targets/<name>/` directories by target name (the
+  `arm32glibc` host library was unreachable); and the glibc stub is generated
+  for every GNU ABI (`isGnu()`), not only `.gnu`, so `gnueabihf` gets one.
+  `test/int/platform/main.roc` declares `arm32linux`; `platform_config.zig`
+  and the arm32 CI lane build it.
 - `echo_platform/mod.zig`: the default platform's Linux build header
   declares `arm32musl` and `arm32linux` (its runtime objects existed since
   Track C), so a program without a `platform` header builds for arm32; a

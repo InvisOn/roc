@@ -27,6 +27,11 @@ and its reason is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   stops compiling until you run the probe it names:
   `zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig`
   (fails once the bug is fixed).
+- `arm32linux` (glibc): the int platform declares it (a vendored `Scrt1.o`
+  from `ci/vendor_glibc_crt.py`, the generated glibc stub `libc.so`), and
+  `test/int/app.roc` built for it passes all its checks on the Pi, linked
+  dynamically against the Pi's glibc. Under qemu it needs an arm glibc
+  sysroot, so CI only builds it.
 - The default platform (a program with no `platform` header) builds for
   `arm32musl` and `arm32linux`: `test/cli/baseline_cpu_smoke.roc`, which
   exercises the NEON lowering, prints the same as on x64 under qemu and on
