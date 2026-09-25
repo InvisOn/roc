@@ -65,6 +65,8 @@ pub const build_platform_main_source =
     \\        arm64musl: { inputs: [app] },
     \\        x64glibc: { inputs: [app] },
     \\        arm64glibc: { inputs: [app] },
+    \\        arm32musl: { inputs: [app] },
+    \\        arm32linux: { inputs: [app] },
     \\        x64v1musl: { inputs: [app] },
     \\        arm64v1musl: { inputs: [app] },
     \\        x64v1glibc: { inputs: [app] },

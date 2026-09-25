@@ -389,6 +389,10 @@ check could gate every later commit.
   `list_sublist`'s `{ start, len }` record fields and the drop/take window
   slots pass as `u64` pairs; the list incref RC helper reads the list's
   words at `listFieldOffset` instead of the literal 0/8/16 (an A2 miss).
+- `echo_platform/mod.zig`: the default platform's Linux build header
+  declares `arm32musl` and `arm32linux` (its runtime objects existed since
+  Track C), so a program without a `platform` header builds for arm32; a
+  subcommands case in `parallel_cli_runner.zig` covers it.
 - `cli/test/parallel_cli_runner.zig` (J3b): `--cross-run` and
   `--cross-runner`, and the cross build's stderr expectations filtered by
   backend (a fix to Track D's `--cross-opt`).
