@@ -892,6 +892,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// (I64/U64/F64 bits) is not a word on a 32-bit target.
         const word = CC.WORD;
 
+        /// Register width of a genuinely 64-bit value (I64/U64 or F64 bits)
+        /// held in one general register. Only a 64-bit target has one; a
+        /// 32-bit target holds such a value as a register pair or in memory
+        /// (D6's `Wide64`), so every site that names this width is one J1
+        /// gives a pair lowering.
+        const wide64_reg_width = if (word_size == 8) word else @compileError("arm32: TODO this site holds a Wide64 in one register; lower it as a pair (J1)");
+
         /// The sign bit of a target word, sign-extended. A small RocStr sets
         /// it in its length word.
         const word_sign_bit: i64 = std.math.minInt(std.meta.Int(.signed, word_size * 8));
@@ -3274,13 +3281,17 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .i32_to_i64,
                 => {
                     std.debug.assert(args.len >= 1);
+                    const spec = numeric_conversion.getConversionSpec(ll.op).?;
+                    if (comptime word_bits < 64) {
+                        if (@max(spec.src.bits(), spec.dst.bits()) > word_bits) return self.generateWide64IntConversion(ll, args);
+                    }
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
-                    // Sign-extend: shift left to put sign bit at bit 63, then arithmetic shift right
-                    const src_bits = srcBits(ll.op);
-                    const shift_amount: u8 = 64 - src_bits;
-                    try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                    try self.codegen.emitAsrImm(.w64, src_reg, src_reg, shift_amount);
+                    // Sign-extend: shift the sign bit to the top of the word,
+                    // then arithmetic shift right.
+                    const shift_amount: u8 = word_bits - spec.src.bits();
+                    try self.codegen.emitShlImm(word, src_reg, src_reg, shift_amount);
+                    try self.codegen.emitAsrImm(word, src_reg, src_reg, shift_amount);
                     return .{ .general_reg = src_reg };
                 },
 
@@ -3299,13 +3310,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .u32_to_u64,
                 => {
                     std.debug.assert(args.len >= 1);
+                    const spec = numeric_conversion.getConversionSpec(ll.op).?;
+                    if (comptime word_bits < 64) {
+                        if (@max(spec.src.bits(), spec.dst.bits()) > word_bits) return self.generateWide64IntConversion(ll, args);
+                    }
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
-                    // Zero-extend: mask off upper bits
-                    const src_bits = srcBits(ll.op);
-                    const shift_amount: u8 = 64 - src_bits;
-                    try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                    try self.codegen.emitLsrImm(.w64, src_reg, src_reg, shift_amount);
+                    // Zero-extend: mask off the bits above the source.
+                    const shift_amount: u8 = word_bits - spec.src.bits();
+                    try self.codegen.emitShlImm(word, src_reg, src_reg, shift_amount);
+                    try self.codegen.emitLsrImm(word, src_reg, src_reg, shift_amount);
                     return .{ .general_reg = src_reg };
                 },
 
@@ -3350,30 +3364,25 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .i64_to_u64_wrap,
                 => {
                     std.debug.assert(args.len >= 1);
+                    const spec = numeric_conversion.getConversionSpec(ll.op).?;
+                    if (comptime word_bits < 64) {
+                        if (@max(spec.src.bits(), spec.dst.bits()) > word_bits) return self.generateWide64IntConversion(ll, args);
+                    }
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
-                    // Truncation: just mask the relevant bits
-                    const dst_bits: u8 = if (ll.op == .u8_to_i8_wrap or ll.op == .i8_to_u8_wrap or ll.op == .u16_to_i8_wrap or ll.op == .u16_to_u8_wrap or ll.op == .i16_to_i8_wrap or ll.op == .i16_to_u8_wrap or ll.op == .u32_to_i8_wrap or ll.op == .u32_to_u8_wrap or ll.op == .i32_to_i8_wrap or ll.op == .i32_to_u8_wrap or ll.op == .u64_to_i8_wrap or ll.op == .u64_to_u8_wrap or ll.op == .i64_to_i8_wrap or ll.op == .i64_to_u8_wrap)
-                        8
-                    else if (ll.op == .u16_to_i16_wrap or ll.op == .i8_to_u16_wrap or ll.op == .i16_to_u16_wrap or ll.op == .u32_to_i16_wrap or ll.op == .u32_to_u16_wrap or ll.op == .i32_to_i16_wrap or ll.op == .i32_to_u16_wrap or ll.op == .u64_to_i16_wrap or ll.op == .u64_to_u16_wrap or ll.op == .i64_to_i16_wrap or ll.op == .i64_to_u16_wrap)
-                        16
-                    else if (ll.op == .u32_to_i32_wrap or ll.op == .i8_to_u32_wrap or ll.op == .i16_to_u32_wrap or ll.op == .i32_to_u32_wrap or ll.op == .u64_to_i32_wrap or ll.op == .u64_to_u32_wrap or ll.op == .i64_to_i32_wrap or ll.op == .i64_to_u32_wrap)
-                        32
-                    else if (ll.op == .i8_to_u64_wrap or ll.op == .i16_to_u64_wrap or ll.op == .i32_to_u64_wrap or ll.op == .u64_to_i64_wrap or ll.op == .i64_to_u64_wrap)
-                        64
-                    else
-                        unreachable;
-                    if (dst_bits < 64) {
-                        const shift_amount: u8 = 64 - dst_bits;
-                        try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                        try self.codegen.emitLsrImm(.w64, src_reg, src_reg, shift_amount);
+                    // Truncation: mask the destination's bits. A word-sized
+                    // destination is a reinterpretation of the bits.
+                    const dst_bits: u8 = spec.dst.bits();
+                    if (dst_bits < word_bits) {
+                        const shift_amount: u8 = word_bits - dst_bits;
+                        try self.codegen.emitShlImm(word, src_reg, src_reg, shift_amount);
+                        try self.codegen.emitLsrImm(word, src_reg, src_reg, shift_amount);
                     }
-                    // 64-bit wrapping is a no-op (reinterpret bits)
                     return .{ .general_reg = src_reg };
                 },
 
                 // ── Signed integer to float conversions ──
-                // Sign-extend the source value to 64 bits, then convert at the
+                // Sign-extend the source value to the word, then convert at the
                 // destination precision so F32 rounding happens exactly once.
                 .i8_to_f32,
                 .i8_to_f64,
@@ -3385,138 +3394,61 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .i64_to_f64,
                 => {
                     if (args.len < 1) unreachable;
+                    const spec = numeric_conversion.getConversionSpec(ll.op).?;
+                    if (comptime word_bits < 64) {
+                        if (spec.src.bits() > word_bits) return self.generateWide64IntConversion(ll, args);
+                    }
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
 
-                    // Sign-extend source to 64 bits
-                    const src_bits = srcBits(ll.op);
-                    if (src_bits < 64) {
-                        const shift_amount: u8 = 64 - src_bits;
-                        try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                        try self.codegen.emitAsrImm(.w64, src_reg, src_reg, shift_amount);
+                    const src_bits = spec.src.bits();
+                    if (src_bits < word_bits) {
+                        const shift_amount: u8 = word_bits - src_bits;
+                        try self.codegen.emitShlImm(word, src_reg, src_reg, shift_amount);
+                        try self.codegen.emitAsrImm(word, src_reg, src_reg, shift_amount);
                     }
 
-                    const is_f32 = ll.op == .i8_to_f32 or
-                        ll.op == .i16_to_f32 or
-                        ll.op == .i32_to_f32 or
-                        ll.op == .i64_to_f32;
+                    const is_f32 = spec.dst == .f32;
                     const freg = try self.allocTempFloat();
-                    if (comptime isa.binaryIs(.aarch64)) {
-                        try self.codegen.emit.scvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
-                    } else {
-                        if (is_f32) {
-                            try self.codegen.emit.cvtsi2ssRegReg(.w64, freg, src_reg);
-                        } else {
-                            try self.codegen.emit.cvtsi2sdRegReg(.w64, freg, src_reg);
-                        }
-                    }
+                    try self.emitSignedWordToFloat(freg, src_reg, is_f32);
                     self.codegen.freeGeneral(src_reg);
                     return .{ .float_reg = .{ .reg = freg, .width = if (is_f32) .f32 else .f64 } };
                 },
 
-                // ── Unsigned integer (≤32-bit) to float conversions ──
-                // Zero-extend to 64 bits, then convert with signed instruction.
-                // All u32 values fit in the positive range of i64 so SCVTF/CVTSI2SD is correct.
+                // ── Unsigned integer to float conversions ──
+                // A source narrower than the word is zero-extended and converted
+                // with the signed instruction (every such value is a positive
+                // signed word). A word-sized source may exceed the signed range,
+                // so it takes the unsigned conversion.
                 .u8_to_f32,
                 .u8_to_f64,
                 .u16_to_f32,
                 .u16_to_f64,
                 .u32_to_f32,
                 .u32_to_f64,
-                => {
-                    if (args.len < 1) unreachable;
-                    const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
-                    const src_reg = try self.ensureInGeneralReg(src_loc);
-
-                    // Zero-extend source to 64 bits
-                    const src_bits = srcBits(ll.op);
-                    const shift_amount: u8 = 64 - src_bits;
-                    try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                    try self.codegen.emitLsrImm(.w64, src_reg, src_reg, shift_amount);
-
-                    const is_f32 = ll.op == .u8_to_f32 or
-                        ll.op == .u16_to_f32 or
-                        ll.op == .u32_to_f32;
-                    const freg = try self.allocTempFloat();
-                    if (comptime isa.binaryIs(.aarch64)) {
-                        try self.codegen.emit.scvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
-                    } else {
-                        if (is_f32) {
-                            try self.codegen.emit.cvtsi2ssRegReg(.w64, freg, src_reg);
-                        } else {
-                            try self.codegen.emit.cvtsi2sdRegReg(.w64, freg, src_reg);
-                        }
-                    }
-                    self.codegen.freeGeneral(src_reg);
-                    return .{ .float_reg = .{ .reg = freg, .width = if (is_f32) .f32 else .f64 } };
-                },
-
-                // ── u64 to float conversions ──
-                // u64 may exceed i64 max, so we need unsigned conversion.
                 .u64_to_f32,
                 .u64_to_f64,
                 => {
                     if (args.len < 1) unreachable;
+                    const spec = numeric_conversion.getConversionSpec(ll.op).?;
+                    if (comptime word_bits < 64) {
+                        if (spec.src.bits() > word_bits) return self.generateWide64IntConversion(ll, args);
+                    }
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
-                    const freg = try self.allocTempFloat();
-                    const is_f32 = ll.op == .u64_to_f32;
-
-                    if (comptime isa.binaryIs(.aarch64)) {
-                        // UCVTF handles unsigned integers directly
-                        try self.codegen.emit.ucvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
-                    } else {
-                        // x86_64 has no unsigned int-to-float instruction.
-                        // If the high bit is clear (value < 2^63), CVTSI2SD works directly.
-                        // If set, we halve the value, convert, and double.
-                        //   test src, src
-                        //   js .large
-                        //   cvtsi2sd freg, src
-                        //   jmp .done
-                        // .large:
-                        //   mov tmp, src
-                        //   shr tmp, 1
-                        //   and src, 1
-                        //   or tmp, src
-                        //   cvtsi2sd freg, tmp
-                        //   addsd freg, freg
-                        // .done:
-
-                        // test src_reg, src_reg (sets SF if high bit is 1)
-                        try self.codegen.emit.testRegReg(.w64, src_reg, src_reg);
-                        // JS .large
-                        const large_patch = try self.codegen.emitCondJump(.sign);
-
-                        // Small path: value fits in i64
-                        if (is_f32)
-                            try self.codegen.emit.cvtsi2ssRegReg(.w64, freg, src_reg)
-                        else
-                            try self.codegen.emit.cvtsi2sdRegReg(.w64, freg, src_reg);
-                        const done_patch = try self.codegen.emitJump();
-
-                        // .large:
-                        try self.codegen.patchJump(large_patch, self.codegen.currentOffset());
-                        const tmp_reg = try self.allocTempGeneral();
-                        try self.codegen.emit.movRegReg(.w64, tmp_reg, src_reg);
-                        // shr tmp, 1
-                        try self.codegen.emit.shrRegImm8(.w64, tmp_reg, 1);
-                        // and src, 1
-                        try self.codegen.emit.andRegImm8(src_reg, 1);
-                        // or tmp, src
-                        try self.codegen.emit.orRegReg(.w64, tmp_reg, src_reg);
-                        // cvtsi2sd freg, tmp
-                        if (is_f32) {
-                            try self.codegen.emit.cvtsi2ssRegReg(.w64, freg, tmp_reg);
-                            try self.codegen.emit.addssRegReg(freg, freg);
-                        } else {
-                            try self.codegen.emit.cvtsi2sdRegReg(.w64, freg, tmp_reg);
-                            try self.codegen.emit.addsdRegReg(freg, freg);
-                        }
-                        self.codegen.freeGeneral(tmp_reg);
-
-                        // .done:
-                        try self.codegen.patchJump(done_patch, self.codegen.currentOffset());
+                    const is_f32 = spec.dst == .f32;
+                    const src_bits = spec.src.bits();
+                    if (src_bits < word_bits) {
+                        const shift_amount: u8 = word_bits - src_bits;
+                        try self.codegen.emitShlImm(word, src_reg, src_reg, shift_amount);
+                        try self.codegen.emitLsrImm(word, src_reg, src_reg, shift_amount);
+                        const freg = try self.allocTempFloat();
+                        try self.emitSignedWordToFloat(freg, src_reg, is_f32);
+                        self.codegen.freeGeneral(src_reg);
+                        return .{ .float_reg = .{ .reg = freg, .width = if (is_f32) .f32 else .f64 } };
                     }
+                    const freg = try self.allocTempFloat();
+                    try self.emitUnsignedWordToFloat(freg, src_reg, is_f32);
                     self.codegen.freeGeneral(src_reg);
                     return .{ .float_reg = .{ .reg = freg, .width = if (is_f32) .f32 else .f64 } };
                 },
@@ -3576,7 +3508,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const bits_reg = try self.ensureInGeneralReg(src_loc);
                     const stack_offset = self.codegen.allocStackSlot(8);
-                    try self.codegen.emitStoreStack(.w64, stack_offset, bits_reg);
+                    try self.codegen.emitStoreStack(wide64_reg_width, stack_offset, bits_reg);
                     self.codegen.freeGeneral(bits_reg);
                     return .{ .stack = .{ .offset = stack_offset, .size = .qword, .layout_idx = .f64 } };
                 },
@@ -3646,42 +3578,40 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .i64_to_u128_wrap,
                 => {
                     if (args.len < 1) unreachable;
+                    const spec = numeric_conversion.getConversionSpec(ll.op).?;
+                    if (comptime word_bits < 64) {
+                        if (spec.src.bits() > word_bits) return self.generateWide64IntConversion(ll, args);
+                    }
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
 
-                    const is_signed = ll.op == .i8_to_i128 or
-                        ll.op == .i16_to_i128 or
-                        ll.op == .i32_to_i128 or
-                        ll.op == .i64_to_i128 or
-                        ll.op == .i8_to_u128_wrap or
-                        ll.op == .i16_to_u128_wrap or
-                        ll.op == .i32_to_u128_wrap or
-                        ll.op == .i64_to_u128_wrap;
-                    const src_bits = srcBits(ll.op);
+                    const is_signed = spec.src.isSigned();
+                    const src_bits = spec.src.bits();
 
-                    // Sign/zero extend source to 64 bits
-                    if (src_bits < 64) {
-                        const shift_amount: u8 = 64 - src_bits;
+                    // Sign/zero extend the source to the word
+                    if (src_bits < word_bits) {
+                        const shift_amount: u8 = word_bits - src_bits;
                         if (is_signed) {
-                            try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                            try self.codegen.emitAsrImm(.w64, src_reg, src_reg, shift_amount);
+                            try self.codegen.emitShlImm(word, src_reg, src_reg, shift_amount);
+                            try self.codegen.emitAsrImm(word, src_reg, src_reg, shift_amount);
                         } else {
-                            try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                            try self.codegen.emitLsrImm(.w64, src_reg, src_reg, shift_amount);
+                            try self.codegen.emitShlImm(word, src_reg, src_reg, shift_amount);
+                            try self.codegen.emitLsrImm(word, src_reg, src_reg, shift_amount);
                         }
                     }
 
                     const stack_offset = self.codegen.allocStackSlot(16);
-                    // Store low 64 bits
-                    try self.codegen.emitStoreStack(.w64, stack_offset, src_reg);
-
-                    // High 64 bits: sign-extend for signed, zero for unsigned
+                    // The low word, then every higher word: copies of the sign
+                    // for a signed source, zero for an unsigned one.
+                    try self.codegen.emitStoreStack(word, stack_offset, src_reg);
                     if (is_signed) {
-                        try self.codegen.emitAsrImm(.w64, src_reg, src_reg, 63);
-                        try self.codegen.emitStoreStack(.w64, stack_offset + 8, src_reg);
+                        try self.codegen.emitAsrImm(word, src_reg, src_reg, word_bits - 1);
                     } else {
                         try self.codegen.emitLoadImm(src_reg, 0);
-                        try self.codegen.emitStoreStack(.w64, stack_offset + 8, src_reg);
+                    }
+                    var fill_offset: i32 = word_size;
+                    while (fill_offset < 16) : (fill_offset += word_size) {
+                        try self.codegen.emitStoreStack(word, stack_offset + fill_offset, src_reg);
                     }
                     self.codegen.freeGeneral(src_reg);
                     return .{ .stack_i128 = stack_offset };
@@ -3763,12 +3693,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
 
-                    // Zero-extend source to 64 bits
+                    // Zero-extend the source to the builtin's 64-bit argument
                     const src_bits = srcBits(ll.op);
                     if (src_bits < 64) {
                         const shift_amount: u8 = 64 - src_bits;
-                        try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                        try self.codegen.emitLsrImm(.w64, src_reg, src_reg, shift_amount);
+                        try self.codegen.emitShlImm(wide64_reg_width, src_reg, src_reg, shift_amount);
+                        try self.codegen.emitLsrImm(wide64_reg_width, src_reg, src_reg, shift_amount);
                     }
 
                     // Call roc_builtins_u64_to_dec(out_low, out_high, u64) -> void
@@ -3784,12 +3714,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const src_reg = try self.ensureInGeneralReg(src_loc);
 
-                    // Sign-extend source to 64 bits
+                    // Sign-extend the source to the builtin's 64-bit argument
                     const src_bits = srcBits(ll.op);
                     if (src_bits < 64) {
                         const shift_amount: u8 = 64 - src_bits;
-                        try self.codegen.emitShlImm(.w64, src_reg, src_reg, shift_amount);
-                        try self.codegen.emitAsrImm(.w64, src_reg, src_reg, shift_amount);
+                        try self.codegen.emitShlImm(wide64_reg_width, src_reg, src_reg, shift_amount);
+                        try self.codegen.emitAsrImm(wide64_reg_width, src_reg, src_reg, shift_amount);
                     }
 
                     // Call roc_builtins_i64_to_dec(out_low, out_high, i64) -> void
@@ -10443,6 +10373,87 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         ) Allocator.Error!ValueLocation {
             _ = .{ self, op, lhs_loc, rhs_loc, operand_layout };
             @compileError("arm32: TODO Wide64 integer arithmetic (J1)");
+        }
+
+        /// Integer conversion, or integer-to-float conversion, with a side
+        /// wider than the target word: I64/U64 on a 32-bit target, a register
+        /// pair or memory operand (D6's `Wide64`). J1 lowers it.
+        fn generateWide64IntConversion(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
+            _ = .{ self, ll, args };
+            @compileError("arm32: TODO Wide64 integer conversions (J1)");
+        }
+
+        /// Convert the signed word in `src_reg` to a float in `freg`.
+        fn emitSignedWordToFloat(self: *Self, freg: FloatReg, src_reg: GeneralReg, is_f32: bool) Allocator.Error!void {
+            if (comptime isa.binaryIs(.aarch64)) {
+                try self.codegen.emit.scvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, word);
+            } else {
+                if (is_f32) {
+                    try self.codegen.emit.cvtsi2ssRegReg(word, freg, src_reg);
+                } else {
+                    try self.codegen.emit.cvtsi2sdRegReg(word, freg, src_reg);
+                }
+            }
+        }
+
+        /// Convert the unsigned word in `src_reg` to a float in `freg`. The
+        /// value may exceed the signed range. Clobbers `src_reg`.
+        fn emitUnsignedWordToFloat(self: *Self, freg: FloatReg, src_reg: GeneralReg, is_f32: bool) Allocator.Error!void {
+            if (comptime isa.binaryIs(.aarch64)) {
+                // UCVTF handles unsigned integers directly
+                try self.codegen.emit.ucvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, word);
+            } else {
+                // x86_64 has no unsigned int-to-float instruction.
+                // If the high bit is clear (value < 2^63), CVTSI2SD works directly.
+                // If set, we halve the value, convert, and double.
+                //   test src, src
+                //   js .large
+                //   cvtsi2sd freg, src
+                //   jmp .done
+                // .large:
+                //   mov tmp, src
+                //   shr tmp, 1
+                //   and src, 1
+                //   or tmp, src
+                //   cvtsi2sd freg, tmp
+                //   addsd freg, freg
+                // .done:
+
+                // test src_reg, src_reg (sets SF if high bit is 1)
+                try self.codegen.emit.testRegReg(word, src_reg, src_reg);
+                // JS .large
+                const large_patch = try self.codegen.emitCondJump(.sign);
+
+                // Small path: value fits in i64
+                if (is_f32)
+                    try self.codegen.emit.cvtsi2ssRegReg(word, freg, src_reg)
+                else
+                    try self.codegen.emit.cvtsi2sdRegReg(word, freg, src_reg);
+                const done_patch = try self.codegen.emitJump();
+
+                // .large:
+                try self.codegen.patchJump(large_patch, self.codegen.currentOffset());
+                const tmp_reg = try self.allocTempGeneral();
+                try self.codegen.emit.movRegReg(word, tmp_reg, src_reg);
+                // shr tmp, 1
+                try self.codegen.emit.shrRegImm8(word, tmp_reg, 1);
+                // and src, 1
+                try self.codegen.emit.andRegImm8(src_reg, 1);
+                // or tmp, src
+                try self.codegen.emit.orRegReg(word, tmp_reg, src_reg);
+                // cvtsi2sd freg, tmp
+                if (is_f32) {
+                    try self.codegen.emit.cvtsi2ssRegReg(word, freg, tmp_reg);
+                    try self.codegen.emit.addssRegReg(freg, freg);
+                } else {
+                    try self.codegen.emit.cvtsi2sdRegReg(word, freg, tmp_reg);
+                    try self.codegen.emit.addsdRegReg(freg, freg);
+                }
+                self.codegen.freeGeneral(tmp_reg);
+
+                // .done:
+                try self.codegen.patchJump(done_patch, self.codegen.currentOffset());
+            }
         }
 
         /// Integer binary operation on an integer that fits one register (at
