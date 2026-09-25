@@ -10,6 +10,10 @@ jobs:
   # Cross-compile all fx platform tests from all host platforms
   roc-cross-compile:
     runs-on: ${{ matrix.host }}
+    # arm32 goes through the dev backend, which gains arm32 code generation in
+    # J1-J2 of projects/big/arm32-dev-backend.md; its lane may fail until J3
+    # makes it required.
+    continue-on-error: ${{ matrix.target == 'arm32musl' }}
     strategy:
       fail-fast: false
       matrix:
@@ -22,7 +26,11 @@ jobs:
         target: [
             x64musl, # Linux x86_64 musl (static linking)
             arm64musl, # Linux ARM64 musl (static linking)
+            arm32musl, # Linux ARM32 musl (static linking), dev backend
           ]
+    # The arm32 lane builds with the dev backend (`--opt=dev`); the other lanes
+    # use roc build's default. The flags are inlined as expressions so every
+    # host shell (bash and PowerShell) sees the same argv.
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -58,19 +66,19 @@ jobs:
       - name: Run fx platform cross-compilation tests
         run: |
           echo "Cross-compiling fx tests from ${{ matrix.host }} to ${{ matrix.target }}"
-          zig build run-test-cli -- --suite platforms --filter test/fx/ --cross-target=${{ matrix.target }}
+          zig build run-test-cli -- --suite platforms --filter test/fx/ --cross-target=${{ matrix.target }} ${{ matrix.target == 'arm32musl' && '--cross-opt=dev' || '' }}
 
       - name: Cross-compile int platform test app (Unix)
         if: runner.os != 'Windows'
         run: |
           echo "Cross-compiling int platform from ${{ matrix.host }} to ${{ matrix.target }}"
-          ./zig-out/bin/roc build --target=${{ matrix.target }} --output=int_app_${{ matrix.target }}_${{ matrix.host }} test/int/app.roc
+          ./zig-out/bin/roc build --target=${{ matrix.target }} ${{ matrix.target == 'arm32musl' && '--opt=dev' || '' }} --output=int_app_${{ matrix.target }}_${{ matrix.host }} test/int/app.roc
 
       - name: Cross-compile int platform test app (Windows)
         if: runner.os == 'Windows'
         run: |
           echo "Cross-compiling int platform from ${{ matrix.host }} to ${{ matrix.target }}"
-          zig-out\bin\roc.exe build --target=${{ matrix.target }} --output=int_app_${{ matrix.target }}_${{ matrix.host }} test/int/app.roc
+          zig-out\bin\roc.exe build --target=${{ matrix.target }} ${{ matrix.target == 'arm32musl' && '--opt=dev' || '' }} --output=int_app_${{ matrix.target }}_${{ matrix.host }} test/int/app.roc
 
       - name: Upload cross-compiled int app executables
         uses: actions/upload-artifact@v7.0.1 # ratchet:actions/upload-artifact@v7.0.1
@@ -84,6 +92,7 @@ jobs:
   test-int-on-target:
     needs: [roc-cross-compile]
     runs-on: ${{ matrix.target_os }}
+    continue-on-error: ${{ matrix.target == 'arm32musl' }}
     strategy:
       fail-fast: false
       matrix:
@@ -96,7 +105,22 @@ jobs:
           - target: arm64musl
             target_os: ubuntu-24.04-arm
             arch: arm64
+          # Test arm32musl executables under qemu on the dev backend's CPU
+          # floor. cortex-a9 is ARMv7-A with NEON and VFPv3-D32 and without
+          # integer divide, so an instruction above the floor (SDIV/UDIV,
+          # VFPv4) raises SIGILL instead of running silently.
+          - target: arm32musl
+            target_os: ubuntu-24.04
+            arch: arm32
+            run_prefix: qemu-arm-static -cpu cortex-a9
     steps:
+      - name: Install qemu (arm32)
+        if: matrix.target == 'arm32musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          qemu-arm-static -cpu help | grep -E '^ *cortex-a9$'
+
       - name: Download all cross-compiled artifacts
         uses: actions/download-artifact@v8.0.1
         with:
@@ -121,7 +145,7 @@ jobs:
               echo ""
               echo "Testing $int_app:"
               chmod +x "$int_app"
-              if ./"$int_app"; then
+              if ${{ matrix.run_prefix }} ./"$int_app"; then
                 echo "✅ $int_app: SUCCESS"
                 success_count=$((success_count + 1))
               else

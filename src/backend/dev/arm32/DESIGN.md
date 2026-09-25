@@ -24,7 +24,8 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | A3: ELF32/REL writer, `.ARM.attributes`, `R_ARM_*` relocation kinds, DWARF address width | Done |
 | A2: width model (`WORD`, `Wide64`, four-word i128) | Classification done: every `.w64` in the driver is `word`, a word loop, or `wide64_reg_width`/`wide64_store_width` (the rest name `StoreWidth` or an ISA's own width table); pair lowering and the by-pointer i128 wrappers are J1's |
 | Track C: arm32 runtime objects, `_start`, glibc stub, CLI tables, test-platform manifests and musl runtime | Done |
-| Track C: CLI test-runner cross-target rosters | Moved to J2 (the builds cannot succeed before it) |
+| Track C: CLI test-runner cross-target rosters | Done with Track D (`int` and `fx` list arm32musl; the runner's `--cross-opt=dev`) |
+| Track D: CI lanes (arm32 cross-compile with `--opt=dev`, qemu on-target row, arm32 eval runner under qemu), allowed to fail | Done |
 | J1-J4: arm32 `CodeGen`, gates, qemu execution, lock-in | Not started |
 
 Nothing outside `src/backend/dev/arm32/` calls the encoder yet. `roc build
@@ -494,11 +495,9 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 
 ## Next steps
 
-In plan order: finish A2 (the remaining `.w64` sites: integer conversions,
-i128 halves, structural equality, the call and return paths, the entry
-wrappers; `Wide64` as a register pair or memory operand; four-word i128 with
-by-pointer builtin wrappers), with the NEON encoder batch and Track D in
-parallel; then J1 (arm32 `CodeGen`, AAPCS32 `CallBuilder`, every `binaryIs`
-and `@compileError("arm32: ...")` site), J2 (gates and hello world under
-qemu), J3 and J4. Every Track A change must leave both byte-identity oracles
+In plan order: J1 (arm32 `CodeGen` with the `Wide64` pair lowering and the
+NEON lowering of the SIMD ops, AAPCS32 `CallBuilder`, the by-pointer
+i128/Dec wrappers, every `binaryIs`, `wide64_reg_width` and
+`@compileError("arm32: ...")` site), J2 (gates and hello world under qemu and
+on the Raspberry Pi), J3 and J4. Every Track A change must leave both byte-identity oracles
 unchanged.

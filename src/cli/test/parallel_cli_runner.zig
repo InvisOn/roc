@@ -14,6 +14,7 @@
 //!   --include-llvm       Include size and speed LLVM backend jobs
 //!   --specialize=<yes|no> Override the runtime lowering strategy for platform jobs
 //!   --cross-target <name> Build platform cases for this target without running them
+//!   --cross-opt=<opt>    Build those cases with --opt=<opt> (dev, size or speed)
 //!   --glue-roc <path>    Roc binary to use for glue generation (default: <roc_binary>)
 //!   --glue-opt <opt>     Glue execution mode: default, dev, size, or speed
 //!   --verbose            Print PASS results and timing details
@@ -2484,6 +2485,7 @@ var roc_binary_path: []const u8 = "";
 var glue_roc_binary_path: []const u8 = "";
 var glue_execution_mode: GlueExecutionMode = .default;
 var platform_specialization_arg: ?[]const u8 = null;
+var cross_build_opt_arg: ?[]const u8 = null;
 var project_root_path: []const u8 = "";
 
 const CaseEnv = struct {
@@ -2825,7 +2827,19 @@ fn runCrossCompileTest(
     const output_arg = std.fmt.allocPrint(allocator, "--output={s}", .{output_name}) catch
         return .{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "failed to allocate output arg" };
     defer allocator.free(output_arg);
-    const build_argv = &[_][]const u8{ roc_binary_path, "build", target_arg, output_arg, roc_file };
+    var build_argv_buf: [6][]const u8 = undefined;
+    var build_argc: usize = 0;
+    for ([_][]const u8{ roc_binary_path, "build", target_arg, output_arg }) |arg| {
+        build_argv_buf[build_argc] = arg;
+        build_argc += 1;
+    }
+    if (cross_build_opt_arg) |opt_arg| {
+        build_argv_buf[build_argc] = opt_arg;
+        build_argc += 1;
+    }
+    build_argv_buf[build_argc] = roc_file;
+    build_argc += 1;
+    const build_argv = build_argv_buf[0..build_argc];
 
     var build_timer = harness.Timer.start() catch
         return .{ .status = .infra_error, .phase = .build, .duration_ns = timer.read(), .message = "no clock" };
@@ -12288,6 +12302,7 @@ fn printUsage() void {
         \\  --include-llvm       Include size and speed LLVM backend jobs
         \\  --specialize=<yes|no> Override the runtime lowering strategy for platform jobs
         \\  --cross-target <name> Build platform cases for this target without running them
+        \\  --cross-opt=<opt>    Build cross-target cases with --opt=<opt> (dev, size, speed)
         \\  --glue-roc <path>    Roc binary to use for glue generation (default: <roc_binary>)
         \\  --glue-opt <opt>     Glue execution mode: default, dev, size, or speed
         \\  --verbose            Show PASS results with timing
@@ -12302,6 +12317,9 @@ const ParsedRunnerArgs = struct {
     glue_roc: ?[]const u8 = null,
     specialization_arg: ?[]const u8 = null,
     cross_target: ?[]const u8 = null,
+    /// `--opt=<mode>` for cross-target builds, or null for `roc build`'s
+    /// default.
+    cross_opt_arg: ?[]const u8 = null,
 };
 
 fn parseSuiteName(value: []const u8) ?Suite {
@@ -12338,6 +12356,7 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
     var glue_roc: ?[]const u8 = null;
     var specialization_arg: ?[]const u8 = null;
     var cross_target: ?[]const u8 = null;
+    var cross_opt_arg: ?[]const u8 = null;
     var saw_suite = false;
     var i: usize = 1;
     while (i < raw_args.len) : (i += 1) {
@@ -12392,6 +12411,16 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
             cross_target = value;
             continue;
         }
+        if (std.mem.startsWith(u8, arg, "--cross-opt=")) {
+            const value = arg["--cross-opt=".len..];
+            const known = std.mem.eql(u8, value, "dev") or std.mem.eql(u8, value, "size") or std.mem.eql(u8, value, "speed");
+            if (!known) {
+                std.debug.print("unknown cross opt: {s}\n", .{value});
+                return error.InvalidArgs;
+            }
+            cross_opt_arg = try std.fmt.allocPrint(allocator, "--opt={s}", .{value});
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--glue-roc=")) {
             glue_roc = arg["--glue-roc=".len..];
             continue;
@@ -12436,6 +12465,10 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
             suites.addAll();
         }
     }
+    if (cross_opt_arg != null and cross_target == null) {
+        std.debug.print("--cross-opt requires --cross-target\n", .{});
+        return error.InvalidArgs;
+    }
     if (cross_target != null and !suites.includesOnly(.platforms)) {
         std.debug.print("--cross-target can only be used with the platforms suite\n", .{});
         return error.InvalidArgs;
@@ -12454,6 +12487,7 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
         .glue_roc = glue_roc,
         .specialization_arg = specialization_arg,
         .cross_target = cross_target,
+        .cross_opt_arg = cross_opt_arg,
     };
 }
 
@@ -12588,6 +12622,7 @@ pub fn main(init: std.process.Init) CliRunnerError!void {
         roc_binary_path;
     glue_execution_mode = parsed.glue_options.execution_mode;
     platform_specialization_arg = parsed.specialization_arg;
+    cross_build_opt_arg = parsed.cross_opt_arg;
 
     const tests = try buildCases(spec_arena.allocator(), args.filters, args.include_llvm, parsed.suites, parsed.glue_options, parsed.cross_target);
     if (tests.len == 0) {
