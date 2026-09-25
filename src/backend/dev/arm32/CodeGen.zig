@@ -73,6 +73,10 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// Callee-saved general registers available after r0-r3: r4-r10.
         pub const CALLEE_SAVED_GENERAL_MASK: u32 = Call.CALLEE_SAVED_GENERAL_MASK;
 
+        /// Size of the callee-saved area below fp (r4-r10 at fixed slots);
+        /// the driver starts local slots below it.
+        pub const CALLEE_SAVED_AREA_SIZE: i32 = 28;
+
         /// Most general registers that can be in use at once, pinned or
         /// temporary: the whole allocatable pool (D10). There is no spill
         /// path.
@@ -918,7 +922,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
 const MuslCodeGen = CodeGen(.arm32musl);
 const MuslEmit = EmitMod.Emit(.arm32musl);
 
-fn expectCode(cg: *MuslCodeGen, expected: *MuslEmit) !void {
+fn expectCode(cg: *MuslCodeGen, expected: *MuslEmit) error{TestExpectedEqual}!void {
     try std.testing.expectEqualSlices(u8, expected.buf.items, cg.getCode());
 }
 
@@ -1074,4 +1078,92 @@ test "an eight-byte discriminant stores the index and a zero high word" {
     try e.movRegImm32(.r0, 0);
     try e.strRegMem(.r0, .r11, -12);
     try expectCode(&cg, &e);
+}
+
+test "deferred prologue size matches the bytes emitted, for every frame shape" {
+    const Builder = MuslCodeGen.DeferredFrameBuilder;
+    const masks = [_]u32{ 0, GeneralReg.r4.listBit(), Call.CALLEE_SAVED_GENERAL_MASK };
+    const sizes = [_]u32{ 0, 100, 0x1234, 4072, 70000, 1 << 20 };
+    for (masks) |mask| {
+        for (sizes) |size| {
+            var e = MuslEmit.init(std.testing.allocator);
+            defer e.deinit();
+            var builder = Builder.init();
+            builder.setCalleeSavedMask(mask);
+            builder.setStackSize(size);
+            const predicted = builder.calculatePrologueSize();
+            _ = try builder.emitPrologue(&e);
+            try std.testing.expectEqual(@as(usize, predicted), e.buf.items.len);
+            try std.testing.expectEqual(@as(u32, 0), builder.actual_stack_alloc % 8);
+        }
+    }
+}
+
+test "deferred prologue and epilogue follow D5" {
+    var cg = MuslCodeGen.init(std.testing.allocator, .default);
+    defer cg.deinit();
+    cg.callee_saved_used = GeneralReg.r4.listBit() | GeneralReg.r9.listBit();
+    try cg.emitPrologueWithAlloc(12);
+    try cg.emitEpilogue();
+
+    var e = MuslEmit.init(std.testing.allocator);
+    defer e.deinit();
+    try e.push(GeneralReg.fp.listBit() | GeneralReg.lr.listBit());
+    try e.movRegReg(.fp, .sp);
+    try e.subRegRegModImm(.sp, .sp, ModImm.of(40)); // 12 + 28, rounded to 8
+    try e.strRegMem(.r4, .fp, -4);
+    try e.strRegMem(.r9, .fp, -24);
+    try e.ldrRegMem(.r4, .fp, -4);
+    try e.ldrRegMem(.r9, .fp, -24);
+    try e.movRegReg(.sp, .fp);
+    try e.pop(GeneralReg.fp.listBit() | GeneralReg.pc.listBit());
+    try expectCode(&cg, &e);
+}
+
+test "a frame of a page or more probes each page" {
+    var e = MuslEmit.init(std.testing.allocator);
+    defer e.deinit();
+    var builder = MuslCodeGen.DeferredFrameBuilder.init();
+    builder.setStackSize(8192);
+    _ = try builder.emitPrologue(&e);
+
+    var expected = MuslEmit.init(std.testing.allocator);
+    defer expected.deinit();
+    const page = ModImm.of(4096);
+    try expected.push(GeneralReg.fp.listBit() | GeneralReg.lr.listBit());
+    try expected.movRegReg(.fp, .sp);
+    try expected.movw(.r12, 8192 + 32);
+    try expected.movt(.r12, 0);
+    try expected.subRegRegModImm(.sp, .sp, page);
+    try expected.strRegMem(.r12, .sp, 0);
+    try expected.subRegRegModImm(.r12, .r12, page);
+    try expected.cmpRegModImm(.r12, page);
+    try expected.bcond(.hi, -16);
+    try expected.subRegRegReg(.sp, .sp, .r12);
+    try expected.strRegMem(.r12, .sp, 0);
+    try std.testing.expectEqualSlices(u8, expected.buf.items, e.buf.items);
+}
+
+test "forward frame pushes its registers and keeps sp 8-aligned" {
+    var e = MuslEmit.init(std.testing.allocator);
+    defer e.deinit();
+    var builder = FrameBuilderMod.ForwardFrameBuilder(MuslEmit).init(&e);
+    builder.saveViaPush(.r4);
+    builder.saveViaPush(.r5);
+    builder.saveViaPush(.r6);
+    builder.setStackSize(16);
+    try std.testing.expectEqual(@as(i32, -12), try builder.emitPrologue());
+    try builder.emitEpilogue();
+
+    var expected = MuslEmit.init(std.testing.allocator);
+    defer expected.deinit();
+    const regs = GeneralReg.r4.listBit() | GeneralReg.r5.listBit() | GeneralReg.r6.listBit();
+    try expected.push(GeneralReg.fp.listBit() | GeneralReg.lr.listBit());
+    try expected.movRegReg(.fp, .sp);
+    try expected.push(regs);
+    try expected.subRegRegModImm(.sp, .sp, ModImm.of(20)); // 16 + 4 padding
+    try expected.addRegRegModImm(.sp, .sp, ModImm.of(20));
+    try expected.pop(regs);
+    try expected.pop(GeneralReg.fp.listBit() | GeneralReg.pc.listBit());
+    try std.testing.expectEqualSlices(u8, expected.buf.items, e.buf.items);
 }
