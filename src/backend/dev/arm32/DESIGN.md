@@ -22,7 +22,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | A1 facade for i128/SIMD/overflow/entry strategies | Deferred to A2 and the NEON batch |
 | Track B, NEON batch | Not started |
 | A3: ELF32/REL writer, `.ARM.attributes`, `R_ARM_*` relocation kinds, DWARF address width | Done |
-| A2: width model (`WORD`, `Wide64`, four-word i128) | Not started |
+| A2: width model (`WORD`, `Wide64`, four-word i128) | In progress: words and one-register integer arithmetic classified; `Wide64` pair lowering and four-word i128 remain |
 | Track C: arm32 runtime objects, `_start`, glibc stub, CLI tables, test-platform manifests and musl runtime | Done |
 | Track C: CLI test-runner cross-target rosters | Moved to J2 (the builds cannot succeed before it) |
 | J1-J4: arm32 `CodeGen`, gates, qemu execution, lock-in | Not started |
@@ -284,6 +284,23 @@ two directions: a `usize` result that Roc types as `U64` (`List.len`,
 `List.capacity`) goes through `wordAsU64`, and an index that the operation's
 contract puts in bounds is read as its low word.
 
+Integer arithmetic follows the same split. `generateIntBinop` handles an
+integer that fits one register, at most a word: sub-word integers are computed
+in the full register and narrowed by `word_bits - n` shifts, and overflow is
+decided by `intOverflowCheck`, a pure function of the layout that returns
+either the type's range (sub-word) or `word_flags` (word-sized: the flags, or a
+multiply's high product). So on arm32 an I32 takes the flag path that I64
+takes on the 64-bit ISAs, without naming either type. An integer wider than
+the word (I64/U64 on arm32) never enters that path: on 32-bit targets only,
+`generateIntBinop` sends it to `generateWide64IntBinop`, which J1 implements
+with pair sequences and the D7 helpers. Shift counts are masked for word-sized
+types too, because an A32 register shift by 32 or more gives zero rather than
+wrapping the count.
+
+A genuinely 64-bit memory field written from an immediate
+(`StrFromUtf8Layout`'s tags) goes through `emitStoreImm64`, which is already
+width-generic: one store on a 64-bit target, two word stores on a 32-bit one.
+
 ## Learnings
 
 ### Is 32-bit support too tightly coupled to wasm32?
@@ -419,8 +436,11 @@ tests anything:
 
 ## Next steps
 
-In plan order: A1 (three-way arch switches, the `CC` seam, raw mnemonics
-behind the per-arch facade), A2 (the `WORD`/`Wide64`/four-word width model),
-A3 (ELF32, `R_ARM_*` relocations, DWARF address width), with the NEON encoder
-batch and Track C in parallel. Every Track A change must leave both
-byte-identity oracles unchanged.
+In plan order: finish A2 (the remaining `.w64` sites: integer conversions,
+i128 halves, structural equality, the call and return paths, the entry
+wrappers; `Wide64` as a register pair or memory operand; four-word i128 with
+by-pointer builtin wrappers), with the NEON encoder batch and Track D in
+parallel; then J1 (arm32 `CodeGen`, AAPCS32 `CallBuilder`, every `binaryIs`
+and `@compileError("arm32: ...")` site), J2 (gates and hello world under
+qemu), J3 and J4. Every Track A change must leave both byte-identity oracles
+unchanged.
