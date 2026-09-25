@@ -216,8 +216,64 @@ resolve those names against compiler-rt.
 instead of consulting `host_lir_codegen_available`. The plan's J3a rewrites
 them.
 
+### Zig 0.16 passes nested `extern struct` arguments off-ABI on arm
+
+- **Where:** Zig's own C-ABI lowering for `arm-linux-musleabihf` (and so the
+  `test/fx` host, `test/fx/platform/host.zig`, which is Zig).
+- **Effect:** a by-value `callconv(.c)` argument whose type is an `extern
+  struct` *containing another struct* starts at an even core register, as
+  if 8-byte aligned, although every field is a word: for
+  `fn f(h: H) callconv(.c) R` with `H = extern struct { name: R }` and `R` a
+  12-byte `{ ?[*]u8, usize, usize }`, Zig reads `h` from r2, r3 and the
+  first stack word, leaving r1 unused. AAPCS32 (and clang, for the same C)
+  puts it in r1-r3. The same struct passed flat, or a nested one after a
+  core-register argument in r0, lands correctly only when no even-register
+  rounding shifts it. Reproduction: compile the two declarations above with
+  `zig build-obj -target arm-linux-musleabihf` and disassemble; clang on the
+  equivalent C uses r1-r3.
+- **Consequence:** the arm32 dev backend follows AAPCS32, so a Zig host
+  receives the wrong words. `hostedHostGetGreeting(host: HostRecord)` in the
+  fx host takes `HostRecord { name: RocStr }`, and 16 of the 19 failing
+  `test/fx` programs call `Host.get_greeting!` (segfault in the host's
+  `bufPrint`, fault address = the string's second word).
+- **Not changed in Roc:** matching Zig here would break AAPCS32 callers and
+  C hosts. The fix belongs upstream in Zig; a host could avoid it by taking
+  the inner struct flat (the ABI-identical `RocStr`), which is a decision for
+  the platform, not the compiler.
+
+### Remaining `test/fx` failures on arm32 (J3b)
+
+With `--cross-run --cross-runner=qemu-arm-static`, 19 of 121 programs fail
+at run time. 16 call `Host.get_greeting!` and hit the Zig ABI bug above:
+`match_str_return`, `question_mark_operator`, `empty_list_get`,
+`dict_pseudo_seed_repro`, `zst_nested_singleton_shapes`, `list_method_get`,
+`dbg_corrupts_recursive_tag_union`, `hosted_effect_opaque_with_data`,
+`early_return_rc`, `float_comparison`, the four `match_guard_*`,
+`cross_module_recursive_nominal`, `test_no_dbg`. Three do not and are open:
+`issue_10038_comptime_dict_transitions`, `inspect_dict_set`,
+`leak_list_str_ops`.
+
+### A `u64` builtin parameter passed as one register is not caught
+
+On arm32 a builtin's `u64` parameter takes an aligned register pair. A call
+site that passes one with `addImmArg` or `addRegArg` builds a single-register
+argument; for an immediate that fits 32 bits nothing fails at build time
+(`CallBuilder` rejects only immediates wider than a word). J2 audited every
+wrapper with 64-bit parameters (`dev_wrappers.zig`, `boxy_abi.zig`) and moved
+their call sites to `addU64SlotArg`, `addImm64Arg` or `addMem64Arg`; a new
+builtin with a `u64` parameter needs the same.
+
 ## Resolved during the work
 
+- **The vendored arm32 `libc.a` lacked `string.h`:** Zig 0.16 builds part
+  of the C library from its own sources into a separate `libzigc.a`, and
+  musl's `libc.a` omits those functions, so linking `test/fx` programs
+  failed on `strcmp`. `ci/vendor_musl_runtime.py` now appends `libzigc.a`'s
+  members to the vendored `libc.a`.
+- **Cross builds ignored the backend's stderr expectations:** the runner's
+  `--cross-opt` passed `--opt=` but still required optimized-build warnings
+  (the `dbg` warning) from dev builds. It now filters them the way native
+  runs do.
 - **`*.s` was gitignored:** `ci/arm32_encoding_oracle.s` would never have
   reached CI. Whitelisted in `.gitignore`.
 - **Plan docs failed tidy:** spaced em dashes and duplicate or missing titles

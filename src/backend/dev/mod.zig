@@ -65,6 +65,8 @@ pub const LocatedArtifact = if (builtin.os.tag == .freestanding) void else @impo
 pub const SpliceSource = if (builtin.os.tag == .freestanding) void else @import("ObjectFileCompiler.zig").SpliceSource;
 /// Place object-cache entries into an open code generator.
 pub const spliceExternalProcs = if (builtin.os.tag == .freestanding) void else @import("ObjectFileCompiler.zig").spliceExternalProcs;
+/// Whether the dev backend generates native code for a target.
+pub const supportsTarget = if (builtin.os.tag == .freestanding) void else @import("ObjectFileCompiler.zig").supportsTarget;
 /// Links object-cache entries spliced into the compile-time evaluator's image.
 pub const HostSplice = if (builtin.os.tag == .freestanding) void else @import("HostSplice.zig").HostSplice;
 /// On-disk form of one module's pack of artifacts.

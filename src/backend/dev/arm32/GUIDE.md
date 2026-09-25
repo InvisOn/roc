@@ -17,14 +17,15 @@ and its reason is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 - The arm32 runtime objects (builtins, compiler-rt, default platform, Boxy
   runtime) build for `arm32musl` and `arm32glibc`, and the test platforms
   declare `arm32musl`.
-- The shared driver (`LirCodeGen`) refuses to compile for arm32 at every
-  architecture decision it has not been taught, and is partway through
-  separating pointer-sized words from genuine 64-bit values (A2).
+- The shared driver (`LirCodeGen`) compiles for arm32 in full (J1), and
+  `roc build --opt=dev --target=arm32musl` builds real programs (J2): the
+  `int` platform's eleven checks pass under qemu and on a Raspberry Pi 3
+  (armv7l), and 120 of 121 `test/fx` programs build; 102 of them run
+  correctly under qemu.
 
-What does not work yet: there is no arm32 `CodeGen`, so `roc build --opt=dev
---target=arm32musl` stops with "The native object backend does not support the
-'arm' architecture". That refusal is removed in J2, after J1 writes the code
-generator.
+What does not work yet: the remaining `test/fx` run failures (see the
+issues note), the eval corpus on an arm32 host (J3a), and the arm32 lines of
+the `dev_object` snapshots, which stay `NOT_IMPLEMENTED` until J4.
 
 ## How the pieces fit
 
@@ -270,12 +271,21 @@ Each object must print `Class: ELF32`, `Machine: ARM`, `Flags: 0x5000400`,
 ### The CLI end to end
 
 ```
-./zig-out/bin/roc build --opt=dev --target=arm32musl test/fx/hello_world.roc
+./zig-out/bin/roc build --opt=dev --target=arm32musl --output=hello test/fx/hello_world.roc
+qemu-arm-static ./hello
 ```
 
-Today this prints "The native object backend does not support the 'arm'
-architecture" (expected until J2). `roc build --target=arm32musl` without
-`--opt=dev` uses LLVM and keeps its 64-bit-only diagnostic by design.
+`--keep-temp` keeps the app object (`roc_app_arm32musl.o`) and prints where;
+`python3 ci/elf32_reader.py --header --attributes` on it shows `Class: ELF32`,
+`Machine: ARM`, `Flags: 0x5000400`, `Tag_CPU_arch: 10`, `Tag_ABI_VFP_args: 1`.
+`roc build --target=arm32musl` without `--opt=dev` uses LLVM and keeps its
+64-bit-only diagnostic by design.
+
+On real hardware (the Raspberry Pi this work uses, armv7l with NEON):
+
+```
+scp hello aj@rocit.local:/tmp/ && ssh aj@rocit.local /tmp/hello
+```
 
 Through the CLI test runner, the same lane CI runs (Track D):
 
@@ -285,9 +295,22 @@ zig build run-test-cli -- --suite platforms --filter test/fx/ --cross-target=arm
 ```
 
 `--cross-opt=<dev|size|speed>` passes `--opt=` to every cross build (without
-it the runner uses `roc build`'s default). Only the `int` and `fx` platforms
-list arm32musl, because only they declare it. Today every case fails in the
-build phase with the message above.
+it the runner uses `roc build`'s default) and applies that backend's build
+stderr expectations. Only the `int` and `fx` platforms list arm32musl,
+because only they declare it.
+
+To also run each program (J3b), with the checks a native run gets:
+
+```
+zig build run-test-cli -- --suite platforms --filter test/fx/ --cross-target=arm32musl --cross-opt=dev --cross-run --cross-runner=qemu-arm-static
+```
+
+A panic while *building* is usually the one-word invariant firing
+(`emitSizedLoadStack` of a `.qword`, or a `CallBuilder` immediate that does
+not fit a register): some site passes a Wide64 or `u64` as one register. The
+runner truncates traces; rebuild the case by hand with
+`./zig-out/bin/roc build --opt=dev --target=arm32musl ...` (without
+`--no-cache`, as the runner does) for the full one.
 
 ### CI lanes (Track D)
 

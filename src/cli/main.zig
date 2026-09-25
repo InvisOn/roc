@@ -2360,6 +2360,8 @@ fn entrypointAbiDigestFromLirData(
         layout.abi.aarch64Target(target.toOsTag())
     else if (cpu_arch == .x86_64)
         if (target.toOsTag() == .windows) .x86_64_windows else .x86_64_sysv
+    else if (cpu_arch == .arm)
+        .arm32
     else if (cpu_arch == .wasm32)
         .wasm32
     else
@@ -9777,6 +9779,7 @@ fn llvmOptimizationLevel(opt: cli_args.OptLevel) builder.OptimizationLevel {
 fn devBackendPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
     if (target_arch == .x86_64) return "x64 Backend";
     if (target_arch == .aarch64) return "arm64 Backend";
+    if (target_arch == .arm) return "arm32 Backend";
     if (target_arch == .wasm32) return "wasm32 Bytecode Generation";
     if (builtin.mode == .Debug) {
         std.debug.panic(
@@ -9790,6 +9793,7 @@ fn devBackendPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
 fn devInstructionGenerationPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
     if (target_arch == .x86_64) return "x64 Instruction Generation";
     if (target_arch == .aarch64) return "arm64 Instruction Generation";
+    if (target_arch == .arm) return "arm32 Instruction Generation";
     if (target_arch == .wasm32) return "wasm32 Bytecode Generation";
     return devBackendPhaseName(target_arch);
 }
@@ -9842,6 +9846,8 @@ test "dev backend timing labels name the backend and emitted instruction format"
     try std.testing.expectEqualStrings("wasm32 Bytecode Generation", devBackendPhaseName(.wasm32));
     try std.testing.expectEqualStrings("x64 Instruction Generation", devInstructionGenerationPhaseName(.x86_64));
     try std.testing.expectEqualStrings("arm64 Instruction Generation", devInstructionGenerationPhaseName(.aarch64));
+    try std.testing.expectEqualStrings("arm32 Backend", devBackendPhaseName(.arm));
+    try std.testing.expectEqualStrings("arm32 Instruction Generation", devInstructionGenerationPhaseName(.arm));
 }
 
 fn noTargetLibcallsForLlvmBuild(target: RocTarget) bool {
@@ -10639,7 +10645,7 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
         return error.UnsupportedCrossCompilation;
     }
 
-    if (target_arch != .x86_64 and target_arch != .aarch64 and target_arch != .wasm32) {
+    if (target_arch != .wasm32 and !backend.devSupportsTarget(target)) {
         try ctx.io.stderr().print(
             "Error: The native object backend does not support the '{s}' architecture.\n",
             .{@tagName(target_arch)},
@@ -10828,10 +10834,15 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
     const build_scratch_dir = createUniqueTempDir(ctx) catch |err| {
         return ctx.fail(.{ .temp_dir_failed = .{ .err = err } });
     };
-    const cleanup_build_scratch_dir = true;
-    defer if (cleanup_build_scratch_dir) {
-        compile.CacheCleanup.deleteTempDir(ctx.io.std_io, build_scratch_dir);
-    };
+    if (args.keep_temp) {
+        const palette = reporting.ColorUtils.getPaletteForConfig(reporting.ReportingConfig.initColorTerminal());
+        const config = reporting.ReportingConfig.initColorTerminal();
+        const headline = try std.fmt.allocPrint(ctx.arena, "Kept temporary directory: {s}.", .{build_scratch_dir});
+        var report = try reporting.Report.init(ctx.arena, "Kept Temporary Directory", headline, .warning);
+        defer report.deinit();
+        reporting.renderReportToTerminal(&report, ctx.io.stderr(), palette, config) catch {};
+    }
+    defer if (!args.keep_temp) compile.CacheCleanup.deleteTempDir(ctx.io.std_io, build_scratch_dir);
 
     const obj_filename = try std.fmt.allocPrint(ctx.arena, "roc_app_{s}.o", .{@tagName(target)});
     const obj_path = try std.fs.path.join(ctx.arena, &.{ build_scratch_dir, obj_filename });
