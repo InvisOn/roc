@@ -866,6 +866,16 @@ daily.
   derived-offset helper for str/list fields (see Related projects).
 - Acceptance: identical to A1's (byte-identical output on every 64-bit target
   is the whole point; `WORD == .w64` and `Wide64 == single register` there).
+- *Amended while A2 is under way:* A2 classifies; J1 lowers. Every `.w64`
+  becomes `word`, a width-generic word loop, or `wide64_reg_width` (a 64-bit
+  value in one register, a compile error on 32-bit targets), and the
+  operations whose arm32 form is structurally different enter
+  `generateWide64IntBinop`/`generateWide64IntUnary`/
+  `generateWide64IntConversion` on 32-bit targets only. The `I128Parts`
+  strategy (two 64-bit registers) stays 64-bit-only, with its halves named
+  `wide64_reg_width`. The by-pointer i128/Dec builtin wrappers move to J1:
+  before arm32's `CodeGen` exists they would have no caller, and nothing on
+  the 64-bit targets would run them.
 
 **A3. Width-parametric containers (D9).**
 - `object/elf.zig`: ELF32 structures, `r_info` packing, `e_flags`, the REL
