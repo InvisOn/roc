@@ -3676,7 +3676,6 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         .signed
                     else
                         .unsigned;
-                    const parts = try self.getI128Parts(src_loc, src_signedness);
 
                     const dst_bits: u8 = if (ll.op == .u128_to_i8_wrap or ll.op == .u128_to_u8_wrap or ll.op == .i128_to_i8_wrap or ll.op == .i128_to_u8_wrap)
                         8
@@ -3690,6 +3689,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         128
                     else
                         unreachable;
+
+                    if (comptime word_size < 8) return self.i128NarrowWords(try self.i128StackOffset(src_loc, src_signedness), dst_bits, ll.ret_layout);
+                    const parts = try self.getI128Parts(src_loc, src_signedness);
 
                     if (dst_bits == 128) {
                         // 128-bit to 128-bit wrap is a reinterpret (no-op on bits)
@@ -3721,6 +3723,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+                    if (comptime word_size < 8) {
+                        const src_offset = try self.wide64StackOffsetOfShape(src_loc, .{ .bits = @intCast(srcBits(ll.op)), .signed = false });
+                        return self.callScalarToI128Words(src_offset, .u64_to_dec);
+                    }
                     const src_reg = try self.ensureInGeneralReg(src_loc);
 
                     // Zero-extend the source to the builtin's 64-bit argument
@@ -3742,6 +3748,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+                    if (comptime word_size < 8) {
+                        const src_offset = try self.wide64StackOffsetOfShape(src_loc, .{ .bits = @intCast(srcBits(ll.op)), .signed = true });
+                        return self.callScalarToI128Words(src_offset, .i64_to_dec);
+                    }
                     const src_reg = try self.ensureInGeneralReg(src_loc);
 
                     // Sign-extend the source to the builtin's 64-bit argument
@@ -3775,6 +3785,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+                    if (comptime word_size < 8) {
+                        const src_offset = try self.i128StackOffset(src_loc, .signed);
+                        const scale = try self.boxyI128LiteralSlot(builtins.dec.RocDec.one_point_zero_i128);
+                        const quotient = self.codegen.allocStackSlot(16);
+                        try self.callI128WrapperWords(LowLevelBuiltins.i128DivRem(false, false), quotient, &.{ src_offset, scale }, null);
+                        const dst_bits: u8 = decToIntTruncBits(ll.op) orelse unreachable;
+                        if (dst_bits == 128) return .{ .stack_i128 = quotient };
+                        return self.i128NarrowWords(quotient, dst_bits, ll.ret_layout);
+                    }
                     const parts = try self.getI128Parts(src_loc, .signed); // Dec is signed i128
                     const scale = try self.decScaleParts();
 
@@ -3810,6 +3829,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .dec_to_f64 => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+                    if (comptime word_size < 8) return self.callI128ToFloatWords(try self.i128StackOffset(src_loc, .signed), LowLevelBuiltins.decToFloat(false), .f64);
                     const parts = try self.getI128Parts(src_loc, .signed); // Dec is signed i128
                     return try self.callI128PartsToFloat(parts, LowLevelBuiltins.decToFloat(false), .f64);
                 },
@@ -3817,6 +3837,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     // Dec-to-f32 is defined by the shared exact-width conversion.
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
+                    if (comptime word_size < 8) return self.callI128ToFloatWords(try self.i128StackOffset(src_loc, .signed), LowLevelBuiltins.decToFloat(true), .f32);
                     const parts = try self.getI128Parts(src_loc, .signed); // Dec is signed i128
                     return try self.callI128PartsToFloat(parts, LowLevelBuiltins.decToFloat(true), .f32);
                 },
@@ -3827,8 +3848,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
-                    const parts = try self.getI128Parts(src_loc, .signed);
                     const width: FloatWidth = if (ll.op == .i128_to_f32) .f32 else .f64;
+                    if (comptime word_size < 8) return self.callI128ToFloatWords(try self.i128StackOffset(src_loc, .signed), LowLevelBuiltins.int128ToFloat(true, width == .f32), width);
+                    const parts = try self.getI128Parts(src_loc, .signed);
                     return try self.callI128PartsToFloat(parts, LowLevelBuiltins.int128ToFloat(true, width == .f32), width);
                 },
                 .u128_to_f32,
@@ -3836,8 +3858,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 => {
                     if (args.len < 1) unreachable;
                     const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
-                    const parts = try self.getI128Parts(src_loc, .unsigned);
                     const width: FloatWidth = if (ll.op == .u128_to_f32) .f32 else .f64;
+                    if (comptime word_size < 8) return self.callI128ToFloatWords(try self.i128StackOffset(src_loc, .unsigned), LowLevelBuiltins.int128ToFloat(false, width == .f32), width);
+                    const parts = try self.getI128Parts(src_loc, .unsigned);
                     return try self.callI128PartsToFloat(parts, LowLevelBuiltins.int128ToFloat(false, width == .f32), width);
                 },
 
@@ -4999,6 +5022,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         self.codegen.freeFloat(float_reg);
                         return .{ .float_reg = .{ .reg = result_reg, .width = width } };
                     } else if (is_i128) {
+                        if (comptime word_size < 8) return self.i128UnaryWords(.negate, try self.i128StackOffset(inner_loc, .signed));
                         const parts = try self.getI128Parts(inner_loc, .signed);
                         const result_low = try self.allocTempGeneral();
                         const result_high = try self.allocTempGeneral();
@@ -5044,6 +5068,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     if (is_i128) {
                         const signedness: std.builtin.Signedness = if (ll.ret_layout == .u128) .unsigned else .signed;
+                        if (comptime word_size < 8) return self.i128UnaryWords(.not, try self.i128StackOffset(inner_loc, signedness));
                         const parts = try self.getI128Parts(inner_loc, signedness);
                         const result_low = try self.allocTempGeneral();
                         const result_high = try self.allocTempGeneral();
@@ -5083,6 +5108,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const inner_loc = try self.emitValueLocal(GuardedList.at(args, 0));
                     const operand_layout = self.valueLayout(GuardedList.at(args, 0));
                     if (operand_layout == .i128 or operand_layout == .u128) {
+                        if (comptime word_size < 8) return self.generateBitCount128Words(ll.op, try self.i128StackOffset(inner_loc, .unsigned));
                         return self.generateBitCount128(ll.op, inner_loc);
                     }
                     return self.generateBitCountScalar(ll.op, inner_loc, operand_layout);
@@ -5544,7 +5570,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
                     try self.callBuiltin(&builder, .box_prepare_update);
                     const result_reg = try self.allocTempGeneral();
-                    try self.codegen.emit.movRegReg(word, result_reg, ret_reg_0);
+                    try self.emitMovRegReg(result_reg, ret_reg_0);
                     return .{ .general_reg = result_reg };
                 },
                 .simd_load_16_unchecked => return self.generateSimdLoad(ll, args),
@@ -5812,9 +5838,14 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// narrower integer is sign- or zero-extended into a fresh 8-byte
         /// slot; a 64-bit value is used where it is.
         fn wide64StackOffsetExtended(self: *Self, loc: ValueLocation, value_layout: layout.Idx) Allocator.Error!i32 {
-            const shape = scalarIntShape(value_layout);
-            if (shape == null or shape.?.bits > word_bits) return self.wide64StackOffset(loc);
-            return self.wide64StackOffsetFromShape(loc, shape.?);
+            const shape = scalarIntShape(value_layout) orelse return self.wide64StackOffset(loc);
+            return self.wide64StackOffsetOfShape(loc, shape);
+        }
+
+        /// The stack offset of an integer of `shape` widened to 64 bits.
+        fn wide64StackOffsetOfShape(self: *Self, loc: ValueLocation, shape: ScalarIntShape) Allocator.Error!i32 {
+            if (shape.bits > word_bits) return self.wide64StackOffset(loc);
+            return self.wide64StackOffsetFromShape(loc, shape);
         }
 
         /// A word-sized or narrower integer of `shape`, sign- or zero-extended
@@ -8775,6 +8806,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn callIntToStr(self: *Self, value_loc: ValueLocation, int_width_bytes: u8, is_signed: bool) Allocator.Error!ValueLocation {
+            if (comptime word_size < 8) return self.callIntToStrWords(value_loc, int_width_bytes, is_signed);
             const result_offset = self.codegen.allocStackSlot(roc_str_size);
             const builtin_fn = LowLevelBuiltins.numToStr(.int);
             const base_reg = frame_ptr;
@@ -8808,6 +8840,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         fn callDecToStr(self: *Self, value_loc: ValueLocation) Allocator.Error!ValueLocation {
             const result_offset = self.codegen.allocStackSlot(roc_str_size);
+            if (comptime word_size < 8) {
+                const value_offset = try self.i128StackOffset(value_loc, .signed);
+                var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+                try builder.addLeaArg(frame_ptr, result_offset);
+                try builder.addMem64Arg(frame_ptr, value_offset);
+                try builder.addMem64Arg(frame_ptr, value_offset + 8);
+                try self.callBuiltin(&builder, LowLevelBuiltins.numToStr(.dec));
+                return .{ .stack_str = result_offset };
+            }
             const base_reg = frame_ptr;
             const parts = try self.getI128Parts(value_loc, .signed);
             defer self.codegen.freeGeneral(parts.low);
@@ -8842,62 +8883,112 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         /// Helper for list_drop_first, list_drop_last, list_take_first, list_take_last
         /// These all map to listSublist with different start/len calculations
+        /// The `start`/`len` window of a sublist call on a 32-bit target, in
+        /// two 8-byte slots: `n` is a U64 (a Wide64), the list length a word,
+        /// and the builtin takes both as `u64`. `len -| n` is zero when `n`
+        /// has a high word.
+        fn sublistWindowWords(self: *Self, list_off: i32, n_loc: ValueLocation, mode: anytype) Allocator.Error!struct { i32, i32 } {
+            const n_off = try self.wide64StackOffset(n_loc);
+            const start_slot = self.codegen.allocStackSlot(8);
+            const len_slot = self.codegen.allocStackSlot(8);
+            const len_reg = try self.allocTempGeneral();
+            const diff_reg = try self.allocTempGeneral();
+            const zero_reg = try self.allocTempGeneral();
+            try self.codegen.emitLoad(word, len_reg, frame_ptr, list_off + listFieldOffset("length"));
+            try self.codegen.emitLoadStack(word, diff_reg, n_off);
+            try self.codegen.emitSaturatingSub(diff_reg, len_reg, diff_reg);
+            try self.codegen.emitLoadStack(word, len_reg, n_off + word_size);
+            try self.codegen.emitCmpImm(len_reg, 0);
+            try self.codegen.emit.movRegModImmCond(.ne, diff_reg, arm32.ModImm.of(0));
+            try self.codegen.emitLoadImm(zero_reg, 0);
+            // `start` then `len`; `null` is `n` itself.
+            const window: [2]?GeneralReg = switch (mode) {
+                .drop_first => .{ null, diff_reg },
+                .drop_last => .{ zero_reg, diff_reg },
+                .take_first => .{ zero_reg, null },
+                .take_last => .{ diff_reg, null },
+            };
+            for (window, [_]i32{ start_slot, len_slot }) |value, slot| {
+                if (value) |reg| {
+                    try self.codegen.emitStoreStack(word, slot, reg);
+                    try self.codegen.emitStoreStack(word, slot + word_size, zero_reg);
+                } else {
+                    try self.copyStackWords(slot, n_off, 8);
+                }
+            }
+            self.codegen.freeGeneral(zero_reg);
+            self.codegen.freeGeneral(diff_reg);
+            self.codegen.freeGeneral(len_reg);
+            return .{ start_slot, len_slot };
+        }
+
+        /// Pass the `u64` in an 8-byte frame slot: one word on a 64-bit
+        /// target, a register or stack pair on a 32-bit one.
+        fn addU64SlotArg(self: *Self, builder: *Builder, slot: i32) Allocator.Error!void {
+            _ = self;
+            if (comptime word_size == 8) return builder.addMemArg(frame_ptr, slot);
+            return builder.addMem64Arg(frame_ptr, slot);
+        }
+
         fn callListSublist(self: *Self, ll: anytype, list_local: LocalId, list_loc: ValueLocation, n_loc: ValueLocation, mode: enum { drop_first, drop_last, take_first, take_last }) Allocator.Error!ValueLocation {
             const ls = self.layout_store;
             const list_abi = builtinInternalListAbi(ls, "dev.callListSublist.builtin_list_abi", ll.ret_layout);
 
             const list_off = try self.ensureOnStack(list_loc, roc_list_size);
-            const n_reg = try self.ensureInGeneralReg(n_loc);
+            const start_slot, const len_slot = if (comptime word_size < 8) try self.sublistWindowWords(list_off, n_loc, mode) else blk: {
+                const n_reg = try self.ensureInGeneralReg(n_loc);
 
-            // Load list length from the struct (offset 8)
-            const len_reg = try self.allocTempGeneral();
-            try self.codegen.emitLoad(word, len_reg, frame_ptr, list_off + listFieldOffset("length"));
+                // Load list length from the struct (offset 8)
+                const len_reg = try self.allocTempGeneral();
+                try self.codegen.emitLoad(word, len_reg, frame_ptr, list_off + listFieldOffset("length"));
 
-            // Compute start and len based on mode. They are the builtin's u64
-            // arguments, and `n` is a U64.
-            const start_slot = self.codegen.allocStackSlot(8);
-            const len_slot = self.codegen.allocStackSlot(8);
+                // Compute start and len based on mode. They are the builtin's u64
+                // arguments, and `n` is a U64.
+                const window_start_slot = self.codegen.allocStackSlot(8);
+                const window_len_slot = self.codegen.allocStackSlot(8);
 
-            switch (mode) {
-                .drop_first => {
-                    // start = n, len = max(list_len - n, 0)
-                    const diff_reg = try self.allocTempGeneral();
-                    try self.codegen.emitSaturatingSub(diff_reg, len_reg, n_reg);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, start_slot, n_reg);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, len_slot, diff_reg);
-                    self.codegen.freeGeneral(diff_reg);
-                },
-                .drop_last => {
-                    // start = 0, len = max(list_len - n, 0)
-                    const diff_reg = try self.allocTempGeneral();
-                    try self.codegen.emitSaturatingSub(diff_reg, len_reg, n_reg);
-                    const zero_reg = try self.allocTempGeneral();
-                    try self.codegen.emitLoadImm(zero_reg, 0);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, start_slot, zero_reg);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, len_slot, diff_reg);
-                    self.codegen.freeGeneral(zero_reg);
-                    self.codegen.freeGeneral(diff_reg);
-                },
-                .take_first => {
-                    // start = 0, len = min(n, list_len)
-                    // listSublist handles this correctly even if n > list_len
-                    const zero_reg = try self.allocTempGeneral();
-                    try self.codegen.emitLoadImm(zero_reg, 0);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, start_slot, zero_reg);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, len_slot, n_reg);
-                    self.codegen.freeGeneral(zero_reg);
-                },
-                .take_last => {
-                    // start = max(list_len - n, 0), len = n
-                    const diff_reg = try self.allocTempGeneral();
-                    try self.codegen.emitSaturatingSub(diff_reg, len_reg, n_reg);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, start_slot, diff_reg);
-                    try self.codegen.emitStore(wide64_reg_width, frame_ptr, len_slot, n_reg);
-                    self.codegen.freeGeneral(diff_reg);
-                },
-            }
-            self.codegen.freeGeneral(n_reg);
-            self.codegen.freeGeneral(len_reg);
+                switch (mode) {
+                    .drop_first => {
+                        // start = n, len = max(list_len - n, 0)
+                        const diff_reg = try self.allocTempGeneral();
+                        try self.codegen.emitSaturatingSub(diff_reg, len_reg, n_reg);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_start_slot, n_reg);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_len_slot, diff_reg);
+                        self.codegen.freeGeneral(diff_reg);
+                    },
+                    .drop_last => {
+                        // start = 0, len = max(list_len - n, 0)
+                        const diff_reg = try self.allocTempGeneral();
+                        try self.codegen.emitSaturatingSub(diff_reg, len_reg, n_reg);
+                        const zero_reg = try self.allocTempGeneral();
+                        try self.codegen.emitLoadImm(zero_reg, 0);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_start_slot, zero_reg);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_len_slot, diff_reg);
+                        self.codegen.freeGeneral(zero_reg);
+                        self.codegen.freeGeneral(diff_reg);
+                    },
+                    .take_first => {
+                        // start = 0, len = min(n, list_len)
+                        // listSublist handles this correctly even if n > list_len
+                        const zero_reg = try self.allocTempGeneral();
+                        try self.codegen.emitLoadImm(zero_reg, 0);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_start_slot, zero_reg);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_len_slot, n_reg);
+                        self.codegen.freeGeneral(zero_reg);
+                    },
+                    .take_last => {
+                        // start = max(list_len - n, 0), len = n
+                        const diff_reg = try self.allocTempGeneral();
+                        try self.codegen.emitSaturatingSub(diff_reg, len_reg, n_reg);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_start_slot, diff_reg);
+                        try self.codegen.emitStore(wide64_reg_width, frame_ptr, window_len_slot, n_reg);
+                        self.codegen.freeGeneral(diff_reg);
+                    },
+                }
+                self.codegen.freeGeneral(n_reg);
+                self.codegen.freeGeneral(len_reg);
+                break :blk .{ window_start_slot, window_len_slot };
+            };
 
             // Zero-width elements have no bytes to slice, so the result is a
             // length computed from the window alone.
@@ -8916,8 +9007,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.alignment_bytes));
                 try builder.addImmArg(@intCast(list_abi.elem_size_align.size));
-                try builder.addMemArg(frame_ptr, start_slot);
-                try builder.addMemArg(frame_ptr, len_slot);
+                try self.addU64SlotArg(&builder, start_slot);
+                try self.addU64SlotArg(&builder, len_slot);
                 try builder.addImmArg(@intFromEnum(boxy_elem.elem_layout));
                 try builder.addMemArg(frame_ptr, boxy_elem.desc_slot);
                 try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
@@ -8935,8 +9026,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.alignment_bytes));
                 try builder.addImmArg(@intCast(list_abi.elem_size_align.size));
-                try builder.addMemArg(frame_ptr, start_slot);
-                try builder.addMemArg(frame_ptr, len_slot);
+                try self.addU64SlotArg(&builder, start_slot);
+                try self.addU64SlotArg(&builder, len_slot);
                 try builder.addImmArg(if (list_abi.elements_refcounted) 1 else 0);
                 if (elem_decref_reg) |reg| try builder.addRegArg(reg) else try builder.addImmArg(0);
                 try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
@@ -9714,7 +9805,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             try self.codegen.emitLoadImm(masked_reg, @bitCast(signless_mask));
             switch (width) {
                 .f32 => try self.codegen.emitAndRegs(.w32, masked_reg, masked_reg, bits_reg),
-                .f64 => try self.codegen.emitAndRegs(wide64_reg_width, masked_reg, masked_reg, bits_reg),
+                // An F64's bits are a Wide64 on a 32-bit target, where
+                // `f64_to_bits` canonicalizes a NaN with VFP instead.
+                .f64 => if (comptime word_size < 8) unreachable else try self.codegen.emitAndRegs(wide64_reg_width, masked_reg, masked_reg, bits_reg),
             }
             try self.codegen.emitLoadImm(infinity_reg, @bitCast(infinity_bits));
             try self.emitCmpReg(masked_reg, infinity_reg);
@@ -10841,17 +10934,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             family_entry: ?CheckedArithmetic.FamilyEntry,
             checked_op: ?lir.LowLevel,
         ) Allocator.Error!ValueLocation {
+            // Stores leave the flags alone.
+            const value = try self.storeWide64Pair(result, operand_layout);
             if (family_entry) |entry| {
-                if (entry.mode == .overflows) {
-                    const flag = try self.allocTempGeneral();
-                    try self.codegen.emitSetCond(flag, overflow);
-                    const value = try self.storeWide64Pair(result, operand_layout);
-                    if (self.pending_overflow_result_target) |result_target| try self.bindAssignedLocal(result_target, value);
-                    return .{ .general_reg = flag };
-                }
-                if (entry.mode == .crash_on_overflow) try self.emitCrashOnCond(overflow, checkedOverflowMessage(entry.op));
+                if (entry.mode == .crash_on_overflow or entry.mode == .overflows) return self.finishOverflowFamily(value, overflow, entry);
             } else if (checked_op) |tag| try self.emitCrashOnCond(overflow, checkedOverflowMessage(tag));
-            return self.storeWide64Pair(result, operand_layout);
+            return value;
         }
 
         /// The low 64 bits of a 64x64 product, with the flags left so that
@@ -10930,7 +11018,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// conventions (the division helpers return the remainder in r2:r3;
         /// the conversions use the base PCS, so floats travel in core
         /// registers).
-        const AeabiHelper = enum { __aeabi_ldivmod, __aeabi_uldivmod, __aeabi_l2d, __aeabi_ul2d, __aeabi_l2f, __aeabi_ul2f };
+        const AeabiHelper = enum { __aeabi_idivmod, __aeabi_uidivmod, __aeabi_ldivmod, __aeabi_uldivmod, __aeabi_l2d, __aeabi_ul2d, __aeabi_l2f, __aeabi_ul2f };
 
         fn callAeabiHelper(self: *Self, builder: *Builder, helper: AeabiHelper) Allocator.Error!void {
             try self.spillAllVectorLocals();
@@ -10938,7 +11026,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 // Native execution runs arm32 code only on an arm32 host,
                 // which links compiler-rt and so defines every helper.
                 .native_execution => if (comptime builtin.cpu.arch.isArm()) switch (helper) {
-                    inline .__aeabi_ldivmod, .__aeabi_uldivmod, .__aeabi_l2d, .__aeabi_ul2d, .__aeabi_l2f, .__aeabi_ul2f => |h| try builder.call(@intFromPtr(@extern(*const fn () callconv(.c) void, .{ .name = @tagName(h) }))),
+                    inline .__aeabi_idivmod, .__aeabi_uidivmod, .__aeabi_ldivmod, .__aeabi_uldivmod, .__aeabi_l2d, .__aeabi_ul2d, .__aeabi_l2f, .__aeabi_ul2f => |h| try builder.call(@intFromPtr(@extern(*const fn () callconv(.c) void, .{ .name = @tagName(h) }))),
                 } else unreachable,
                 .shim_execution, .object_file => try builder.callRelocatable(try self.codegen.symbols.intern(self.allocator, @tagName(helper)), &self.codegen),
             }
@@ -11348,11 +11436,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.emitCheckedSignedMinDivOverflow(tag, lhs_reg, rhs_reg, operand_layout);
                     }
                     // For integers, div and div_trunc are the same (integer division truncates)
-                    if (is_unsigned) {
-                        try self.codegen.emitUDiv(word, result_reg, lhs_reg, rhs_reg);
-                    } else {
-                        try self.codegen.emitSDiv(word, result_reg, lhs_reg, rhs_reg);
-                    }
+                    try self.emitWordDivRem(result_reg, lhs_reg, rhs_reg, is_unsigned, .quotient);
                 },
                 .num_rem_by => {
                     var rem_done_patch: ?usize = null;
@@ -11360,11 +11444,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.emitCheckedZeroDenominator(tag, rhs_reg, operand_layout);
                         rem_done_patch = try self.emitCheckedSignedMinRemainderZero(lhs_reg, rhs_reg, result_reg, operand_layout);
                     }
-                    if (is_unsigned) {
-                        try self.codegen.emitUMod(word, result_reg, lhs_reg, rhs_reg);
-                    } else {
-                        try self.codegen.emitSMod(word, result_reg, lhs_reg, rhs_reg);
-                    }
+                    try self.emitWordDivRem(result_reg, lhs_reg, rhs_reg, is_unsigned, .remainder);
                     if (rem_done_patch) |patch| try self.codegen.patchJump(patch, self.codegen.currentOffset());
                 },
                 .num_mod_by => {
@@ -11374,7 +11454,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         mod_done_patch = try self.emitCheckedSignedMinRemainderZero(lhs_reg, rhs_reg, result_reg, operand_layout);
                     }
                     if (is_unsigned) {
-                        try self.codegen.emitUMod(word, result_reg, lhs_reg, rhs_reg);
+                        try self.emitWordDivRem(result_reg, lhs_reg, rhs_reg, true, .remainder);
                     } else {
                         // Mathematical modulo: result has the sign of the divisor.
                         // Start with hardware remainder (sign of dividend), and add
@@ -11382,7 +11462,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         // its sign differs from the divisor's sign.
                         const divisor_reg = try self.allocTempGeneral();
                         try self.emitMovRegReg(divisor_reg, rhs_reg);
-                        try self.codegen.emitSMod(word, result_reg, lhs_reg, rhs_reg);
+                        // arm32 divides by a call, which clobbers the
+                        // argument registers: keep the divisor in memory.
+                        const divisor_slot: ?i32 = if (comptime isa == .arm32) blk: {
+                            const slot = self.codegen.allocStackSlot(word_size);
+                            try self.codegen.emitStoreStack(word, slot, divisor_reg);
+                            break :blk slot;
+                        } else null;
+                        try self.emitWordDivRem(result_reg, lhs_reg, rhs_reg, false, .remainder);
+                        if (divisor_slot) |slot| try self.codegen.emitLoadStack(word, divisor_reg, slot);
                         const sign_check_reg = try self.allocTempGeneral();
                         try self.codegen.emitCmpImm(result_reg, 0);
                         const zero_patch = try self.codegen.emitJumpIfEqual();
@@ -11436,6 +11524,26 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.codegen.freeGeneral(rhs_reg);
 
             return .{ .general_reg = result_reg };
+        }
+
+        /// `dst = lhs / rhs` or `lhs % rhs` (truncated) on words. arm32's
+        /// floor has no divide instruction (D2), so it calls
+        /// `__aeabi_idivmod`/`__aeabi_uidivmod` (D7), which return the
+        /// quotient in r0 and the remainder in r1.
+        fn emitWordDivRem(self: *Self, dst: GeneralReg, lhs: GeneralReg, rhs: GeneralReg, is_unsigned: bool, want: enum { quotient, remainder }) Allocator.Error!void {
+            switch (isa) {
+                .x86_64, .aarch64 => switch (want) {
+                    .quotient => if (is_unsigned) try self.codegen.emitUDiv(word, dst, lhs, rhs) else try self.codegen.emitSDiv(word, dst, lhs, rhs),
+                    .remainder => if (is_unsigned) try self.codegen.emitUMod(word, dst, lhs, rhs) else try self.codegen.emitSMod(word, dst, lhs, rhs),
+                },
+                .arm32 => {
+                    var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+                    try builder.addRegArg(lhs);
+                    try builder.addRegArg(rhs);
+                    try self.callAeabiHelper(&builder, if (is_unsigned) .__aeabi_uidivmod else .__aeabi_idivmod);
+                    try self.emitMovRegReg(dst, if (want == .quotient) .r0 else .r1);
+                },
+            }
         }
 
         fn emitIntAddSubOverflowFlag(
@@ -11781,6 +11889,549 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             return @intCast(lowest);
         }
 
+        /// i128/u128/Dec binary operation on a 32-bit target, where the type
+        /// is four memory-resident words (D6). Add, subtract, bitwise ops and
+        /// compares run word by word; multiply, divide, remainder, modulo and
+        /// shifts call the same decomposed builtin wrappers as the 64-bit
+        /// targets, with each `u64` half passed as a register or stack pair.
+        fn generateI128BinopWords(
+            self: *Self,
+            op: lir.LowLevel,
+            lhs_loc: ValueLocation,
+            rhs_loc: ValueLocation,
+            operand_layout: layout.Idx,
+        ) Allocator.Error!ValueLocation {
+            const signedness: std.builtin.Signedness = if (operand_layout == .u128) .unsigned else .signed;
+            const is_unsigned = operand_layout == .u128;
+            const family_entry = CheckedArithmetic.classify(op);
+            const checked_op = crashingBinaryOp(op);
+            const plain_op = plainBinaryOp(op);
+            const lhs = try self.i128StackOffset(lhs_loc, signedness);
+            switch (narrowEnum(IntBinOp, plain_op)) {
+                .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by => {
+                    const slot = self.codegen.allocStackSlot(16);
+                    const result: ValueLocation = .{ .stack_i128 = slot };
+                    const count = try self.ensureInGeneralReg(rhs_loc);
+                    try self.callI128WrapperWords(i128ShiftBuiltin(plain_op, operand_layout), slot, &.{lhs}, count);
+                    self.codegen.freeGeneral(count);
+                    return result;
+                },
+                .num_plus, .num_minus => |add_sub| {
+                    const slot = self.codegen.allocStackSlot(16);
+                    const result: ValueLocation = .{ .stack_i128 = slot };
+                    const rhs = try self.i128StackOffset(rhs_loc, signedness);
+                    const is_add = add_sub == .num_plus;
+                    try self.emitI128WordChain(slot, lhs, rhs, if (is_add) .add else .sub, if (is_add) .adc else .sbc, true);
+                    const overflow: Condition = if (!is_unsigned)
+                        CodeGen.condOverflow()
+                    else if (is_add)
+                        CodeGen.condUnsignedAddOverflow()
+                    else
+                        CodeGen.condUnsignedSubOverflow();
+                    if (family_entry) |entry| {
+                        if (entry.mode == .crash_on_overflow or entry.mode == .overflows) return self.finishOverflowFamily(result, overflow, entry);
+                    } else if (checked_op) |tag| {
+                        // A checked Dec add or subtract has no overflow check
+                        // here, as on the 64-bit targets.
+                        if (operand_layout == .i128 or operand_layout == .u128) try self.emitCrashOnCond(overflow, checkedOverflowMessage(tag));
+                    }
+                    return result;
+                },
+                .num_times => {
+                    const slot = self.codegen.allocStackSlot(16);
+                    const result: ValueLocation = .{ .stack_i128 = slot };
+                    const rhs = try self.i128StackOffset(rhs_loc, signedness);
+                    if (operand_layout == .dec) {
+                        // dec_mul crashes on overflow itself.
+                        try self.callI128WrapperWords(LowLevelBuiltins.decBinaryArith(.dec_mul), slot, &.{ lhs, rhs }, null);
+                        return result;
+                    }
+                    // The checked multiply wrappers store the wrapped product
+                    // and return the overflow flag, so a wrapping multiply
+                    // uses them too and ignores the flag.
+                    try self.callI128WrapperWords(LowLevelBuiltins.checkedMul128(is_unsigned), slot, &.{ lhs, rhs }, null);
+                    if (family_entry) |entry| {
+                        if (entry.mode == .crash_on_overflow or entry.mode == .overflows) {
+                            try self.codegen.emitCmpImm(ret_reg_0, 0);
+                            return self.finishOverflowFamily(result, CodeGen.condNotEqual(), entry);
+                        }
+                    } else if (checked_op != null) unreachable;
+                    return result;
+                },
+                .num_div_by, .num_div_trunc_by => |div_op| {
+                    const slot = self.codegen.allocStackSlot(16);
+                    const result: ValueLocation = .{ .stack_i128 = slot };
+                    const rhs = try self.i128StackOffset(rhs_loc, signedness);
+                    if (operand_layout == .dec) {
+                        try self.callI128WrapperWords(LowLevelBuiltins.decBinaryArith(if (div_op == .num_div_by) .num_div_by else .num_div_trunc_by), slot, &.{ lhs, rhs }, null);
+                        return result;
+                    }
+                    if (checked_op) |tag| {
+                        try self.emitI128ZeroDenominatorCheckWords(tag, rhs, operand_layout);
+                        if (operand_layout == .i128) {
+                            const lhs_not_min = try self.emitI128IsMinByNegOneWords(lhs, rhs);
+                            try self.emitCrashOnCond(CodeGen.condEqual(), checkedOverflowMessage(tag));
+                            try self.codegen.patchJump(lhs_not_min, self.codegen.currentOffset());
+                        }
+                    }
+                    try self.callI128WrapperWords(LowLevelBuiltins.i128DivRem(false, is_unsigned), slot, &.{ lhs, rhs }, null);
+                    return result;
+                },
+                .num_rem_by, .num_mod_by => |rem_op| {
+                    const slot = self.codegen.allocStackSlot(16);
+                    const result: ValueLocation = .{ .stack_i128 = slot };
+                    const rhs = try self.i128StackOffset(rhs_loc, signedness);
+                    var done_patch: ?usize = null;
+                    if (checked_op) |tag| {
+                        try self.emitI128ZeroDenominatorCheckWords(tag, rhs, operand_layout);
+                        if (operand_layout == .i128) {
+                            // The I128 minimum by -1 has remainder 0.
+                            const lhs_not_min = try self.emitI128IsMinByNegOneWords(lhs, rhs);
+                            const rhs_not_neg_one = try self.codegen.emitJumpIfNotEqual();
+                            const zero = try self.allocTempGeneral();
+                            try self.codegen.emitLoadImm(zero, 0);
+                            var index: i32 = 0;
+                            while (index < 16) : (index += word_size) try self.codegen.emitStoreStack(word, slot + index, zero);
+                            self.codegen.freeGeneral(zero);
+                            done_patch = try self.codegen.emitJump();
+                            const normal = self.codegen.currentOffset();
+                            try self.codegen.patchJump(lhs_not_min, normal);
+                            try self.codegen.patchJump(rhs_not_neg_one, normal);
+                        }
+                    }
+                    // Unsigned modulo is the truncated remainder; signed (and
+                    // Dec) modulo takes the divisor's sign in the builtin.
+                    const builtin_fn = if (rem_op == .num_rem_by or is_unsigned)
+                        LowLevelBuiltins.i128DivRem(true, is_unsigned)
+                    else
+                        LowLevelBuiltins.i128Mod(false);
+                    try self.callI128WrapperWords(builtin_fn, slot, &.{ lhs, rhs }, null);
+                    if (done_patch) |patch| try self.codegen.patchJump(patch, self.codegen.currentOffset());
+                    return result;
+                },
+                .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor => |logic_op| {
+                    const slot = self.codegen.allocStackSlot(16);
+                    const result: ValueLocation = .{ .stack_i128 = slot };
+                    const rhs = try self.i128StackOffset(rhs_loc, signedness);
+                    const data_op: arm32.DataOp = if (logic_op == .num_bitwise_and)
+                        .@"and"
+                    else if (logic_op == .num_bitwise_or)
+                        .orr
+                    else
+                        .eor;
+                    try self.emitI128WordChain(slot, lhs, rhs, data_op, data_op, false);
+                    return result;
+                },
+                .num_is_eq => {
+                    const rhs = try self.i128StackOffset(rhs_loc, signedness);
+                    const flag = try self.emitI128EqualWords(lhs, rhs);
+                    try self.codegen.emitSetCond(flag, CodeGen.condEqual());
+                    return .{ .general_reg = flag };
+                },
+                .num_is_lt, .num_is_lte, .num_is_gt, .num_is_gte => |cmp_op| {
+                    const rhs = try self.i128StackOffset(rhs_loc, signedness);
+                    const flag = try self.allocTempGeneral();
+                    try self.emitI128CompareWords(lhs, rhs, cmp_op, is_unsigned, flag);
+                    return .{ .general_reg = flag };
+                },
+            }
+        }
+
+        /// The frame offset of a 16-byte copy of an i128/u128/Dec operand on
+        /// a 32-bit target. A narrower operand (a word, or a memory-resident
+        /// Wide64) is sign- or zero-extended per `signedness`, as
+        /// `getI128Parts` does on the 64-bit targets.
+        fn i128StackOffset(self: *Self, loc: ValueLocation, signedness: std.builtin.Signedness) Allocator.Error!i32 {
+            switch (loc) {
+                .stack_i128 => |offset| return offset,
+                .immediate_i128 => |val| return self.boxyI128LiteralSlot(val),
+                // An i64 immediate is sign-extended, as on the 64-bit targets.
+                .immediate_i64 => |val| return self.boxyI128LiteralSlot(val),
+                .stack => |s| if (s.size == .qword) {
+                    const slot = self.codegen.allocStackSlot(16);
+                    const reg = try self.allocTempGeneral();
+                    try self.codegen.emitLoadStack(word, reg, s.offset);
+                    try self.codegen.emitStoreStack(word, slot, reg);
+                    try self.codegen.emitLoadStack(word, reg, s.offset + word_size);
+                    try self.codegen.emitStoreStack(word, slot + word_size, reg);
+                    try self.emitI128FillHighWords(slot, 2, reg, signedness);
+                    self.codegen.freeGeneral(reg);
+                    return slot;
+                },
+                .general_reg, .stack_str => {},
+                .float_reg, .vector_reg, .list_stack, .immediate_f32, .immediate_f64, .noreturn => unreachable,
+            }
+            // A word: the low word, then its sign (or zero) above it.
+            const reg = try self.ensureInGeneralReg(loc);
+            const slot = self.codegen.allocStackSlot(16);
+            try self.codegen.emitStoreStack(word, slot, reg);
+            const fill = try self.allocTempGeneral();
+            try self.emitMovRegReg(fill, reg);
+            try self.emitI128FillHighWords(slot, 1, fill, signedness);
+            self.codegen.freeGeneral(fill);
+            if (loc != .general_reg) self.codegen.freeGeneral(reg);
+            return slot;
+        }
+
+        /// Fill words `from..4` of the i128 at `slot` with the sign of the
+        /// word in `reg` (signed) or zero (unsigned). Clobbers `reg`.
+        fn emitI128FillHighWords(self: *Self, slot: i32, from: i32, reg: GeneralReg, signedness: std.builtin.Signedness) Allocator.Error!void {
+            switch (signedness) {
+                .signed => try self.codegen.emitAsrImm(word, reg, reg, word_bits - 1),
+                .unsigned => try self.codegen.emitLoadImm(reg, 0),
+            }
+            var index = from;
+            while (index < 16 / word_size) : (index += 1) try self.codegen.emitStoreStack(word, slot + index * word_size, reg);
+        }
+
+        /// `dst[i] = a[i] <op> b[i]` over the four words, `first` for word 0
+        /// and `rest` for the others (so ADD then ADC carries across words).
+        /// With `set_flags`, the flags after the last word are the 128-bit
+        /// operation's.
+        fn emitI128WordChain(self: *Self, dst: i32, a: i32, b: i32, first: arm32.DataOp, rest: arm32.DataOp, set_flags: bool) Allocator.Error!void {
+            const x = try self.allocTempGeneral();
+            const y = try self.allocTempGeneral();
+            var index: i32 = 0;
+            while (index < 16) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, x, a + index);
+                try self.codegen.emitLoadStack(word, y, b + index);
+                try self.codegen.emit.dataProc(.al, if (index == 0) first else rest, set_flags, x, x, .{ .reg = y });
+                try self.codegen.emitStoreStack(word, dst + index, x);
+            }
+            self.codegen.freeGeneral(x);
+            self.codegen.freeGeneral(y);
+        }
+
+        /// Leave `eq` in the flags exactly when the i128s at `a` and `b` are
+        /// equal; returns a free-to-use register the caller owns.
+        fn emitI128EqualWords(self: *Self, a: i32, b: i32) Allocator.Error!GeneralReg {
+            const acc = try self.allocTempGeneral();
+            const x = try self.allocTempGeneral();
+            const y = try self.allocTempGeneral();
+            var index: i32 = 0;
+            while (index < 16) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, x, a + index);
+                try self.codegen.emitLoadStack(word, y, b + index);
+                if (index == 0) {
+                    try self.codegen.emit.eorRegRegReg(acc, x, y);
+                } else {
+                    try self.codegen.emit.eorRegRegReg(x, x, y);
+                    try self.codegen.emit.dataProc(.al, .orr, index == 16 - word_size, acc, acc, .{ .reg = x });
+                }
+            }
+            self.codegen.freeGeneral(x);
+            self.codegen.freeGeneral(y);
+            return acc;
+        }
+
+        /// `flag = a <cmp> b` for i128s: CMP on word 0 and SBCS through word
+        /// 3 leave a 128-bit subtraction's flags; `>` and `<=` swap operands.
+        fn emitI128CompareWords(self: *Self, a: i32, b: i32, cmp_op: IntBinOp, is_unsigned: bool, flag: GeneralReg) Allocator.Error!void {
+            const swap = cmp_op == .num_is_gt or cmp_op == .num_is_lte;
+            const x_off = if (swap) b else a;
+            const y_off = if (swap) a else b;
+            const x = try self.allocTempGeneral();
+            const y = try self.allocTempGeneral();
+            var index: i32 = 0;
+            while (index < 16) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, x, x_off + index);
+                try self.codegen.emitLoadStack(word, y, y_off + index);
+                if (index == 0) {
+                    try self.codegen.emit.cmpRegReg(x, y);
+                } else {
+                    try self.codegen.emit.sbcsRegRegReg(x, x, y);
+                }
+            }
+            self.codegen.freeGeneral(x);
+            self.codegen.freeGeneral(y);
+            const less = cmp_op == .num_is_lt or cmp_op == .num_is_gt;
+            const cond: Condition = if (less)
+                (if (is_unsigned) CodeGen.condBelow() else CodeGen.condLess())
+            else
+                (if (is_unsigned) CodeGen.condAboveOrEqual() else CodeGen.condGreaterOrEqual());
+            try self.codegen.emitSetCond(flag, cond);
+        }
+
+        /// Crash when the i128 divisor at `rhs` is zero.
+        fn emitI128ZeroDenominatorCheckWords(self: *Self, op: lir.LowLevel, rhs: i32, operand_layout: layout.Idx) Allocator.Error!void {
+            const acc = try self.allocTempGeneral();
+            const x = try self.allocTempGeneral();
+            try self.codegen.emitLoadStack(word, acc, rhs);
+            var index: i32 = word_size;
+            while (index < 16) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, x, rhs + index);
+                try self.codegen.emit.dataProc(.al, .orr, index == 16 - word_size, acc, acc, .{ .reg = x });
+            }
+            self.codegen.freeGeneral(x);
+            self.codegen.freeGeneral(acc);
+            try self.emitCrashOnCond(CodeGen.condEqual(), checkedZeroDenominatorMessage(op, operand_layout));
+        }
+
+        /// Test for the I128 minimum divided by -1. Returns the patch of the
+        /// jump taken when `lhs` is not the minimum; falling through, `eq`
+        /// holds exactly when `rhs` is -1.
+        fn emitI128IsMinByNegOneWords(self: *Self, lhs: i32, rhs: i32) Allocator.Error!usize {
+            const acc = try self.allocTempGeneral();
+            const x = try self.allocTempGeneral();
+            // The minimum is 0x8000_0000 in word 3 and zero below it.
+            try self.codegen.emitLoadStack(word, acc, lhs + 3 * word_size);
+            try self.codegen.emit.eorRegRegModImm(acc, acc, arm32.ModImm.of(0x8000_0000));
+            var index: i32 = 0;
+            while (index < 3 * word_size) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, x, lhs + index);
+                try self.codegen.emit.dataProc(.al, .orr, index == 2 * word_size, acc, acc, .{ .reg = x });
+            }
+            const lhs_not_min = try self.codegen.emitJumpIfNotEqual();
+            // -1 has every bit set, so the AND of its words is all ones.
+            try self.codegen.emitLoadStack(word, acc, rhs);
+            index = word_size;
+            while (index < 16) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, x, rhs + index);
+                try self.codegen.emit.andRegRegReg(acc, acc, x);
+            }
+            try self.codegen.emit.cmnRegModImm(acc, arm32.ModImm.of(1));
+            self.codegen.freeGeneral(x);
+            self.codegen.freeGeneral(acc);
+            return lhs_not_min;
+        }
+
+        /// Call a decomposed i128/Dec builtin wrapper `(out_low: *u64,
+        /// out_high: *u64, a_low: u64, a_high: u64, ...)` on a 32-bit target:
+        /// the result goes to the 16-byte `result_slot`, each operand's `u64`
+        /// halves come from its slot as register or stack pairs
+        /// (`addMem64Arg`), and a shift count follows the operands.
+        fn callI128WrapperWords(self: *Self, builtin_fn: BuiltinFn, result_slot: i32, operands: []const i32, count: ?GeneralReg) Allocator.Error!void {
+            var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+            try builder.addLeaArg(frame_ptr, result_slot);
+            try builder.addLeaArg(frame_ptr, result_slot + 8);
+            for (operands) |offset| {
+                try builder.addMem64Arg(frame_ptr, offset);
+                try builder.addMem64Arg(frame_ptr, offset + 8);
+            }
+            if (count) |reg| try builder.addRegArg(reg);
+            try self.callBuiltin(&builder, builtin_fn);
+        }
+
+        /// The i128/u128 shift wrapper for a shift op.
+        fn i128ShiftBuiltin(op: lir.LowLevel, operand_layout: layout.Idx) BuiltinFn {
+            if (builtin.mode == .Debug and operand_layout == .dec) {
+                std.debug.panic("LirCodeGen invariant violated: decimal layout reached i128 shift lowering", .{});
+            }
+            return if (op == .num_shift_left_by)
+                .num_shl_u128
+            else if (op == .num_shift_right_by)
+                if (operand_layout == .u128) .num_shr_u128 else .num_shr_i128
+            else if (op == .num_shift_right_zf_by)
+                .num_shr_u128
+            else
+                unreachable;
+        }
+
+        /// The low `dst_bits` of the i128 at `offset` on a 32-bit target: a
+        /// fresh i128, a memory-resident Wide64, or a word masked to the
+        /// destination.
+        fn i128NarrowWords(self: *Self, offset: i32, dst_bits: u8, ret_layout: layout.Idx) Allocator.Error!ValueLocation {
+            if (dst_bits > word_bits) {
+                const size: u32 = dst_bits / 8;
+                const slot = self.codegen.allocStackSlot(size);
+                try self.copyStackWords(slot, offset, size);
+                if (dst_bits == 128) return .{ .stack_i128 = slot };
+                return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = ret_layout } };
+            }
+            const reg = try self.allocTempGeneral();
+            try self.codegen.emitLoadStack(word, reg, offset);
+            if (dst_bits < word_bits) {
+                const shift_amount: u8 = word_bits - dst_bits;
+                try self.codegen.emitShlImm(word, reg, reg, shift_amount);
+                try self.codegen.emitLsrImm(word, reg, reg, shift_amount);
+            }
+            return .{ .general_reg = reg };
+        }
+
+        /// Copy `size` bytes (a multiple of the word) between frame slots.
+        fn copyStackWords(self: *Self, dst: i32, src: i32, size: u32) Allocator.Error!void {
+            const reg = try self.allocTempGeneral();
+            var index: i32 = 0;
+            while (index < size) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, reg, src + index);
+                try self.codegen.emitStoreStack(word, dst + index, reg);
+            }
+            self.codegen.freeGeneral(reg);
+        }
+
+        /// Call a `(out_low: *u64, out_high: *u64, val: u64) -> void` builtin
+        /// with the Wide64 at `src_offset` on a 32-bit target.
+        fn callScalarToI128Words(self: *Self, src_offset: i32, builtin_fn: BuiltinFn) Allocator.Error!ValueLocation {
+            const slot = self.codegen.allocStackSlot(16);
+            var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+            try builder.addLeaArg(frame_ptr, slot);
+            try builder.addLeaArg(frame_ptr, slot + 8);
+            try builder.addMem64Arg(frame_ptr, src_offset);
+            try self.callBuiltin(&builder, builtin_fn);
+            return .{ .stack_i128 = slot };
+        }
+
+        /// Call an exact-width C conversion `fn(low: u64, high: u64) ->
+        /// f32/f64` with the i128 at `offset` on a 32-bit target. The hard-float
+        /// C ABI returns the float in s0 or d0.
+        fn callI128ToFloatWords(self: *Self, offset: i32, builtin_fn: BuiltinFn, width: FloatWidth) Allocator.Error!ValueLocation {
+            var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+            try builder.addMem64Arg(frame_ptr, offset);
+            try builder.addMem64Arg(frame_ptr, offset + 8);
+            try self.callBuiltin(&builder, builtin_fn);
+            const freg = try self.allocTempFloat();
+            try self.emitMoveFloat(width, freg, float_ret_reg);
+            return .{ .float_reg = .{ .reg = freg, .width = width } };
+        }
+
+        /// Two's-complement negation or bitwise NOT of the i128 at `offset`
+        /// on a 32-bit target, into a fresh slot.
+        fn i128UnaryWords(self: *Self, op: enum { negate, not }, offset: i32) Allocator.Error!ValueLocation {
+            const slot = self.codegen.allocStackSlot(16);
+            const reg = try self.allocTempGeneral();
+            var index: i32 = 0;
+            while (index < 16) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, reg, offset + index);
+                switch (op) {
+                    // 0 - x, borrowing across words: RSBS then RSC.
+                    .negate => try self.codegen.emit.dataProc(.al, if (index == 0) .rsb else .rsc, true, reg, reg, .{ .imm = arm32.ModImm.of(0) }),
+                    .not => try self.codegen.emit.mvnRegReg(reg, reg),
+                }
+                try self.codegen.emitStoreStack(word, slot + index, reg);
+            }
+            self.codegen.freeGeneral(reg);
+            return .{ .stack_i128 = slot };
+        }
+
+        /// `callIntToStr` on a 32-bit target: every integer is widened to an
+        /// i128 and passed as two `u64` halves.
+        fn callIntToStrWords(self: *Self, value_loc: ValueLocation, int_width_bytes: u8, is_signed: bool) Allocator.Error!ValueLocation {
+            const result_offset = self.codegen.allocStackSlot(roc_str_size);
+            const signedness: std.builtin.Signedness = if (is_signed) .signed else .unsigned;
+            const value_offset = if (int_width_bytes == 16)
+                try self.i128StackOffset(value_loc, signedness)
+            else if (int_width_bytes > word_size)
+                // A Wide64, extended per its own signedness (a U64 immediate
+                // is not sign-extended).
+                try self.i128StackOffset(.{ .stack = .{ .offset = try self.wide64StackOffset(value_loc), .size = .qword } }, signedness)
+            else blk: {
+                // Clear any bits above a narrow integer before extending it.
+                const reg = try self.ensureInGeneralReg(value_loc);
+                const work = try self.allocTempGeneral();
+                try self.emitMovRegReg(work, reg);
+                if (value_loc != .general_reg) self.codegen.freeGeneral(reg);
+                try self.normalizeIntegerWidthInReg(work, int_width_bytes, is_signed);
+                const offset = try self.i128StackOffset(.{ .general_reg = work }, signedness);
+                self.codegen.freeGeneral(work);
+                break :blk offset;
+            };
+            var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+            try builder.addLeaArg(frame_ptr, result_offset);
+            try builder.addMem64Arg(frame_ptr, value_offset);
+            try builder.addMem64Arg(frame_ptr, value_offset + 8);
+            try builder.addImmArg(int_width_bytes);
+            try builder.addImmArg(if (is_signed) @as(u8, 1) else @as(u8, 0));
+            try self.callBuiltin(&builder, LowLevelBuiltins.numToStr(.int));
+            return .{ .stack_str = result_offset };
+        }
+
+        /// A bit count of the i128 at `offset` on a 32-bit target, as a U8.
+        /// Leading (trailing) zeros are counted word by word from the top
+        /// (bottom), stopping after the first non-zero word, so a zero
+        /// operand counts 128.
+        fn generateBitCount128Words(self: *Self, op: lir.LowLevel, offset: i32) Allocator.Error!ValueLocation {
+            const result = try self.allocTempGeneral();
+            const x = try self.allocTempGeneral();
+            const count = try self.allocTempGeneral();
+            try self.codegen.emitLoadImm(result, 0);
+            const bit_op = narrowEnum(BitCountOp, op);
+            var done_patches: [16 / word_size]usize = undefined;
+            var index: u32 = 0;
+            while (index < 16 / word_size) : (index += 1) {
+                const word_index: i32 = @intCast(if (bit_op == .num_count_leading_zero_bits) 16 / word_size - 1 - index else index);
+                try self.codegen.emitLoadStack(word, x, offset + word_index * word_size);
+                switch (bit_op) {
+                    .num_count_one_bits => try self.emitPopcountWord(count, x),
+                    .num_count_leading_zero_bits => try self.emitClzWord(count, x),
+                    .num_count_trailing_zero_bits => try self.codegen.emitCtzWord(count, x),
+                }
+                try self.codegen.emitAddRegs(word, result, result, count);
+                if (bit_op != .num_count_one_bits and index + 1 < 16 / word_size) {
+                    try self.codegen.emitCmpImm(x, 0);
+                    done_patches[index] = try self.codegen.emitJumpIfNotEqual();
+                }
+            }
+            if (bit_op != .num_count_one_bits) {
+                const done = self.codegen.currentOffset();
+                for (done_patches[0 .. 16 / word_size - 1]) |patch| try self.codegen.patchJump(patch, done);
+            }
+            self.codegen.freeGeneral(count);
+            self.codegen.freeGeneral(x);
+            return .{ .general_reg = result };
+        }
+
+        /// `num_abs` of the signed i128 (or Dec) at `offset` on a 32-bit
+        /// target: its negation when the top word is negative, else a copy.
+        fn generateNumAbsWords(self: *Self, offset: i32) Allocator.Error!ValueLocation {
+            const result = try self.i128UnaryWords(.negate, offset);
+            const top = try self.allocTempGeneral();
+            try self.codegen.emitLoadStack(word, top, offset + 16 - word_size);
+            try self.codegen.emitCmpImm(top, 0);
+            self.codegen.freeGeneral(top);
+            const negative = try self.codegen.emitCondJump(CodeGen.condLess());
+            try self.copyStackWords(result.stack_i128, offset, 16);
+            try self.codegen.patchJump(negative, self.codegen.currentOffset());
+            return result;
+        }
+
+        /// `num_abs_diff` of two i128s on a 32-bit target: `a - b`, negated
+        /// in place when `a < b`. The result is a U128.
+        fn generateAbsDiff128Words(self: *Self, a_loc: ValueLocation, b_loc: ValueLocation, is_signed: bool) Allocator.Error!ValueLocation {
+            const signedness: std.builtin.Signedness = if (is_signed) .signed else .unsigned;
+            const a = try self.i128StackOffset(a_loc, signedness);
+            const b = try self.i128StackOffset(b_loc, signedness);
+            const slot = self.codegen.allocStackSlot(16);
+            try self.emitI128WordChain(slot, a, b, .sub, .sbc, true);
+            const in_order = try self.codegen.emitCondJump(if (is_signed) CodeGen.condGreaterOrEqual() else CodeGen.condAboveOrEqual());
+            const negated = try self.i128UnaryWords(.negate, slot);
+            try self.copyStackWords(slot, negated.stack_i128, 16);
+            try self.codegen.patchJump(in_order, self.codegen.currentOffset());
+            return .{ .stack_i128 = slot };
+        }
+
+        /// Crash when the signed i128 (or Dec) at `offset` is its minimum, on
+        /// a 32-bit target.
+        fn emitCheckedI128LowestWords(self: *Self, offset: i32, message: []const u8) Allocator.Error!void {
+            const acc = try self.allocTempGeneral();
+            const x = try self.allocTempGeneral();
+            try self.codegen.emitLoadStack(word, acc, offset + 16 - word_size);
+            try self.codegen.emit.eorRegRegModImm(acc, acc, arm32.ModImm.of(0x8000_0000));
+            var index: i32 = 0;
+            while (index < 16 - word_size) : (index += word_size) {
+                try self.codegen.emitLoadStack(word, x, offset + index);
+                try self.codegen.emit.dataProc(.al, .orr, index == 16 - 2 * word_size, acc, acc, .{ .reg = x });
+            }
+            self.codegen.freeGeneral(x);
+            self.codegen.freeGeneral(acc);
+            try self.emitCrashOnCond(CodeGen.condEqual(), message);
+        }
+
+        /// Finish an add, subtract or multiply of the overflow family whose
+        /// overflow `cond` holds in the flags: return the overflow flag
+        /// (binding `result` to the pending result target) or crash on
+        /// overflow.
+        fn finishOverflowFamily(self: *Self, result: ValueLocation, overflow: Condition, entry: CheckedArithmetic.FamilyEntry) Allocator.Error!ValueLocation {
+            if (entry.mode == .overflows) {
+                const flag = try self.allocTempGeneral();
+                try self.codegen.emitSetCond(flag, overflow);
+                if (self.pending_overflow_result_target) |result_target| try self.bindAssignedLocal(result_target, result);
+                return .{ .general_reg = flag };
+            }
+            std.debug.assert(entry.mode == .crash_on_overflow);
+            try self.emitCrashOnCond(overflow, checkedOverflowMessage(entry.op));
+            return result;
+        }
+
         /// Generate 128-bit integer binary operation
         fn generateI128Binop(
             self: *Self,
@@ -11789,6 +12440,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             rhs_loc: ValueLocation,
             operand_layout: layout.Idx,
         ) Allocator.Error!ValueLocation {
+            if (comptime word_size < 8) return self.generateI128BinopWords(op, lhs_loc, rhs_loc, operand_layout);
             // For 128-bit operations, we work with the values as pairs of 64-bit words
             // Low word at offset 0, high word at offset 8
 
@@ -12276,6 +12928,73 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         /// Generate a checked integer conversion returning Ok(value) | Err(OutOfRange).
+        /// The range of a destination of at most 64 bits for a signed
+        /// source's `int_try_signed` call.
+        fn intTrySignedBounds(dst: numeric_conversion.NumType) struct { i64, i64 } {
+            const min_val: i64 = if (dst.isSigned()) blk: {
+                if (dst.bits() >= 64) break :blk std.math.minInt(i64);
+                const shift: u6 = @intCast(dst.bits() - 1);
+                break :blk -(@as(i64, 1) << shift);
+            } else 0;
+
+            const max_val: i64 = if (dst.isSigned()) blk: {
+                if (dst.bits() >= 64) break :blk std.math.maxInt(i64);
+                const shift: u6 = @intCast(dst.bits() - 1);
+                break :blk (@as(i64, 1) << shift) - 1;
+            } else blk: {
+                // For unsigned targets >= 64 bits, any non-negative i64 fits
+                if (dst.bits() >= 64) break :blk std.math.maxInt(i64);
+                const shift: u6 = @intCast(dst.bits());
+                break :blk (@as(i64, 1) << shift) - 1;
+            };
+            return .{ min_val, max_val };
+        }
+
+        /// The maximum of a destination of at most 64 bits for an unsigned
+        /// source's `int_try_unsigned` call.
+        fn intTryUnsignedMax(dst: numeric_conversion.NumType) u64 {
+            if (dst.isSigned()) {
+                if (dst.bits() >= 64) return @as(u64, @bitCast(@as(i64, std.math.maxInt(i64))));
+                const shift: u6 = @intCast(dst.bits() - 1);
+                return @as(u64, @intCast((@as(i64, 1) << shift) - 1));
+            }
+            if (dst.bits() >= 64) return std.math.maxInt(u64);
+            const shift: u6 = @intCast(dst.bits());
+            return (@as(u64, 1) << shift) - 1;
+        }
+
+        /// `generateIntTryConversion`'s call on a 32-bit target: the source
+        /// travels as `u64` halves (an i128) or one `u64` pair (at most 64
+        /// bits, extended), and so do the 64-bit bounds.
+        fn callIntTryConvertWords(self: *Self, src_loc: ValueLocation, spec: numeric_conversion.Conversion, result_offset: i32, payload_size: u32, disc_offset: u32) Allocator.Error!void {
+            const signedness: std.builtin.Signedness = if (spec.src.isSigned()) .signed else .unsigned;
+            var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
+            if (spec.src.bits() > 64) {
+                const offset = try self.i128StackOffset(src_loc, signedness);
+                try builder.addLeaArg(frame_ptr, result_offset);
+                try builder.addMem64Arg(frame_ptr, offset);
+                try builder.addMem64Arg(frame_ptr, offset + 8);
+                try builder.addImmArg(@intCast(spec.dst.bits()));
+                try builder.addImmArg(if (spec.dst.isSigned()) 1 else 0);
+                try builder.addImmArg(@intCast(payload_size));
+                try builder.addImmArg(@intCast(disc_offset));
+                return self.callBuiltin(&builder, LowLevelBuiltins.intTryConvert(true, spec.src.isSigned()));
+            }
+            const offset = try self.wide64StackOffsetOfShape(src_loc, .{ .bits = @intCast(spec.src.bits()), .signed = spec.src.isSigned() });
+            try builder.addLeaArg(frame_ptr, result_offset);
+            try builder.addMem64Arg(frame_ptr, offset);
+            if (spec.src.isSigned()) {
+                const min_val, const max_val = intTrySignedBounds(spec.dst);
+                try builder.addImm64Arg(min_val);
+                try builder.addImm64Arg(max_val);
+            } else {
+                try builder.addImm64Arg(@bitCast(intTryUnsignedMax(spec.dst)));
+            }
+            try builder.addImmArg(@intCast(payload_size));
+            try builder.addImmArg(@intCast(disc_offset));
+            try self.callBuiltin(&builder, LowLevelBuiltins.intTryConvert(false, spec.src.isSigned()));
+        }
+
         fn generateIntTryConversion(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
             if (args.len != 1) unreachable;
             const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
@@ -12295,6 +13014,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             const spec = numeric_conversion.getConversionSpec(ll.op).?;
 
+            if (comptime word_size < 8) {
+                try self.callIntTryConvertWords(src_loc, spec, result_offset, payload_size, disc_offset);
+                return .{ .stack = .{ .offset = result_offset } };
+            }
             if (spec.src.bits() > 64) {
                 // 128-bit source: load as two registers, call 128-bit C wrapper
                 const parts = try self.getI128Parts(src_loc, if (spec.src.isSigned()) .signed else .unsigned);
@@ -12337,22 +13060,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                 if (spec.src.isSigned()) {
                     // Signed source: call wrapIntTrySigned(out, val, min_val, max_val, payload_size, disc_offset)
-                    const min_val: i64 = if (spec.dst.isSigned()) blk: {
-                        if (spec.dst.bits() >= 64) break :blk std.math.minInt(i64);
-                        const shift: u6 = @intCast(spec.dst.bits() - 1);
-                        break :blk -(@as(i64, 1) << shift);
-                    } else 0;
-
-                    const max_val: i64 = if (spec.dst.isSigned()) blk: {
-                        if (spec.dst.bits() >= 64) break :blk std.math.maxInt(i64);
-                        const shift: u6 = @intCast(spec.dst.bits() - 1);
-                        break :blk (@as(i64, 1) << shift) - 1;
-                    } else blk: {
-                        // For unsigned targets >= 64 bits, any non-negative i64 fits
-                        if (spec.dst.bits() >= 64) break :blk std.math.maxInt(i64);
-                        const shift: u6 = @intCast(spec.dst.bits());
-                        break :blk (@as(i64, 1) << shift) - 1;
-                    };
+                    const min_val, const max_val = intTrySignedBounds(spec.dst);
 
                     const base_reg = frame_ptr;
                     var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
@@ -12365,15 +13073,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.callBuiltin(&builder, LowLevelBuiltins.intTryConvert(false, true));
                 } else {
                     // Unsigned source: call wrapIntTryUnsigned(out, val, max_val, payload_size, disc_offset)
-                    const max_val: u64 = if (spec.dst.isSigned()) blk: {
-                        if (spec.dst.bits() >= 64) break :blk @as(u64, @bitCast(@as(i64, std.math.maxInt(i64))));
-                        const shift: u6 = @intCast(spec.dst.bits() - 1);
-                        break :blk @as(u64, @intCast((@as(i64, 1) << shift) - 1));
-                    } else blk: {
-                        if (spec.dst.bits() >= 64) break :blk std.math.maxInt(u64);
-                        const shift: u6 = @intCast(spec.dst.bits());
-                        break :blk (@as(u64, 1) << shift) - 1;
-                    };
+                    const max_val = intTryUnsignedMax(spec.dst);
 
                     const base_reg = frame_ptr;
                     var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
@@ -12467,6 +13167,34 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         /// Generate a float/dec try_unsafe conversion returning a record.
+        /// An i128/Dec operand of a builtin call: two registers on a 64-bit
+        /// target, a 16-byte slot on a 32-bit one (D6).
+        const I128Arg = if (word_size == 8) I128Parts else i32;
+
+        fn prepareI128Arg(self: *Self, loc: ValueLocation, signedness: std.builtin.Signedness) Allocator.Error!I128Arg {
+            if (comptime word_size == 8) return self.getI128Parts(loc, signedness);
+            return self.i128StackOffset(loc, signedness);
+        }
+
+        /// Pass an operand as its two `u64` halves.
+        fn addI128Arg(self: *Self, builder: *Builder, arg: I128Arg) Allocator.Error!void {
+            _ = self;
+            if (comptime word_size == 8) {
+                try builder.addRegArg(arg.low);
+                try builder.addRegArg(arg.high);
+            } else {
+                try builder.addMem64Arg(frame_ptr, arg);
+                try builder.addMem64Arg(frame_ptr, arg + 8);
+            }
+        }
+
+        fn freeI128Arg(self: *Self, arg: I128Arg) void {
+            if (comptime word_size == 8) {
+                self.codegen.freeGeneral(arg.low);
+                self.codegen.freeGeneral(arg.high);
+            }
+        }
+
         fn generateFloatDecTryUnsafeConversion(self: *Self, ll: anytype, args: anytype) Allocator.Error!ValueLocation {
             if (args.len != 1) unreachable;
             const src_loc = try self.emitValueLocal(GuardedList.at(args, 0));
@@ -12489,12 +13217,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
                     if (spec.src == .dec) {
                         // Dec source: get i128 parts, call Dec-to-int wrapper
-                        const parts = try self.getI128Parts(src_loc, .signed); // Dec is signed i128
+                        const operand = try self.prepareI128Arg(src_loc, .signed); // Dec is signed i128
                         const base_reg = frame_ptr;
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addLeaArg(base_reg, result_offset);
-                        try builder.addRegArg(parts.low);
-                        try builder.addRegArg(parts.high);
+                        try self.addI128Arg(&builder, operand);
                         try builder.addImmArg(@intCast(target_bits));
                         try builder.addImmArg(@intCast(target_is_signed));
                         try builder.addImmArg(@intCast(val_size));
@@ -12502,8 +13229,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try builder.addImmArg(@intCast(offsets.value));
                         try self.callBuiltin(&builder, .dec_to_int_try_unsafe);
 
-                        self.codegen.freeGeneral(parts.low);
-                        self.codegen.freeGeneral(parts.high);
+                        self.freeI128Arg(operand);
                     } else {
                         // The float `val` is argument position 1 (after `out`). On x86-64
                         // it must flow through the CallBuilder so it lands in the right
@@ -12542,18 +13268,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     std.debug.assert(spec.dst == .f32);
                     if (spec.src == .dec) {
                         // Dec to f32
-                        const parts = try self.getI128Parts(src_loc, .signed); // Dec is signed i128
+                        const operand = try self.prepareI128Arg(src_loc, .signed); // Dec is signed i128
                         const base_reg = frame_ptr;
                         var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                         try builder.addLeaArg(base_reg, result_offset);
-                        try builder.addRegArg(parts.low);
-                        try builder.addRegArg(parts.high);
+                        try self.addI128Arg(&builder, operand);
                         try builder.addImmArg(@intCast(offsets.success));
                         try builder.addImmArg(@intCast(offsets.value));
                         try self.callBuiltin(&builder, .dec_to_f32_try_unsafe);
 
-                        self.codegen.freeGeneral(parts.low);
-                        self.codegen.freeGeneral(parts.high);
+                        self.freeI128Arg(operand);
                     } else {
                         // f64 to f32. `val` is argument position 1 (after `out`); route it
                         // through the CallBuilder on x86-64 to honor Windows x64 positional
@@ -12581,20 +13305,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .dec => {
                     // Integer to Dec: result is { success: U8, val_or_memory_garbage: Dec }
                     std.debug.assert(spec.src.bits() == 128);
-                    const parts = try self.getI128Parts(src_loc, if (spec.src.isSigned()) .signed else .unsigned);
+                    const operand = try self.prepareI128Arg(src_loc, if (spec.src.isSigned()) .signed else .unsigned);
                     const builtin_fn: BuiltinFn = if (spec.src.isSigned()) .i128_to_dec_try_unsafe else .u128_to_dec_try_unsafe;
                     const base_reg = frame_ptr;
 
                     var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
                     try builder.addLeaArg(base_reg, result_offset);
-                    try builder.addRegArg(parts.low);
-                    try builder.addRegArg(parts.high);
+                    try self.addI128Arg(&builder, operand);
                     try builder.addImmArg(@intCast(offsets.success));
                     try builder.addImmArg(@intCast(offsets.value));
                     try self.callBuiltin(&builder, builtin_fn);
 
-                    self.codegen.freeGeneral(parts.low);
-                    self.codegen.freeGeneral(parts.high);
+                    self.freeI128Arg(operand);
                 },
             }
 
@@ -12622,6 +13344,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn callDecUnaryMathBuiltin(self: *Self, src_loc: ValueLocation, builtin_fn: BuiltinFn) Allocator.Error!ValueLocation {
+            if (comptime word_size < 8) {
+                const src_offset = try self.i128StackOffset(src_loc, .signed);
+                const slot = self.codegen.allocStackSlot(16);
+                try self.callI128WrapperWords(builtin_fn, slot, &.{src_offset}, null);
+                return .{ .stack_i128 = slot };
+            }
             const src_parts = try self.getI128Parts(src_loc, .signed);
             const result_slot = self.codegen.allocStackSlot(16);
             const base_reg = frame_ptr;
@@ -12640,6 +13368,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         fn callDecBinaryMathBuiltin(self: *Self, lhs_loc: ValueLocation, rhs_loc: ValueLocation, builtin_fn: BuiltinFn) Allocator.Error!ValueLocation {
+            if (comptime word_size < 8) {
+                const lhs_offset = try self.i128StackOffset(lhs_loc, .signed);
+                const rhs_offset = try self.i128StackOffset(rhs_loc, .signed);
+                const slot = self.codegen.allocStackSlot(16);
+                try self.callI128WrapperWords(builtin_fn, slot, &.{ lhs_offset, rhs_offset }, null);
+                return .{ .stack_i128 = slot };
+            }
             const lhs_parts = try self.getI128Parts(lhs_loc, .signed);
             const rhs_parts = try self.getI128Parts(rhs_loc, .signed);
             const result_slot = self.codegen.allocStackSlot(16);
@@ -13469,13 +14204,19 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.emitMovRegReg(rr, eq_reg);
                         self.codegen.freeGeneral(eq_reg);
                     } else if (f.layout_idx == .dec or f.layout_idx == .i128 or f.layout_idx == .u128) {
-                        const lhs_parts = try self.getI128Parts(.{ .stack_i128 = f.lhs_off }, .signed);
-                        const rhs_parts = try self.getI128Parts(.{ .stack_i128 = f.rhs_off }, .signed);
-                        try self.generateI128Equality(lhs_parts, rhs_parts, rr, true);
-                        self.codegen.freeGeneral(lhs_parts.low);
-                        self.codegen.freeGeneral(lhs_parts.high);
-                        self.codegen.freeGeneral(rhs_parts.low);
-                        self.codegen.freeGeneral(rhs_parts.high);
+                        if (comptime word_size < 8) {
+                            const acc = try self.emitI128EqualWords(f.lhs_off, f.rhs_off);
+                            try self.codegen.emitSetCond(rr, CodeGen.condEqual());
+                            self.codegen.freeGeneral(acc);
+                        } else {
+                            const lhs_parts = try self.getI128Parts(.{ .stack_i128 = f.lhs_off }, .signed);
+                            const rhs_parts = try self.getI128Parts(.{ .stack_i128 = f.rhs_off }, .signed);
+                            try self.generateI128Equality(lhs_parts, rhs_parts, rr, true);
+                            self.codegen.freeGeneral(lhs_parts.low);
+                            self.codegen.freeGeneral(lhs_parts.high);
+                            self.codegen.freeGeneral(rhs_parts.low);
+                            self.codegen.freeGeneral(rhs_parts.high);
+                        }
                     } else if (field_layout.tag == .list or field_layout.tag == .list_of_zst) {
                         try work.append(wa, .{ .node_list = .{ .lhs_loc = .{ .stack = .{ .offset = f.lhs_off } }, .rhs_loc = .{ .stack = .{ .offset = f.rhs_off } }, .layout_idx = f.layout_idx, .result_reg = rr } });
                     } else if (f.size <= word_size) {
@@ -13853,7 +14594,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         const len_reg = try self.allocTempGeneral();
                         try self.codegen.emitLoadStack(word, ctr_reg, ctr_slot);
                         try self.codegen.emitLoadStack(word, len_reg, len_slot);
-                        try self.codegen.emit.cmpRegReg(word, ctr_reg, len_reg);
+                        try self.emitCmpReg(ctr_reg, len_reg);
                         self.codegen.freeGeneral(ctr_reg);
                         self.codegen.freeGeneral(len_reg);
                     }
@@ -14146,7 +14887,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
         fn emitCheckedSignedLowestValue(self: *Self, loc: ValueLocation, operand_layout: layout.Idx, op: lir.LowLevel) Allocator.Error!void {
             const message = CheckedArithmetic.overflowMessageForLayout(op, operand_layout) orelse unreachable;
-            if (operand_layout == .i128 or operand_layout == .dec) {
+            if (comptime word_size < 8) {
+                if (operand_layout == .i128 or operand_layout == .dec) return self.emitCheckedI128LowestWords(try self.i128StackOffset(loc, .signed), message);
+                if (operand_layout == .i64) {
+                    // The I64 minimum: 0x8000_0000 over a zero low word.
+                    const pair = try self.loadWide64Pair(loc);
+                    try self.codegen.emit.eorRegRegModImm(pair.hi, pair.hi, arm32.ModImm.of(0x8000_0000));
+                    try self.codegen.emit.dataProc(.al, .orr, true, pair.hi, pair.hi, .{ .reg = pair.lo });
+                    self.freeWide64Pair(pair);
+                    return self.emitCrashOnCond(CodeGen.condEqual(), message);
+                }
+            }
+            if (word_size == 8 and (operand_layout == .i128 or operand_layout == .dec)) {
                 const parts = try self.getI128Parts(loc, .signed);
                 const high_lowest = try self.allocTempGeneral();
                 try self.codegen.emitCmpImm(parts.low, 0);
@@ -14193,6 +14945,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
 
             if (operand_layout == .i128 or operand_layout == .dec) {
+                if (comptime word_size < 8) return self.generateNumAbsWords(try self.i128StackOffset(val_loc, .signed));
                 // 128-bit: negate, then select original or negated based on sign
                 const parts = try self.getI128Parts(val_loc, .signed);
                 const neg_low = try self.allocTempGeneral();
@@ -14382,6 +15135,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// Generate 128-bit |a - b| using SUBS/SBCS for comparison flags.
         fn generateAbsDiff128(self: *Self, a_loc: ValueLocation, b_loc: ValueLocation, input_layout: layout.Idx) Allocator.Error!ValueLocation {
             const is_signed = (input_layout == .i128 or input_layout == .dec);
+            if (comptime word_size < 8) return self.generateAbsDiff128Words(a_loc, b_loc, is_signed);
 
             const a_parts = try self.getI128Parts(a_loc, if (is_signed) .signed else .unsigned);
             const b_parts = try self.getI128Parts(b_loc, if (is_signed) .signed else .unsigned);
@@ -16651,6 +17405,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         }
 
         /// Generate code for explicit tag-discriminant access.
+        /// A loaded discriminant as a value of `target_layout`. A U64 on a
+        /// 32-bit target is a Wide64 (D6): the word, zero-extended.
+        fn discriminantResult(self: *Self, disc_reg: GeneralReg, target_layout: layout.Idx) Allocator.Error!ValueLocation {
+            if (comptime word_size < 8) {
+                if (target_layout == .u64) {
+                    const slot = try self.wide64StackOffsetFromShape(.{ .general_reg = disc_reg }, .{ .bits = word_bits, .signed = false });
+                    return .{ .stack = .{ .offset = slot, .size = .qword, .layout_idx = .u64 } };
+                }
+            }
+            return .{ .general_reg = disc_reg };
+        }
+
         fn generateDiscriminantAccess(self: *Self, disc: anytype) Allocator.Error!ValueLocation {
             const ls = self.layout_store;
             const raw_value_loc = try self.emitValueLocal(disc.source);
@@ -16666,7 +17432,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     @intCast(tu_data.discriminant_offset.get(ls.targetUsize())),
                     tu_data.discriminant_size,
                 );
-                return .{ .general_reg = disc_reg };
+                return self.discriminantResult(disc_reg, disc.target_layout);
             }
 
             if (source_layout.tag == .box) {
@@ -16677,6 +17443,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     const disc_reg = try self.allocTempGeneral();
                     if (disc.target_layout != .u64) {
                         try self.codegen.emitLoad(.w32, disc_reg, box_ptr_reg, @intCast(tu_data.discriminant_offset.get(self.layout_store.targetUsize())));
+                    } else if (comptime word_size < 8) {
+                        // A discriminant fits a word; `discriminantResult`
+                        // widens it.
+                        try self.codegen.emitLoad(word, disc_reg, box_ptr_reg, @intCast(tu_data.discriminant_offset.get(self.layout_store.targetUsize())));
                     } else {
                         try self.codegen.emitLoad(wide64_reg_width, disc_reg, box_ptr_reg, @intCast(tu_data.discriminant_offset.get(self.layout_store.targetUsize())));
                     }
@@ -16687,7 +17457,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.emitMaskDiscriminant(disc_reg, tu_data.discriminant_size, mask);
                     }
 
-                    return .{ .general_reg = disc_reg };
+                    return self.discriminantResult(disc_reg, disc.target_layout);
                 }
             }
 
@@ -18018,6 +18788,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     if (float.width == .f32) {
                         try self.codegen.emitStoreStackF32(slot, float.reg);
                         try self.codegen.emitLoadStack(.w32, target_reg, slot);
+                    } else if (comptime word_size < 8) {
+                        // An F64 is a Wide64 on a 32-bit target, which never
+                        // enters one general register (D6).
+                        unreachable;
                     } else {
                         try self.codegen.emitStoreStackF64(slot, float.reg);
                         try self.codegen.emitLoadStack(wide64_reg_width, target_reg, slot);
@@ -18924,14 +19698,28 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// Emit the zero-width result of a sublist-shaped op. The surviving
         /// length is `min(len, size -| start)`, built from saturating
         /// subtraction alone because `min(x, y)` is `y -| (y -| x)`.
+        /// Load the `u64` in an 8-byte frame slot as a word. On a 32-bit
+        /// target a value with a high word saturates to the largest word,
+        /// which no list length exceeds.
+        fn emitLoadU64SlotSaturated(self: *Self, dst: GeneralReg, slot: i32) Allocator.Error!void {
+            try self.codegen.emitLoad(word, dst, frame_ptr, slot);
+            if (comptime word_size < 8) {
+                const high = try self.allocTempGeneral();
+                try self.codegen.emitLoadStack(word, high, slot + word_size);
+                try self.codegen.emitCmpImm(high, 0);
+                try self.codegen.emit.dataProc(.ne, .mvn, false, dst, .r0, .{ .imm = arm32.ModImm.of(0) });
+                self.codegen.freeGeneral(high);
+            }
+        }
+
         fn emitZstSublist(self: *Self, list_off: i32, start_at: i32, len_at: i32) Allocator.Error!ValueLocation {
             const avail_reg = try self.allocTempGeneral();
             const start_reg = try self.allocTempGeneral();
             const want_reg = try self.allocTempGeneral();
             const tmp_reg = try self.allocTempGeneral();
             try self.codegen.emitLoad(word, avail_reg, frame_ptr, list_off + listFieldOffset("length"));
-            try self.codegen.emitLoad(word, start_reg, frame_ptr, start_at);
-            try self.codegen.emitLoad(word, want_reg, frame_ptr, len_at);
+            try self.emitLoadU64SlotSaturated(start_reg, start_at);
+            try self.emitLoadU64SlotSaturated(want_reg, len_at);
             try self.codegen.emitSaturatingSub(avail_reg, avail_reg, start_reg);
             try self.codegen.emitSaturatingSub(tmp_reg, avail_reg, want_reg);
             try self.codegen.emitSaturatingSub(avail_reg, avail_reg, tmp_reg);
@@ -20222,18 +21010,25 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     // i128 by arithmetic-shifting a copy right by word_bits - 1
                     // to fill the higher words.
                     const sign_reg = try self.allocTempGeneral();
-                    if (comptime isa.binaryIs(.aarch64)) {
-                        try self.emitStoreToPtr(word_store_width, reg, ptr_reg, 0);
-                        try self.codegen.emit.asrRegRegImm(word, sign_reg, reg, word_bits - 1);
-                        var offset: i32 = word_size;
-                        while (offset < 16) : (offset += word_size) {
-                            try self.emitStoreToPtr(word_store_width, sign_reg, ptr_reg, offset);
-                        }
-                    } else {
-                        try self.codegen.emit.movMemReg(word, ptr_reg, 0, reg);
-                        try self.emitMovRegReg(sign_reg, reg);
-                        try self.codegen.emit.sarRegImm8(word, sign_reg, word_bits - 1);
-                        try self.codegen.emit.movMemReg(word, ptr_reg, word_size, sign_reg);
+                    switch (isa) {
+                        .aarch64, .arm32 => {
+                            try self.emitStoreToPtr(word_store_width, reg, ptr_reg, 0);
+                            if (comptime isa == .aarch64) {
+                                try self.codegen.emit.asrRegRegImm(word, sign_reg, reg, word_bits - 1);
+                            } else {
+                                try self.codegen.emitAsrImm(word, sign_reg, reg, word_bits - 1);
+                            }
+                            var offset: i32 = word_size;
+                            while (offset < 16) : (offset += word_size) {
+                                try self.emitStoreToPtr(word_store_width, sign_reg, ptr_reg, offset);
+                            }
+                        },
+                        .x86_64 => {
+                            try self.codegen.emit.movMemReg(word, ptr_reg, 0, reg);
+                            try self.emitMovRegReg(sign_reg, reg);
+                            try self.codegen.emit.sarRegImm8(word, sign_reg, word_bits - 1);
+                            try self.codegen.emit.movMemReg(word, ptr_reg, word_size, sign_reg);
+                        },
                     }
                     self.codegen.freeGeneral(sign_reg);
                 },
@@ -21768,12 +22563,22 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         }
                         break :blk slot;
                     },
-                    .general_reg,
-                    .float_reg,
-                    .vector_reg,
+                    // A Wide64 takes two words on a 32-bit target, and may
+                    // be an immediate or an F64 register (D6).
                     .immediate_i64,
-                    .immediate_f32,
                     .immediate_f64,
+                    .float_reg,
+                    => if (comptime word_size < 8)
+                        try self.wide64StackOffset(info.loc)
+                    else if (builtin.mode == .Debug) {
+                        std.debug.panic(
+                            "freezeCallArg expected stack-backed multi-reg arg, got {s} for layout {any}",
+                            .{ @tagName(info.loc), info.layout_idx },
+                        );
+                    } else unreachable,
+                    .general_reg,
+                    .vector_reg,
+                    .immediate_f32,
                     .noreturn,
                     => if (builtin.mode == .Debug) {
                         std.debug.panic(
@@ -21935,7 +22740,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     try self.codegen.emitLoadImm(scratch_reg, val);
                     try self.codegen.emitStore(word, frame_ptr, slot, scratch_reg);
                 },
-                .immediate_f64 => |val| {
+                // An F64 takes two words on a 32-bit target, so the
+                // multi-register path freezes it.
+                .immediate_f64 => |val| if (comptime word_size < 8) unreachable else {
                     const bits: u64 = @bitCast(val);
                     try self.codegen.emitLoadImm(scratch_reg, @bitCast(bits));
                     try self.codegen.emitStore(wide64_reg_width, frame_ptr, slot, scratch_reg);

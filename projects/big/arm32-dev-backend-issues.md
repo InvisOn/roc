@@ -109,6 +109,19 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   invariant violation. That is best-effort recovery in a compiler stage.
 - **Fix direction:** make those arms invariant failures.
 
+### A U64 discriminant loaded as eight bytes
+
+- **Where:** `src/backend/dev/LirCodeGen.zig`, `generateDiscriminantAccess`
+  (the boxed tag-union arm) and `loadAndMaskDiscriminant` with
+  `disc_use_w32 == false`.
+- **Effect:** when the discriminant's target layout is `U64`, the 64-bit
+  targets load a full word from the discriminant offset and mask only
+  discriminants narrower than four bytes. A four-byte discriminant followed
+  by padding would read the padding into the high half. Unverified: it
+  depends on whether that padding is always zero.
+- **Fix direction:** load `discriminant_size` bytes and zero-extend, as the
+  arm32 path (a word load, then `discriminantResult`) already does.
+
 ### A string result stored from one register
 
 - **Where:** `src/backend/dev/LirCodeGen.zig`, `storeResultToSavedPtr`'s

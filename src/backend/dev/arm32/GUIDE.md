@@ -122,6 +122,46 @@ and `.zig-cache` keeps every version: a day of Track A iterations grew it past
 Check `du -sh .zig-cache` now and then; `rm -rf .zig-cache` is safe and costs
 one full rebuild.
 
+### Listing what the driver cannot yet compile for arm32 (J1)
+
+Nothing in the tree instantiates `LirCodeGen(.arm32musl)` until J1f adds its
+acceptance test, so the arm32 driver is only type-checked when a test does.
+While J1 is in progress, paste a temporary test above `test "stack reuse
+bounds locals..."` in `LirCodeGen.zig` that compiles a proc through it:
+
+```zig
+test "arm32: a proc compiles through LirCodeGen(.arm32musl)" {
+    const allocator = std.testing.allocator;
+    var store = LirStore.init(allocator);
+    defer store.deinit();
+    var state = try TestLayoutState.init(allocator);
+    defer state.deinit();
+    _ = try addSineChainProc(&store, allocator, 8);
+    var cg = try LirCodeGen(.arm32musl).init(allocator, &store, &state.layout_store, .{}, &.{}, .default);
+    defer cg.deinit();
+    try cg.compileAllProcSpecs(store.getProcSpecs());
+}
+```
+
+and run `zig build run-test-zig-module-backend`. Remove it before committing.
+Two things hide sites:
+
+- Each `isa.binaryIs` call reports its own error ("called at comptime
+  here"), but `wide64_reg_width` and `wide64_store_width` are declarations:
+  their `@compileError` fires once, however many sites reach them. To list
+  every reachable use, temporarily turn each into a function of the call
+  site, `fn wide64RegWidthAt(comptime src: std.builtin.SourceLocation)
+  @TypeOf(word)` that fails with `src.line`, and replace every use with
+  `wide64RegWidthAt(@src())` (a regex over the file; restore it afterwards).
+- Zig stops analyzing a function body at its first error, and a generic
+  callee (`ll: anytype`) is analyzed as part of its caller, so errors
+  surface in waves: fixing one can reveal the next in the same function.
+
+A site that compiles can still break the one-word `general_reg` invariant at
+run time: `emitSizedLoadStack` of a `.qword` and `emitLoadImm` of an
+immediate wider than 32 bits panic on arm32, and `ensureInGeneralReg` of an
+F64 is `unreachable`.
+
 ### Encoder
 
 With the tool (preferred):

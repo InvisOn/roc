@@ -32,7 +32,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J1b: AAPCS32 C-ABI classifier and physical assignment (`layout/abi/arm32.zig`, `Target.arm32`, `PhysicalArg.split`) | Done |
 | J1c: the driver's calls, returns, entry wrappers, helpers and two-way ISA tests | Done |
 | J1d: `Wide64` lowering (arithmetic, overflow, division, shifts, compares, unary ops, conversions, F64 bits) | Done |
-| J1d: four-word i128/Dec | In progress |
+| J1d: four-word i128/Dec, word division through `__aeabi_idivmod`, U64 window and discriminant values | Done |
 | J1e-J1f: NEON lowering, acceptance test | Not started |
 | J2-J4: gates, qemu execution, lock-in | Not started |
 
@@ -97,8 +97,8 @@ width-tagged loads and stores, stack addressing, immediates, compares,
 condition codes, register arithmetic, trap. The i128 arithmetic, SIMD
 kernels, checked-multiply sequences and entry wrappers do not yet: their
 x86_64/aarch64 bodies assume one 64-bit register per value, while arm32
-keeps i128 in memory with by-pointer helpers and 64-bit values in register
-pairs (D6), and its SIMD is NEON. They keep `binaryIs` tests until A2 and the
+keeps i128 in memory and 64-bit values in memory, loaded as register pairs
+(D6), and its SIMD is NEON. They keep `binaryIs` tests until A2 and the
 NEON batch define signatures that fit all three ISAs.
 
 ## Module layout
@@ -176,6 +176,19 @@ concrete or amended them.
   too; the encoder already has the shifted-register operand forms the
   standard inline 64-bit shift sequence needs, and J1 decides between the
   two.
+
+- **No by-pointer i128/Dec wrappers (D6, amended).** D6 planned new
+  by-pointer variants of the `callI128*`/`callDec*` wrappers because the
+  existing ones take four `u64` scalars, which do not fit r0-r3. They do not
+  need to: AAPCS32 passes each `u64` in an even register pair or on the
+  stack (C.3-C.5), and `CallBuilder.addMem64Arg` places each half from its
+  slot, so the arm32 driver calls the same wrappers as the 64-bit targets
+  with every operand's halves read from its 16-byte slot
+  (`callI128WrapperWords`).
+- **Word division (D7).** The floor has no `SDIV`/`UDIV` (D2), so a word
+  divide or remainder calls `__aeabi_idivmod`/`__aeabi_uidivmod` (quotient
+  r0, remainder r1) through `emitWordDivRem`; signed modulo keeps its divisor
+  in a frame slot across the call.
 
 ## How correctness is established
 
@@ -375,6 +388,25 @@ first.
 compiler-rt defines them, `roc_default_compiler_rt.o` in a link), by address
 when natively executing on an arm host.
 
+### Four-word i128 and Dec (J1d)
+
+An i128, U128 or Dec on a 32-bit target is four words in a 16-byte frame
+slot, `.stack_i128` (or `immediate_i128`). `i128StackOffset` gives the slot
+of any operand, sign- or zero-extending a word or a Wide64 as `getI128Parts`
+does on the 64-bit targets. Each i128 entry point routes on
+`comptime word_size < 8` to a `...Words` function:
+
+- add, subtract and bitwise ops chain `ADDS`/`ADCS` (or `SUBS`/`SBCS`, or
+  the logic op) over the words, and the final flags give overflow;
+- compares chain `CMP`/`SBCS`, equality ORs the words' XORs;
+- negate, not, abs, abs-diff, bit counts, narrowing and the minimum and
+  zero-divisor checks are word loops;
+- multiply, divide, remainder, modulo, shifts, Dec math, conversions to
+  float and string, and try-conversions call the existing decomposed
+  wrappers, each `u64` half passed as a pair (see "No by-pointer i128/Dec
+  wrappers" above). A wrapping i128 multiply uses the checked-multiply
+  wrapper, which stores the wrapped product, and ignores its flag.
+
 A genuinely 64-bit memory field written from an immediate
 (`StrFromUtf8Layout`'s tags) goes through `emitStoreImm64`, which is already
 width-generic: one store on a 64-bit target, two word stores on a 32-bit one.
@@ -547,8 +579,8 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 ## Next steps
 
 In plan order: J1 (arm32 `CodeGen` with the `Wide64` pair lowering and the
-NEON lowering of the SIMD ops, AAPCS32 `CallBuilder`, the by-pointer
-i128/Dec wrappers, every `binaryIs`, `wide64_reg_width` and
+NEON lowering of the SIMD ops, AAPCS32 `CallBuilder`, four-word i128/Dec,
+every `binaryIs`, `wide64_reg_width` and
 `@compileError("arm32: ...")` site), J2 (gates and hello world under qemu and
 on the Raspberry Pi), J3 and J4. Every Track A change must leave both byte-identity oracles
 unchanged.
