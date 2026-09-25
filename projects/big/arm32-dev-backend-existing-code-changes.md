@@ -221,3 +221,14 @@ check could gate every later commit.
   (`saveWide64CallReturnValue`, `moveWide64ToReturn`, the scalar count).
   Needed because the internal convention's "register" is a word, and 8-byte
   units would split or drop half of every multi-register value on arm32.
+- `LirCodeGen.zig` (refcount, string and list helpers): the RC helper
+  bodies and calls, Boxy capture drops, ZST list paths, string capture and
+  delimiter scanning, literal comparison, `emitMovRegReg`, and the chunked
+  zero, poison and copy loops use words (a 4-byte piece only below a larger
+  word). The RC helper's discriminant load follows structural equality's
+  rule. `List.split_*` stores its word-valued counts as the builtin's `u64`
+  arguments with `emitStoreWordAsU64` (a zero high word on 32-bit targets);
+  `List.sublist`'s U64 arguments, the hasher's u64 state and
+  `str_count_utf8_bytes`'s U64 result name `wide64_reg_width`. Needed because
+  these are pointers, lengths and bytes on every target, except the named
+  64-bit values, which a 32-bit target holds as two words.
