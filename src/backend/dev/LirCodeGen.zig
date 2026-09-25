@@ -17058,12 +17058,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Lower the call to the platform C ABI (shared classifier, same as the LLVM
             // backend and interpreter trampoline).
-            const abi_target: layout.abi.Target = if (comptime isa.binaryIs(.aarch64))
-                layout.abi.aarch64Target(target.toOsTag())
-            else if (comptime roc_target.isWindows())
-                .x86_64_windows
-            else
-                .x86_64_sysv;
+            const abi_target: layout.abi.Target = c_abi_target;
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
             const lowered = layout.abi.lower(arena_state.allocator(), self.layout_store, abi_target, arg_layouts, ret_layout, false) catch return error.OutOfMemory;
@@ -17073,8 +17068,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // sret: on x86 the indirect-result pointer is the first integer argument; on
             // aarch64 it is the dedicated x8 register, set just before the call.
-            const aarch64_sret = lowered.ret == .indirect and comptime isa.binaryIs(.aarch64);
-            if (lowered.ret == .indirect and comptime !isa.binaryIs(.aarch64)) {
+            const aarch64_sret = lowered.ret == .indirect and comptime isa == .aarch64;
+            if (lowered.ret == .indirect and comptime isa != .aarch64) {
                 try builder.setReturnByPointer(ret_slot);
             }
 
@@ -17146,8 +17141,16 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
 
             // Register-class return: store each result register into the return slot.
-            const hosted_ret_reg_0: GeneralReg = if (isa.binaryIs(.x86_64)) .RAX else .X0;
-            const hosted_ret_reg_1: GeneralReg = if (isa.binaryIs(.x86_64)) .RDX else .X1;
+            const hosted_ret_reg_0: GeneralReg = switch (isa) {
+                .x86_64 => .RAX,
+                .aarch64 => .X0,
+                .arm32 => .r0,
+            };
+            const hosted_ret_reg_1: GeneralReg = switch (isa) {
+                .x86_64 => .RDX,
+                .aarch64 => .X1,
+                .arm32 => .r1,
+            };
             switch (lowered.ret) {
                 .none, .indirect => {},
                 .registers => |registers| {
@@ -17160,9 +17163,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                 const reg = if (gp_i == 0) hosted_ret_reg_0 else hosted_ret_reg_1;
                                 if (piece.size <= 4) {
                                     try self.codegen.emitStore(.w32, frame_ptr, dst_off, reg);
-                                } else {
+                                } else if (comptime word_size == 8) {
                                     try self.codegen.emitStore(wide64_reg_width, frame_ptr, dst_off, reg);
-                                }
+                                } else unreachable; // a C-ABI piece is at most a word on arm32
                                 gp_i += 1;
                             },
                             .float, .vector => {
@@ -20896,6 +20899,22 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         const max_internal_return_words: u32 = 2;
         const max_internal_return_size: u32 = max_internal_return_words * word_size;
 
+        /// Callee-saved register holding an entry wrapper's argument pointer
+        /// (the x86_64 and arm32 wrappers; aarch64 uses X21 in its own path).
+        const entry_args_reg: GeneralReg = switch (isa) {
+            .x86_64 => .R13,
+            .aarch64 => .X21,
+            .arm32 => .r8,
+        };
+
+        /// The C-ABI target of this ISA and OS for hosted calls and C-ABI
+        /// entrypoints.
+        const c_abi_target: layout.abi.Target = switch (isa) {
+            .aarch64 => layout.abi.aarch64Target(target.toOsTag()),
+            .x86_64 => if (target.isWindows()) .x86_64_windows else .x86_64_sysv,
+            .arm32 => .arm32,
+        };
+
         /// Registers of a multi-word internal return value, in order.
         const internal_ret_regs = switch (isa) {
             .aarch64 => [_]GeneralReg{ .X0, .X1, .X2, .X3, .X4, .X5, .X6, .X7, .XR, .X9, .X10, .X11, .X12, .X13, .X14, .X15 },
@@ -24009,7 +24028,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             self.clearLocalLocationsRetainingCapacity();
             self.codegen.callee_saved_used = 0;
 
-            if (isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 const saved_callee_saved_used = self.codegen.callee_saved_used;
                 const saved_callee_saved_available = self.codegen.callee_saved_available;
                 const saved_early_return_patches_len = self.early_return_patches.items.len;
@@ -24098,9 +24117,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const saved_callee_saved_available = self.codegen.callee_saved_available;
                 const saved_early_return_patches_len = self.early_return_patches.items.len;
 
-                const rbx_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RBX);
-                const r12_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R12);
-                const r13_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R13);
+                // x86_64 and arm32: the result pointer, RocOps and argument
+                // pointer live in pinned callee-saved registers.
+                const rbx_bit = @as(u32, 1) << @intFromEnum(CC.RESULT_PTR_SAVE_REG);
+                const r12_bit = @as(u32, 1) << @intFromEnum(CC.ROC_OPS_SAVE_REG);
+                const r13_bit = @as(u32, 1) << @intFromEnum(entry_args_reg);
                 self.codegen.callee_saved_used = rbx_bit | r12_bit | r13_bit;
                 self.codegen.callee_saved_available &= ~(rbx_bit | r12_bit | r13_bit);
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
@@ -24111,20 +24132,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 if (self.generation_mode.internalEntrypoints()) {
                     // The compiler and the shim call the wrapper with the
                     // (ret_ptr, args_ptr) convention.
-                    if (target.isWindows()) {
-                        try self.codegen.emit.movRegReg(word, .RBX, .RCX);
-                        try self.codegen.emit.movRegReg(word, .R13, .RDX);
-                    } else {
-                        try self.codegen.emit.movRegReg(word, .RBX, .RDI);
-                        try self.codegen.emit.movRegReg(word, .R13, .RSI);
-                    }
+                    try self.emitMovRegReg(CC.RESULT_PTR_SAVE_REG, CC.PARAM_REGS[0]);
+                    try self.emitMovRegReg(entry_args_reg, CC.PARAM_REGS[1]);
                     if (self.boxy_runtime_used) try self.emitBoxyDictProcRegistrations();
-                    try self.generateEntrypointProcCall(entry_proc, arg_layouts, ret_layout, .RBX, .R13);
+                    try self.generateEntrypointProcCall(entry_proc, arg_layouts, ret_layout, CC.RESULT_PTR_SAVE_REG, entry_args_reg);
                 } else {
                     // Object files export natural C-ABI entrypoints. The
-                    // incoming sret pointer (if any) is captured into RBX
-                    // inside generateEntrypointBodyCAbi.
-                    try self.generateEntrypointBodyCAbi(entry_proc, arg_layouts, ret_layout, .RBX, &incoming_stack_copies);
+                    // incoming sret pointer (if any) is captured into the
+                    // result-pointer register inside generateEntrypointBodyCAbi.
+                    try self.generateEntrypointBodyCAbi(entry_proc, arg_layouts, ret_layout, CC.RESULT_PTR_SAVE_REG, &incoming_stack_copies);
                 }
 
                 const body_epilogue_offset = self.codegen.currentOffset();
@@ -24226,7 +24242,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         fn generateBoxyDictProcThunk(self: *Self, proc_id: lir.LIR.LirProcSpecId) Allocator.Error!usize {
             const func_start = self.codegen.currentOffset();
 
-            if (isa.binaryIs(.aarch64)) {
+            if (comptime isa == .aarch64) {
                 const saved_callee_saved_used = self.codegen.callee_saved_used;
                 const saved_callee_saved_available = self.codegen.callee_saved_available;
                 const saved_early_return_patches_len = self.early_return_patches.items.len;
@@ -24295,9 +24311,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 const saved_callee_saved_available = self.codegen.callee_saved_available;
                 const saved_early_return_patches_len = self.early_return_patches.items.len;
 
-                const rbx_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.RBX);
-                const r12_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R12);
-                const r13_bit = @as(u32, 1) << @intFromEnum(x86_64.GeneralReg.R13);
+                // x86_64 and arm32: the result pointer, RocOps and argument
+                // pointer live in pinned callee-saved registers.
+                const rbx_bit = @as(u32, 1) << @intFromEnum(CC.RESULT_PTR_SAVE_REG);
+                const r12_bit = @as(u32, 1) << @intFromEnum(CC.ROC_OPS_SAVE_REG);
+                const r13_bit = @as(u32, 1) << @intFromEnum(entry_args_reg);
                 self.codegen.callee_saved_used = rbx_bit | r12_bit | r13_bit;
                 self.codegen.callee_saved_available &= ~(rbx_bit | r12_bit | r13_bit);
                 self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
@@ -24752,12 +24770,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 unreachable;
             }
 
-            const abi_target: layout.abi.Target = if (comptime isa.binaryIs(.aarch64))
-                layout.abi.aarch64Target(target.toOsTag())
-            else if (comptime roc_target.isWindows())
-                .x86_64_windows
-            else
-                .x86_64_sysv;
+            const abi_target: layout.abi.Target = c_abi_target;
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
             const lowered = layout.abi.lower(arena_state.allocator(), self.layout_store, abi_target, arg_layouts, ret_layout, false) catch return error.OutOfMemory;
@@ -24768,10 +24781,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             // Capture the sret pointer before anything else can clobber it.
             if (lowered.ret == .indirect) {
-                if (comptime isa.binaryIs(.aarch64)) {
-                    try self.codegen.emit.movRegReg(word, sret_reg, .XR);
-                } else {
-                    try self.codegen.emit.movRegReg(word, sret_reg, int_param_regs[0]);
+                switch (isa) {
+                    .aarch64 => try self.codegen.emit.movRegReg(word, sret_reg, .XR),
+                    .x86_64 => try self.codegen.emit.movRegReg(word, sret_reg, int_param_regs[0]),
+                    .arm32 => try self.emitMovRegReg(sret_reg, int_param_regs[0]),
                 }
             }
 
@@ -24868,7 +24881,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         var copied: u32 = 0;
                         while (copied < raw_size) {
                             const remaining = raw_size - copied;
-                            const piece_size: u8 = if (remaining >= 8) 8 else if (remaining >= 4) 4 else if (remaining >= 2) 2 else 1;
+                            const piece_size: u8 = if (remaining >= word_size) word_size else if (remaining >= 4) 4 else if (remaining >= 2) 2 else 1;
                             try incoming_stack_copies.append(self.allocator, .{
                                 .dest_off = slot + @as(i32, @intCast(copied)),
                                 .incoming_byte_offset = stack_value.offset + copied,
@@ -24951,11 +24964,28 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // offset, so its copies happen here in the body. (On aarch64 the
             // offset depends on the final frame size; those copies are emitted
             // by emitEntryIncomingStackCopies right after the prologue.)
-            if (comptime isa.binaryIs(.x86_64)) {
+            if (comptime isa != .aarch64) {
                 for (incoming_stack_copies.items) |copy| {
                     const src_off = incoming_stack_arg_base_offset + @as(i32, @intCast(copy.incoming_byte_offset));
                     switch (copy.kind) {
-                        .value => |width| {
+                        .value => |width| if (comptime isa == .arm32) {
+                            // Stack pieces are at most a word on arm32.
+                            switch (width) {
+                                1 => {
+                                    try self.codegen.emitLoadW8(scratch_reg, frame_ptr, src_off);
+                                    try self.codegen.emitStoreW8(frame_ptr, copy.dest_off, scratch_reg);
+                                },
+                                2 => {
+                                    try self.codegen.emitLoadW16(scratch_reg, frame_ptr, src_off);
+                                    try self.codegen.emitStoreW16(frame_ptr, copy.dest_off, scratch_reg);
+                                },
+                                4 => {
+                                    try self.codegen.emitLoad(word, scratch_reg, frame_ptr, src_off);
+                                    try self.codegen.emitStore(word, frame_ptr, copy.dest_off, scratch_reg);
+                                },
+                                else => unreachable,
+                            }
+                        } else {
                             const register_width: x86_64.RegisterWidth = switch (width) {
                                 1 => .w8,
                                 2 => .w16,
@@ -24999,7 +25029,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         try self.storeResultToSavedPtr(result_loc, ret_layout, sret_reg);
                     }
                     // Both SysV and Win64 require the sret pointer back in RAX.
-                    if (comptime isa.binaryIs(.x86_64)) {
+                    if (comptime isa == .x86_64) {
                         try self.codegen.emit.movRegReg(word, .RAX, sret_reg);
                     }
                 },
@@ -25016,9 +25046,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                 gp_i += 1;
                                 if (piece.size <= 4) {
                                     try self.codegen.emitLoad(.w32, reg, frame_ptr, src_off);
-                                } else {
+                                } else if (comptime word_size == 8) {
                                     try self.codegen.emitLoad(wide64_reg_width, reg, frame_ptr, src_off);
-                                }
+                                } else unreachable; // a C-ABI piece is at most a word on arm32
                             },
                             .float, .vector => {
                                 try self.codegen.emitEntryFloatLoad(src_off, fp_i, piece.size);
@@ -25034,7 +25064,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         /// area into the frame. Emitted right after the prologue on aarch64,
         /// where that area begins at [fp + frame_total].
         fn emitEntryIncomingStackCopies(self: *Self, copies: []const EntryStackCopy, frame_total: i32) Allocator.Error!void {
-            if (comptime !isa.binaryIs(.aarch64)) {
+            if (comptime isa != .aarch64) {
                 std.debug.assert(copies.len == 0);
                 return;
             }
