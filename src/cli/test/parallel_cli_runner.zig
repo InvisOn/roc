@@ -15,6 +15,10 @@
 //!   --specialize=<yes|no> Override the runtime lowering strategy for platform jobs
 //!   --cross-target <name> Build platform cases for this target without running them
 //!   --cross-opt=<opt>    Build those cases with --opt=<opt> (dev, size or speed)
+//!   --cross-run          Also run each cross-built program, with the checks
+//!                        a native run gets
+//!   --cross-runner=<cmd> Run cross-built programs through <cmd> (for example
+//!                        qemu-arm-static) instead of directly
 //!   --glue-roc <path>    Roc binary to use for glue generation (default: <roc_binary>)
 //!   --glue-opt <opt>     Glue execution mode: default, dev, size, or speed
 //!   --verbose            Print PASS results and timing details
@@ -289,8 +293,20 @@ const PlatformCase = struct {
         native_run,
         /// Build natively, run with --test <spec>; check exit code 0
         io_spec: []const u8,
-        /// Build for the named cross-compilation target without running.
-        cross_compile: []const u8,
+        /// Build for a cross-compilation target, and with `--cross-run`
+        /// run the program as its native case would.
+        cross_compile: CrossCompile,
+    };
+
+    const CrossCompile = struct {
+        target: []const u8,
+        run: CrossRun,
+    };
+
+    /// How a cross-built program runs: bare, or with `--test <spec>`.
+    const CrossRun = union(enum) {
+        native_run,
+        io_spec: []const u8,
     };
 };
 
@@ -732,7 +748,7 @@ fn appendCrossCompilePlatformSpecs(
     switch (platform.test_apps) {
         .single => |app_name| {
             const roc_file = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ platform.base_dir, app_name });
-            try appendCrossCompileCase(allocator, cases, platform.name, target, roc_file, &.{}, filters);
+            try appendCrossCompileCase(allocator, cases, platform.name, target, roc_file, .native_run, &.{}, filters);
         },
         .spec_list => |specs| {
             for (specs) |spec| {
@@ -742,6 +758,7 @@ fn appendCrossCompilePlatformSpecs(
                     platform.name,
                     target,
                     spec.roc_file,
+                    .{ .io_spec = spec.io_spec },
                     spec.expected_build_stderr_contains,
                     filters,
                 );
@@ -749,7 +766,7 @@ fn appendCrossCompilePlatformSpecs(
         },
         .simple_list => |specs| {
             for (specs) |spec| {
-                try appendCrossCompileCase(allocator, cases, platform.name, target, spec.roc_file, &.{}, filters);
+                try appendCrossCompileCase(allocator, cases, platform.name, target, spec.roc_file, .native_run, &.{}, filters);
             }
         },
     }
@@ -761,6 +778,7 @@ fn appendCrossCompileCase(
     platform: []const u8,
     target: []const u8,
     roc_file: []const u8,
+    run: PlatformCase.CrossRun,
     expected_build_stderr_contains: []const []const u8,
     filters: []const []const u8,
 ) CliRunnerError!void {
@@ -773,7 +791,7 @@ fn appendCrossCompileCase(
             .roc_file = roc_file,
             .platform = platform,
             .expected_build_stderr_contains = expected_build_stderr_contains,
-            .test_kind = .{ .cross_compile = target },
+            .test_kind = .{ .cross_compile = .{ .target = target, .run = run } },
         } },
     };
     if (matchesFilters(case, filters)) {
@@ -2486,6 +2504,12 @@ var glue_roc_binary_path: []const u8 = "";
 var glue_execution_mode: GlueExecutionMode = .default;
 var platform_specialization_arg: ?[]const u8 = null;
 var cross_build_opt_arg: ?[]const u8 = null;
+/// Whether `--cross-run` asked to run cross-built programs.
+var cross_run: bool = false;
+/// The `--cross-runner` command cross-built programs run through, if any.
+var cross_runner: ?[]const u8 = null;
+/// The backend `--cross-opt` selects; `roc build`'s default (speed) when absent.
+var cross_build_opt: OptMode = .speed;
 var project_root_path: []const u8 = "";
 
 const CaseEnv = struct {
@@ -2632,7 +2656,7 @@ fn runPlatformCase(io: std.Io, allocator: Allocator, spec: CliCase, timeout_ms: 
         return .{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "failed to set isolated temp dir" };
 
     const result = switch (platform.test_kind) {
-        .cross_compile => |target| runCrossCompileTest(io, allocator, target, platform, roc_file, output_name, &env_map, dirs.work_dir, &timer, timeout_ms),
+        .cross_compile => |cross| runCrossCompileTest(io, allocator, cross, platform, roc_file, output_name, &env_map, dirs.work_dir, &timer, timeout_ms),
         .native_run, .io_spec => blk: {
             const backend = spec.backend orelse
                 break :blk TestResult{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "platform case missing backend" };
@@ -2812,7 +2836,7 @@ fn runCompiledTest(
 fn runCrossCompileTest(
     io: std.Io,
     allocator: Allocator,
-    target: []const u8,
+    cross: PlatformCase.CrossCompile,
     platform: PlatformCase,
     roc_file: []const u8,
     output_name: []const u8,
@@ -2821,7 +2845,7 @@ fn runCrossCompileTest(
     timer: *harness.Timer,
     timeout_ms: u64,
 ) TestResult {
-    const target_arg = std.fmt.allocPrint(allocator, "--target={s}", .{target}) catch
+    const target_arg = std.fmt.allocPrint(allocator, "--target={s}", .{cross.target}) catch
         return .{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "failed to allocate target arg" };
     defer allocator.free(target_arg);
     const output_arg = std.fmt.allocPrint(allocator, "--output={s}", .{output_name}) catch
@@ -2855,7 +2879,7 @@ fn runCrossCompileTest(
         return .{ .status = .infra_error, .phase = .build, .duration_ns = timer.read(), .build_ns = build_timer.read(), .message = msg };
     };
     const build_ns = build_timer.read();
-    const expected_stderr = platform.expected_build_stderr_contains;
+    const expected_stderr = expectedBuildStderrForBackend(cross_build_opt, platform.expected_build_stderr_contains);
     if (processTimedOut(build_result.stderr) or hasMemoryErrors(build_result.stderr) != null or
         !buildSucceededOrExpectedDiagnostics(build_result, expected_stderr))
     {
@@ -2877,7 +2901,39 @@ fn runCrossCompileTest(
     if (!builtOutputExists(io, allocator, output_name)) {
         return .{ .status = .build_failed, .phase = .build, .duration_ns = timer.read(), .build_ns = build_ns, .message = "cross-build succeeded but output file was not created" };
     }
-    return .{ .status = .pass, .phase = .build, .duration_ns = timer.read(), .build_ns = build_ns };
+    if (!cross_run) return .{ .status = .pass, .phase = .build, .duration_ns = timer.read(), .build_ns = build_ns };
+
+    // Run the program as its native case would, through the runner when one
+    // is given.
+    var run_argv_buf: [4][]const u8 = undefined;
+    var argc: usize = 0;
+    if (cross_runner) |runner| {
+        run_argv_buf[argc] = runner;
+        argc += 1;
+    }
+    run_argv_buf[argc] = output_name;
+    argc += 1;
+    switch (cross.run) {
+        .native_run => {},
+        .io_spec => |io_spec| {
+            run_argv_buf[argc] = "--test";
+            argc += 1;
+            run_argv_buf[argc] = io_spec;
+            argc += 1;
+        },
+    }
+    var run_timer = harness.Timer.start() catch return .{ .status = .infra_error, .phase = .run, .duration_ns = timer.read(), .build_ns = build_ns, .message = "no clock" };
+    const run_timeout_ms = childCommandTimeoutMs(timer, timeout_ms) orelse
+        return timeoutFailure(allocator, timer, .run, "case timeout exhausted before cross-built output started");
+    const run_result = util.runChildWithTimeout(io, allocator, run_argv_buf[0..argc], .{
+        .cwd = work_dir,
+        .max_output_bytes = 10 * 1024 * 1024,
+        .timeout_ms = run_timeout_ms,
+    }) catch |err| {
+        const msg = std.fmt.allocPrint(allocator, "cross-run spawn error: {}", .{err}) catch "cross-run spawn error";
+        return .{ .status = .infra_error, .phase = .run, .duration_ns = timer.read(), .build_ns = build_ns, .run_ns = run_timer.read(), .message = msg };
+    };
+    return resultFromProcess(run_result, timer, .run, build_ns, run_timer.read(), "cross-run failed");
 }
 
 fn builtOutputExists(io: std.Io, allocator: Allocator, output_name: []const u8) bool {
@@ -12320,6 +12376,12 @@ const ParsedRunnerArgs = struct {
     /// `--opt=<mode>` for cross-target builds, or null for `roc build`'s
     /// default.
     cross_opt_arg: ?[]const u8 = null,
+    /// The backend `cross_opt_arg` selects.
+    cross_opt: OptMode = .speed,
+    /// Run cross-built programs after building them.
+    cross_run: bool = false,
+    /// Command to run cross-built programs through.
+    cross_runner: ?[]const u8 = null,
 };
 
 fn parseSuiteName(value: []const u8) ?Suite {
@@ -12357,6 +12419,9 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
     var specialization_arg: ?[]const u8 = null;
     var cross_target: ?[]const u8 = null;
     var cross_opt_arg: ?[]const u8 = null;
+    var cross_opt: OptMode = .speed;
+    var parsed_cross_run = false;
+    var parsed_cross_runner: ?[]const u8 = null;
     var saw_suite = false;
     var i: usize = 1;
     while (i < raw_args.len) : (i += 1) {
@@ -12411,6 +12476,14 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
             cross_target = value;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--cross-run")) {
+            parsed_cross_run = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--cross-runner=")) {
+            parsed_cross_runner = arg["--cross-runner=".len..];
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--cross-opt=")) {
             const value = arg["--cross-opt=".len..];
             const known = std.mem.eql(u8, value, "dev") or std.mem.eql(u8, value, "size") or std.mem.eql(u8, value, "speed");
@@ -12418,6 +12491,7 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
                 std.debug.print("unknown cross opt: {s}\n", .{value});
                 return error.InvalidArgs;
             }
+            cross_opt = std.meta.stringToEnum(OptMode, value).?;
             cross_opt_arg = try std.fmt.allocPrint(allocator, "--opt={s}", .{value});
             continue;
         }
@@ -12469,6 +12543,14 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
         std.debug.print("--cross-opt requires --cross-target\n", .{});
         return error.InvalidArgs;
     }
+    if ((parsed_cross_run or parsed_cross_runner != null) and cross_target == null) {
+        std.debug.print("--cross-run and --cross-runner require --cross-target\n", .{});
+        return error.InvalidArgs;
+    }
+    if (parsed_cross_runner != null and !parsed_cross_run) {
+        std.debug.print("--cross-runner requires --cross-run\n", .{});
+        return error.InvalidArgs;
+    }
     if (cross_target != null and !suites.includesOnly(.platforms)) {
         std.debug.print("--cross-target can only be used with the platforms suite\n", .{});
         return error.InvalidArgs;
@@ -12488,6 +12570,9 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
         .specialization_arg = specialization_arg,
         .cross_target = cross_target,
         .cross_opt_arg = cross_opt_arg,
+        .cross_opt = cross_opt,
+        .cross_run = parsed_cross_run,
+        .cross_runner = parsed_cross_runner,
     };
 }
 
@@ -12579,7 +12664,7 @@ test "cross target builds one build-only case per matching platform spec" {
         try std.testing.expectEqual(@as(?OptMode, null), case.backend);
         try std.testing.expect(std.mem.startsWith(u8, case.body.platform.roc_file, "test/fx/"));
         if (std.meta.activeTag(case.body.platform.test_kind) != .cross_compile) return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings("x64musl", case.body.platform.test_kind.cross_compile);
+        try std.testing.expectEqualStrings("x64musl", case.body.platform.test_kind.cross_compile.target);
     }
 }
 
@@ -12623,6 +12708,9 @@ pub fn main(init: std.process.Init) CliRunnerError!void {
     glue_execution_mode = parsed.glue_options.execution_mode;
     platform_specialization_arg = parsed.specialization_arg;
     cross_build_opt_arg = parsed.cross_opt_arg;
+    cross_build_opt = parsed.cross_opt;
+    cross_run = parsed.cross_run;
+    cross_runner = parsed.cross_runner;
 
     const tests = try buildCases(spec_arena.allocator(), args.filters, args.include_llvm, parsed.suites, parsed.glue_options, parsed.cross_target);
     if (tests.len == 0) {
