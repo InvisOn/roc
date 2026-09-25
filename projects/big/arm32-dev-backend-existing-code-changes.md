@@ -259,3 +259,17 @@ check could gate every later commit.
   verified by comparing the `.text` of `test/simd/differential.roc` and
   `test/cli/runtime_simd_smoke.roc` built with `--opt=dev` for x64musl and
   arm64musl before and after (identical).
+
+### Track D: CI lanes
+
+- `src/cli/test/parallel_cli_runner.zig`: `--cross-opt=<dev|size|speed>`
+  passes `--opt=` to every cross build (and requires `--cross-target`).
+  Needed because the arm32 lane must build with the dev backend while the
+  other lanes keep `roc build`'s default; an explicit option rather than a
+  rule keyed on the target name.
+- `src/cli/test/platform_config.zig`: `int` and `fx` list arm32musl (the two
+  platforms whose manifests declare it). Needed so `--cross-target=arm32musl`
+  selects their cases instead of reporting an unknown target.
+- `.github/workflows/ci_cross_compile.yml`, `ci_zig.yml`: the arm32 lanes
+  (cross-compile with `--opt=dev`, a qemu `cortex-a9` on-target row, the eval
+  runner built for arm32 and run under qemu), all allowed to fail until J3.

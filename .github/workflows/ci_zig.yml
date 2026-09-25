@@ -604,6 +604,31 @@ jobs:
           command: zig build -Dtarget=${{ matrix.target }}
           retry_count: 3
 
+      # J3a of projects/big/arm32-dev-backend.md: the eval corpus run by a
+      # compiler built for arm32 under qemu on the dev backend's CPU floor
+      # (cortex-a9: ARMv7-A, NEON, VFPv3-D32, no integer divide). Allowed to
+      # fail until J3 makes it required.
+      - name: Install qemu (arm32)
+        if: matrix.target == 'arm-linux-musleabihf'
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          qemu-arm-static -cpu help | grep -E '^ *cortex-a9$'
+
+      - name: Build the eval runner for arm32
+        if: matrix.target == 'arm-linux-musleabihf'
+        continue-on-error: true
+        uses: ./.github/actions/flaky-retry
+        with:
+          command: zig build build-test-eval-runner build-test-eval-host-effects-runner -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast
+          retry_count: 3
+
+      - name: Run the eval corpus on arm32 under qemu
+        if: matrix.target == 'arm-linux-musleabihf'
+        continue-on-error: true
+        run: qemu-arm-static -cpu cortex-a9 zig-out/bin/eval-test-runner --timeout 300000
+
   # Test cross-compilation with Roc's cross-compilation system (musl + glibc)
   roc-cross-compile:
     uses: ./.github/workflows/ci_cross_compile.yml
