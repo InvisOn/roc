@@ -16951,6 +16951,27 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                             }
                         }
                     },
+                    // AAPCS32 C.5: the leading words in the last core
+                    // registers, the rest at the start of the stack area.
+                    .split => |split| {
+                        for (split.registers) |assigned| {
+                            const piece = assigned.piece;
+                            std.debug.assert(piece.class == .integer);
+                            builder.addMemArgAt(
+                                assigned.register_index,
+                                frame_ptr,
+                                slot_off + @as(i32, @intCast(piece.offset)),
+                                CallingConventionMod.Promotion.fromRegPiece(piece),
+                            );
+                        }
+                        builder.addStackMemArgAt(
+                            split.stack.offset,
+                            frame_ptr,
+                            slot_off + @as(i32, split.value_offset),
+                            split.stack.size,
+                            .none,
+                        );
+                    },
                 }
             }
 
@@ -24607,6 +24628,40 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                                     });
                                 },
                             }
+                        }
+                        const loc = self.stackLocationForLayout(arg_layout, slot);
+                        try self.scratch_arg_infos.append(.{
+                            .loc = loc,
+                            .layout_idx = arg_layout,
+                            .num_regs = self.calcArgRegCount(loc, arg_layout),
+                        });
+                    },
+                    // AAPCS32 C.5: the leading words arrive in the last core
+                    // registers, the rest at the start of the stack area.
+                    .split => |split| {
+                        const runtime_layout = self.runtimeRepresentationLayoutIdx(arg_layout);
+                        const raw_size = self.layout_store.layoutSizeAlign(self.layout_store.getLayout(runtime_layout)).size;
+                        const slot_size = @max(self.entrypointParamSlotSize(arg_layout), std.mem.alignForward(u32, raw_size, 8));
+                        const slot = self.codegen.allocStackSlot(slot_size);
+                        for (split.registers) |assigned| {
+                            std.debug.assert(assigned.piece.class == .integer and assigned.piece.size <= word_size);
+                            try reg_captures.append(self.allocator, .{
+                                .dest_off = slot + @as(i32, @intCast(assigned.piece.offset)),
+                                .width = word_size,
+                                .reg_index = assigned.register_index,
+                                .is_float = false,
+                            });
+                        }
+                        var copied: u32 = 0;
+                        while (copied < split.stack.size) {
+                            const remaining = split.stack.size - copied;
+                            const piece_size: u8 = if (remaining >= word_size) word_size else if (remaining >= 2) 2 else 1;
+                            try incoming_stack_copies.append(self.allocator, .{
+                                .dest_off = slot + @as(i32, split.value_offset) + @as(i32, @intCast(copied)),
+                                .incoming_byte_offset = split.stack.offset + copied,
+                                .kind = .{ .value = piece_size },
+                            });
+                            copied += piece_size;
                         }
                         const loc = self.stackLocationForLayout(arg_layout, slot);
                         try self.scratch_arg_infos.append(.{

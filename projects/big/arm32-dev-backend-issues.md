@@ -135,6 +135,18 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 
 ## Open: risks for the remaining arm32 work
 
+### The interpreter's hosted-call trampoline assumes a 64-bit host
+
+- **Where:** `src/eval/host_trampoline.zig`, the ABI target selection, and
+  `src/eval/host_trampoline.S`.
+- **Effect:** any host that is not aarch64 is treated as x86_64 SysV, so an
+  interpreter running *on* arm32 (the Track D/J3a lane) would marshal hosted
+  calls with the wrong ABI; the trampoline also carries 64-bit registers and
+  has no A32 entry. The J3a baseline's 51 passing cases make no hosted call.
+- **Fix direction:** an explicit arm32 selection (`layout.abi.Target.arm32`,
+  which now exists) and an A32 trampoline, or an explicit refusal on hosts the
+  trampoline does not implement, before J3 makes the lane required.
+
 ### Baseline of the arm32 eval lane before J1
 
 `zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf
