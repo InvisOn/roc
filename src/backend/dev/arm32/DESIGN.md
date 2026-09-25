@@ -661,7 +661,7 @@ shifts and bitwise operations. J1 composes the rest from the encoders above:
 | widen, narrow_wrap/sat | `VMOVL` (`VSHLL #0`), `VMOVN`/`VQMOVN`/`VQMOVUN` |
 | bitmask | `VSHR` to the sign bit, `VAND` with a bit-weight constant, `VPADD` chains, core move |
 | splat, get/with_lane, load/store, u128 bits | `VDUP` (core or lane), `VMOV` lane↔core, `VMOV` D↔core pair for 64-bit lanes, `VLD1`/`VST1.8` (no alignment requirement), `VMOV` D↔core pairs |
-| clmul_lo/hi | composed from `VMULL.P8`, `VEOR` and `VEXT` (D2 already notes ARMv7 has no 64-bit polynomial multiply) |
+| clmul_lo/hi | a 64-step shift-and-XOR loop over the multiplier's bits (ARMv7 has no 64-bit polynomial multiply, D2) |
 
 ### A32 encoding facts that bit, or would have
 
