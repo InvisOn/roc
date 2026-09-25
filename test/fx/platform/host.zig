@@ -742,7 +742,30 @@ fn hostedBuilderPrintValue(builder: BuilderArgs) callconv(.c) void {
 /// Takes Host { name: Str } as first argument, returns Str
 const HostRecord = extern struct { name: RocStr };
 
-fn hostedHostGetGreeting(host: HostRecord) callconv(.c) RocStr {
+// ZIG BUG WORKAROUND (Zig 0.16, arm32): Zig passes a by-value `extern struct`
+// that *contains another struct* at an even core register, as if it were
+// 8-byte aligned, while AAPCS32 (and clang) start it at the next register. For
+// this function the result pointer takes r0, so Zig reads `HostRecord` from r2,
+// r3 and the stack, but Roc (following AAPCS32) passes it in r1-r3. See
+// "Zig 0.16 passes nested `extern struct` arguments off-ABI on arm" in
+// projects/big/arm32-dev-backend-issues.md.
+//
+// The workaround takes the inner `RocStr` directly on arm32. A struct with one
+// struct field has the same C ABI as that field on every target, so the Roc
+// side is unchanged and still correct.
+//
+// WHEN ZIG IS FIXED: set `work_around_zig_arm_nested_struct_bug` to false (then
+// delete it, `HostGreetingArg` and `hostRecordFromArg`, and give
+// `hostedHostGetGreeting` its plain `host: HostRecord` parameter).
+const work_around_zig_arm_nested_struct_bug = builtin.cpu.arch == .arm;
+const HostGreetingArg = if (work_around_zig_arm_nested_struct_bug) RocStr else HostRecord;
+
+fn hostRecordFromArg(arg: HostGreetingArg) HostRecord {
+    return if (work_around_zig_arm_nested_struct_bug) .{ .name = arg } else arg;
+}
+
+fn hostedHostGetGreeting(host_arg: HostGreetingArg) callconv(.c) RocStr {
+    const host = hostRecordFromArg(host_arg);
     const ops = g_roc_ops.?;
     const name_slice = host.name.asSlice();
     defer host.name.decref(ops);
