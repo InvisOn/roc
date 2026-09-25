@@ -36,6 +36,9 @@ pub const ValueStorage = @import("ValueStorage.zig");
 pub const ObjectWriter = @import("ObjectWriter.zig");
 pub const Dwarf = @import("Dwarf.zig");
 
+/// Publishes newly written instructions (the I-cache/D-cache protocol).
+pub const instruction_cache = @import("instruction_cache.zig");
+
 /// Executable memory for running generated code. Uses OS-specific APIs not available on freestanding.
 pub const ExecutableMemory = if (builtin.os.tag == .freestanding)
     void
