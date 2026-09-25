@@ -296,3 +296,12 @@ check could gate every later commit.
   two-way `binaryIs` dispatch becomes exhaustive switches with an arm32 body.
   Needed because the six `.arm32 => @compileError` sites stood where arm32's
   frame belongs, and a two-way test cannot name a third ISA.
+- `CallingConvention.zig` (`CallBuilder`): AAPCS32. Implicit stack slots and
+  aggregate copy pieces are a target word (8 bytes on 64-bit targets, as
+  before); `addMem64Arg`/`addImm64Arg` place a 64-bit argument in an even
+  register pair or an 8-aligned stack slot that closes the core registers
+  (C.3/C.5), and are `addMemArg`/`addImmArg` on 64-bit targets; float
+  arguments back-fill s0-s15; the call emitters gain arm32 arms (`blx r12`,
+  `blx rN`, BL with an `R_ARM_CALL` relocation) and the ISA-specific stores
+  and scratch moves go through exhaustive switches. Needed because the six
+  arm32 sites were compile errors and the two-way tests had no arm32 answer.
