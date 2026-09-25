@@ -38,6 +38,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | J2: `supportsTarget` gate, CLI and phase names, `--keep-temp`, arm32 runtime fixes found by real builds | Done (the snapshot tool keeps arm32 at `NOT_IMPLEMENTED` until J4) |
 | J2: the default platform declares `arm32musl` and `arm32linux` | Done; a CLI case builds `baseline_cpu_smoke.roc` for arm32musl |
 | J2: `arm32linux` (glibc) on the int platform | Done; runs on the Pi, CI builds it on the Linux host |
+| J2: arm32 lane of `run-check-simd-codegen` | Done; the exhaustive SIMD corpus builds, contains NEON, and passes under qemu and on the Pi |
 | J3b: `--cross-run`/`--cross-runner` in the CLI runner | Done; all 121 `test/fx` programs run correctly under qemu (the fx host works around a Zig 0.16 arm ABI bug) |
 | J3a, J3c, J4 | Not started |
 
