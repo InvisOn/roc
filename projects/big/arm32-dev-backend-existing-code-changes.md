@@ -13,6 +13,17 @@ eval-corpus object hashes) unless the entry says otherwise.
 
 ## Fixes to existing defects (separate commits)
 
+### The snapshot tool mapped every dev compile error to `NOT_IMPLEMENTED`
+
+`processDevObjectSnapshot` called `compileToObjectFile` for each target that
+passed its architecture pre-check and turned any error into the
+`NOT_IMPLEMENTED` hash (`else |_|`). Since the pre-check already excludes the
+unsupported targets, every error there is a real code-generation failure,
+which the snapshot silently recorded as "not implemented". It now logs the
+error and fails the snapshot. Needed before J2 lets the dev backend compile
+arm32, so an arm32 failure cannot be mistaken for an unsupported target. No
+effect on passing snapshots.
+
 ### Target data sized by the host's `usize` (`654087283b`)
 
 `LirCodeGen` measured target memory with the compiler host's word in three
@@ -354,3 +365,26 @@ check could gate every later commit.
   incoming stack arguments are copied at fixed fp offsets in word pieces;
   C-ABI integer pieces wider than four bytes are 64-bit-only. Needed because
   each two-way test was a compile error for arm32.
+
+### J2: turning cross-compilation on
+
+- `ObjectFileCompiler.zig`: `supportsTarget`, the one decision whether the
+  dev backend serves a target (x86_64, aarch64, arm32), used by
+  `crossCompileDispatch` and exported as `backend.devSupportsTarget`.
+- `cli/main.zig`: `rocBuildNative`'s architecture gate asks
+  `devSupportsTarget` (the LLVM path's 64-bit-only gate is unchanged); arm32
+  phase names; the entrypoint-ABI hash selects `.arm32`; `rocBuildNative`
+  honours `--keep-temp` as the LLVM path does.
+- `LirCodeGen.zig`, found by building real programs: a one-word frozen call
+  argument is `word_value_size` rather than `.qword`; the C-ABI entrypoint
+  stores an incoming VFP argument by its AAPCS32 S-register index and an
+  indirect argument's pointer as a word; `u64` builtin parameters go through
+  `addU64SlotArg`/`addImm64Arg`/`addMem64Arg` (`list_*`, `str_*`,
+  `debug_invalid_local`, `register_proc`, `list_concat`'s update modes,
+  `float_to_str`); switch conditions wider than the word compare as pairs
+  (`emitSwitchCondCompare`); in-bounds U64 indices use their low word; one-
+  register element copies are bounded by the word. All byte-identical on the
+  64-bit targets.
+- `cli/test/parallel_cli_runner.zig` (J3b): `--cross-run` and
+  `--cross-runner`, and the cross build's stderr expectations filtered by
+  backend (a fix to Track D's `--cross-opt`).

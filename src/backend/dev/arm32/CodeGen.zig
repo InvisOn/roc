@@ -796,12 +796,18 @@ pub fn CodeGen(comptime target: RocTarget) type {
             try self.storeFloatPiece(dst_off, index, size);
         }
 
-        /// Store an incoming float argument register into the frame.
-        pub fn emitEntryFloatStore(self: *Self, dest_off: i32, freg: FloatReg, size: u8) Allocator.Error!void {
+        /// Store an incoming VFP argument to [fp + dest_off]. `s_index` is
+        /// the value's first S register, AAPCS32's numbering of the VFP
+        /// argument registers: an f64 starts at an even one (d = s/2), a
+        /// vector at a multiple of four.
+        pub fn emitEntryVfpArgStore(self: *Self, dest_off: i32, s_index: u16, size: u8) Allocator.Error!void {
             switch (size) {
-                4 => try self.emitStoreStackF32(dest_off, freg),
-                8 => try self.emitStoreStackF64(dest_off, freg),
-                16 => try self.emitStoreStackV128(dest_off, freg),
+                4 => {
+                    const at = try self.reachable(.vfp, fp, dest_off);
+                    try self.emit.vstrF32(@enumFromInt(@as(u5, @intCast(s_index))), at.base, at.offset);
+                },
+                8 => try self.emitStoreStackF64(dest_off, @enumFromInt(@as(u5, @intCast(s_index / 2)))),
+                16 => try self.emitStoreStackV128(dest_off, @enumFromInt(@as(u5, @intCast(s_index / 2)))),
                 else => unreachable,
             }
         }

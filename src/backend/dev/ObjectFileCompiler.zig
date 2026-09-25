@@ -20,6 +20,7 @@ const lir = @import("lir");
 const CoreCtx = @import("ctx").CoreCtx;
 const LirStore = lir.LirStore;
 const LirProcSpec = lir.LirProcSpec;
+const roc_target_mod = @import("roc_target");
 const RocTarget = @import("roc_target").RocTarget;
 const Dwarf = @import("Dwarf.zig");
 const coff = @import("object/coff.zig");
@@ -171,7 +172,8 @@ pub const ObjectFileCompiler = struct {
     /// instantiation for the requested target. Works for both native and
     /// cross-compilation—the caller just passes the desired target.
     ///
-    /// Returns CompilationError.UnsupportedTarget for arm32 and wasm32 targets.
+    /// Returns CompilationError.UnsupportedTarget for wasm32 targets (see
+    /// `supportsTarget`).
     pub fn compileToObjectFile(
         self: *ObjectFileCompiler,
         lir_store: *const LirStore,
@@ -973,6 +975,16 @@ fn compileStaticDataObjectBytes(
 /// its default twin's instantiation and carries its CPU level as a runtime
 /// field, so the baseline targets cost no extra monomorphizations: they select
 /// different instruction sequences, not a different code generator.
+/// Whether the dev backend generates native code for `target`: x86_64,
+/// aarch64 and arm32. wasm32 has its own backend, and every gate that decides
+/// whether the dev backend serves a target asks this.
+pub fn supportsTarget(target: RocTarget) bool {
+    return switch (roc_target_mod.classifyCpuArch(target.toCpuArch())) {
+        .x86_64, .aarch64, .aarch64_be, .arm => true,
+        .wasm32, .other => false,
+    };
+}
+
 fn crossCompileDispatch(
     allocator: Allocator,
     lir_store: *const LirStore,
@@ -998,8 +1010,7 @@ fn crossCompileDispatch(
         const comptime_target: RocTarget = @enumFromInt(field.value);
         if (comptime comptime_target.defaultCpuTarget() != comptime_target) continue;
         if (default_target == comptime_target) {
-            const arch = comptime comptime_target.toCpuArch();
-            if (comptime (arch == .x86_64 or arch == .aarch64 or arch == .aarch64_be)) {
+            if (comptime supportsTarget(comptime_target)) {
                 return compileWithCodeGen(
                     LirCodeGenMod.LirCodeGen(comptime_target),
                     allocator,
