@@ -176,3 +176,17 @@ check could gate every later commit.
   `@offsetOf` and stores its two `u64` tags with `emitStoreImm64`. Needed
   because these are pointers, indices and word copies, and the tags are
   genuine 64-bit fields that a 32-bit target writes as two words.
+- `LirCodeGen.zig` (integer conversions): widening, wrapping and
+  integer-to-float conversions take their widths from
+  `numeric_conversion.getConversionSpec` (the wrapping arm's 38-way if-chain
+  for the destination width is gone), extend and mask by `word_bits - n`, and
+  on 32-bit targets route a conversion with a side wider than the word to
+  `generateWide64IntConversion` (J1). The unsigned-to-float arms merge: a
+  source narrower than the word takes the signed conversion, a word-sized one
+  the unsigned conversion (`emitSignedWordToFloat`/`emitUnsignedWordToFloat`).
+  Widening into i128 stores the word and then fill words up to 16 bytes. The
+  int-to-Dec arguments and `f64_from_bits` name `wide64_reg_width`, the width
+  of a 64-bit value in one register, which is a compile error on 32-bit
+  targets. Needed because on arm32 U32 is word-sized (a signed conversion of
+  it is wrong above 2^31) and 64-bit sources and destinations do not fit a
+  register.

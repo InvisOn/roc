@@ -297,6 +297,19 @@ with pair sequences and the D7 helpers. Shift counts are masked for word-sized
 types too, because an A32 register shift by 32 or more gives zero rather than
 wrapping the count.
 
+Conversions follow the same rule, reading both widths from
+`numeric_conversion.getConversionSpec`: within the word they extend or mask by
+`word_bits - n`; with a side wider than the word they go to
+`generateWide64IntConversion` (J1). An unsigned source narrower than the word
+converts to float with the signed instruction, a word-sized one with the
+unsigned conversion, so U32 moves to the unsigned path on arm32.
+
+A site that holds a 64-bit value in one register and has no generic form yet
+names `wide64_reg_width` instead of `.w64`. It equals `word` on the 64-bit
+targets and is a compile error on 32-bit ones, so `grep wide64_reg_width` is
+J1's list of `Wide64` sites to lower as pairs, beside `binaryIs` and the
+`generateWide64*` entry points.
+
 A genuinely 64-bit memory field written from an immediate
 (`StrFromUtf8Layout`'s tags) goes through `emitStoreImm64`, which is already
 width-generic: one store on a 64-bit target, two word stores on a 32-bit one.
