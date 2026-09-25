@@ -290,3 +290,9 @@ check could gate every later commit.
   method `emitCtz64` is renamed `emitCtzWord`. Needed because the driver
   calls it only on values that fit one register, and arm32's implementation
   counts a 32-bit word; the name now states the contract every ISA meets.
+- `FrameBuilder.zig`: the arm32 frame (D5: `push {fp, lr}; mov fp, sp`, one
+  SP decrement covering a fixed r4-r10 area and the locals, page probing at a
+  page or more, `mov sp, fp; pop {fp, pc}`), and `ForwardFrameBuilder`'s
+  two-way `binaryIs` dispatch becomes exhaustive switches with an arm32 body.
+  Needed because the six `.arm32 => @compileError` sites stood where arm32's
+  frame belongs, and a two-way test cannot name a third ISA.
