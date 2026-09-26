@@ -422,10 +422,9 @@ Fix each one in its own commit, and remove its entry in that commit.
     debugging used a separate ReleaseSafe build (about 20 minutes).
 
   **Plan.** Take these in order and stop once debugging is fast enough.
-  1. Verify and document `-Ddebug-gpa-traces` for arm32 unit tests (for
-     example `zig build run-test-zig-module-backend -Dtarget=arm-linux-musleabihf
-     -fqemu -Ddebug-gpa-traces`) in `src/backend/dev/arm32/TOOLS.md`. This
-     costs nothing and covers most unit-test debugging.
+  1. Done: `-Ddebug-gpa-traces` gives arm32 unit tests error-return traces
+     with source lines under qemu (verified with a throwaway failing test),
+     documented in `src/backend/dev/arm32/TOOLS.md`.
   2. Make the Debug arm32 eval runner link. A32 `BL` reaches ±32 MB, and LLD
      can only place range-extension thunks between input sections. The eval
      runner is one Zig compilation unit whose `.text` is a single input
