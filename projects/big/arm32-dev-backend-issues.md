@@ -184,12 +184,17 @@ explicit `abs32` kind.
 
 #### The interpreter's hosted-call trampoline assumes a 64-bit host
 
-**Status: open, narrowed.** The trampoline now refuses hosts it does not
-implement: `host_trampoline.available` is false and marshaling returns
-`error.UnsupportedArch` on anything but x86_64/aarch64 (since `c7528522f4`,
-J1b). So an interpreter running on arm32 fails cleanly instead of using the
-wrong ABI; hosted calls from the interpreter on an arm32 host still need an
-A32 trampoline.
+**Status: open, and worse than first recorded (found by reading
+`interpreter.zig`, not yet run).** On an arm32 host `host_trampoline.available`
+is false (since `c7528522f4`, J1b), but the interpreter does not refuse the
+call: it falls through to the "uniform" hosted ABI, calling the function as
+`fn (args_buf, ret_buf)`. Only platforms written for that ABI (the echo
+platform, for wasm32) register functions of that shape; an ordinary platform
+registers C-ABI functions, so an interpreter running on arm32 calls them with
+the wrong arguments. It is reached only by a compiler built for arm32 and run
+there with the interpreter; `roc build --opt=interpreter` refuses non-native
+targets, and the eval runners dispatch hosted calls through a callback, so
+none of the J3 runs exercised it.
 
 - **Where:** `src/eval/host_trampoline.zig`, the ABI target selection, and
   `src/eval/host_trampoline.S`.
