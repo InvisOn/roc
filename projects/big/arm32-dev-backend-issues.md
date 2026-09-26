@@ -1,4 +1,4 @@
-# ARM32 Dev Backend: Issues Found
+# ARM32 Dev Backend: Issues and Notes
 
 Issues found while carrying out `projects/big/arm32-dev-backend.md`, each
 verified in the tree rather than inferred. Most are pre-existing and outside
@@ -7,9 +7,26 @@ design and the reasoning behind the arm32 work are in
 `src/backend/dev/arm32/DESIGN.md`; every change made to existing code, and why,
 is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 
-## Open: pre-existing defects
+Nothing here is deleted when it stops being current: a resolved entry moves
+to "Resolved" with the commit that resolved it, and background that no longer
+describes the tree moves to "Background and history". The record of what was
+found, and why things are the way they are, stays in one place.
 
-### LIR images drop the layout store's recursive-graph keys
+Contents:
+
+1. Open
+   1. Pre-existing defects (outside arm32, found by this work)
+   2. Limitations of arm32 support
+   3. Annoyances to fix later
+   4. Follow-up ideas
+2. Resolved
+3. Background and history
+
+## 1. Open
+
+### 1.1 Pre-existing defects
+
+#### LIR images drop the layout store's recursive-graph keys
 
 - **Where:** `src/lir/lir_image.zig` rebuilds the layout store with an empty
   `interned_recursive_graphs` map (around `:402` and `:815`).
@@ -21,19 +38,10 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 - **Fix direction:** serialize the keys into the image. Making the digest
   tolerate their absence would be a fallback.
 
-### In-process relocation patching guesses the encoding
+#### `abs64` patching is sized by the host, not the relocation
 
-- **Where:** `src/backend/dev/Relocation.zig`, `patchLinkedFunctionRelocation`.
-- **Effect:** it picks x86 `call rel32` or AArch64 `BL` by decoding the bytes
-  around the relocation (`0xE8` before the offset, or the `BL` opcode bits)
-  instead of carrying an explicit relocation kind. That is recovering missing
-  information in a compiler stage, which AGENTS.md forbids, and it cannot be
-  extended to A32 `BL` without adding a third guess.
-- **Fix direction:** give function relocations an explicit encoding kind, as
-  `DataRelocationKind` does for data. Needed before J3a runs arm32 code
-  in-process.
-
-### `abs64` patching is sized by the host, not the relocation
+**Status: open.** Unchanged; arm32 code does not reach it because it uses the
+explicit `abs32` kind.
 
 - **Where:** `src/backend/dev/Relocation.zig`, `patchAbsolutePointerOperand`.
 - **Effect:** an `abs64` relocation writes four bytes when the *compiler host*
@@ -42,7 +50,7 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 - **Fix direction:** arm32 code uses the explicit `abs32` kind (added in A3);
   `abs64` should always write eight bytes.
 
-### The snapshot tool hashes programs that failed to type-check
+#### The snapshot tool hashes programs that failed to type-check
 
 - **Where:** `src/snapshot_tool/main.zig`, `type=dev_object` snapshots.
 - **Effect:** a type error turns the definition into `<runtime_error>` in the
@@ -51,7 +59,7 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 - **Fix direction:** report problems for `dev_object` snapshots (as other
   snapshot types do) or refuse to hash a program with errors.
 
-### Procedure symbol names change with every compiler build
+#### Procedure symbol names change with every compiler build
 
 - **Where:** `src/check/checked_artifact.zig` folds
   `build_options.compiler_artifact_hash` (from the git revision) into every
@@ -65,25 +73,14 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   Whether identities *should* depend on the compiler build is a design
   question for the identity owners, not for arm32.
 
-### glibc stub still emits `ret` for non-x86/aarch64/arm architectures
+#### glibc stub still emits `ret` for non-x86/aarch64/arm architectures
 
 - **Where:** `src/build/glibc_stub.zig`.
 - **Effect:** arm now gets real A32 bodies, but `aarch64_be`, `wasm32` and
   `other` still emit `ret`, which is not an instruction on most of them. Only
   reached for glibc cross targets, none of which use those architectures.
 
-### A backend unit test wrote to stderr, failing `zig build` (resolved)
-
-- **Where:** `wasm.WasmModule` test "mergeModule rejects same-name imports with
-  different signatures" printed "WASM merge: both modules import 'roc_crashed'".
-- **Effect:** `zig build run-test-zig-module-backend` reported failure although
-  the binary reported every test passed.
-- **Resolved:** the merge records the conflicting function in
-  `WasmModule.merge_type_conflict` instead of printing it, and the test
-  asserts the recorded conflict. The step passes, on the host and for arm32
-  under `-fqemu`.
-
-### wasm32 wraps `U64` sublist indices to 32 bits (confirmed miscompile)
+#### wasm32 wraps `U64` sublist indices to 32 bits (confirmed miscompile)
 
 - **Where:** `src/backend/wasm/WasmCodeGen.zig`, the `.list_sublist` /
   `.list_sublist_borrowed` lowering, which loads the record's `U64` `start`
@@ -102,7 +99,7 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   them; only `usize` results typed `U64` (`List.len`) and in-bounds indices
   used for address arithmetic cross the word/`U64` boundary in the driver.
 
-### `list_get_unsafe` accepts an index in an i128 location
+#### `list_get_unsafe` accepts an index in an i128 location
 
 - **Where:** `src/backend/dev/LirCodeGen.zig`, the `.list_get_unsafe` handler's
   index materialization (`.stack_i128` and `.immediate_i128` arms, commented
@@ -112,7 +109,7 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   invariant violation. That is best-effort recovery in a compiler stage.
 - **Fix direction:** make those arms invariant failures.
 
-### A U64 discriminant loaded as eight bytes
+#### A U64 discriminant loaded as eight bytes
 
 - **Where:** `src/backend/dev/LirCodeGen.zig`, `generateDiscriminantAccess`
   (the boxed tag-union arm) and `loadAndMaskDiscriminant` with
@@ -125,7 +122,7 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 - **Fix direction:** load `discriminant_size` bytes and zero-extend, as the
   arm32 path (a word load, then `discriminantResult`) already does.
 
-### A string result stored from one register
+#### A string result stored from one register
 
 - **Where:** `src/backend/dev/LirCodeGen.zig`, `storeResultToSavedPtr`'s
   `.str` arm, the catch-all over non-stack locations (commented "Fallback for
@@ -139,7 +136,7 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
 - **Fix direction:** make the arm an invariant failure and fix any producer
   that reaches it.
 
-### Redundant narrowing before byte stores
+#### Redundant narrowing before byte stores
 
 - **Where:** `src/backend/dev/LirCodeGen.zig`, `storeResultToSavedPtr`'s `.u8`
   and `.i8` arms.
@@ -149,9 +146,50 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   changes must be byte-identical. A cleanup can drop them with a regenerated
   hash file.
 
-## Open: risks for the remaining arm32 work
+### 1.2 Limitations of arm32 support
 
-### The interpreter's hosted-call trampoline assumes a 64-bit host
+#### The wasm eval oracle cannot run in a 32-bit process
+
+- **Symptom:** in an eval runner built for arm32, every wasm evaluation failed
+  with `WasmExecFailed`. The ReleaseSafe runner shows the cause:
+  `wasm instantiate failed: Uninstantiable64BitLimitsOn32BitArch`.
+- **Cause:** Roc's wasm modules declare linear memory without a maximum
+  (`WasmModule.memory_max_pages = null`). bytebox then takes the wasm32 limit
+  of 65536 pages (4 GiB) and reserves all of it up front (`MemoryInstance.init`,
+  a `StableArray` of the maximum size). Its own check refuses a maximum above
+  `maxInt(usize)`, and 4 GiB does not fit a 32-bit address space. Nothing
+  about the program or the arm32 backend is involved: any 32-bit host fails
+  the same way.
+- **What J3a did:** `eval.backendAvailable(.wasm)` is `@sizeOf(usize) >= 8`,
+  and the eval runner asks it (it hardcoded `true` before), so a 32-bit build
+  reports wasm as `not_implemented` instead of failing. The comment at the
+  gate in `src/eval/mod.zig` explains why.
+- **What it costs:** on an arm32 (or any 32-bit) host the wasm backend is not
+  cross-checked by the eval corpus, and J3a's "same pass count as the host
+  x86_64 run" covers the interpreter and dev backends only. The REPL's wasm
+  backend is likewise unavailable in a 32-bit compiler. The wasm backend
+  itself is host-independent and stays fully tested on 64-bit hosts.
+- **Ways to lift it, in order of preference:**
+  1. bytebox grows linear memory on demand instead of reserving the maximum
+     (a change upstream, or to the vendored copy, which would need its own
+     decision).
+  2. The eval runner supplies memory through bytebox's `WasmMemoryExternal`
+     hooks. This does not work alone: `verifyLimitsAreInstantiable` rejects
+     the limit before the hooks are used, so it needs (1) too.
+  3. The wasm backend declares a memory maximum. This changes the emitted
+     modules on every host and caps every program's memory, so it is a
+     language/platform decision, not a test-harness fix.
+  Whichever lands, remove the `@sizeOf(usize)` gate in the same commit and
+  rerun the arm32 eval corpus under qemu to confirm wasm passes.
+
+#### The interpreter's hosted-call trampoline assumes a 64-bit host
+
+**Status: open, narrowed.** The trampoline now refuses hosts it does not
+implement: `host_trampoline.available` is false and marshaling returns
+`error.UnsupportedArch` on anything but x86_64/aarch64 (since `c7528522f4`,
+J1b). So an interpreter running on arm32 fails cleanly instead of using the
+wrong ABI; hosted calls from the interpreter on an arm32 host still need an
+A32 trampoline.
 
 - **Where:** `src/eval/host_trampoline.zig`, the ABI target selection, and
   `src/eval/host_trampoline.S`.
@@ -163,64 +201,31 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   which now exists) and an A32 trampoline, or an explicit refusal on hosts the
   trampoline does not implement, before J3 makes the lane required.
 
-### Baseline of the arm32 eval lane before J1
+#### A Debug arm32 eval runner does not link
 
-`zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf
--Doptimize=ReleaseFast`, run with `qemu-arm-static -cpu cortex-a9 ...
---timeout 300000` (2026-09-25): 51 passed, 2120 failed, 0 crashed. Every
-failure is `UnsupportedPlatform` (the dev backend has no arm32 code
-generator), so the compiler's front end and interpreter already run on a
-32-bit host; J1-J3 turn the failures into passes.
+`zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf` in Debug
+fails in LLD: "InputSection too large for range extension thunk". The runner
+links LLVM, and a Debug A32 image is larger than a B/BL range extension
+thunk can span. The plan's J3a acceptance measures D10 in "the Debug runner
+build"; J3a used ReleaseFast (as the CI lane does) and ReleaseSafe instead.
+That still checks D10: exhausting a register pool is a `std.debug.panic` in
+every build mode, not an assertion that Release builds drop.
 
-### Target data laid out with the host's word
+#### Two eval tests need more memory than a 1 GB board has
 
-Code generation sometimes sizes *target* data with the *host's* `usize`, which
-is right only while host and target share a word size (every target before
-arm32). Fixed (`654087283b`): `@alignOf(usize)` in the Debug RocStr validity
-check and `@sizeOf(usize)` in the erased-call descriptor array and the
-erased-callable drop-pointer slot; and every use of
-`builtins.erased_callable`'s host layouts (`Payload`, `capture_offset`,
-`HotReloadCaptureHeader`, `CompilerMetadata`), now derived for the target word
-by `erased_layout` in `LirCodeGen`.
+"inspect: inclusive numeric ranges all iterate" and "inspect: exclusive
+numeric ranges all iterate" compile ten `Iter.fold` range pipelines, one per
+integer width. Compiling them peaks at about 1.25 GB resident on x86_64 and
+870 MB in an arm32 build (under qemu). On the Raspberry Pi 3 (920 MB RAM plus
+zram swap) they fail with OutOfMemory during compilation, even with one
+worker; every other test passes there. This is the compiler front end's
+memory use, not arm32 code generation.
 
-### The 64-bit register budget is nearly exhausted already
+Follow-up idea: see "Report peak memory per test" under follow-up ideas.
 
-Over the eval corpus, instruction selection peaks at 12 of 13 allocatable
-general registers on x86_64 (12 of 25 on aarch64), pinned registers included.
-arm32 has 11, with 64-bit values taking two each. Existing sequences cannot be
-reused on arm32 (D10), and x86_64 itself is one register from an invariant
-panic.
+#### Zig 0.16 passes nested `extern struct` arguments off-ABI on arm
 
-### Width bugs in shared native code have never been exercised
-
-wasm32 is the only 32-bit target today and it shares no code generation with
-the dev backend. The first 32-bit native target will be the first to run the
-shared native code (object writing, relocation widths, DWARF, the driver's
-literal 8s) at 32-bit width.
-
-### A checked I64 multiply took 10 of arm32's 11 temporaries (resolved in J2)
-
-`emitWide64MulChecked` held both operand pairs, the result pair and four
-partial-product registers at once, and J2's D10 measurement saw the general
-pool reach 11 / 11 there. It now leaves the operands in their memory slots and
-loads one word at a time into two scratch registers, so it holds 8 registers
-at most. Over everything J2 builds, the arm32 general peak is now 9 / 11 (see
-the register budget section of `src/backend/dev/arm32/DESIGN.md`).
-
-### Shim execution did not resolve `__aeabi_*` (resolved in J3a)
-
-`callAeabiHelper` emits a relocation to the helper's name in shim mode, like
-every other runtime symbol. `native_runtime_libcalls.resolve` now binds those
-names to the compiler's own compiler-rt when the compiler runs on arm32, so
-in-process linking (HostSplice, the machine-code shim) resolves them.
-
-### Test skip guards are keyed on the host architecture
-
-`LirCodeGen.zig` tests skip unless `builtin.cpu.arch` is x86_64 or aarch64
-instead of consulting `host_lir_codegen_available`. The plan's J3a rewrites
-them.
-
-### Zig 0.16 passes nested `extern struct` arguments off-ABI on arm
+**Status: open (a Zig bug), worked around in the fx test host.**
 
 - **Where:** Zig's own C-ABI lowering for `arm-linux-musleabihf` (and so the
   `test/fx` host, `test/fx/platform/host.zig`, which is Zig).
@@ -263,22 +268,9 @@ them.
   `fn hostedHostGetGreeting(host: HostRecord) callconv(.c) RocStr`. Other Zig
   hosts that take a nested struct by value on arm32 need the same until then.
 
-### `test/fx` on arm32 (J3b)
+#### A `u64` builtin parameter passed as one register is not caught
 
-With `--cross-run --cross-runner=qemu-arm-static`, all 121 programs pass.
-Before the host workaround above, these 16 failed, all calling
-`Host.get_greeting!`:
-`match_str_return`, `question_mark_operator`, `empty_list_get`,
-`dict_pseudo_seed_repro`, `zst_nested_singleton_shapes`, `list_method_get`,
-`dbg_corrupts_recursive_tag_union`, `hosted_effect_opaque_with_data`,
-`early_return_rc`, `float_comparison`, the four `match_guard_*`,
-`cross_module_recursive_nominal`, `test_no_dbg`. (Three others,
-`issue_10038_comptime_dict_transitions`, `inspect_dict_set` and
-`leak_list_str_ops`, were arm32 bugs: `list_sublist`'s record window passed
-as single words, and the list incref RC helper reading the list at 64-bit
-word offsets.)
-
-### A `u64` builtin parameter passed as one register is not caught
+**Status: open (a standing rule).** Nothing checks it mechanically yet.
 
 On arm32 a builtin's `u64` parameter takes an aligned register pair. A call
 site that passes one with `addImmArg` or `addRegArg` builds a single-register
@@ -288,115 +280,7 @@ wrapper with 64-bit parameters (`dev_wrappers.zig`, `boxy_abi.zig`) and moved
 their call sites to `addU64SlotArg`, `addImm64Arg` or `addMem64Arg`; a new
 builtin with a `u64` parameter needs the same.
 
-## Resolved during the work
-
-- **The vendored arm32 `libc.a` lacked `string.h`:** Zig 0.16 builds part
-  of the C library from its own sources into a separate `libzigc.a`, and
-  musl's `libc.a` omits those functions, so linking `test/fx` programs
-  failed on `strcmp`. `ci/vendor_musl_runtime.py` now appends `libzigc.a`'s
-  members to the vendored `libc.a`.
-- **Cross builds ignored the backend's stderr expectations:** the runner's
-  `--cross-opt` passed `--opt=` but still required optimized-build warnings
-  (the `dbg` warning) from dev builds. It now filters them the way native
-  runs do.
-- **`*.s` was gitignored:** `ci/arm32_encoding_oracle.s` would never have
-  reached CI. Whitelisted in `.gitignore`.
-- **Plan docs failed tidy:** spaced em dashes and duplicate or missing titles
-  in `projects/big/`. Fixed.
-- **CLI tables handed arm32 the host's objects:** `BuiltinsObjects.forTarget`
-  and `forTargetExtern` mapped `arm32linux`/`arm32musl` to `native`. Replaced
-  by explicit arm32 rows.
-- **`LirCodeGen.cc` would have panicked for arm32:** its initializer called
-  `CallingConvention.forTarget`, which panics for `.arm`. The never-read field
-  is gone.
-- **Two-way arch tests would have mis-routed arm32:** about 250
-  `arch == .x86_64` / `== .aarch64` tests in the driver, `FrameBuilder` and
-  `CallingConvention` (some with no final `else`) now go through `Isa`, which
-  refuses to compile for arm32.
-
-## Tooling notes
-
-- JIT code cannot be a golden oracle: it embeds absolute host addresses.
-- `libc.a` from Zig's musl is not byte-reproducible (members are named by
-  absolute cache paths), and Zig's cache holds two `crt1.o` builds per arm
-  triple; `ci/vendor_musl_runtime.py` takes the one the link line names.
-- The eval-corpus hash check costs about four minutes on sixteen cores, mostly
-  re-checking the Builtin module for each case.
-- The plan's claim that `roc build --help` names `dev` as the default `--opt`
-  is stale: it names `speed`.
-
-### The wasm eval oracle cannot run in a 32-bit process
-
-- **Symptom:** in an eval runner built for arm32, every wasm evaluation failed
-  with `WasmExecFailed`. The ReleaseSafe runner shows the cause:
-  `wasm instantiate failed: Uninstantiable64BitLimitsOn32BitArch`.
-- **Cause:** Roc's wasm modules declare linear memory without a maximum
-  (`WasmModule.memory_max_pages = null`). bytebox then takes the wasm32 limit
-  of 65536 pages (4 GiB) and reserves all of it up front (`MemoryInstance.init`,
-  a `StableArray` of the maximum size). Its own check refuses a maximum above
-  `maxInt(usize)`, and 4 GiB does not fit a 32-bit address space. Nothing
-  about the program or the arm32 backend is involved: any 32-bit host fails
-  the same way.
-- **What J3a did:** `eval.backendAvailable(.wasm)` is `@sizeOf(usize) >= 8`,
-  and the eval runner asks it (it hardcoded `true` before), so a 32-bit build
-  reports wasm as `not_implemented` instead of failing. The comment at the
-  gate in `src/eval/mod.zig` explains why.
-- **What it costs:** on an arm32 (or any 32-bit) host the wasm backend is not
-  cross-checked by the eval corpus, and J3a's "same pass count as the host
-  x86_64 run" covers the interpreter and dev backends only. The REPL's wasm
-  backend is likewise unavailable in a 32-bit compiler. The wasm backend
-  itself is host-independent and stays fully tested on 64-bit hosts.
-- **Ways to lift it, in order of preference:**
-  1. bytebox grows linear memory on demand instead of reserving the maximum
-     (a change upstream, or to the vendored copy, which would need its own
-     decision).
-  2. The eval runner supplies memory through bytebox's `WasmMemoryExternal`
-     hooks. This does not work alone: `verifyLimitsAreInstantiable` rejects
-     the limit before the hooks are used, so it needs (1) too.
-  3. The wasm backend declares a memory maximum. This changes the emitted
-     modules on every host and caps every program's memory, so it is a
-     language/platform decision, not a test-harness fix.
-  Whichever lands, remove the `@sizeOf(usize)` gate in the same commit and
-  rerun the arm32 eval corpus under qemu to confirm wasm passes.
-
-### A Debug arm32 eval runner does not link
-
-`zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf` in Debug
-fails in LLD: "InputSection too large for range extension thunk". The runner
-links LLVM, and a Debug A32 image is larger than a B/BL range extension
-thunk can span. The plan's J3a acceptance measures D10 in "the Debug runner
-build"; J3a used ReleaseFast (as the CI lane does) and ReleaseSafe instead.
-That still checks D10: exhausting a register pool is a `std.debug.panic` in
-every build mode, not an assertion that Release builds drop.
-
-### Cross-built compilers fill `.zig-cache` quickly
-
-Each arm32 build of the eval runner leaves a 250-400 MB LLVM-linked binary in
-`.zig-cache/o`. During J3a the cache reached 229 GB and filled the disk.
-Deleting part of `.zig-cache/o` leaves manifests pointing at missing files,
-and Zig does not recover ("failed to check cache: FileNotFound"), so clear
-the whole directory instead.
-
-### Two eval tests need more memory than a 1 GB board has
-
-"inspect: inclusive numeric ranges all iterate" and "inspect: exclusive
-numeric ranges all iterate" compile ten `Iter.fold` range pipelines, one per
-integer width. Compiling them peaks at about 1.25 GB resident on x86_64 and
-870 MB in an arm32 build (under qemu). On the Raspberry Pi 3 (920 MB RAM plus
-zram swap) they fail with OutOfMemory during compilation, even with one
-worker; every other test passes there. This is the compiler front end's
-memory use, not arm32 code generation.
-
-**Follow-up idea (a separate project, not part of the arm32 work):** report
-peak memory per test in the eval runner, next to its per-phase timing. The
-runner already forks a child per test, and on POSIX `wait4` returns the
-child's `ru_maxrss`, so a "largest memory" list like the "slowest tests" list
-costs almost nothing and would have found these two tests before a 1 GB
-board did. Open questions for that project: report only or enforce limits
-(limits are flaky across allocators and hosts), attributing compile vs run
-memory (needs measuring inside the child), and Windows (a different query).
-
-## Annoyances to fix later
+### 1.3 Annoyances to fix later
 
 Small frictions met while working, none blocking. Each says where it belongs.
 Fix each one in its own commit, and remove its entry in that commit.
@@ -482,3 +366,182 @@ Fix each one in its own commit, and remove its entry in that commit.
   `eval.backendAvailable` in the same commit.
 - **Probe apps that read stdin block without input.** Any ad-hoc
   build-and-run script must redirect stdin (`</dev/null`) and use a timeout.
+
+### 1.4 Follow-up ideas
+
+#### Report peak memory per test
+
+Report
+peak memory per test in the eval runner, next to its per-phase timing. The
+runner already forks a child per test, and on POSIX `wait4` returns the
+child's `ru_maxrss`, so a "largest memory" list like the "slowest tests" list
+costs almost nothing and would have found these two tests before a 1 GB
+board did. Open questions for that project: report only or enforce limits
+(limits are flaky across allocators and hosts), attributing compile vs run
+memory (needs measuring inside the child), and Windows (a different query).
+
+## 2. Resolved
+
+#### In-process relocation patching guesses the encoding
+
+**Status: resolved in `c8b2e8f839`** (J3a). Relocation patching takes the ISA
+the code was generated for and patches each site by that ISA's rule; arm32
+patches A32 `bl`/`b`.
+
+- **Where:** `src/backend/dev/Relocation.zig`, `patchLinkedFunctionRelocation`.
+- **Effect:** it picks x86 `call rel32` or AArch64 `BL` by decoding the bytes
+  around the relocation (`0xE8` before the offset, or the `BL` opcode bits)
+  instead of carrying an explicit relocation kind. That is recovering missing
+  information in a compiler stage, which AGENTS.md forbids, and it cannot be
+  extended to A32 `BL` without adding a third guess.
+- **Fix direction:** give function relocations an explicit encoding kind, as
+  `DataRelocationKind` does for data. Needed before J3a runs arm32 code
+  in-process.
+
+#### A backend unit test wrote to stderr, failing `zig build`
+
+- **Where:** `wasm.WasmModule` test "mergeModule rejects same-name imports with
+  different signatures" printed "WASM merge: both modules import 'roc_crashed'".
+- **Effect:** `zig build run-test-zig-module-backend` reported failure although
+  the binary reported every test passed.
+- **Resolved in `3bb3ca2b44`:** the merge records the conflicting function in
+  `WasmModule.merge_type_conflict` instead of printing it, and the test
+  asserts the recorded conflict. The step passes, on the host and for arm32
+  under `-fqemu`.
+
+#### A checked I64 multiply took 10 of arm32's 11 temporaries
+
+**Status: resolved in `1de80a8369`** (J2).
+
+`emitWide64MulChecked` held both operand pairs, the result pair and four
+partial-product registers at once, and J2's D10 measurement saw the general
+pool reach 11 / 11 there. It now leaves the operands in their memory slots and
+loads one word at a time into two scratch registers, so it holds 8 registers
+at most. Over everything J2 builds, the arm32 general peak is now 9 / 11 (see
+the register budget section of `src/backend/dev/arm32/DESIGN.md`).
+
+#### Shim execution did not resolve `__aeabi_*`
+
+**Status: resolved in `f485e9c6c5`** (J3a).
+
+`callAeabiHelper` emits a relocation to the helper's name in shim mode, like
+every other runtime symbol. `native_runtime_libcalls.resolve` now binds those
+names to the compiler's own compiler-rt when the compiler runs on arm32, so
+in-process linking (HostSplice, the machine-code shim) resolves them.
+
+#### Test skip guards are keyed on the host architecture
+
+**Status: resolved in `4a49f4b51f`** (J3a): the tests skip on
+`host_lir_codegen_available`, and all of them run and pass on an arm32 host
+under qemu.
+
+`LirCodeGen.zig` tests skip unless `builtin.cpu.arch` is x86_64 or aarch64
+instead of consulting `host_lir_codegen_available`. The plan's J3a rewrites
+them.
+
+#### Target data laid out with the host's word
+
+**Status: resolved in `654087283b`.**
+
+Code generation sometimes sizes *target* data with the *host's* `usize`, which
+is right only while host and target share a word size (every target before
+arm32). Fixed (`654087283b`): `@alignOf(usize)` in the Debug RocStr validity
+check and `@sizeOf(usize)` in the erased-call descriptor array and the
+erased-callable drop-pointer slot; and every use of
+`builtins.erased_callable`'s host layouts (`Payload`, `capture_offset`,
+`HotReloadCaptureHeader`, `CompilerMetadata`), now derived for the target word
+by `erased_layout` in `LirCodeGen`.
+
+#### Smaller items resolved during the work
+
+- **The vendored arm32 `libc.a` lacked `string.h`:** Zig 0.16 builds part
+  of the C library from its own sources into a separate `libzigc.a`, and
+  musl's `libc.a` omits those functions, so linking `test/fx` programs
+  failed on `strcmp`. `ci/vendor_musl_runtime.py` now appends `libzigc.a`'s
+  members to the vendored `libc.a`.
+- **Cross builds ignored the backend's stderr expectations:** the runner's
+  `--cross-opt` passed `--opt=` but still required optimized-build warnings
+  (the `dbg` warning) from dev builds. It now filters them the way native
+  runs do.
+- **`*.s` was gitignored:** `ci/arm32_encoding_oracle.s` would never have
+  reached CI. Whitelisted in `.gitignore`.
+- **Plan docs failed tidy:** spaced em dashes and duplicate or missing titles
+  in `projects/big/`. Fixed.
+- **CLI tables handed arm32 the host's objects:** `BuiltinsObjects.forTarget`
+  and `forTargetExtern` mapped `arm32linux`/`arm32musl` to `native`. Replaced
+  by explicit arm32 rows.
+- **`LirCodeGen.cc` would have panicked for arm32:** its initializer called
+  `CallingConvention.forTarget`, which panics for `.arm`. The never-read field
+  is gone.
+- **Two-way arch tests would have mis-routed arm32:** about 250
+  `arch == .x86_64` / `== .aarch64` tests in the driver, `FrameBuilder` and
+  `CallingConvention` (some with no final `else`) now go through `Isa`, which
+  refuses to compile for arm32.
+
+## 3. Background and history
+
+#### The 64-bit register budget is nearly exhausted already
+
+**Status: background.** Still true for x86_64; arm32's measured peaks and the
+lowerings that keep it within 11 are in DESIGN.md's register budget section.
+
+Over the eval corpus, instruction selection peaks at 12 of 13 allocatable
+general registers on x86_64 (12 of 25 on aarch64), pinned registers included.
+arm32 has 11, with 64-bit values taking two each. Existing sequences cannot be
+reused on arm32 (D10), and x86_64 itself is one register from an invariant
+panic.
+
+#### Width bugs in shared native code have never been exercised
+
+**Status: history.** J1-J3 exercised that code at 32-bit width; the bugs it
+found are fixed and listed in `arm32-dev-backend-existing-code-changes.md`.
+
+wasm32 is the only 32-bit target today and it shares no code generation with
+the dev backend. The first 32-bit native target will be the first to run the
+shared native code (object writing, relocation widths, DWARF, the driver's
+literal 8s) at 32-bit width.
+
+#### Baseline of the arm32 eval lane before J1
+
+**Status: history.** J3a ended at 2171/2171 under qemu.
+
+`zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf
+-Doptimize=ReleaseFast`, run with `qemu-arm-static -cpu cortex-a9 ...
+--timeout 300000` (2026-09-25): 51 passed, 2120 failed, 0 crashed. Every
+failure is `UnsupportedPlatform` (the dev backend has no arm32 code
+generator), so the compiler's front end and interpreter already run on a
+32-bit host; J1-J3 turn the failures into passes.
+
+#### `test/fx` on arm32 (J3b)
+
+With `--cross-run --cross-runner=qemu-arm-static`, all 121 programs pass.
+Before the host workaround above, these 16 failed, all calling
+`Host.get_greeting!`:
+`match_str_return`, `question_mark_operator`, `empty_list_get`,
+`dict_pseudo_seed_repro`, `zst_nested_singleton_shapes`, `list_method_get`,
+`dbg_corrupts_recursive_tag_union`, `hosted_effect_opaque_with_data`,
+`early_return_rc`, `float_comparison`, the four `match_guard_*`,
+`cross_module_recursive_nominal`, `test_no_dbg`. (Three others,
+`issue_10038_comptime_dict_transitions`, `inspect_dict_set` and
+`leak_list_str_ops`, were arm32 bugs: `list_sublist`'s record window passed
+as single words, and the list incref RC helper reading the list at 64-bit
+word offsets.)
+
+#### Cross-built compilers fill `.zig-cache` quickly
+
+Each arm32 build of the eval runner leaves a 250-400 MB LLVM-linked binary in
+`.zig-cache/o`. During J3a the cache reached 229 GB and filled the disk.
+Deleting part of `.zig-cache/o` leaves manifests pointing at missing files,
+and Zig does not recover ("failed to check cache: FileNotFound"), so clear
+the whole directory instead.
+
+#### Tooling notes
+
+- JIT code cannot be a golden oracle: it embeds absolute host addresses.
+- `libc.a` from Zig's musl is not byte-reproducible (members are named by
+  absolute cache paths), and Zig's cache holds two `crt1.o` builds per arm
+  triple; `ci/vendor_musl_runtime.py` takes the one the link line names.
+- The eval-corpus hash check costs about four minutes on sixteen cores, mostly
+  re-checking the Builtin module for each case.
+- The plan's claim that `roc build --help` names `dev` as the default `--opt`
+  is stale: it names `speed`.
