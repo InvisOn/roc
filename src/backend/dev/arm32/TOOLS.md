@@ -164,9 +164,19 @@ zig build run-test-zig-module-backend -Dtarget=arm-linux-musleabihf -fqemu
 Use a separate `--prefix`, so the arm32 binaries do not replace the host's in
 `zig-out/bin`. Use ReleaseFast or ReleaseSafe: a Debug runner does not link
 (issues note). ReleaseSafe prints the evaluator's own diagnostics (for
-example why a backend failed) and panic stack traces, which Zig does not
-print on arm in Debug test binaries run under qemu. The backend tests print
+example why a backend failed) and panic stack traces. The backend tests print
 their totals when the binary runs directly under `qemu-arm-static`.
+
+**Stack traces in arm32 unit tests.** Zig unit-test binaries in this repo
+print no stack traces by default ("Cannot print stack trace: stack tracing is
+disabled"): `src/build/unit_test_runner.zig` turns tracing off because
+capturing allocation traces dominates Debug test time. Add
+`-Ddebug-gpa-traces` to get error-return and panic traces with source lines,
+on arm32 under qemu as on the host:
+
+```
+zig build run-test-zig-module-backend -Dtarget=arm-linux-musleabihf -fqemu -Ddebug-gpa-traces
+```
 
 ## `ci/ssh_cross_runner.sh`
 
