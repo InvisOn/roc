@@ -72,13 +72,16 @@ is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   `other` still emit `ret`, which is not an instruction on most of them. Only
   reached for glibc cross targets, none of which use those architectures.
 
-### A backend unit test writes to stderr, failing `zig build`
+### A backend unit test wrote to stderr, failing `zig build` (resolved)
 
 - **Where:** `wasm.WasmModule` test "mergeModule rejects same-name imports with
-  different signatures" prints "WASM merge: both modules import 'roc_crashed'".
-- **Effect:** `zig build run-test-zig-module-backend` reports failure although
-  the binary reports every test passed; failures in that step are therefore
-  easy to dismiss.
+  different signatures" printed "WASM merge: both modules import 'roc_crashed'".
+- **Effect:** `zig build run-test-zig-module-backend` reported failure although
+  the binary reported every test passed.
+- **Resolved:** the merge records the conflicting function in
+  `WasmModule.merge_type_conflict` instead of printing it, and the test
+  asserts the recorded conflict. The step passes, on the host and for arm32
+  under `-fqemu`.
 
 ### wasm32 wraps `U64` sublist indices to 32 bits (confirmed miscompile)
 
@@ -389,17 +392,6 @@ memory use, not arm32 code generation.
 Small frictions met while working, none blocking. Each says where it belongs.
 Fix each one in its own commit, and remove its entry in that commit.
 
-- **The backend test step always reports failure.** `mergeModule` in
-  `src/backend/wasm/WasmModule.zig` (the `FunctionTypeMismatch` branch)
-  prints "WASM merge: both modules import ..." in Debug builds, and the test
-  "mergeModule rejects same-name imports with different signatures" reaches
-  that branch on purpose. Zig's build runner treats test output on stderr as
-  a failure, so `zig build run-test-zig-module-backend` fails although the
-  binary reports every test passed. Fix: return the detail through the error
-  path instead of printing. For example, record the import name and both
-  type indices in a caller-visible diagnostic, as HostSplice does with
-  `unresolved`, and print it only where the error is reported. Then the test
-  can assert the detail instead of producing output.
 - **Line-number exclusions in build.zig's pattern checks go stale.** The
   type-checker pattern check (`excluded_ranges` in `build.zig`, two tables)
   excludes lines of `inspected.zig`, `Check.zig`, `store.zig`,

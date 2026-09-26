@@ -466,3 +466,8 @@ check could gate every later commit.
   which a 32-bit process cannot hold (`Uninstantiable64BitLimitsOn32BitArch`).
   The runner asks `eval.backendAvailable(.wasm)` instead of hardcoding true,
   so on an arm32 host wasm reports `not_implemented` like an absent backend.
+- `backend/wasm/WasmModule.zig` (annoyance fix): a function-type mismatch
+  during a module merge is recorded in `merge_type_conflict` (the name and
+  both type indices) instead of printed to stderr in Debug builds, so the
+  backend test step stops failing on a passing run. WasmCodeGen's eval
+  builtin-merge invariant message now names the conflicting function.
