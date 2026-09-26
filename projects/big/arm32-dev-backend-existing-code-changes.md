@@ -501,12 +501,12 @@ glue binaries.
 - `sljmp` (`e9e1a8da3b`): an A32 setjmp/longjmp for arm Linux (R4-R11, SP, LR,
   D8-D15), so the compile-time evaluator's crash recovery works on an
   arm32 compiler.
-- `HostSplice.zig` and `machine_code_shim/main.zig` (`c8b2e8f839`): an A32 jump stub
-  (`ldr pc, [pc, #-4]` and the target word); HostSplice's tests skip on
-  `host_lir_codegen_available` instead of naming x86_64 and aarch64.
-- `builtins/native_runtime_libcalls.zig` (`f485e9c6c5`): on an arm32 host, `resolve`
-  binds the `__aeabi_*` helpers the arm32 dev backend calls (D7) to the
-  compiler's own compiler-rt.
+- `HostSplice.zig` and `machine_code_shim/main.zig` (`c8b2e8f839`): an A32
+  jump stub (`ldr pc, [pc, #-4]` and the target word); HostSplice's tests skip
+  on `host_lir_codegen_available` instead of naming x86_64 and aarch64.
+- `builtins/native_runtime_libcalls.zig` (`f485e9c6c5`): on an arm32 host,
+  `resolve` binds the `__aeabi_*` helpers the arm32 dev backend calls (D7) to
+  the compiler's own compiler-rt.
 - `LirCodeGen.zig` (`79f9ccf002`): `host_lir_codegen_available` is true for
   arm, so an arm32 compiler evaluates with its own dev backend; the 37 tests
   that named x86_64/aarch64 hosts skip on that constant instead (the tests
