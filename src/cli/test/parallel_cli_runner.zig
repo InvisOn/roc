@@ -18,7 +18,8 @@
 //!   --cross-run          Also run each cross-built program, with the checks
 //!                        a native run gets
 //!   --cross-runner=<cmd> Run cross-built programs through <cmd> (for example
-//!                        qemu-arm-static) instead of directly
+//!                        qemu-arm-static) instead of directly; a relative
+//!                        path is taken from the directory the runner starts in
 //!   --glue-roc <path>    Roc binary to use for glue generation (default: <roc_binary>)
 //!   --glue-opt <opt>     Glue execution mode: default, dev, size, or speed
 //!   --verbose            Print PASS results and timing details
@@ -2511,6 +2512,27 @@ var cross_build_opt_arg: ?[]const u8 = null;
 var cross_run: bool = false;
 /// The `--cross-runner` command cross-built programs run through, if any.
 var cross_runner: ?[]const u8 = null;
+
+/// The command `--cross-runner` names, made usable from a case's work
+/// directory: a bare command name is left for the `PATH` lookup, an absolute
+/// path is kept, and a relative path (one with a directory part, such as
+/// `ci/ssh_cross_runner.sh`) is resolved against `project_root`, the directory
+/// the runner was started in.
+fn resolveCrossRunner(allocator: std.mem.Allocator, project_root: []const u8, runner: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (std.fs.path.isAbsolute(runner)) return runner;
+    if (std.mem.findAny(u8, runner, "/" ++ std.fs.path.sep_str) == null) return runner;
+    return std.fs.path.join(allocator, &.{ project_root, runner });
+}
+
+test "resolveCrossRunner keeps commands and absolute paths and anchors relative paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("qemu-arm-static", try resolveCrossRunner(a, "/repo", "qemu-arm-static"));
+    try std.testing.expectEqualStrings("/opt/run.sh", try resolveCrossRunner(a, "/repo", "/opt/run.sh"));
+    try std.testing.expectEqualStrings("/repo/ci/ssh_cross_runner.sh", try resolveCrossRunner(a, "/repo", "ci/ssh_cross_runner.sh"));
+    try std.testing.expectEqualStrings("/repo/./run.sh", try resolveCrossRunner(a, "/repo", "./run.sh"));
+}
 /// The backend `--cross-opt` selects; `roc build`'s default (speed) when absent.
 var cross_build_opt: OptMode = .speed;
 var project_root_path: []const u8 = "";
@@ -12717,7 +12739,7 @@ pub fn main(init: std.process.Init) CliRunnerError!void {
     cross_build_opt_arg = parsed.cross_opt_arg;
     cross_build_opt = parsed.cross_opt;
     cross_run = parsed.cross_run;
-    cross_runner = parsed.cross_runner;
+    cross_runner = if (parsed.cross_runner) |runner| try resolveCrossRunner(spec_arena.allocator(), project_root_path, runner) else null;
 
     const tests = try buildCases(spec_arena.allocator(), args.filters, args.include_llvm, parsed.suites, parsed.glue_options, parsed.cross_target);
     if (tests.len == 0) {

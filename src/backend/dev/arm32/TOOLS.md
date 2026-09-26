@@ -181,11 +181,11 @@ deletes the copy.
 ```
 ROC_CROSS_SSH_HOST=user@board zig build run-test-cli -- --suite platforms \
     --filter test/fx/ --cross-target=arm32musl --cross-opt=dev --cross-run \
-    --cross-runner=$PWD/ci/ssh_cross_runner.sh --threads 3
+    --cross-runner=ci/ssh_cross_runner.sh --threads 3
 ```
 
-The runner path must be absolute: the CLI runner starts each program in a
-per-test work directory. The board needs key-based ssh login without
+A relative runner path is taken from the directory the CLI runner starts
+in, although each program runs in its own work directory. The board needs key-based ssh login without
 prompts. Every argument is quoted for the remote shell, because the runner
 passes the expected-output spec (spaces and `|`) as a single argument.
 
