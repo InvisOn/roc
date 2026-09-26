@@ -166,8 +166,7 @@ Use a separate `--prefix`, so the arm32 binaries do not replace the host's in
 (issues note). ReleaseSafe prints the evaluator's own diagnostics (for
 example why a backend failed) and panic stack traces, which Zig does not
 print on arm in Debug test binaries run under qemu. The backend tests print
-their totals when the binary runs directly under `qemu-arm-static`. The
-build step alone reports a failure because one wasm test writes to stderr.
+their totals when the binary runs directly under `qemu-arm-static`.
 
 ## `ci/ssh_cross_runner.sh`
 

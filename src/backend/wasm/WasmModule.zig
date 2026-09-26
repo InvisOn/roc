@@ -5,7 +5,6 @@
 //! for surgical linking.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const shim_symbols = @import("builtins").shim_symbols;
 const Allocator = std.mem.Allocator;
 const roc_base = @import("base");
@@ -533,6 +532,9 @@ has_memory: bool,
 memory_import: bool,
 memory_min_pages: u32,
 memory_max_pages: ?u32,
+/// The function whose types disagreed when the last merge into this module
+/// failed with `error.FunctionTypeMismatch`, for the caller to report.
+merge_type_conflict: ?MergeTypeConflict = null,
 has_stack_pointer: bool,
 stack_pointer_init: u32,
 /// Number of globals found when preloading an existing Wasm binary. Their
@@ -924,7 +926,7 @@ fn resolveUndefinedFunctionSymbols(
         if (!self.isUndefinedFunctionNamed(sym, name)) continue;
         if (sym.index >= self.imports.items.len) return error.InvalidSection;
         if (self.imports.items[sym.index].type_idx != defined_type) {
-            if (builtin.mode == .Debug) std.debug.print("WASM merge: import '{s}' has type {d}, but its definition has type {d}\n", .{ name, self.imports.items[sym.index].type_idx, defined_type });
+            self.merge_type_conflict = .{ .name = name, .existing_type = self.imports.items[sym.index].type_idx, .incoming_type = defined_type, .existing_is_definition = false };
             return error.FunctionTypeMismatch;
         }
         if (first_match == null) first_match = @intCast(i);
@@ -1621,9 +1623,23 @@ pub fn mergeModuleForObject(self: *Self, source: *const Self) MergeError!MergeRe
     return try self.mergeModuleMode(source, .relocatable_object);
 }
 
+/// Two modules disagree on a function's type: this module defines or imports
+/// `name` with `existing_type`, and the merged module defines or imports it
+/// with `incoming_type` (both indices into this module's type section).
+pub const MergeTypeConflict = struct {
+    /// Borrowed from the merged module; valid while that module lives.
+    name: []const u8,
+    existing_type: u32,
+    incoming_type: u32,
+    /// Whether this module defines the function (otherwise it imports it).
+    existing_is_definition: bool,
+};
+
 /// Merge `source` into this module using the requested final-link or object-mode policy.
+/// On `error.FunctionTypeMismatch`, `merge_type_conflict` names the function.
 pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeError!MergeResult {
     const gpa = self.allocator;
+    self.merge_type_conflict = null;
 
     // --- 1. Merge type section (with deduplication) ---
     // Maps source type index → self type index.
@@ -1703,7 +1719,7 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
             const local_idx = fn_idx - old_import_count;
             if (local_idx >= self.func_type_indices.items.len) return error.InvalidSection;
             if (!self.funcTypesEqual(self.func_type_indices.items[local_idx], remapped_type)) {
-                if (builtin.mode == .Debug) std.debug.print("WASM merge: '{s}' is defined with type {d}, but the merged module imports it with type {d}\n", .{ src_imp.field_name, self.func_type_indices.items[local_idx], remapped_type });
+                self.merge_type_conflict = .{ .name = src_imp.field_name, .existing_type = self.func_type_indices.items[local_idx], .incoming_type = remapped_type, .existing_is_definition = true };
                 return error.FunctionTypeMismatch;
             }
             func_remap[src_idx] = fn_idx;
@@ -1716,7 +1732,7 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
         for (self.imports.items, 0..) |self_imp, self_idx| {
             if (std.mem.eql(u8, self_imp.field_name, src_imp.field_name)) {
                 if (!self.funcTypesEqual(self_imp.type_idx, remapped_type)) {
-                    if (builtin.mode == .Debug) std.debug.print("WASM merge: both modules import '{s}', with types {d} and {d}\n", .{ src_imp.field_name, self_imp.type_idx, remapped_type });
+                    self.merge_type_conflict = .{ .name = src_imp.field_name, .existing_type = self_imp.type_idx, .incoming_type = remapped_type, .existing_is_definition = false };
                     return error.FunctionTypeMismatch;
                 }
                 matched = @intCast(self_idx);
@@ -6296,6 +6312,11 @@ test "mergeModule rejects same-name imports with different signatures" {
     _ = try source.addImport("env", shim_symbols.roc_crashed, source_type);
 
     try std.testing.expectError(error.FunctionTypeMismatch, host.mergeModule(&source));
+    const conflict = host.merge_type_conflict.?;
+    try std.testing.expectEqualStrings(shim_symbols.roc_crashed, conflict.name);
+    try std.testing.expectEqual(host_type, conflict.existing_type);
+    try std.testing.expect(conflict.existing_type != conflict.incoming_type);
+    try std.testing.expect(!conflict.existing_is_definition);
 }
 
 test "mergeModule—function indices remapped correctly" {
