@@ -404,9 +404,6 @@ Fix each one in its own commit, and remove its entry in that commit.
   A full run spends about 15 minutes in `build-ci` before the first check,
   so each quick lint failure costs a full cycle. Run the `run-check-*`
   phases directly first, and resume with `--minici-after <phase>`.
-- **`run-check-glue-abi` needs a Rust target that is not documented as a
-  prerequisite:** `rustup target add x86_64-unknown-linux-musl`. Add it to the
-  contributor setup notes.
 - **Zig does not print stack traces in arm Debug test binaries under qemu**
   ("stack tracing is disabled"), so an arm32 test failure shows no location.
   ReleaseSafe runners do print traces; a Debug runner does not link at all
