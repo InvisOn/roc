@@ -13,6 +13,29 @@ zig build roc
 ./zig-out/bin/roc version
 ```
 
+## Running the CI checks locally
+
+`zig build minici` runs the checks CI runs. A few of them need tools beyond
+Zig:
+
+- **Rust, with two targets** (`zig build run-check-glue-abi` compiles the
+  generated Rust glue). Install Rust through [rustup](https://rustup.rs), then
+  add the Rust target for your machine and the wasm target:
+
+  | Host | Command |
+  |---|---|
+  | Linux x86-64 | `rustup target add x86_64-unknown-linux-musl wasm32-unknown-unknown` |
+  | Linux AArch64 | `rustup target add aarch64-unknown-linux-musl wasm32-unknown-unknown` |
+  | macOS x86-64 | `rustup target add x86_64-apple-darwin wasm32-unknown-unknown` |
+  | macOS Apple silicon | `rustup target add aarch64-apple-darwin wasm32-unknown-unknown` |
+  | Windows x86-64 | `rustup target add x86_64-pc-windows-msvc wasm32-unknown-unknown` |
+
+  Without the target the check fails with `can't find crate for 'std'`.
+- **Optional, for the arm32 checks:** `qemu-arm-static` (Debian/Ubuntu
+  package `qemu-user-static`) runs arm32 programs, and `llvm-objdump` lets
+  `run-check-simd-codegen` confirm the arm32 binary uses NEON. Without them
+  those parts are skipped, and CI still runs them.
+
 ## Using Nix
 
 If you're familiar with nix and like using it, you can build the compiler like this:
