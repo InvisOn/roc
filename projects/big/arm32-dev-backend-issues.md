@@ -12,6 +12,21 @@ to "Resolved" with the commit that resolved it, and background that no longer
 describes the tree moves to "Background and history". The record of what was
 found, and why things are the way they are, stays in one place.
 
+Where a new note goes:
+
+| Kind of note | Where |
+|---|---|
+| A defect or limitation found (open) | here, section 1.1 (outside arm32) or 1.2 (arm32 support), with Where / Effect / Fix direction and a status line |
+| A small friction in the workflow | here, 1.3; fix each in its own commit, which removes the entry |
+| An idea worth a separate project | here, 1.4 |
+| A plan for fixing an open entry | inside that entry, as a "Plan" subsection |
+| Something resolved | move its entry to section 2, with the resolving commit |
+| A change to code that existed before the arm32 work | `arm32-dev-backend-existing-code-changes.md`, under its milestone, or under "Fixes to existing defects" if it has its own commit |
+| How arm32 works and why (decisions, amendments, lessons) | `src/backend/dev/arm32/DESIGN.md` |
+| How to work on arm32 (workflow) | `src/backend/dev/arm32/GUIDE.md` |
+| A tool, script or command | `src/backend/dev/arm32/TOOLS.md` |
+| The plan's units and their acceptance | `projects/big/arm32-dev-backend.md` (a plan change is recorded as an amendment in DESIGN.md) |
+
 Contents:
 
 1. Open
@@ -205,6 +220,89 @@ none of the J3 runs exercised it.
 - **Fix direction:** an explicit arm32 selection (`layout.abi.Target.arm32`,
   which now exists) and an A32 trampoline, or an explicit refusal on hosts the
   trampoline does not implement, before J3 makes the lane required.
+
+**Plan, step 1: refuse instead of calling the wrong way (do now).**
+
+The uniform `(args_buf, ret_buf)` ABI is a wasm32 contract: the echo platform
+chooses its shape by `is_wasm`, not by `host_trampoline.available`, so every
+platform registers C-ABI functions on every other architecture. Restricting
+the uniform path to wasm32 therefore breaks nothing that works today.
+
+1. In `interpreter.zig`'s hosted-call dispatch, keep the three existing
+   branches (the `hosted_call_handler` callback, the trampoline when
+   `host_trampoline.available`, the uniform call) but take the uniform branch
+   only when the compiler runs on wasm32 (`builtin.cpu.arch == .wasm32`, the
+   same condition as the echo platform's `is_wasm`; better, one shared
+   constant both use).
+2. Add a fourth branch for every other architecture without a trampoline
+   (today: arm32 and 32-bit x86): an explicit error that names the
+   architecture and says the interpreter cannot call hosted functions there,
+   through the interpreter's existing error reporting, not a panic. Decide
+   while writing it whether this is a user-facing error (a compiler built for
+   that host is a supported configuration) or an invariant failure; the
+   former is right if arm32-hosted compilers are shipped.
+3. Update the comments at the uniform branch and at `echoLineHostedFn` so
+   both state the same rule.
+4. Tests: a unit test that the dispatch selects the refusal on a
+   non-wasm, non-trampoline architecture (a comptime selection function
+   that takes the architecture, so it can be tested for arm on an x86_64
+   host). End to end: a compiler built for arm32
+   (`zig build roc -Dtarget=arm-linux-musleabihf`), run under qemu and on the
+   Raspberry Pi 5, prints the error for `roc --opt=interpreter
+   test/fx/hello_world.roc` instead of misbehaving.
+5. One commit, a fix to existing code: an entry under "Fixes to existing
+   defects" in the existing-code-changes note, and this entry's status
+   updated to "refuses cleanly; A32 trampoline open".
+
+**Plan, step 2: an A32 trampoline (only if the maintainers want the compiler
+to run on 32-bit ARM).**
+
+Scope question first: the arm32 plan made arm32 a *target*; the compiler ran
+on arm32 only for the test runners. Raise it with the maintainers together
+with the rest of the arm32 work. If they want it:
+
+1. **Control block.** `Call` today fixes 64-bit registers (`gp: [8]u64`,
+   `sse: [8]u128`) and the assembly hardcodes 8-byte field offsets. Make the
+   register images per-architecture (arm32: four `u32` core registers, eight
+   `f64` VFP double registers, the stack area, `sret`, results r0-r3 and
+   d0-d3), and derive the assembly's offsets from `@offsetOf` with comptime
+   assertions next to the struct, so the Zig and assembly layouts cannot
+   drift.
+2. **Classification.** Reuse `layout.abi.Target.arm32` (J1b's AAPCS32
+   classifier, including C.5 splits between r3 and the stack and VFP
+   back-filling) through `abi.lower`, as x86_64 and aarch64 do. The
+   scatter code maps each placement to the arm32 images (a `u64` in an even
+   register pair, an `f32` into an S register view of a D image).
+3. **Assembly (`host_trampoline.S`, an `__arm__` section).** `push {r4, r5,
+   fp, lr}`; keep the control block in r4; if there are stack arguments,
+   reserve them keeping SP 8-byte aligned and copy the bytes; `vldmia` d0-d7;
+   `ldmia` r0-r3; `blx` the target; store r0-r3 and `vstmia` d0-d3 into the
+   result images; restore and return. A32, hard-float, no NEON needed.
+4. **Results.** AAPCS32 returns up to four bytes of a composite in r0, a
+   64-bit integer in r0:r1, a homogeneous float aggregate of up to four
+   members in d0-d3 / s0-s3, and anything else through a hidden pointer in
+   r0. The gather code follows the classifier, as for the other ISAs.
+5. **Tests.** There is no execution test of the trampoline today (only a
+   text check of the assembly and a layout test). Add one that calls Zig
+   `callconv(.c)` functions through `host_trampoline.call` for each
+   J3 call shape (`test/fx/abi_call_shapes.roc`'s list: an i64 after an i32,
+   an i64 on the stack, a 12-byte record split by C.5, an f32 back-fill, nine
+   f64s, a hidden result pointer, an F64 -> I64 -> F64 round trip), on every
+   architecture with a trampoline, so x86_64 and aarch64 gain coverage too.
+   Put it in a small test module if the eval module's test binary is too
+   large to link or run for arm32. End to end: the fx suite with
+   `--opt=interpreter` from a compiler built for arm32, under qemu and on the
+   Pi 5.
+6. **Commits.** The control-block generalization (byte-identical behaviour on
+   x86_64/aarch64) first, with the execution tests; then the A32 stub and
+   `available` turned on for arm. Remove step 1's refusal for arm in the
+   second commit.
+
+Risks: the eval module's arm32 test binary may be too large (see "A Debug
+arm32 eval runner does not link"); VFP register images must be saved as
+doubles and addressed as singles for f32 arguments; and the stub has no
+unwind information, so a crash inside a hosted function shows no frames
+through the trampoline (true for the existing ISAs too).
 
 #### A Debug arm32 eval runner does not link
 
