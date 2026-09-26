@@ -387,6 +387,15 @@ zram swap) they fail with OutOfMemory during compilation, even with one
 worker; every other test passes there. This is the compiler front end's
 memory use, not arm32 code generation.
 
+**Follow-up idea (a separate project, not part of the arm32 work):** report
+peak memory per test in the eval runner, next to its per-phase timing. The
+runner already forks a child per test, and on POSIX `wait4` returns the
+child's `ru_maxrss`, so a "largest memory" list like the "slowest tests" list
+costs almost nothing and would have found these two tests before a 1 GB
+board did. Open questions for that project: report only or enforce limits
+(limits are flaky across allocators and hosts), attributing compile vs run
+memory (needs measuring inside the child), and Windows (a different query).
+
 ## Annoyances to fix later
 
 Small frictions met while working, none blocking. Each says where it belongs.
