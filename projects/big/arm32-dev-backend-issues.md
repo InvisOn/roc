@@ -389,31 +389,93 @@ memory use, not arm32 code generation.
 Small frictions met while working, none blocking. Each says where it belongs.
 Fix each one in its own commit, and remove its entry in that commit.
 
-- **The backend test step always reports failure.** One wasm test prints to
-  stderr, so `zig build run-test-zig-module-backend` fails although every
-  test passes (see "WASM merge" above). Fix in the test: capture or drop the
-  debug print. Until then, run the test binary directly to read the totals.
+- **The backend test step always reports failure.** `mergeModule` in
+  `src/backend/wasm/WasmModule.zig` (the `FunctionTypeMismatch` branch)
+  prints "WASM merge: both modules import ..." in Debug builds, and the test
+  "mergeModule rejects same-name imports with different signatures" reaches
+  that branch on purpose. Zig's build runner treats test output on stderr as
+  a failure, so `zig build run-test-zig-module-backend` fails although the
+  binary reports every test passed. Fix: return the detail through the error
+  path instead of printing. For example, record the import name and both
+  type indices in a caller-visible diagnostic, as HostSplice does with
+  `unresolved`, and print it only where the error is reported. Then the test
+  can assert the detail instead of producing output.
 - **Line-number exclusions in build.zig's pattern checks go stale.** The
-  type-checker pattern check excludes lines of `inspected.zig`,
-  `Check.zig`, `store.zig` and `cir_to_lir.zig` by number, so any edit above
-  them breaks the check (J3a shifted `inspected.zig` by one line). Two of the
+  type-checker pattern check (`excluded_ranges` in `build.zig`, two tables)
+  excludes lines of `inspected.zig`, `Check.zig`, `store.zig`,
+  `cir_to_lir.zig` and `utils.zig` by number, so any edit above an excluded
+  line breaks CI (J3a shifted `inspected.zig` by one line). Two of the
   `inspected.zig` ranges (2475 and 3265-3276) already point at unrelated
-  lines. Fix by anchoring exclusions to a marker comment on the line instead
-  of a number.
+  lines, so whatever they meant to allow is no longer allowed or needed.
+  Fix: replace the tables with a marker comment on each allowed line (for
+  example `// pattern-check: allow cross-module name match`) that the
+  scanner looks for. The reason then sits next to the code, and edits
+  elsewhere cannot move it. Audit each current range while converting it,
+  and drop the stale ones.
 - **minici stops at the first failing phase and rebuilds everything first.**
   A full run spends about 15 minutes in `build-ci` before the first check,
   so each quick lint failure costs a full cycle. Run the `run-check-*`
   phases directly first, and resume with `--minici-after <phase>`.
-- **Zig does not print stack traces in arm Debug test binaries under qemu**
-  ("stack tracing is disabled"), so an arm32 test failure shows no location.
-  ReleaseSafe runners do print traces; a Debug runner does not link at all
-  (above). Worth a small helper step that builds a ReleaseSafe arm32 runner.
+- **Debugging arm32 failures is slow** (plan for a fix below). Two separate
+  problems:
+  - *Unit-test binaries print no stack traces.* This is not an arm or qemu
+    limitation: `src/build/unit_test_runner.zig` sets
+    `allow_stack_tracing = build_options.debug_gpa_traces`, which defaults
+    to off because capturing allocation traces dominates Debug test time.
+    `-Ddebug-gpa-traces` turns panic and error-return traces back on for
+    every target. The fx host sets `.allow_stack_tracing = false` too.
+  - *The eval runner has no Debug arm32 build.* It fails to link ("InputSection
+    too large for range extension thunk"; see "A Debug arm32 eval runner does
+    not link"). ReleaseFast has no traces and no safety checks, so J3a
+    debugging used a separate ReleaseSafe build (about 20 minutes).
+
+  **Plan.** Take these in order and stop once debugging is fast enough.
+  1. Verify and document `-Ddebug-gpa-traces` for arm32 unit tests (for
+     example `zig build run-test-zig-module-backend -Dtarget=arm-linux-musleabihf
+     -fqemu -Ddebug-gpa-traces`) in `src/backend/dev/arm32/TOOLS.md`. This
+     costs nothing and covers most unit-test debugging.
+  2. Make the Debug arm32 eval runner link. A32 `BL` reaches ±32 MB, and LLD
+     can only place range-extension thunks between input sections. The eval
+     runner is one Zig compilation unit whose `.text` is a single input
+     section larger than that. `roc` and several objects in `build.zig`
+     already set `link_function_sections = true`. Setting it for the eval
+     runners (at least for arm targets) splits `.text` per function, which
+     should let LLD place thunks. If it works, the Debug runner gives safety
+     checks and traces with no separate ReleaseSafe build, and J3a's
+     acceptance ("the Debug runner build's D10 high-water mark") can be met
+     as the plan wrote it. Risk: the build may still be slow or large; for
+     x86_64 and aarch64 the setting only changes section layout, but it
+     needs a check that it does not slow host builds noticeably.
+  3. If 2 fails, add a build step (for example
+     `build-test-eval-runner-arm32-safe`) that builds the ReleaseSafe runners
+     into their own prefix, so nobody overwrites `zig-out/bin` with arm
+     binaries by accident (which happened during J3a).
+
+  **Alternatives considered.**
+  - *gdb through qemu's gdb stub* (`qemu-arm-static -g <port>` with an
+    arm-capable gdb). It gives full debugging, but the local gdb is
+    x86_64-only (`gdb-multiarch` would be needed), and it steps one process,
+    while the eval runner forks a child per test. Useful for one hard bug, not
+    as the everyday path.
+  - *Native gdb on the board.* The Pi has gdb, and the Pi 5 will be fast
+    enough. It needs the program copied over and has the same fork problem.
+    Good for hardware-only bugs.
+  - *Symbolizing raw return addresses offline.* The panic handler would print
+    addresses and `llvm-symbolizer` would resolve them against the unstripped
+    binary. That only duplicates what `allow_stack_tracing` already does once
+    it is on.
+  - *Running arm32 tests only on the board.* It avoids qemu, but CI and most
+    contributors have no board, so qemu stays the primary path.
 - **`.zig-cache` fills the disk during cross builds** (above). A periodic
   full clear, or a separate `--cache-dir` for arm32 cross builds that can be
   deleted wholesale, would avoid it.
 - **The int app prints heap addresses,** so comparing its stdout across
-  targets needs masking (the J3c lane masks `0x…`). Printing a stable token
-  instead of the pointer would make the output directly comparable.
+  targets needs masking. `test/int/platform/host.zig` prints
+  `init returned Box: 0x{x}` and `update returned new Box: 0x{x}`, and the
+  J3c lane in `ci_cross_compile.yml` masks `0x...` before diffing. Fix:
+  print that the box is non-null (for example `init returned a Box`), and
+  check the address in the host instead if it matters. Then remove the
+  `sed` masking from the J3c step in the same commit.
 - **The wasm eval oracle is off on 32-bit hosts** (see "The wasm eval oracle
   cannot run in a 32-bit process" above for the cause and the options). The
   fix belongs in bytebox's memory reservation; remove the gate in
