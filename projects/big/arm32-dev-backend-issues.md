@@ -316,6 +316,10 @@ every build mode, not an assertion that Release builds drop.
 
 #### Two eval tests need more memory than a 1 GB board has
 
+**Status: open for 1 GB boards only.** On a Raspberry Pi 5 (8 GB, 64-bit
+kernel) both tests pass: the full corpus runs 2171/2171 there
+(2026-09-27, at `6ba6f28726`).
+
 "inspect: inclusive numeric ranges all iterate" and "inspect: exclusive
 numeric ranges all iterate" compile ten `Iter.fold` range pipelines, one per
 integer width. Compiling them peaks at about 1.25 GB resident on x86_64 and
