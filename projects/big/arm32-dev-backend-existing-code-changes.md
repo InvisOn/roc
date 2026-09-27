@@ -87,7 +87,9 @@ Linux, the OS calls on macOS and Windows, nothing on x86) moved from
 shim and `ExecutableMemory` share it. This also adds the flush on aarch64,
 which previously relied on the kernel's maintenance at `mprotect`. The new
 `error.FlushInstructionCacheFailed` is added to every error set that
-enumerated `ExecutableMemory`'s errors.
+enumerated `ExecutableMemory`'s errors. The move missed the one workflow
+step that tests the file (`ci_manager.yml`, the arm64 hello-world job, run
+on every pull request); a later commit points it at the new path.
 
 ### In-process relocations patched by guessing the ISA (`c8b2e8f839`)
 
