@@ -26,6 +26,7 @@ Where a new note goes:
 | How to work on arm32 (workflow) | `src/backend/dev/arm32/GUIDE.md` |
 | A tool, script or command | `src/backend/dev/arm32/TOOLS.md` |
 | The plan's units and their acceptance | `projects/big/arm32-dev-backend.md` (a plan change is recorded as an amendment in DESIGN.md) |
+| Verification results, catching up with upstream | `projects/big/arm32-dev-backend-verification.md` |
 
 Contents:
 
