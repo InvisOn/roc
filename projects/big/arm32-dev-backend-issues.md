@@ -304,6 +304,36 @@ doubles and addressed as singles for f32 arguments; and the stub has no
 unwind information, so a crash inside a hosted function shows no frames
 through the trampoline (true for the existing ISAs too).
 
+#### Building the arm32 eval runners needs 18 GB, more than CI runners have
+
+**Status: open, blocks the J3a CI lane (never run in CI yet).**
+
+- **Where:** `.github/workflows/ci_zig.yml`, step "Build the eval runner for
+  arm32" (`zig build build-test-eval-runner build-test-eval-host-effects-runner
+  -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast`), on GitHub-hosted
+  `ubuntu-24.04`.
+- **Measured** (`--summary all`, 2026-09-27, x86_64 desktop): compiling
+  `eval-test-runner` for arm32 peaks at **18 GB** resident (14 minutes),
+  `eval-host-effects-runner` at **11 GB** (8 minutes); every other step
+  stays under 1 GB. The two build in parallel by default, so the step needs
+  about 29 GB at peak.
+- **Effect:** GitHub's standard hosted Linux runners have 16 GB on public
+  repositories (and less for private ones), so the lane J3a made required
+  will very likely fail from lack of memory on its first CI run. A Raspberry Pi 5
+  (8 GB) rebooted trying the same build with four jobs, and cannot build it
+  even one step at a time.
+- **Fix directions, to investigate in this order:**
+  1. Find what takes 18 GB (the LLVM-backend oracle linked into the runner,
+     or Zig's own ReleaseFast code generation of one huge compilation unit)
+     and whether a build option that leaves out the LLVM backend, or
+     `-Doptimize=ReleaseSmall`, cuts it below the runner's memory.
+  2. Build the two runners in sequence (`-j1`), which helps only once the
+     larger one fits on its own.
+  3. Build them on a larger runner, or on a self-hosted machine, and pass
+     the binaries to the job that runs them under qemu.
+  Whatever the fix, confirm it with `--summary all` (MaxRSS per step) before
+  relying on CI.
+
 #### A Debug arm32 eval runner does not link
 
 `zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf` in Debug
