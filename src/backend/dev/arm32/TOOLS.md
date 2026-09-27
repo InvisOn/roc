@@ -194,7 +194,10 @@ ROC_CROSS_SSH_HOST=user@board zig build run-test-cli -- --suite platforms \
 ```
 
 A relative runner path is taken from the directory the CLI runner starts
-in, although each program runs in its own work directory. The board needs key-based ssh login without
+in, although each program runs in its own work directory. Tested boards: a
+Raspberry Pi 5 on 64-bit Raspberry Pi OS (its default kernel uses 16 KB pages;
+arm32 programs run unchanged) and a Raspberry Pi 3 on 32-bit Raspberry Pi OS.
+The board needs key-based ssh login without
 prompts. Every argument is quoted for the remote shell, because the runner
 passes the expected-output spec (spaces and `|`) as a single argument.
 
