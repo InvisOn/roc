@@ -190,6 +190,12 @@ oracle.
 
 ## Results
 
+### Findings so far
+
+| Found | Red at | Fixed by | What |
+|---|---|---|---|
+| 2026-09-28, drafting the self-hosted workflow | `ee65370868` (#70) | the commit that adds this row | The instruction-cache file moved to `src/backend/dev/`, but `ci_manager.yml`'s arm64 hello-world job (run on every pull request) still tested the old path. The moved file passes `zig test -O ReleaseSafe` on the Raspberry Pi 5 (aarch64). |
+
 ### Stage 1: per-commit table
 
 Not run yet.
