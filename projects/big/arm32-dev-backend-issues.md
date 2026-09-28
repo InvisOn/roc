@@ -202,7 +202,7 @@ explicit `abs32` kind.
 
 **Status: open, and worse than first recorded (found by reading
 `interpreter.zig`, not yet run).** On an arm32 host `host_trampoline.available`
-is false (since `c7528522f4`, J1b), but the interpreter does not refuse the
+is false (since `ecf471509f`, J1b), but the interpreter does not refuse the
 call: it falls through to the "uniform" hosted ABI, calling the function as
 `fn (args_buf, ret_buf)`. Only platforms written for that ABI (the echo
 platform, for wasm32) register functions of that shape; an ordinary platform
@@ -324,14 +324,16 @@ through the trampoline (true for the existing ISAs too).
   (8 GB) rebooted trying the same build with four jobs, and cannot build it
   even one step at a time.
 - **Fix directions, to investigate in this order:**
-  1. Find what takes 18 GB (the LLVM-backend oracle linked into the runner,
+  1. The cheap check first: build the two runners one at a time (`-j1`) and
+     see whether the larger one (18 GB) fits in the hosted runner's 16 GB
+     plus its swap. If it does, this alone may fix the lane.
+  2. Find what takes 18 GB (the LLVM-backend oracle linked into the runner,
      or Zig's own ReleaseFast code generation of one huge compilation unit)
      and whether a build option that leaves out the LLVM backend, or
      `-Doptimize=ReleaseSmall`, cuts it below the runner's memory.
-  2. Build the two runners in sequence (`-j1`), which helps only once the
-     larger one fits on its own.
-  3. Build them on a larger runner, or on a self-hosted machine, and pass
-     the binaries to the job that runs them under qemu.
+  3. Build them on a larger GitHub-hosted runner (which costs money even on
+     a public repository) and pass the binaries to the job that runs them
+     under qemu. Not on the owner's own machines: no CI runners there.
   Whatever the fix, confirm it with `--summary all` (MaxRSS per step) before
   relying on CI.
 
@@ -349,7 +351,7 @@ every build mode, not an assertion that Release builds drop.
 
 **Status: open for 1 GB boards only.** On a Raspberry Pi 5 (8 GB, 64-bit
 kernel) both tests pass: the full corpus runs 2171/2171 there
-(2026-09-27, at `6ba6f28726`).
+(2026-09-27, at `e3457476ca`).
 
 "inspect: inclusive numeric ranges all iterate" and "inspect: exclusive
 numeric ranges all iterate" compile ten `Iter.fold` range pipelines, one per
@@ -522,7 +524,7 @@ memory (needs measuring inside the child), and Windows (a different query).
 
 #### In-process relocation patching guesses the encoding
 
-**Status: resolved in `c8b2e8f839`** (J3a). Relocation patching takes the ISA
+**Status: resolved in `e865de0a8a`** (J3a). Relocation patching takes the ISA
 the code was generated for and patches each site by that ISA's rule; arm32
 patches A32 `bl`/`b`.
 
@@ -542,14 +544,14 @@ patches A32 `bl`/`b`.
   different signatures" printed "WASM merge: both modules import 'roc_crashed'".
 - **Effect:** `zig build run-test-zig-module-backend` reported failure although
   the binary reported every test passed.
-- **Resolved in `3bb3ca2b44`:** the merge records the conflicting function in
+- **Resolved in `1138ce4c33`:** the merge records the conflicting function in
   `WasmModule.merge_type_conflict` instead of printing it, and the test
   asserts the recorded conflict. The step passes, on the host and for arm32
   under `-fqemu`.
 
 #### A checked I64 multiply took 10 of arm32's 11 temporaries
 
-**Status: resolved in `1de80a8369`** (J2).
+**Status: resolved in `c36fd3b6ea`** (J2).
 
 `emitWide64MulChecked` held both operand pairs, the result pair and four
 partial-product registers at once, and J2's D10 measurement saw the general
@@ -560,7 +562,7 @@ the register budget section of `src/backend/dev/arm32/DESIGN.md`).
 
 #### Shim execution did not resolve `__aeabi_*`
 
-**Status: resolved in `f485e9c6c5`** (J3a).
+**Status: resolved in `c68e88c823`** (J3a).
 
 `callAeabiHelper` emits a relocation to the helper's name in shim mode, like
 every other runtime symbol. `native_runtime_libcalls.resolve` now binds those
@@ -569,7 +571,7 @@ in-process linking (HostSplice, the machine-code shim) resolves them.
 
 #### Test skip guards are keyed on the host architecture
 
-**Status: resolved in `4a49f4b51f`** (J3a): the tests skip on
+**Status: resolved in `894650cd4e`** (J3a): the tests skip on
 `host_lir_codegen_available`, and all of them run and pass on an arm32 host
 under qemu.
 
@@ -579,11 +581,11 @@ them.
 
 #### Target data laid out with the host's word
 
-**Status: resolved in `654087283b`.**
+**Status: resolved in `f4af9e372d`.**
 
 Code generation sometimes sizes *target* data with the *host's* `usize`, which
 is right only while host and target share a word size (every target before
-arm32). Fixed (`654087283b`): `@alignOf(usize)` in the Debug RocStr validity
+arm32). Fixed (`f4af9e372d`): `@alignOf(usize)` in the Debug RocStr validity
 check and `@sizeOf(usize)` in the erased-call descriptor array and the
 erased-callable drop-pointer slot; and every use of
 `builtins.erased_callable`'s host layouts (`Payload`, `capture_offset`,

@@ -37,7 +37,7 @@ error and fails the snapshot. Needed before J2 lets the dev backend compile
 arm32, so an arm32 failure cannot be mistaken for an unsupported target. No
 effect on passing snapshots.
 
-### Target data sized by the host's `usize` (`654087283b`)
+### Target data sized by the host's `usize` (`f4af9e372d`)
 
 `LirCodeGen` measured target memory with the compiler host's word in three
 places: the Debug RocStr validity check's alignment mask (`@alignOf(usize) -
@@ -47,7 +47,7 @@ cross-compiling for a 32-bit target would validate 4-byte-aligned heap strings
 against 8-byte alignment (a false Debug crash) and lay out 8-byte slots the
 target reads as 4-byte ones. No effect on today's targets.
 
-### Erased-callable layouts taken from the host (`ab6e860e2d`)
+### Erased-callable layouts taken from the host (`d69fb5eb7f`)
 
 `LirCodeGen` wrote erased-callable payloads using `builtins.erased_callable`'s
 constants and `@offsetOf`/`@sizeOf` on its structs, which the compiler host
@@ -70,14 +70,14 @@ shift is cast to `usize`'s shift type after asserting that. Needed for the
 Track D/J3a lane that runs the eval corpus on arm32 under qemu. No effect on
 64-bit hosts.
 
-### Plan documents failed `run-check-tidy` (`12be3758d5`)
+### Plan documents failed `run-check-tidy` (`e8e659062c`)
 
 Spaced em dashes and missing or duplicate top-level titles in
 `projects/big/arm32-dev-backend*.md` and `arm64-backend-reference.md` made the
 tidy check fail on the branch before any code changed. Needed so the tidy
 check could gate every later commit.
 
-### Instruction cache not flushed before JIT memory runs (`ee65370868`)
+### Instruction cache not flushed before JIT memory runs (`49bf1449b9`)
 
 `ExecutableMemory.zig` (J3a, D12): memory is published to the instruction
 stream through `instruction_cache.flush` before it is made executable. The
@@ -91,7 +91,7 @@ enumerated `ExecutableMemory`'s errors. The move missed the one workflow
 step that tests the file (`ci_manager.yml`, the arm64 hello-world job, run
 on every pull request); a later commit points it at the new path.
 
-### In-process relocations patched by guessing the ISA (`c8b2e8f839`)
+### In-process relocations patched by guessing the ISA (`e865de0a8a`)
 
 `Relocation.zig` (J3a): `applyRelocations`/`applyRelocationsWithContext`
 take the ISA the code was generated for, and every relocation site is
@@ -107,12 +107,12 @@ host ISA; the tests pass the ISA of the bytes they patch.
 The same commit adds arm32's rules (A32 `bl`/`b`, `abs32` local data) and
 the A32 jump stubs listed under J3a.
 
-### The wasm test ULEB reader did not compile for a 32-bit host (`86c2f646fc`)
+### The wasm test ULEB reader did not compile for a 32-bit host (`e610fb5353`)
 
 `WasmCodeGen.zig` (J3a): the test-only ULEB reader shifts by
 `Log2Int(usize)`, not `u6`, so the backend tests compile on a 32-bit host.
 
-### Backend tests assumed a 64-bit host; a literal 8 in entry slots (`4a49f4b51f`)
+### Backend tests assumed a 64-bit host; a literal 8 in entry slots (`894650cd4e`)
 
 `LirCodeGen.zig` (J3a): `entrypointParamSlotSize` rounds by the target
 word, not a literal 8 (an A2 miss; byte-identical on the 64-bit targets).
@@ -121,7 +121,7 @@ dev backend: the shift tests build LIR with a `U8` amount, as the shift
 builtins do; the narrow-argument observer reads word-sized registers; the
 static-root pack test builds its descriptor at the target's word size.
 
-### The wasm eval backend reported available on 32-bit hosts (`eb28c6efb7`)
+### The wasm eval backend reported available on 32-bit hosts (`1344ce3159`)
 
 `eval/mod.zig` and `eval/test/parallel_runner.zig` (J3a): the wasm eval
 backend is available only on 64-bit hosts. Roc's wasm modules declare no
@@ -130,7 +130,7 @@ which a 32-bit process cannot hold (`Uninstantiable64BitLimitsOn32BitArch`).
 The runner asks `eval.backendAvailable(.wasm)` instead of hardcoding true,
 so on an arm32 host wasm reports `not_implemented` like an absent backend.
 
-### A wasm merge conflict printed to stderr, failing the backend test step (`3bb3ca2b44`)
+### A wasm merge conflict printed to stderr, failing the backend test step (`1138ce4c33`)
 
 `backend/wasm/WasmModule.zig` (annoyance fix): a function-type mismatch
 during a module merge is recorded in `merge_type_conflict` (the name and
@@ -138,7 +138,7 @@ both type indices) instead of printed to stderr in Debug builds, so the
 backend test step stops failing on a passing run. WasmCodeGen's eval
 builtin-merge invariant message now names the conflicting function.
 
-### A relative `--cross-runner` path was not found (`a266aab5ed`)
+### A relative `--cross-runner` path was not found (`6205c06435`)
 
 `cli/test/parallel_cli_runner.zig`: cross-built programs run in per-test
 work directories, so a relative runner such as `ci/ssh_cross_runner.sh` was
@@ -149,7 +149,7 @@ glue binaries.
 
 ## Plan milestones that edit existing code
 
-### Track B: encoder and oracle (`8ffd541b71`)
+### Track B: encoder and oracle (`73b96e7924`)
 
 - `.gitignore`: whitelists `ci/arm32_encoding_oracle.s`. Needed because `*.s`
   is ignored repository-wide, so CI would never have received the oracle's
@@ -189,20 +189,20 @@ glue binaries.
   emitted nothing). The never-read `LirCodeGen.cc` field is removed because
   its initializer, `CallingConvention.forTarget`, panics for `.arm`.
 - `x86_64/CodeGen.zig`, `aarch64/CodeGen.zig`, `NativeProcCompiler.zig`
-  (`42b80a5c56`): the CPU level and the bounded temporary allocators move from
+  (`85656e1351`): the CPU level and the bounded temporary allocators move from
   the driver into each ISA's `CodeGen`, which records the D10 high-water mark.
   Needed as the seam per-ISA instruction selection and arm32's register budget
   build on.
-- `x86_64/Emit.zig`, `aarch64/Emit.zig`, `LirCodeGen.zig` (`939c17678e`): role
+- `x86_64/Emit.zig`, `aarch64/Emit.zig`, `LirCodeGen.zig` (`0be4fbe2fd`): role
   registers (result-pointer and RocOps save registers, Roc return registers,
   caller stack-argument base) come from the ISA's `CC`. Needed so arm32
   supplies its register roles by defining its `CC` instead of adding a third
   literal at each site.
-- `LirCodeGen.zig`, both `CodeGen.zig` (`f23924444c`, `37872af5d3`): 55
+- `LirCodeGen.zig`, both `CodeGen.zig` (`33be6e0cec`, `18faf2eabe`): 55
   ISA-neutral helpers move into per-ISA `CodeGen` methods with one signature.
   Needed so arm32 implements them in its own `CodeGen`.
 
-### A3: containers (`301db39b9a`)
+### A3: containers (`277feeecfd`)
 
 - `object/elf.zig`: ELF32/REL writer for `.arm` beside the untouched ELF64
   path. Needed because the writer was ELF64/RELA-only and an EM_ARM ELF64
@@ -220,7 +220,7 @@ glue binaries.
   (x86_64 -4, aarch64 0, arm -8). Needed because `if x86_64 -4 else 0` would
   have given arm32 the wrong PC bias.
 
-### Track C: target artifacts (`75c55299d2`)
+### Track C: target artifacts (`db8d0e81d5`)
 
 - `build.zig`: arm32musl/arm32glibc builtins, runtime and host-library
   targets. Needed for anything to link for arm32.
@@ -240,12 +240,12 @@ glue binaries.
 
 ### A2: width model
 
-- `LirCodeGen.zig` (`1decf55b3f`): `target_ptr_size` derives from the target
+- `LirCodeGen.zig` (`d94be6fc25`): `target_ptr_size` derives from the target
   (it was the literal 8) and the word vocabulary is added; RocStr/RocList
   field accesses name their fields. The small-string literal path bit-cast a
   word's bytes to `u64`, which compiles only for 8-byte words. Needed because
   every 32-bit value of these was wrong or uncompilable.
-- `LirCodeGen.zig` (`9896319673`, `dcb012efe4`): list element access, the
+- `LirCodeGen.zig` (`5fb339fda7`, `d626657d87`): list element access, the
   general copier, `List.len`/`List.capacity`, and the string and refcount
   helpers use words; `word_sign_bit` and `small_str_len_shift` replace
   `minInt(i64)` and a literal 56. Needed because those are pointer-sized
@@ -500,51 +500,51 @@ glue binaries.
 
 ### J3a: the dev backend on arm32 hosts
 
-- `sljmp` (`e9e1a8da3b`): an A32 setjmp/longjmp for arm Linux (R4-R11, SP, LR,
+- `sljmp` (`18000a923c`): an A32 setjmp/longjmp for arm Linux (R4-R11, SP, LR,
   D8-D15), so the compile-time evaluator's crash recovery works on an
   arm32 compiler.
-- `HostSplice.zig` and `machine_code_shim/main.zig` (`c8b2e8f839`): an A32
+- `HostSplice.zig` and `machine_code_shim/main.zig` (`e865de0a8a`): an A32
   jump stub (`ldr pc, [pc, #-4]` and the target word); HostSplice's tests skip
   on `host_lir_codegen_available` instead of naming x86_64 and aarch64.
-- `builtins/native_runtime_libcalls.zig` (`f485e9c6c5`): on an arm32 host,
+- `builtins/native_runtime_libcalls.zig` (`c68e88c823`): on an arm32 host,
   `resolve` binds the `__aeabi_*` helpers the arm32 dev backend calls (D7) to
   the compiler's own compiler-rt.
-- `LirCodeGen.zig` (`79f9ccf002`): `host_lir_codegen_available` is true for
+- `LirCodeGen.zig` (`5887997c63`): `host_lir_codegen_available` is true for
   arm, so an arm32 compiler evaluates with its own dev backend; the 37 tests
   that named x86_64/aarch64 hosts skip on that constant instead (the tests
-  themselves were made host-independent in `4a49f4b51f`, above). The arm32
+  themselves were made host-independent in `894650cd4e`, above). The arm32
   lowering fixes in the same commit (checked I64 negate, the small string
   capture copy, the wrapping 128-bit multiply) are new arm32 code and are in
   arm32 DESIGN.md.
-- `arm32/Call.zig` and `arm32/CodeGen.zig` (`bf3e33730a`, a D5 amendment):
+- `arm32/Call.zig` and `arm32/CodeGen.zig` (`0bea1440e5`, a D5 amendment):
   out-of-range addresses are formed in LR, not r12. Listed here because it
   changes the register roles the plan's D5 fixed; see arm32 DESIGN.md.
-- `.github/workflows/ci_zig.yml` (`79f9ccf002`): the arm32 eval lane is no
+- `.github/workflows/ci_zig.yml` (`5887997c63`): the arm32 eval lane is no
   longer allowed to fail and also runs the host-effects corpus.
 
 ### J3: call-shape battery
 
 - `test/fx/platform/main.roc`, `host.zig`, new `Abi.roc`, and
-  `cli/test/fx_test_specs.zig` (`80c74cc9d5`): eight hosted functions whose C
+  `cli/test/fx_test_specs.zig` (`f3c70c60c0`): eight hosted functions whose C
   signatures are the call shapes a backend must place exactly, and the
   `test/fx/abi_call_shapes.roc` case that calls them.
-- `test/glue/fx_platform_cglue_expected.h` (`352d062072`): regenerated,
+- `test/glue/fx_platform_cglue_expected.h` (`43ed156943`): regenerated,
   because the new hosted functions change the fx platform's generated C
   header (their declarations, and every later hosted index moves by eight).
 
 ### J3c: required cross-compile lanes
 
-- `.github/workflows/ci_cross_compile.yml` (`cd563f5c05`): the arm32musl
+- `.github/workflows/ci_cross_compile.yml` (`fc02e3fb45`): the arm32musl
   lanes are no longer allowed to fail, and the on-target job compares each
   arm32 int app's stdout with the Linux-built x64musl app's, with heap
   addresses masked.
 
 ### J4: lock-in
 
-- `snapshot_tool/main.zig` (`c17b138009`): the per-target pre-check asks
+- `snapshot_tool/main.zig` (`fdaa863dbf`): the per-target pre-check asks
   `devSupportsTarget` instead of listing the 64-bit architectures, and a new
   test pins every `dev_object` snapshot line to that gate. The 16
   `dev_object` snapshots gain arm32 hashes (only `arm32*=` lines change).
-- `design.md`, `backend/dev/mod.zig`, `projects/README.md` (`13547918d4`):
+- `design.md`, `backend/dev/mod.zig`, `projects/README.md` (`0c66ab5b94`):
   ARM32 named among the native dev backends, its CPU floor stated, and the
   plan indexed.
