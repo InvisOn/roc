@@ -100,9 +100,10 @@ which refuses if the remote moved). It needs the owner's go-ahead at the time.
 
 ## The history being verified
 
-After part 1: 105 commits on `32-bit-backend` since the merge base with
-upstream `main` (`58508d582b`, 2026-09-24), linear. The commit hashes in the
-tables below are the pre-rewrite ones; step 5 of part 1 updates them.
+105 commits on `32-bit-backend` since the merge base with upstream `main`
+(`58508d582b`, 2026-09-24), linear (after part 1). Hashes and `#N` numbers in
+this section and below are the new ones; the appendix maps old hashes to
+new.
 
 The plan's units interleave in the history (A2's commits are mixed with A3,
 Track C, the NEON batch, Track D and fixes; J3b landed before J2), so a unit
@@ -122,32 +123,32 @@ column says where each can be checked.
 
 | Unit | Last commit | How |
 |---|---|---|
-| Track B (encoder, NEON batch) | `60be8c5855` (#36) | local: encoder tests, `ci/arm32_encoding_oracle.py --check`, test count ≥ `pub fn` count |
-| A0 (byte-identity oracles) | `82e4e93092` (#6) | local x86_64; the aarch64 host and "every ci_zig host" parts need CI |
-| A1 (dispatch, D10, CC seam, facade) | `013e9f13f6` (#13) | local: oracles, `run-test-zig`, eval, host effects, CLI, the three `rg` checks, the `@compileError` gate still present |
-| A3 (ELF32 containers) | `301db39b9a` (#14) | local: oracles, the `elf.zig` tests and the aarch64 sibling test |
-| Track C (arm32 target artifacts) | `75c55299d2` (#15); fix `2760f61aa1` (#53) | local: the six objects, `ci/elf32_reader.py` output, baseline pin test, non-zero cross case count |
-| A2 (width model) | `0ba1d611fa` (#37) | local: as A1 |
-| Track D (CI lanes) | `b3b397ad8a` (#38) | CI only (the jobs must appear and their steps run) |
-| J1a–J1f (arm32 CodeGen) | `0364d47adb` (#40), `c7528522f4` (#43), `1c9bdcfa57` (#48), `2e4ce3f8a8` (#50), `7654e0f561` (#51), `2cf0c7ffd5` (#52) | local: no `arm => @compileError` left, the `LirCodeGen(.arm32musl)` test block, the hello-world link-and-run test under qemu |
-| J3b (`--cross-run`) | `1202fbae9e` (#57) | local: fx and int cases pass under qemu with the x86_64 dev stdout |
-| J2 (cross-compilation on) | `aa6c9c2485` (#67) | local Linux parts (int app, `elf32_reader.py` on object and executable, qemu stdout, arm32linux, the `--opt=speed` diagnostic, the SIMD lane, D10 in Debug builds); the macOS and Windows hosts need CI |
-| J3a (dev backend on arm32 hosts) | `79f9ccf002` (#77) | local under qemu, plus the Raspberry Pi 5; the "Debug runner" clause cannot be met (see the issues note) |
-| J3c (required cross-compile lanes) | `cd563f5c05` (#78) | CI only (all four hosts) |
-| J3 hardware (call-shape battery, atomics) | `57bdd065a2` (#85) | Pi 3 and Pi 5, manually |
-| J4 (lock-in) | `13547918d4` (#88) | local x86_64; "all six ci_zig hosts" needs CI |
+| Track B (encoder, NEON batch) | `4d3de2e56e` (#34) | local: encoder tests, `ci/arm32_encoding_oracle.py --check`, test count ≥ `pub fn` count |
+| A0 (byte-identity oracles) | `5ee8a07527` (#4) | local x86_64; the aarch64 host and "every ci_zig host" parts need CI |
+| A1 (dispatch, D10, CC seam, facade) | `81fd7f7774` (#11) | local: oracles, `run-test-zig`, eval, host effects, CLI, the three `rg` checks, the `@compileError` gate still present |
+| A3 (ELF32 containers) | `277feeecfd` (#12) | local: oracles, the `elf.zig` tests and the aarch64 sibling test |
+| Track C (arm32 target artifacts) | `db8d0e81d5` (#13); fix `77c761ec12` (#51) | local: the six objects, `ci/elf32_reader.py` output, baseline pin test, non-zero cross case count |
+| A2 (width model) | `37cc054a58` (#35) | local: as A1 |
+| Track D (CI lanes) | `727d84088f` (#36) | CI only (the jobs must appear and their steps run) |
+| J1a–J1f (arm32 CodeGen) | `506b0486f2` (#38), `ecf471509f` (#41), `b392284263` (#46), `f017e3b2a5` (#48), `a31e7a2a91` (#49), `a50e40a165` (#50) | local: no `arm => @compileError` left, the `LirCodeGen(.arm32musl)` test block, the hello-world link-and-run test under qemu |
+| J3b (`--cross-run`) | `a02d04458f` (#55) | local: fx and int cases pass under qemu with the x86_64 dev stdout |
+| J2 (cross-compilation on) | `2ec8ae751e` (#65) | local Linux parts (int app, `elf32_reader.py` on object and executable, qemu stdout, arm32linux, the `--opt=speed` diagnostic, the SIMD lane, D10 in Debug builds); the macOS and Windows hosts need CI |
+| J3a (dev backend on arm32 hosts) | `5887997c63` (#75) | local under qemu, plus the Raspberry Pi 5; the "Debug runner" clause cannot be met (see the issues note) |
+| J3c (required cross-compile lanes) | `fc02e3fb45` (#76) | CI only (all four hosts) |
+| J3 hardware (call-shape battery, atomics) | `fd1cec553e` (#83) | Pi 3 and Pi 5, manually |
+| J4 (lock-in) | `0c66ab5b94` (#86) | local x86_64; "all six ci_zig hosts" needs CI |
 
 ### Phases (cut points for CI and for walkthroughs)
 
 | Phase | Ends at | Contains |
 |---|---|---|
-| 1 | `013e9f13f6` (#13) | plan documents, Track B batch 1, A0, A1 |
-| 2 | `75c55299d2` (#15) | A3, Track C |
-| 3 | `013809c2b6` (#39) | A2, Track B NEON, Track D, fixes to existing code |
-| 4 | `2cf0c7ffd5` (#52) | J1a–J1f |
-| 5 | `aa6c9c2485` (#67) | J2, J3b |
-| 6 | `79f9ccf002` (#77) | J3a |
-| 7 | `352d062072` (#89) | J3c, J3 battery, J4 |
+| 1 | `81fd7f7774` (#11) | plan documents, Track B batch 1, A0, A1 |
+| 2 | `db8d0e81d5` (#13) | A3, Track C |
+| 3 | `f2fb602f74` (#37) | A2, Track B NEON, Track D, fixes to existing code |
+| 4 | `a50e40a165` (#50) | J1a–J1f |
+| 5 | `2ec8ae751e` (#65) | J2, J3b |
+| 6 | `5887997c63` (#75) | J3a |
+| 7 | `43ed156943` (#87) | J3c, J3 battery, J4 |
 | 8 | the tip | post-plan fixes and notes |
 
 Each phase becomes a branch pointing at its existing last commit
@@ -295,11 +296,28 @@ oracle.
 
 | Found | Red at | Fixed by | What |
 |---|---|---|---|
-| 2026-09-28, drafting a CI workflow | `ee65370868` (#70) | `da35674feb` | The instruction-cache file moved to `src/backend/dev/`, but `ci_manager.yml`'s arm64 hello-world job (run on every pull request) still tested the old path. The moved file passes `zig test -O ReleaseSafe` on the Raspberry Pi 5 (aarch64). |
+| 2026-09-28, drafting a CI workflow | `49bf1449b9` (#68) | `6eeba018af` | The instruction-cache file moved to `src/backend/dev/`, but `ci_manager.yml`'s arm64 hello-world job (run on every pull request) still tested the old path. The moved file passes `zig test -O ReleaseSafe` on the Raspberry Pi 5 (aarch64). |
 
 ### Part 1: history cleanup
 
-Not run yet.
+Done 2026-09-29, locally (nothing pushed).
+
+- Safety copies: tag `backup/32-bit-backend-before-rewrite` at the old tip
+  `8ff3b64374`, and a verified `git bundle` of it in the scratch directory.
+- New history: `8e7c114321` ("Add the arm32 dev backend plan") on
+  `58508d582b`, with `379469a2c4`'s tree, then 104 commits replayed by
+  `git commit-tree -S` (every original commit was signed with the owner's SSH
+  key, so every replayed one is too). New tip before this update:
+  `aadf66a29b`.
+- Checks, all passed: every replayed commit has its original tree, author,
+  committer and dates; the history is linear from the merge base with 105
+  commits and no merges; every commit is signed; no commit message cites a
+  rewritten commit by its old hash (two messages had citations rewritten);
+  the old and new tips have identical trees; `git range-diff` shows only the
+  squash, the two rewritten citations, and one repaired message.
+- The message of `8ff3b64374` had lost its end to a shell quoting mistake;
+  its replay (`aadf66a29b`) carries the intended message.
+- Citations in the notes updated in the commit that adds this section.
 
 ### Part 2: local verification
 
@@ -316,3 +334,119 @@ Not run yet.
 ### Part 5
 
 Not run yet.
+
+## Appendix: old to new commit hashes
+
+Every commit before part 1's rewrite and its replacement. `379469a2c4`,
+`904d57d0a4` and `5ce438e86f` (the two "vibe plan" commits and the merge)
+all map to the one commit that replaced them.
+
+| Old | New |
+|---|---|
+| `379469a2c4` | `8e7c114321` |
+| `904d57d0a4` | `8e7c114321` |
+| `5ce438e86f` | `8e7c114321` |
+| `12be3758d5` | `e8e659062c` |
+| `8ffd541b71` | `73b96e7924` |
+| `82e4e93092` | `5ee8a07527` |
+| `cd0d9d49b1` | `0950270e57` |
+| `f0c884f2f9` | `6e8a676578` |
+| `42b80a5c56` | `85656e1351` |
+| `939c17678e` | `0be4fbe2fd` |
+| `f23924444c` | `33be6e0cec` |
+| `37872af5d3` | `18faf2eabe` |
+| `013e9f13f6` | `81fd7f7774` |
+| `301db39b9a` | `277feeecfd` |
+| `75c55299d2` | `db8d0e81d5` |
+| `06e0da2b8b` | `4f0b09e679` |
+| `1decf55b3f` | `d94be6fc25` |
+| `9896319673` | `5fb339fda7` |
+| `654087283b` | `f4af9e372d` |
+| `dcb012efe4` | `d626657d87` |
+| `c5248f3763` | `470bb6ee0a` |
+| `ab6e860e2d` | `d69fb5eb7f` |
+| `9081711a60` | `637fa493d3` |
+| `45a961d272` | `3a4703ceed` |
+| `4843fe861d` | `b562917556` |
+| `fbf9701f87` | `ab4042a3fb` |
+| `f2bd5fb262` | `6ea49faf81` |
+| `8efb4a3369` | `a7c1ed4d54` |
+| `233cfe5d55` | `760c5513f8` |
+| `cdbaa9af47` | `c5a9cd49cc` |
+| `a14bc455db` | `c1afe28d34` |
+| `36d5866bdf` | `835187afb3` |
+| `e20928099d` | `47046b4c8f` |
+| `731b0e28b2` | `b5b44ccdab` |
+| `faf770e14f` | `7499e08728` |
+| `60be8c5855` | `4d3de2e56e` |
+| `0ba1d611fa` | `37cc054a58` |
+| `b3b397ad8a` | `727d84088f` |
+| `013809c2b6` | `f2fb602f74` |
+| `0364d47adb` | `506b0486f2` |
+| `741361cf05` | `ac6b9ca982` |
+| `bdaeb12155` | `4e5a27516c` |
+| `c7528522f4` | `ecf471509f` |
+| `57d2dbfecf` | `ee8b2f33a6` |
+| `2beb9762d1` | `88a75e3048` |
+| `d57f64c811` | `c64dbef7df` |
+| `676661b517` | `955f916d65` |
+| `1c9bdcfa57` | `b392284263` |
+| `8dee9650ca` | `bddcb8bc7b` |
+| `2e4ce3f8a8` | `f017e3b2a5` |
+| `7654e0f561` | `a31e7a2a91` |
+| `2cf0c7ffd5` | `a50e40a165` |
+| `2760f61aa1` | `77c761ec12` |
+| `4067bc0872` | `d910f7aa39` |
+| `170dcf805f` | `2eb455507d` |
+| `5e16a9068f` | `06fcdaba4e` |
+| `1202fbae9e` | `a02d04458f` |
+| `8a1ec2e76d` | `208ddcc06c` |
+| `22e7bb2c2a` | `adf22c944a` |
+| `bcdf943494` | `026674bcc7` |
+| `b2ec048675` | `16d1ab893c` |
+| `508f00b2d8` | `607e5c1f38` |
+| `8b021b74eb` | `2e7c169071` |
+| `1de80a8369` | `c36fd3b6ea` |
+| `216f174987` | `279a81e227` |
+| `f22b630738` | `c7e0484875` |
+| `aa6c9c2485` | `2ec8ae751e` |
+| `86c2f646fc` | `e610fb5353` |
+| `e9e1a8da3b` | `18000a923c` |
+| `ee65370868` | `49bf1449b9` |
+| `c8b2e8f839` | `e865de0a8a` |
+| `f485e9c6c5` | `c68e88c823` |
+| `096eac947c` | `ad15c01f82` |
+| `bf3e33730a` | `0bea1440e5` |
+| `eb28c6efb7` | `1344ce3159` |
+| `4a49f4b51f` | `894650cd4e` |
+| `79f9ccf002` | `5887997c63` |
+| `cd563f5c05` | `fc02e3fb45` |
+| `86153ba924` | `74a5dfc19c` |
+| `bf3d0ac8d7` | `f9cbc7c3d9` |
+| `a3ad1aec6c` | `7dd3165833` |
+| `4a7ffefca9` | `7d3bca5f6e` |
+| `eb5c911820` | `6f12baef44` |
+| `80c74cc9d5` | `f3c70c60c0` |
+| `57bdd065a2` | `fd1cec553e` |
+| `8ce226369e` | `24eac62a86` |
+| `c17b138009` | `fdaa863dbf` |
+| `13547918d4` | `0c66ab5b94` |
+| `352d062072` | `43ed156943` |
+| `a266aab5ed` | `6205c06435` |
+| `b8b1c72b5b` | `2def52effc` |
+| `ba0dd55634` | `677588b79e` |
+| `5fbaf9fa0d` | `b2067838b2` |
+| `3bb3ca2b44` | `1138ce4c33` |
+| `f112435139` | `1dca9f9caf` |
+| `8ab1649828` | `b0ed747445` |
+| `a675c266fb` | `2a796cdc4e` |
+| `58c18f99d7` | `f993075b25` |
+| `a10627df8c` | `5b75e32d18` |
+| `c170dc2dca` | `ab9d92bf7d` |
+| `8edfb8859d` | `53953527cb` |
+| `6ba6f28726` | `e3457476ca` |
+| `31ff7f781e` | `e60908c7e6` |
+| `3536f697ca` | `85e383503c` |
+| `c2095b72ca` | `73c1c2dcce` |
+| `da35674feb` | `6eeba018af` |
+| `8ff3b64374` | `aadf66a29b` |
