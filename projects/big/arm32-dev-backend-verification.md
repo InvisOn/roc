@@ -321,15 +321,30 @@ Done 2026-09-29, locally (nothing pushed).
 
 ### Part 2: local verification
 
-Not run yet.
+- 2a, `zig build minici` at `e76f346470` (the tip after part 1): 79 of 79
+  phases passed, 2026-09-29, in 59 minutes.
 
 ### Part 3: CI
 
-Not run yet.
+- Pushed 2026-09-29 to the public fork: `32-bit-backend` → `e76f346470`
+  (force-push over `5ce438e86f`, with lease) and `arm32/base` → `58508d582b`.
+- Pull request InvisOn/roc#1 (`32-bit-backend` → `arm32/base`): no
+  pull-request workflows were triggered, even after closing and reopening it,
+  while a manual dispatch runs. Likely GitHub's safeguard for forks, which
+  keeps event-triggered workflows off until the owner confirms once in the
+  fork's Actions tab; waiting on the owner.
+- Full suite dispatched on `e76f346470`: `ci_zig.yml` with `full-run=true`,
+  run 36494296904. Results pending.
 
 ### Part 4: trial merges
 
-Not run yet.
+- 2026-09-29, `upstream/main` at `9093111a90` (2026-09-28), 465 commits past
+  the base: 17 files conflict. `src/backend/dev/LirCodeGen.zig` 8 hunks (269
+  lines); `ObjectFileCompiler.zig` 2 hunks, `object/elf.zig`,
+  `backend/wasm/WasmCodeGen.zig`, `base/LargeBlockAllocator.zig` 1 each;
+  `.github/workflows/ci_zig.yml` (103 lines) and `ci_manager.yml` (57 lines);
+  and the hash block of 10 `dev_object` snapshots, which part 5 regenerates
+  rather than merges by hand. `rerere` is enabled.
 
 ### Part 5
 
