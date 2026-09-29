@@ -389,7 +389,12 @@ Done 2026-09-29, locally (nothing pushed).
   | J1 | `rg 'codegen\.emit\.' src/backend/dev/LirCodeGen.zig` empty (moved here from A1) | **not met**: 611 matches (issues note, same entry) |
   | J4 | no `arm32*=NOT_IMPLEMENTED` snapshot line; the lock-in changed only `arm32*=` lines | PASS (64 changed lines, all `arm32*=`) |
 
-  The criteria that need builds, qemu or CI are still to run.
+  The criteria that need builds, qemu or CI:
+  - A1 at `81fd7f7774`, 2026-09-30: `run-test-zig` (6,536 tests),
+    `run-test-eval` (2171/2171), `run-test-eval-host-effects` (86/86) and
+    `run-test-cli` (no failures) all pass.
+  - Track C, J2 and J3a: not yet run (the run was stopped for low memory
+    during Track C's build; see the morning report of 2026-09-30).
 
 ### Part 3: CI
 
