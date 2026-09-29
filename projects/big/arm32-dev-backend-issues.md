@@ -27,6 +27,7 @@ Where a new note goes:
 | A tool, script or command | `src/backend/dev/arm32/TOOLS.md` |
 | The plan's units and their acceptance | `projects/big/arm32-dev-backend.md` (a plan change is recorded as an amendment in DESIGN.md) |
 | Verification results, catching up with upstream | `projects/big/arm32-dev-backend-verification.md` |
+| A design decision the work still owes, laid out for the owner | its own `projects/big/arm32-dev-backend-<topic>-decision.md`, linked from its issues entry |
 
 Contents:
 
@@ -252,6 +253,8 @@ decision, recorded here rather than silently counted as met.**
   byte-identity oracles unchanged; or (b) amend the plan: the driver may
   contain per-ISA arms inside exhaustive switches, with the rationale above,
   recorded in DESIGN.md. Worth raising with the maintainers before choosing.
+- **Trade-offs in detail:** `arm32-dev-backend-facade-decision.md`
+  (measurements, four options, a comparison table and a recommendation).
 
 #### The interpreter's hosted-call trampoline assumes a 64-bit host
 
