@@ -162,6 +162,32 @@ explicit `abs32` kind.
   changes must be byte-identical. A cleanup can drop them with a regenerated
   hash file.
 
+#### The branch compiler panics type-checking basic-cli 0.22.2
+
+**Status: open, found 2026-09-29; very likely fixed upstream already.**
+
+- **Symptom:** `roc check` of any app using basic-cli 0.22.2 panics in the
+  type checker: "trying to add var at rank 5, but current rank is 4". The
+  nightly compiler (`release-fast-9927ba85`) checks the same app cleanly.
+- **Where:** the type checker, which the arm32 work does not touch, so the
+  bug belongs to the upstream base the branch sits on (`58508d582b`), not to
+  arm32.
+- **Next:** recheck after catching up with upstream (part 4 of the
+  verification plan); if it still panics there, reduce it and report it
+  upstream.
+
+#### git-lints pads a file name with NUL bytes
+
+**Status: open (cosmetic), found 2026-09-29.**
+
+- **Where:** the "src/ file never imported" message of
+  `zig build run-check-git-lints` (`tidy --git-lints`).
+- **Effect:** the file name is followed by NUL bytes up to a fixed width
+  instead of spaces, so the output is binary to `grep` and shows as a gap in
+  terminals. Probably a fixed-size, zero-filled buffer printed whole.
+- **Fix direction:** print only the used part of the buffer, or pad with
+  spaces.
+
 ### 1.2 Limitations of arm32 support
 
 #### The wasm eval oracle cannot run in a 32-bit process
