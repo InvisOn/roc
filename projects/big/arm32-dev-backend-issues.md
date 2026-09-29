@@ -198,6 +198,35 @@ explicit `abs32` kind.
   Whichever lands, remove the `@sizeOf(usize)` gate in the same commit and
   rerun the arm32 eval corpus under qemu to confirm wasm passes.
 
+#### The driver still names mnemonics and register literals
+
+**Status: open, found by the acceptance checks (2026-09-29); needs a
+decision, recorded here rather than silently counted as met.**
+
+- **The criteria:** A1 (and the plan's correctness ideal) require
+  `rg 'codegen\.emit\.' src/backend/dev/LirCodeGen.zig` and A1's
+  register-literal search to return nothing: the driver would call only
+  facade methods and name no ISA register.
+- **What happened:** A1's amendment kept the lowering *strategies* (i128,
+  SIMD, checked multiply, entry wrappers) out of the facade and deferred their
+  signatures "to A2 and the NEON batch". Neither added them. J1 instead gave
+  those sites `.arm32 =>` arms with raw `self.codegen.emit.` calls in
+  exhaustive switches. So the raw calls grew from 502 at A1 to 611 at J1,
+  and 136 register literals remain. DESIGN.md's status table still says
+  "deferred to A2 and the NEON batch".
+- **What still holds:** the safety property the criteria were for. Every
+  architecture decision is an exhaustive switch or a `binaryIs` test, so a
+  missing arm32 path is a compile error, never a silent fall-through.
+- **Why it matters:** maintainers reviewing `LirCodeGen.zig` will see
+  three-way switches with ISA mnemonics in the shared driver, which the
+  plan said would not be there.
+- **Options:** (a) define facade signatures for the strategy families
+  (i128 by pointer, `Wide64` pairs, NEON kernels) and move the arms into the
+  per-ISA `CodeGen`s, a large but mechanical refactor that must keep both
+  byte-identity oracles unchanged; or (b) amend the plan: the driver may
+  contain per-ISA arms inside exhaustive switches, with the rationale above,
+  recorded in DESIGN.md. Worth raising with the maintainers before choosing.
+
 #### The interpreter's hosted-call trampoline assumes a 64-bit host
 
 **Status: open, and worse than first recorded (found by reading

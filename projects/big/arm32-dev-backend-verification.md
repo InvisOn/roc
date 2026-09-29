@@ -334,6 +334,24 @@ Done 2026-09-29, locally (nothing pushed).
     exactly what the x64musl build prints (54 lines, heap addresses masked)
     and exit 0.
 - 2b (per-commit sweep): running; results below when it finishes.
+- 2c, the criteria that are searches over source files, checked at each
+  unit's last commit with `git grep` / `git show` (no build), 2026-09-29:
+
+  | Unit | Criterion | Result |
+  |---|---|---|
+  | A0 | golden hash file, compare step, `dev_object` snapshots exist | PASS (16 snapshots) |
+  | A1 | `rg 'arch == \.\|arch != \.\|toCpuArch...'` empty outside host-side test guards (amended) | PASS: all 41 matches are `builtin.cpu.arch` test guards |
+  | A1 | the arm32 `@compileError` gates still in place | PASS |
+  | A1 | no register literal in `LirCodeGen.zig` | **not met**: 136 matches (see the issues note, "The driver still names mnemonics and register literals") |
+  | A3 | `elf.zig` tests assert EM_ARM, `0x05000400`, `SHT_REL` and the four ARM relocation types; aarch64 sibling test | PASS |
+  | Track B | every `pub fn` in `arm32/Emit.zig` has a byte-exact test | PASS in substance: 158 of 163 are called by a test (the tests live in the generated `encoding_oracle_tests.zig`, not in `Emit.zig` as the criterion words it); the other five are `Emit` itself and four helpers (`fitsImmediate`, used by 11 test lines; `bits`, `encodeMovwMovt`, `codeOffset`) exercised through the emitters |
+  | Track C | a unit test pins Zig's arm baseline (D2) | PASS (`src/target/mod.zig`, "arm32 targets' architecture baseline is the dev backend's CPU floor") |
+  | J1 | `rg 'arm => @compileError' src/backend/dev src/layout/abi` empty | PASS |
+  | J1 | the `LirCodeGen(.arm32musl)` test block asserts types, registers and sizes | PASS |
+  | J1 | `rg 'codegen\.emit\.' src/backend/dev/LirCodeGen.zig` empty (moved here from A1) | **not met**: 611 matches (issues note, same entry) |
+  | J4 | no `arm32*=NOT_IMPLEMENTED` snapshot line; the lock-in changed only `arm32*=` lines | PASS (64 changed lines, all `arm32*=`) |
+
+  The criteria that need builds, qemu or CI are still to run.
 
 ### Part 3: CI
 
