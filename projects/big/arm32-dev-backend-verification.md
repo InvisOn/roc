@@ -424,6 +424,11 @@ Done 2026-09-29, locally (nothing pushed).
   - All 12 `roc-cross-compile` jobs passed, including the arm32 app built on
     Linux, Windows, macOS arm64 and macOS x86_64.
 - Spellcheck on the pull request: seven words in the notes; fixed.
+- Pull-request run 36534635511 on `fe779eee30`: every `zig-minici` shard
+  passed except `windows-harness`, cancelled at its 2-hour limit.
+  `run-check-dev-code-hashes` alone took 46 minutes there. The hash file is
+  host-independent, so minici now runs that check on Linux only and reports
+  it skipped elsewhere; `ubuntu-full` still checks it on every pull request.
 
 ### Part 4: trial merges
 
