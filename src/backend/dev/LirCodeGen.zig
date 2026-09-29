@@ -28413,6 +28413,10 @@ test "arm32: a proc compiles through LirCodeGen(.arm32musl)" {
     _ = try addSineChainProc(&store, allocator, 8);
     var cg = try LirCodeGen(.arm32musl).init(allocator, &store, &state.layout_store, .{}, &.{}, .default);
     defer cg.deinit();
+    // As in cross-compilation: calls are relocations. Native execution would
+    // embed this host's function addresses, which do not fit arm32 code on a
+    // 64-bit host whose image is loaded above 4 GiB (macOS, Windows).
+    cg.generation_mode = .object_file;
     try cg.compileAllProcSpecs(store.getProcSpecs());
 }
 
