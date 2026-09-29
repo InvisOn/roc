@@ -19,7 +19,7 @@ work and how to test each one; `TOOLS.md` documents the tools.
 | A1, dispatch: every arch decision in the driver is exhaustive or arm32-refusing | Done |
 | A1, register budget: temporaries allocated by the per-arch `CodeGen`, D10 high-water mark | Done |
 | A1, `CC` register seam and facade for ISA-neutral helpers | Done |
-| A1 facade for i128/SIMD/overflow/entry strategies | Deferred to A2 and the NEON batch |
+| A1 facade for i128/SIMD/overflow/entry strategies | Deferred to A2 and the NEON batch, which did not add it: J1 gave these sites `.arm32` arms with raw emitter calls in exhaustive switches instead. Open (issues note, "The driver still names mnemonics and register literals") |
 | Track B, NEON batch: the Advanced SIMD encoder families, 147 oracle entries | Done |
 | A3: ELF32/REL writer, `.ARM.attributes`, `R_ARM_*` relocation kinds, DWARF address width | Done |
 | A2: width model (`WORD`, `Wide64`, four-word i128) | Classification done: every `.w64` in the driver is `word`, a word loop, or `wide64_reg_width`/`wide64_store_width` (the rest name `StoreWidth` or an ISA's own width table); pair lowering and the by-pointer i128 wrappers are J1's |
