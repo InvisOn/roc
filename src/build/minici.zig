@@ -65,6 +65,16 @@ const ParsedArgs = struct {
     skip_build: bool,
 };
 
+/// `test/dev_code_hashes/eval.blake3` is host-independent: every host lowers
+/// each eval case for the same fixed targets and must produce the same file,
+/// so checking it on one host covers all of them. Linux checks it. On the
+/// Windows runners the check alone took 46 minutes and pushed the harness
+/// shard past its 2-hour limit.
+const dev_code_hashes_skip_reason: ?[]const u8 = switch (target.classifyOs(builtin.os.tag)) {
+    .linux => null,
+    .macos, .windows, .freebsd, .openbsd, .netbsd, .other => "dev-code hashes are host-independent and checked on Linux\n",
+};
+
 const jobs = [_]Job{
     // MiniCI trusts `build.zig` to keep build work behind `build-ci`. Keep this
     // list to leaf `run-*` steps. Do not add aliases or aggregate steps that
@@ -137,7 +147,7 @@ const jobs = [_]Job{
     .{ .name = "run-test-zig-backend-llvm" },
     .{ .name = "run-test-eval", .kind = .harness, .args = &.{ "--timeout", "120000" } },
     .{ .name = "run-test-simd-differential", .kind = .harness },
-    .{ .name = "run-check-dev-code-hashes" },
+    .{ .name = "run-check-dev-code-hashes", .skip_reason = dev_code_hashes_skip_reason },
     .{ .name = "run-test-eval-host-effects", .kind = .harness },
     .{ .name = "run-test-playground", .kind = .harness },
     .{ .name = "run-test-cli", .kind = .harness },
