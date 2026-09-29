@@ -286,6 +286,17 @@ maintainers, and upstream pull requests phase by phase, each brought up to
 date with the `main` of that time by a merge and verified with the relative
 oracle.
 
+Checklist for the upstream pull requests:
+
+- **In the final pull request, note the prebuilt binaries** (owner's
+  request, 2026-09-29): the arm32 work adds five committed runtime binaries
+  (`crt1.o`/`libc.a` for `arm32musl` in the fx and int platforms, `Scrt1.o`
+  for `arm32linux`) only to follow Roc's current practice; say that the owner
+  considers committed binaries a security risk (the xz-utils backdoor hid its
+  payload in binary test files) and intends to propose generating them at
+  build time for every target. Details: the issues note, "Stop committing
+  prebuilt binaries".
+
 ## Open decisions
 
 - Whether J1's six sub-units each get their own CI run (finer phases).
