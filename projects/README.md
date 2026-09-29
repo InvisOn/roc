@@ -342,7 +342,9 @@ The arm32 dev backend (2026-09) is a standalone project:
   [big/arm32-dev-backend-existing-code-changes.md](big/arm32-dev-backend-existing-code-changes.md)
   (every change it made outside the arm32 backend), and
   [big/arm32-dev-backend-verification.md](big/arm32-dev-backend-verification.md)
-  (how each commit and unit is verified before catching up with upstream).
+  (how each commit and unit is verified before catching up with upstream),
+  and [big/arm32-dev-backend-facade-decision.md](big/arm32-dev-backend-facade-decision.md)
+  (whether ISA-specific code may stay in the shared driver).
   The implementation's own
   record is `src/backend/dev/arm32/DESIGN.md`.
 
