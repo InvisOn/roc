@@ -147,6 +147,15 @@ lookup and absolute paths as given, and anchors a relative path at the
 directory the runner started in, as the runner already does for the roc and
 glue binaries.
 
+### The notes failed upstream's spellcheck (`typos`)
+
+The pull-request spellcheck (`alwayscheck.yml`, `typos` 1.44.0), which
+`zig build minici` does not run, flagged seven words in the arm32 notes.
+Three were rephrased ("misrouted", "misrouting", "combined by AND");
+`typos.toml` gains `lasr` (the AEABI helper `__aeabi_lasr`) as a word and an
+ignore rule for abbreviated commit hashes in backticks, whose random letters
+cannot be listed as words.
+
 ## Plan milestones that edit existing code
 
 ### Track B: encoder and oracle (`73b96e7924`)

@@ -297,6 +297,7 @@ oracle.
 | Found | Red at | Fixed by | What |
 |---|---|---|---|
 | 2026-09-28, drafting a CI workflow | `49bf1449b9` (#68) | `6eeba018af` | The instruction-cache file moved to `src/backend/dev/`, but `ci_manager.yml`'s arm64 hello-world job (run on every pull request) still tested the old path. The moved file passes `zig test -O ReleaseSafe` on the Raspberry Pi 5 (aarch64). |
+| 2026-09-29, CI (pull request #1, Spellcheck) | the notes, from part 1 on | the commit that adds this row | `typos` flags seven words in the arm32 notes. `zig build minici` does not run the spellcheck, so the local run passed; `typos` is now run locally too. |
 
 ### Part 1: history cleanup
 

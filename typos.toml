@@ -21,9 +21,13 @@ extend-ignore-re = [
     "(#|//)\\s*spellchecker:ignore-next-line\\n.*",
     # Ignore blocks between `# spellchecker:off` and `# spellchecker:on`
     "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on",
+    # Abbreviated commit hashes in backticks, as the project notes cite them:
+    # their letters are random, so they cannot be listed as words.
+    "`[0-9a-f]{7,40}`",
 ]
 
 [default.extend-words]
+lasr = "lasr" # `__aeabi_lasr`, the AEABI 64-bit arithmetic shift right helper
 ACCES = "ACCES" # POSIX/WASI errno name for EACCES
 ANF = "ANF" # A-normal form
 ba = "ba" # Binop apply
