@@ -1348,7 +1348,16 @@ pub fn CallBuilder(comptime EmitType: type) type {
                     try self.emit.callReg(CC_EMIT.SCRATCH_REG);
                 },
                 .arm32 => {
-                    try self.emit.movRegImm32(CC_EMIT.SCRATCH_REG, @intCast(fn_addr));
+                    // An absolute call target is a host function address, so
+                    // arm32 code only calls one when it runs in the process
+                    // that generated it: on an arm32 host, where every address
+                    // is 32 bits. Code for another host goes through
+                    // `callRelocatable`.
+                    const addr = std.math.cast(u32, fn_addr) orelse std.debug.panic(
+                        "arm32: native call target 0x{x} is not a 32-bit address; native execution of arm32 code needs an arm32 host",
+                        .{fn_addr},
+                    );
+                    try self.emit.movRegImm32(CC_EMIT.SCRATCH_REG, addr);
                     try self.emit.blxReg(CC_EMIT.SCRATCH_REG);
                 },
             }
