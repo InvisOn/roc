@@ -346,7 +346,9 @@ The arm32 dev backend (2026-09) is a standalone project:
   and [big/arm32-dev-backend-facade-decision.md](big/arm32-dev-backend-facade-decision.md)
   (whether ISA-specific code may stay in the shared driver), and
   [big/arm32-dev-backend-fuzzing.md](big/arm32-dev-backend-fuzzing.md)
-  (fuzzing the arm32 code generator: compile and differential oracles).
+  (fuzzing the arm32 code generator: compile and differential oracles), and
+  [big/arm32-dev-backend-walkthroughs.md](big/arm32-dev-backend-walkthroughs.md)
+  (guided tours of the work, phase by phase).
   The implementation's own
   record is `src/backend/dev/arm32/DESIGN.md`.
 
