@@ -299,6 +299,7 @@ oracle.
 | 2026-09-28, drafting a CI workflow | `49bf1449b9` (#68) | `6eeba018af` | The instruction-cache file moved to `src/backend/dev/`, but `ci_manager.yml`'s arm64 hello-world job (run on every pull request) still tested the old path. The moved file passes `zig test -O ReleaseSafe` on the Raspberry Pi 5 (aarch64). |
 | 2026-09-29, CI (pull request #1, Spellcheck) | the notes, from part 1 on | the commit that adds this row | `typos` flags seven words in the arm32 notes. `zig build minici` does not run the spellcheck, so the local run passed; `typos` is now run locally too. |
 | 2026-09-29, CI (pull request #1, `zig-minici` macOS and Windows) | `a50e40a165` (#50, J1f) | the commit that adds this row | The J1f test "arm32: a proc compiles through LirCodeGen(.arm32musl)" compiled arm32 code in native-execution mode, which embeds this host's builtin addresses; `CallBuilder.call` narrowed them to 32 bits with `@intCast`, which panics where the test binary is loaded above 4 GiB (macOS, Windows) and passed on Linux only because the image is loaded low. The test now compiles in object-file mode, as cross-compilation does, and the arm32 absolute call reports the broken invariant (native arm32 code needs an arm32 host) instead of a bare cast. Backend tests pass on x86_64 (898/900) and for arm32 under qemu (895/900). |
+| 2026-09-29, sweep | `506b0486f2` (#38, J1a) | `ac6b9ca982` (#39, J1b) | `zig build run-check-tidy`: the test helper `expectCode` in `arm32/CodeGen.zig` returned an inferred error set (`!void`); J1b made it `error{TestExpectedEqual}!void`. |
 
 ### Part 1: history cleanup
 
@@ -364,7 +365,24 @@ Done 2026-09-29, locally (nothing pushed).
   keeps event-triggered workflows off until the owner confirms once in the
   fork's Actions tab; waiting on the owner.
 - Full suite dispatched on `e76f346470`: `ci_zig.yml` with `full-run=true`,
-  run 36494296904. Results pending.
+  run 36494296904, ended cancelled. Every failed job, attributed:
+  - `zig-tests` on macOS arm64 and Windows 2022/2025, `nix-build (macos-15)`,
+    and the pull request's `zig-minici` macOS-core and Windows-core shards:
+    all the same arm32 test, native call addresses above 4 GiB; fixed (see
+    the findings table).
+  - `zig-cross-compile (arm-linux-musleabihf)`: the runner starved building
+    the arm32 eval runners (the 18 GB issue).
+  - `zig-tests (macos-15-intel)`: RustGlue plugins fail to load
+    (`UndefinedSymbol`) and some `--opt=speed` tests fail. Upstream's own
+    nightly fails or is cancelled on this job in every run since at least
+    2026-09-18, with the same glue errors before this branch's base, so it is
+    not from the arm32 work.
+  - Jobs killed by the runner (exit 143) on x86-linux-musl, x86_64-macos,
+    aarch64-linux and the Ubuntu test job: upstream's nightly loses the same
+    jobs.
+  - All 12 `roc-cross-compile` jobs passed, including the arm32 app built on
+    Linux, Windows, macOS arm64 and macOS x86_64.
+- Spellcheck on the pull request: seven words in the notes; fixed.
 
 ### Part 4: trial merges
 
