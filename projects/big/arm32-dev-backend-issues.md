@@ -567,6 +567,16 @@ Fix each one in its own commit, and remove its entry in that commit.
   A full run spends about 15 minutes in `build-ci` before the first check,
   so each quick lint failure costs a full cycle. Run the `run-check-*`
   phases directly first, and resume with `--minici-after <phase>`.
+- **Building the test platforms deletes the user's whole Roc cache.**
+  `ClearRocCacheStep` in `build.zig` (upstream code, run before the test
+  platforms are rebuilt) calls `deleteTree` on `~/.cache/roc` (or
+  `$XDG_CACHE_HOME/roc`), which also holds downloaded packages such as
+  basic-cli. The A1 `run-test-cli` run on 2026-09-30 wiped them, and the
+  next `roc` run of the verify tools re-downloaded basic-cli.
+  `ROC_CACHE_DIR` does not help: it moves only the build cache, not
+  packages. Workaround until fixed: run repo builds with `XDG_CACHE_HOME`
+  pointing at a scratch directory. Fix (upstream): clear only the build
+  cache's host entries the step means to invalidate, never packages.
 - **Debugging arm32 failures is slow** (plan for a fix below). Two separate
   problems:
   - *Unit-test binaries print no stack traces.* This is not an arm or qemu
