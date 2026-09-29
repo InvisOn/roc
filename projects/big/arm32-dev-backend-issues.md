@@ -29,6 +29,7 @@ Where a new note goes:
 | Verification results, catching up with upstream | `projects/big/arm32-dev-backend-verification.md` |
 | A design decision the work still owes, laid out for the owner | its own `projects/big/arm32-dev-backend-<topic>-decision.md`, linked from its issues entry |
 | A follow-up project's plan (fuzzing, for example) | its own `projects/big/arm32-dev-backend-<topic>.md`, indexed in `projects/README.md` |
+| A guided tour of a phase, for the owner | `projects/big/arm32-dev-backend-walkthroughs.md` |
 
 Contents:
 
