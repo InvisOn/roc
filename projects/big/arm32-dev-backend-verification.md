@@ -296,6 +296,16 @@ Checklist for the upstream pull requests:
   payload in binary test files) and intends to propose generating them at
   build time for every target. Details: the issues note, "Stop committing
   prebuilt binaries".
+- **Point out the Zig ABI workaround in the test host** (owner's request,
+  2026-09-29): `test/fx/platform/host.zig` works around a Zig 0.16 bug (a
+  by-value nested `extern struct` passed off-ABI on arm) so the fx host
+  receives `Host.get_greeting!`'s argument correctly. AGENTS.md forbids
+  workarounds, so say plainly that this one is confined to a test host, is
+  guarded by two tripwires (a probe test in CI that fails once Zig is fixed,
+  and a Zig version check), and name the alternatives (change the test
+  platform's API, or skip those fx programs on arm32 until Zig is fixed).
+  Report the bug to Zig first and link the report. Details: the issues note,
+  "Zig 0.16 passes nested `extern struct` arguments off-ABI on arm".
 
 ## Open decisions
 
@@ -346,7 +356,22 @@ Done 2026-09-29, locally (nothing pushed).
   - int app on the Pi 3: `arm32musl` and `arm32linux` (glibc) both print
     exactly what the x64musl build prints (54 lines, heap addresses masked)
     and exit 0.
-- 2b (per-commit sweep): running; results below when it finishes.
+- 2b, the per-commit sweep, 2026-09-29, finished: all 114 commits up to
+  `fe779eee30` (82 with code; the rest change only Markdown), on the desktop,
+  with #82-#85, #92, #104 and #109 run on the Ubuntu laptop. Every build,
+  format, lint, backend-test, encoding-oracle and 64-bit byte-identity check
+  passed on every code commit, except three failures, each fixed by a later
+  commit:
+
+  | Check | Red at | Fixed at | Cause |
+  |---|---|---|---|
+  | git-lints | #21-#76 | #77 | `arm32_link_smoke.zig` was not imported anywhere |
+  | tidy | #38 (J1a) | #39 (J1b) | a test helper with an inferred error set |
+  | tidy | #77 | #78 | `std.mem.indexOf` (banned; `std.mem.find`) in the link smoke test |
+
+  So from A0 (#4) on, every commit reproduces the committed x86_64 and
+  aarch64 output exactly: Track A's promise holds at every step. The raw
+  results table is kept in `.git/verify-tools/sweep-results.tsv`.
 - 2c, the criteria that are searches over source files, checked at each
   unit's last commit with `git grep` / `git show` (no build), 2026-09-29:
 
