@@ -623,6 +623,37 @@ board did. Open questions for that project: report only or enforce limits
 (limits are flaky across allocators and hosts), attributing compile vs run
 memory (needs measuring inside the child), and Windows (a different query).
 
+#### Stop committing prebuilt binaries (owner's intention, security)
+
+**Status: planned for after the arm32 work lands; until then the arm32
+work follows Roc's current practice.** Decided by the owner 2026-09-29.
+
+- **What:** the repository commits prebuilt binaries that tests link: at
+  the arm32 work's base about 100 files (`crt1.o` and `libc.a` per musl
+  target in the fx, int and str test platforms, glibc stub files per glibc
+  target, and 24 `.lib` import libraries per mingw target). The arm32 work
+  adds five in the same pattern: `crt1.o` and `libc.a` for `arm32musl` in
+  the fx and int platforms, and `Scrt1.o` for `arm32linux`.
+- **Why change it:** a binary in the tree cannot be reviewed. The xz-utils
+  backdoor (CVE-2024-3094) hid its payload in binary "test files" that
+  reviewers could not read; a tampered `libc.a` or `crt1.o` here would be
+  linked into every test program built for that target. Readable sources plus
+  a build step leave nothing opaque in the history.
+- **Direction:** generate the files at build time from Zig's own sources
+  (`ci/vendor_musl_runtime.py` already does this for arm32; the other targets
+  need the same), list them in `.gitignore`, and delete the committed copies.
+  Points to settle:
+  - Zig's `libc.a` is not byte-reproducible (members are named by absolute
+    cache paths), so either normalize the archive when generating it or stop
+    relying on byte comparisons of it.
+  - Build time: generate once per target and cache.
+  - The mingw `.lib` files come from a different source (import libraries),
+    so they need their own generator.
+  - Until then, a CI check that regenerates the committed files and compares
+    them (after normalizing) would at least detect tampering.
+- **Scope:** a change to every target, so it is proposed to the maintainers
+  as its own pull request, not bundled with the arm32 work.
+
 ## 2. Resolved
 
 #### In-process relocation patching guesses the encoding
