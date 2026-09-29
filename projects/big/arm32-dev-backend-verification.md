@@ -393,8 +393,26 @@ Done 2026-09-29, locally (nothing pushed).
   - A1 at `81fd7f7774`, 2026-09-30: `run-test-zig` (6,536 tests),
     `run-test-eval` (2171/2171), `run-test-eval-host-effects` (86/86) and
     `run-test-cli` (no failures) all pass.
-  - Track C, J2 and J3a: not yet run (the run was stopped for low memory
-    during Track C's build; see the morning report of 2026-09-30).
+  - Track C at `db8d0e81d5`, 2026-09-30: `zig build` and the six
+    `arm32musl` objects (ELF32, ARM, `0x5000400`, `Tag_ABI_VFP_args: 1`)
+    pass. The non-zero cross-target case count cannot pass at this commit:
+    the plan's own amendment moved the `arm32musl` roster rows out of Track
+    C, so the runner rejects `--cross-target=arm32musl` as unknown (which is
+    the runner-hygiene behaviour C added). The count is met at J2 (121 fx
+    cases and 1 int case, below).
+  - J2 at `2ec8ae751e`, 2026-09-30: all 10 criteria pass, including the
+    kept object (ELF32, ARM, `0x5000400`, VFP args, `Tag_CPU_arch: 10`),
+    the int app under qemu cortex-a9 and as arm32linux (glibc) on the
+    Raspberry Pi 3 with the x64musl stdout, the `--opt=speed` diagnostic,
+    the arm32 SIMD lane, and Debug `roc` building all 121 fx and 1 int
+    programs for arm32 without tripping D10. The first run's two failures
+    were bugs in the acceptance script (it built only `roc`, not the glibc
+    stubs of the install step, and missed the kept object's path); fixed
+    and rerun.
+  - J3a at `5887997c63`, 2026-09-30: all 6 pass. The ReleaseFast arm32 eval
+    runners build; under qemu cortex-a9 the eval corpus passes 2171/2171
+    and host effects 86/86; the x86_64 runner passes the same 2171; the
+    arm32 backend tests pass under qemu (894/899, 5 skipped).
 
 ### Part 3: CI
 
@@ -442,7 +460,11 @@ Done 2026-09-29, locally (nothing pushed).
 
 ### Part 5
 
-Not run yet.
+- 2026-09-30, relative 64-bit oracle on the part 4 trial merge
+  (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
+  dev-code hashes: 2,126 cases, none differ, none on one side only.
+  `dev_object` snapshots: 16 files, no 64-bit line differs. This is a trial;
+  the real merge reruns it.
 
 ## Appendix: old to new commit hashes
 
