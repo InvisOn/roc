@@ -621,11 +621,15 @@ jobs:
         if: matrix.target == 'arm-linux-musleabihf'
         run: zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig
 
+      # ReleaseSmall, not ReleaseFast: compiling the arm32 eval runner in
+      # ReleaseFast peaks at about 18 GB (17 GB even built alone), more than a
+      # hosted runner's 16 GB; ReleaseSmall peaks at 8 GB (the host-effects
+      # runner at 5 GB) and runs the corpus about 27% slower under qemu.
       - name: Build the eval runner for arm32
         if: matrix.target == 'arm-linux-musleabihf'
         uses: ./.github/actions/flaky-retry
         with:
-          command: zig build build-test-eval-runner build-test-eval-host-effects-runner -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast
+          command: zig build build-test-eval-runner build-test-eval-host-effects-runner -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseSmall
           retry_count: 3
 
       - name: Run the eval corpus on arm32 under qemu
