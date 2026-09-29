@@ -367,7 +367,9 @@ through the trampoline (true for the existing ISAs too).
 
 #### Building the arm32 eval runners needs 18 GB, more than CI runners have
 
-**Status: open, confirmed in CI.** In the first full run on the public fork
+**Status: fix prepared (2026-09-30), to be confirmed by a CI run of the
+lane.** The CI step now builds the runners in ReleaseSmall (results below).
+Before: **open, confirmed in CI.** In the first full run on the public fork
 (run 36494296904, 2026-09-29) the lane's runner died: "The hosted runner lost
 communication with the server… starves it for CPU/Memory". Upstream's own
 nightly loses its `arm-linux-musleabihf` job the same way.
@@ -444,6 +446,22 @@ machine.
 
 The fix is chosen from the smallest change that fits with margin, confirmed
 by a CI run of the lane.
+
+**Results (2026-09-30, desktop, inside `systemd-run -p MemoryMax=16G -p
+MemorySwapMax=4G`, fresh cache, peak memory from `--summary all`):**
+
+| Experiment | `eval-test-runner` | `eval-host-effects-runner` | Build time | Verdict |
+|---|---|---|---|---|
+| ReleaseFast, both at once (before) | 18 GB | 11 GB | (29 GB together) | does not fit |
+| 1: ReleaseFast, `-j1` | 17 GB | 12 GB | 22 min | fits only by swapping; too thin |
+| 3: ReleaseSmall, `-j1` | 8 GB | 5 GB | 10 min | fits with a wide margin, even both at once (13 GB) |
+
+The ReleaseSmall runners pass the whole corpus under qemu `cortex-a9`:
+2171/2171 in 19.9 minutes (ReleaseFast: 15.6 minutes, both with six
+threads) and host effects 86/86. So the fix is one flag in the CI step
+(`-Doptimize=ReleaseSmall`); experiments 2 and 4 were not needed.
+Experiment 4 (leaving LLVM out of the arm32 eval runners) stays a possible
+improvement: the lane never uses LLVM.
 
 #### A Debug arm32 eval runner does not link
 
