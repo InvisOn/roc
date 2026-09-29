@@ -321,8 +321,18 @@ Done 2026-09-29, locally (nothing pushed).
 
 ### Part 2: local verification
 
-- 2a, `zig build minici` at `e76f346470` (the tip after part 1): 79 of 79
-  phases passed, 2026-09-29, in 59 minutes.
+- 2a at `e76f346470` (the tip after part 1), 2026-09-29, all passing:
+  - `zig build minici`: 79 of 79 phases, in 59 minutes.
+  - arm32 eval corpus (ReleaseFast runners built at the tip): 2171/2171
+    under qemu (`cortex-a9`, the CPU floor) and 2171/2171 on the Raspberry
+    Pi 5, the dev backend running 2030 evaluations in each, as on x86_64.
+  - arm32 host effects: 86/86 under qemu and on the Pi 5.
+  - fx suite through `ci/ssh_cross_runner.sh`: 122/122 on the Pi 3 (32-bit
+    kernel) and 122/122 on the Pi 5.
+  - int app on the Pi 3: `arm32musl` and `arm32linux` (glibc) both print
+    exactly what the x64musl build prints (54 lines, heap addresses masked)
+    and exit 0.
+- 2b (per-commit sweep): running; results below when it finishes.
 
 ### Part 3: CI
 
