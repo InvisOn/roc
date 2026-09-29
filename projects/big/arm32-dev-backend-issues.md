@@ -613,7 +613,7 @@ by `erased_layout` in `LirCodeGen`.
 - **`LirCodeGen.cc` would have panicked for arm32:** its initializer called
   `CallingConvention.forTarget`, which panics for `.arm`. The never-read field
   is gone.
-- **Two-way arch tests would have mis-routed arm32:** about 250
+- **Two-way arch tests would have misrouted arm32:** about 250
   `arch == .x86_64` / `== .aarch64` tests in the driver, `FrameBuilder` and
   `CallingConvention` (some with no final `else`) now go through `Isa`, which
   refuses to compile for arm32.

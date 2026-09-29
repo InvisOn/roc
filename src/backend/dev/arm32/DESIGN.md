@@ -441,7 +441,7 @@ named by its even low D register; `neonQ` and `neonHigh` give its Q view
 and high half.
 
 - 64-bit lanes, where ARMv7 lacks the instruction: equality is `VCEQ.I32`
-  ANDed with its `VREV64.32`; signed `>` is `VQSUB.S64 (b - a)` spread by
+  combined by AND with its `VREV64.32`; signed `>` is `VQSUB.S64 (b - a)` spread by
   `VSHR.S64 #63`, unsigned `>` is a non-zero `VQSUB.U64 (a - b)`; `>=` is
   the negated swap; min/max select with `VBSL` through that mask; negate,
   abs, abs-diff and the rounding average are composed from subtracts,

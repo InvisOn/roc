@@ -1156,7 +1156,7 @@ assume the encoder is the bulk of it:
   (dispatch) and A2 (width) can each be proven byte-identical separately; if
   they are merged into one PR a hash diff cannot be attributed. Any golden or
   snapshot diff in Track A is a bug, never an accepted change.
-- **Silent mis-routing is the failure mode, not compile errors.** Until A1
+- **Silent misrouting is the failure mode, not compile errors.** Until A1
   lands, relaxing the gate builds successfully with arm32 routed into aarch64
   or x86_64 code paths. The completion signal for J1 is the empty
   `rg 'arm => @compileError'`, not a clean build.
