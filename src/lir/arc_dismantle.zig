@@ -951,7 +951,6 @@ const FutureFields = struct {
                 .assign_boxy_unbox,
                 .assign_boxy_adapt,
                 .assign_boxy_inspect,
-                .assign_boxy_eq,
                 .assign_boxy_tag,
                 .assign_boxy_tag_payload,
                 .assign_call_dict,
@@ -1053,7 +1052,6 @@ fn fieldObservedAfter(
             .assign_boxy_unbox,
             .assign_boxy_adapt,
             .assign_boxy_inspect,
-            .assign_boxy_eq,
             .assign_boxy_tag,
             .assign_boxy_tag_payload,
             .assign_call_dict,
@@ -1124,25 +1122,25 @@ test "future field uses resolve joins in their procedure" {
     var join_ids = body_clone.JoinParamIndex.init(gpa);
     defer join_ids.deinit();
     const join_id = join_ids.freshJoinPoint();
-    const exit = try store.addCFStmt(.{ .ret = .{ .value = field } });
-    const back_edge = try store.addCFStmt(.{ .jump = .{ .target = join_id } });
+    const exit = try store.addCFStmt(.{ .ret = .{ .value = field } }, .test_fixture);
+    const back_edge = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
     const read = try store.addCFStmt(.{ .assign_ref = .{
         .target = field,
         .op = .{ .field = .{ .source = container, .field_idx = 0 } },
         .next = back_edge,
-    } });
+    } }, .test_fixture);
     const loop_proc = try store.addCFStmt(.{ .join = .{
         .id = join_id,
         .params = .empty(),
         .body = read,
         .remainder = back_edge,
-    } });
+    } }, .test_fixture);
     const other_proc = try store.addCFStmt(.{ .join = .{
         .id = join_id,
         .params = .empty(),
         .body = exit,
         .remainder = back_edge,
-    } });
+    } }, .test_fixture);
     var loop_joins = std.AutoHashMapUnmanaged(u32, LIR.CFStmtId).empty;
     defer loop_joins.deinit(gpa);
     var other_joins = std.AutoHashMapUnmanaged(u32, LIR.CFStmtId).empty;
@@ -1175,26 +1173,26 @@ test "future field observations agree with per-read traversal across joins rebin
     defer store.deinit();
     const local = try store.addLocal(.{ .layout_idx = .str });
     const other = try store.addLocal(.{ .layout_idx = .str });
-    const exit = try store.addCFStmt(.{ .ret = .{ .value = other } });
-    const boundary = try store.addCFStmt(.loop_continue);
+    const exit = try store.addCFStmt(.{ .ret = .{ .value = other } }, .test_fixture);
+    const boundary = try store.addCFStmt(.loop_continue, .test_fixture);
     // Reserve the two procedure-local join identities before building their
     // bodies, which contain forward references to the enclosing joins.
     var join_ids: [2]LIR.JoinPointId = undefined;
     for (&join_ids, 0..) |*id, index| id.* = @enumFromInt(index);
     const outer_id = join_ids[0];
     const nested_id = join_ids[1];
-    const jump = try store.addCFStmt(.{ .jump = .{ .target = outer_id } });
+    const jump = try store.addCFStmt(.{ .jump = .{ .target = outer_id } }, .test_fixture);
     const rebind = try store.addCFStmt(.{ .set_local = .{
         .target = local,
         .value = other,
         .mode = .initialize_join_param,
         .next = jump,
-    } });
+    } }, .test_fixture);
     const read = try store.addCFStmt(.{ .assign_ref = .{
         .target = other,
         .op = .{ .field = .{ .source = local, .field_idx = 0 } },
         .next = rebind,
-    } });
+    } }, .test_fixture);
     const branch = try store.addCFStmt(.{ .switch_stmt = .{
         .cond = other,
         .branches = try store.addCFSwitchBranches(&.{
@@ -1202,20 +1200,20 @@ test "future field observations agree with per-read traversal across joins rebin
             .{ .value = 1, .body = boundary },
         }),
         .default_branch = read,
-    } });
-    const nested_jump = try store.addCFStmt(.{ .jump = .{ .target = nested_id } });
+    } }, .test_fixture);
+    const nested_jump = try store.addCFStmt(.{ .jump = .{ .target = nested_id } }, .test_fixture);
     const nested = try store.addCFStmt(.{ .join = .{
         .id = nested_id,
         .params = .empty(),
         .body = branch,
         .remainder = nested_jump,
-    } });
+    } }, .test_fixture);
     const outer = try store.addCFStmt(.{ .join = .{
         .id = outer_id,
         .params = .empty(),
         .body = nested,
         .remainder = jump,
-    } });
+    } }, .test_fixture);
     var joins = std.AutoHashMapUnmanaged(u32, LIR.CFStmtId).empty;
     defer joins.deinit(gpa);
     try joins.put(gpa, @intFromEnum(outer_id), nested);
@@ -1231,7 +1229,7 @@ test "future field observations agree with per-read traversal across joins rebin
             .target = other,
             .op = .{ .field = .{ .source = local, .field_idx = 2 } },
             .next = start,
-        } });
+        } }, .test_fixture);
         try reads.put(gpa, probe, .{ .bit = 4, .consuming = true });
     }
     // These queries consume only join membership and the outcome signature
@@ -1281,7 +1279,7 @@ test "future field observations share CFG discovery across many consuming reads"
     var store = LirStore.init(gpa);
     defer store.deinit();
     const local = try store.addLocal(.{ .layout_idx = .str });
-    var start = try store.addCFStmt(.{ .ret = .{ .value = local } });
+    var start = try store.addCFStmt(.{ .ret = .{ .value = local } }, .test_fixture);
     const exit = start;
     // Mutually exclusive consuming reads share a long continuation observing
     // another field: the old DFS cannot exit early for any of their queries.
@@ -1290,7 +1288,7 @@ test "future field observations share CFG discovery across many consuming reads"
             .target = local,
             .op = .{ .local = local },
             .next = start,
-        } });
+        } }, .test_fixture);
     }
     var reads = std.AutoHashMapUnmanaged(LIR.CFStmtId, ReadKind).empty;
     defer reads.deinit(gpa);
@@ -1309,7 +1307,7 @@ test "future field observations share CFG discovery across many consuming reads"
                 .target = local,
                 .op = .{ .field = .{ .source = local, .field_idx = 0 } },
                 .next = start,
-            } });
+            } }, .test_fixture);
             try reads.put(gpa, probe, .{ .bit = 1, .consuming = true });
         }
         var old_visits: usize = 0;
@@ -2012,13 +2010,6 @@ pub fn compute(
                 analysis.disqualify(stmt.target);
                 try stack.append(gpa, stmt.next);
             },
-            .assign_boxy_eq => |stmt| {
-                try analysis.useWhole(current, stmt.lhs);
-                try analysis.useWhole(current, stmt.rhs);
-                try analysis.noteDef(stmt.target, current);
-                analysis.disqualify(stmt.target);
-                try stack.append(gpa, stmt.next);
-            },
             .assign_boxy_tag => |stmt| {
                 if (stmt.payload) |payload| try analysis.useWhole(current, payload);
                 try analysis.noteDef(stmt.target, current);
@@ -2380,7 +2371,6 @@ pub fn compute(
                 .assign_boxy_unbox,
                 .assign_boxy_adapt,
                 .assign_boxy_inspect,
-                .assign_boxy_eq,
                 .assign_boxy_tag,
                 .assign_boxy_tag_payload,
                 .boxy_tag_match,
@@ -2617,7 +2607,7 @@ pub fn compute(
                     }
                 }
                 switch (store.getCFStmt(cursor)) {
-                    inline .init_uninitialized, .assign_ref, .assign_literal, .assign_call, .assign_call_erased, .assign_packed_erased_fn, .assign_boxy_desc_ref, .assign_boxy_dict_ref, .assign_boxy_box, .assign_boxy_reuse_box, .assign_boxy_unbox, .assign_boxy_adapt, .assign_boxy_inspect, .assign_boxy_eq, .assign_boxy_tag, .assign_boxy_tag_payload, .assign_call_dict, .assign_low_level, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .debug, .expect, .comptime_branch_taken, .incref, .decref, .decref_if_initialized, .free => |stmt| cursor = stmt.next,
+                    inline .init_uninitialized, .assign_ref, .assign_literal, .assign_call, .assign_call_erased, .assign_packed_erased_fn, .assign_boxy_desc_ref, .assign_boxy_dict_ref, .assign_boxy_box, .assign_boxy_reuse_box, .assign_boxy_unbox, .assign_boxy_adapt, .assign_boxy_inspect, .assign_boxy_tag, .assign_boxy_tag_payload, .assign_call_dict, .assign_low_level, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .debug, .expect, .comptime_branch_taken, .incref, .decref, .decref_if_initialized, .free => |stmt| cursor = stmt.next,
                     .set_local => |stmt| {
                         // The value operand above still observes the old
                         // definition. Only the explicit write starts a fresh
