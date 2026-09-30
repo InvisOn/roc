@@ -14091,16 +14091,17 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
 
             var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
             try builder.addLeaArg(frame_ptr, result_offset);
+            // bytes, length, capacity_or_alloc_ptr, at the target word's offsets.
             switch (spec.source) {
                 .str => {
                     try builder.addMemArg(frame_ptr, src_off);
-                    try builder.addMemArg(frame_ptr, src_off + 16);
-                    try builder.addMemArg(frame_ptr, src_off + 8);
+                    try builder.addMemArg(frame_ptr, src_off + strFieldOffset("length"));
+                    try builder.addMemArg(frame_ptr, src_off + strFieldOffset("capacity_or_alloc_ptr"));
                 },
                 .utf8 => {
                     try builder.addMemArg(frame_ptr, src_off);
-                    try builder.addMemArg(frame_ptr, src_off + 8);
-                    try builder.addMemArg(frame_ptr, src_off + 16);
+                    try builder.addMemArg(frame_ptr, src_off + listFieldOffset("length"));
+                    try builder.addMemArg(frame_ptr, src_off + listFieldOffset("capacity_or_alloc_ptr"));
                 },
             }
             const class: LowLevelBuiltins.NumericClass = switch (spec.parse) {
