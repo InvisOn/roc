@@ -28501,8 +28501,8 @@ test "aggregate copy loops preserve exact bytes and base registers" {
         try cg.codegen.emitLoadImm(dst, @bitCast(@intFromPtr(&dest)));
         try cg.copyChunked(temp, src, 1, dst, 1, size);
         // Reuse both original bases after the copy, detecting clobbered bases.
-        try cg.emitLoadW8(temp, src, 0);
-        try cg.emitStoreW8(dst, 0, temp);
+        try cg.codegen.emitLoadW8(temp, src, 0);
+        try cg.codegen.emitStoreW8(dst, 0, temp);
         try cg.codegen.emit.ret();
         try std.testing.expectEqual(@as(u32, 0), cg.codegen.callee_saved_used);
         var executable = try ExecutableMemory.init(cg.codegen.getCode());
