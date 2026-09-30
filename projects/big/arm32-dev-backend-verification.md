@@ -443,6 +443,11 @@ Done 2026-09-29, locally (nothing pushed).
   - All 12 `roc-cross-compile` jobs passed, including the arm32 app built on
     Linux, Windows, macOS arm64 and macOS x86_64.
 - Spellcheck on the pull request: seven words in the notes; fixed.
+- ReleaseSmall probe, run 36675742296 (branch `arm32/releasesmall-probe`,
+  one throwaway workflow running `ci_zig.yml`'s arm32 eval-runner steps
+  without the LLVM build that gets the runner killed): passed on a 16 GB,
+  4-core hosted runner. Build peak 7.7 GB, 10 minutes; eval 2171/2171 and
+  host effects 86/86 under qemu cortex-a9. The 18 GB issue is resolved.
 - Full run 36615593810 on `56029eddf9`: `zig-tests` on Windows 2022 and
   2025 failed one test of the branch's (see the findings table, fixed).
   `zig-tests (macos-15)` failed 11 tests, all in its ReleaseFast `-Dfuzz`
