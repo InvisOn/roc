@@ -110,10 +110,11 @@ outside its scope. Details and fix directions:
   Cost: about four minutes on sixteen cores (46 on the Windows runner, so
   check on Linux only, `56029eddf9`). This is the arm32 plan's second pull
   request anyway.
-- **Report the Zig 0.16 arm ABI bug to Zig.** Zig passes a by-value
+- **The Zig 0.16 arm ABI bug (reported).** Zig passes a by-value
   `callconv(.c)` argument of nested `extern struct` type off-ABI on
   `arm-linux-musleabihf`. The fx test host works around it, with two
-  tripwires that fail when Zig fixes it. No Zig issue has been filed yet.
+  tripwires that fail when Zig fixes it. Reported to Zig as
+  https://codeberg.org/ziglang/zig/issues/37018 (2026-09-30).
   (Issues note, 1.2.)
 - **Stop committing prebuilt binaries** (the owner's intention). About 100
   `crt1.o`, `libc.a`, glibc stub and `.lib` files are committed; a binary
@@ -136,7 +137,7 @@ outside its scope. Details and fix directions:
 1. Small independent fixes from section 1: `16d1ab893c` (a user-visible crash)
    first, then `d910f7aa39`, `1138ce4c33`, `49bf1449b9`, `2def52effc`.
 2. The cache-wipe fix and the ReleaseFast test failures, as issues.
-3. File the Zig ABI bug with Zig.
+3. Done: the Zig ABI bug is filed (https://codeberg.org/ziglang/zig/issues/37018).
 4. The section 2 defects as issues, with the wasm sublist miscompile first
    (it has a ready eval case).
 5. The A0 oracles, which open the arm32 series.

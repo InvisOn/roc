@@ -394,7 +394,8 @@ Follow-up idea: see "Report peak memory per test" under follow-up ideas.
 
 #### Zig 0.16 passes nested `extern struct` arguments off-ABI on arm
 
-**Status: open (a Zig bug), worked around in the fx test host.**
+**Status: open (a Zig bug), worked around in the fx test host.** Reported to
+Zig as https://codeberg.org/ziglang/zig/issues/37018 (2026-09-30).
 
 - **Where:** Zig's own C-ABI lowering for `arm-linux-musleabihf` (and so the
   `test/fx` host, `test/fx/platform/host.zig`, which is Zig).
