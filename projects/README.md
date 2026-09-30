@@ -348,7 +348,9 @@ The arm32 dev backend (2026-09) is a standalone project:
   [big/arm32-dev-backend-fuzzing.md](big/arm32-dev-backend-fuzzing.md)
   (fuzzing the arm32 code generator: compile and differential oracles), and
   [big/arm32-dev-backend-walkthroughs.md](big/arm32-dev-backend-walkthroughs.md)
-  (guided tours of the work, phase by phase).
+  (guided tours of the work, phase by phase), and
+  [big/arm32-dev-backend-upstream-now.md](big/arm32-dev-backend-upstream-now.md)
+  (fixes, defects and lessons upstream can use before arm32 lands).
   The implementation's own
   record is `src/backend/dev/arm32/DESIGN.md`.
 
