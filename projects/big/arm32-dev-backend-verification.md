@@ -507,6 +507,19 @@ Done 2026-09-29, locally (nothing pushed).
   cases, none differ, none on one side only; the committed hash file is
   byte-identical to the oracle's merged side. `dev_object` snapshots: 16
   files, no 64-bit line differs.
+- Local checks on the merge, 2026-09-30 to 2026-10-01. Three fixes were
+  needed on top of the merge (findings table): `65458f0f9b` (two new upstream
+  tests adapted to the branch's interfaces), `b70e57798c` (A0's test spells
+  the new symbol prefix from its constant) and `b3199c8912` (arm32's ELF32
+  declares `.bss`), then `99a837b08b` (the prefix parsers' field offsets).
+  - minici at `b3199c8912`: 79/79 phases pass.
+  - arm32 at `b3199c8912`: host effects under qemu 104/104; all 122 `test/fx`
+    programs cross-built with the dev backend pass under qemu and on the
+    Raspberry Pi 5; the int app as arm32linux (glibc) on the Pi 3 prints
+    x64musl's 54 lines.
+  - At `99a837b08b`: the arm32 eval corpus under qemu 2381/2381 (the issue
+    11471 crash did not recur); `run-check-dev-code-hashes` 2,133/2,133;
+    format, zig lints, tidy and git lints pass.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
