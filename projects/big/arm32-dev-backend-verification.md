@@ -452,9 +452,24 @@ Done 2026-09-29, locally (nothing pushed).
   three failures and no others (the LIR proc-pass no-op worker test and two
   staged SpecConstr tests, one expecting `error.OutOfMemory`), so those
   three come from upstream. Both runs were then stopped by the cap
-  (`oom-kill`) before finishing, so the other eight macOS failures
-  (interface summaries, range proving, the snapshot tool, three fx
-  stack-overflow tests, `lir_inline_test`) are not attributed yet.
+  (`oom-kill`) before finishing. A third run, filtered to the other eight
+  (tip at `-j2` under 24 GB; base at `-j1` under 16 GB), settled them:
+  - Upstream (fail at the base too): the two interface-summary tests,
+    "LIR pass workers deterministically prove runtime range guards", and
+    `lir_inline_test` "interface summaries relocate across bodies and
+    executor lanes".
+  - macOS only (pass on Linux at the tip): the three fx stack-overflow
+    tests.
+  - Open: "snapshot validation" fails at the tip because a ReleaseFast
+    snapshot tool produces different x86_64, aarch64 and arm32 bytes than
+    the Debug build that wrote the hashes, for `dev_object_str_ops` and
+    `dev_object_recursion_rc` only. Both snapshots were added by A0, so the
+    base has no such test and its pass says nothing. The output depending on
+    the compiler's optimize mode means some code-generation input is not
+    deterministic (for example uninitialized memory, which Debug fills with a
+    fixed pattern). Next: run the Debug and ReleaseFast snapshot tools at the
+    base on these two files; the same difference there puts the cause
+    upstream, otherwise bisect the branch.
 - Pull-request run 36534635511 on `fe779eee30`: every `zig-minici` shard
   passed except `windows-harness`, cancelled at its 2-hour limit.
   `run-check-dev-code-hashes` alone took 46 minutes there. The hash file is
