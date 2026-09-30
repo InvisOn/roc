@@ -57,7 +57,7 @@ outside its scope. Details and fix directions:
 | **git-lints pads a file name with NUL bytes** in "src/ file never imported". | `tidy --git-lints` | Cosmetic | Not rechecked |
 | **The compiler at our base panics type-checking basic-cli 0.22.2** ("trying to add var at rank 5, but current rank is 4"); the nightly checks it cleanly. | type checker | Crash | Probably fixed; recheck after the merge |
 | Redundant narrowing shifts before byte stores. | `LirCodeGen.zig` | Dead work | Not rechecked |
-| **The x86_64 SysV classifier asserts on a zero-sized aggregate member.** `test/fx/parallel_fusion.roc` and `test/fx/inspect_dict_set.roc` panic (`assert(size > 0)`) when built with `--target=x64musl` and the default LLVM backend, so `roc-cross-compile (ubuntu-24.04, x64musl)` fails. Found 2026-10-01. | `layout/abi/x86_64.zig`, `classifySystemV` via `classifyMemberSysV` | Compiler crash | Present at `00cab95af8` |
+| **The x86_64 SysV classifier asserts on a zero-sized aggregate member.** `test/fx/parallel_fusion.roc` and `test/fx/inspect_dict_set.roc` panic (`assert(size > 0)`) when built with `--target=x64musl` and the default LLVM backend, so the x64musl `roc-cross-compile` lanes fail on every host, and `eval-llvm (ubuntu-24.04)` loses 30 cases to the same assertion. Found 2026-10-01. | `layout/abi/x86_64.zig`, `classifySystemV` via `classifyMemberSysV` | Compiler crash | Present at `00cab95af8` |
 
 ## 3. CI, build and tooling findings
 

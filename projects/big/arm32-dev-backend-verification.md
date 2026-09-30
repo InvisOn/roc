@@ -527,6 +527,11 @@ Done 2026-09-29, locally (nothing pushed).
   `classifySystemV` (`src/layout/abi/x86_64.zig:124`), reached for a
   zero-sized member of an aggregate. Upstream: the same command fails the
   same way at `00cab95af8` (`.git/verify-tools/x64musl_cross_attr.sh`).
+  The same two programs fail the x64musl lanes on macOS-15 and Windows 2022,
+  and `eval-llvm (ubuntu-24.04)` fails 30 of 2,381 cases (Set, Iter and
+  inspect cases), every one an LLVM-backend abort (`signal: 6`) at the same
+  assertion. Attributed to the same upstream defect by that assertion; the
+  LLVM eval corpus was not separately rerun at upstream.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
