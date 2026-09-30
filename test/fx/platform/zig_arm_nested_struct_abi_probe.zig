@@ -3,7 +3,8 @@
 //!
 //! Zig 0.16 passes a by-value `extern struct` that contains another struct at
 //! an even core register on arm, as if it were 8-byte aligned. AAPCS32 (and
-//! clang) start it at the next free register. See "Zig 0.16 passes nested
+//! clang) start it at the next free register. Zig issue:
+//! https://codeberg.org/ziglang/zig/issues/37018. See also "Zig 0.16 passes nested
 //! `extern struct` arguments off-ABI on arm" in
 //! `projects/big/arm32-dev-backend-issues.md`.
 //!
