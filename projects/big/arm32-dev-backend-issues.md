@@ -366,104 +366,6 @@ doubles and addressed as singles for f32 arguments; and the stub has no
 unwind information, so a crash inside a hosted function shows no frames
 through the trampoline (true for the existing ISAs too).
 
-#### Building the arm32 eval runners needs 18 GB, more than CI runners have
-
-**Status: fix prepared (2026-09-30), to be confirmed by a CI run of the
-lane.** The CI step now builds the runners in ReleaseSmall (results below).
-Before: **open, confirmed in CI.** In the first full run on the public fork
-(run 36494296904, 2026-09-29) the lane's runner died: "The hosted runner lost
-communication with the server… starves it for CPU/Memory". Upstream's own
-nightly loses its `arm-linux-musleabihf` job the same way.
-
-- **Where:** `.github/workflows/ci_zig.yml`, step "Build the eval runner for
-  arm32" (`zig build build-test-eval-runner build-test-eval-host-effects-runner
-  -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast`), on GitHub-hosted
-  `ubuntu-24.04`.
-- **Measured** (`--summary all`, 2026-09-27, x86_64 desktop): compiling
-  `eval-test-runner` for arm32 peaks at **18 GB** resident (14 minutes),
-  `eval-host-effects-runner` at **11 GB** (8 minutes); every other step
-  stays under 1 GB. The two build in parallel by default, so the step needs
-  about 29 GB at peak.
-- **Effect:** GitHub's standard hosted Linux runners have 16 GB on public
-  repositories (and less for private ones), so the lane J3a made required
-  will very likely fail from lack of memory on its first CI run. A Raspberry Pi 5
-  (8 GB) rebooted trying the same build with four jobs, and cannot build it
-  even one step at a time.
-- **Fix directions, to investigate in this order:**
-  1. The cheap check first: build the two runners one at a time (`-j1`) and
-     see whether the larger one (18 GB) fits in the hosted runner's 16 GB
-     plus its swap. If it does, this alone may fix the lane.
-  2. Find what takes 18 GB (the LLVM-backend oracle linked into the runner,
-     or Zig's own ReleaseFast code generation of one huge compilation unit)
-     and whether a build option that leaves out the LLVM backend, or
-     `-Doptimize=ReleaseSmall`, cuts it below the runner's memory.
-  3. Build them on a larger GitHub-hosted runner (which costs money even on
-     a public repository) and pass the binaries to the job that runs them
-     under qemu. Not on the owner's own machines: no CI runners there.
-  Whatever the fix, confirm it with `--summary all` (MaxRSS per step) before
-  relying on CI.
-
-**Analysis (2026-09-29, from `build.zig`, no builds yet).**
-
-- `eval-test-runner` is one ReleaseFast compilation of the whole compiler
-  (`roc_modules`), the test harness, bytebox and the SIMD corpus, plus
-  LLVM: `addLlvmSupportToStep` links LLVM's static libraries and C++ glue and
-  adds the `llvm_codegen`/`llvm_compile` modules whenever prebuilt LLVM exists
-  for the target, which it does for arm32. There is no option to leave it out.
-- **The runner never uses LLVM in this lane.** Its LLVM eval backend is
-  opt-in (`--include-llvm`, off by default; `parallel_runner.zig`), and the
-  arm32 lane does not pass it. So every arm32 build compiles and links all
-  of LLVM for nothing.
-- Leaving LLVM out is not only a build switch: the `eval` module imports
-  `llvm_compile`, so the evaluator would need to compile without it (a
-  comptime-known "LLVM linked" option, with the LLVM backend reporting
-  unavailable, as the wasm backend does on 32-bit hosts).
-- The 18 GB is the peak of one `compile exe` step, which includes Zig's own
-  code generation and optimization through LLVM and the in-process link.
-  Which of the two dominates is not known yet.
-
-**Plan.** Every experiment runs inside a simulated hosted runner on the
-desktop (`systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=4G`;
-the desktop delegates the memory controller), so an overrun kills the build,
-not the machine. Each records peak memory with `--summary all`. Run when the
-per-commit sweep is not using the desktop, or on the owner's larger Linux
-machine.
-
-1. **Sequential (`-j1`):** does the 18 GB build fit in 16 GB plus 4 GB swap
-   when built alone? If yes, changing the CI step to build the two runners
-   one at a time may be enough, at the cost of a slower lane.
-2. **Where the memory goes:** the same build with `-femit-llvm-ir` off and
-   a Zig time report, and the arm32 `roc` executable alone (the compiler
-   plus LLVM, without the test runner). If `roc` alone is close to 18 GB,
-   the test code is not the problem; if it is far below, the runner's extra
-   modules are.
-3. **Optimize mode:** the same build in ReleaseSmall and ReleaseSafe. The
-   lane needs the runner to run the corpus in reasonable time, not maximum
-   speed, so ReleaseSmall is acceptable if it fits.
-4. **Without LLVM:** a build option that keeps LLVM out of the eval runners
-   for the arm32 lane (the change described above). Likely the largest
-   saving, but a real code change to existing modules, so only if 1-3 do not
-   suffice.
-
-The fix is chosen from the smallest change that fits with margin, confirmed
-by a CI run of the lane.
-
-**Results (2026-09-30, desktop, inside `systemd-run -p MemoryMax=16G -p
-MemorySwapMax=4G`, fresh cache, peak memory from `--summary all`):**
-
-| Experiment | `eval-test-runner` | `eval-host-effects-runner` | Build time | Verdict |
-|---|---|---|---|---|
-| ReleaseFast, both at once (before) | 18 GB | 11 GB | (29 GB together) | does not fit |
-| 1: ReleaseFast, `-j1` | 17 GB | 12 GB | 22 min | fits only by swapping; too thin |
-| 3: ReleaseSmall, `-j1` | 8 GB | 5 GB | 10 min | fits with a wide margin, even both at once (13 GB) |
-
-The ReleaseSmall runners pass the whole corpus under qemu `cortex-a9`:
-2171/2171 in 19.9 minutes (ReleaseFast: 15.6 minutes, both with six
-threads) and host effects 86/86. So the fix is one flag in the CI step
-(`-Doptimize=ReleaseSmall`); experiments 2 and 4 were not needed.
-Experiment 4 (leaving LLVM out of the arm32 eval runners) stays a possible
-improvement: the lane never uses LLVM.
-
 #### A Debug arm32 eval runner does not link
 
 `zig build build-test-eval-runner -Dtarget=arm-linux-musleabihf` in Debug
@@ -690,6 +592,112 @@ work follows Roc's current practice.** Decided by the owner 2026-09-29.
   as its own pull request, not bundled with the arm32 work.
 
 ## 2. Resolved
+
+#### Building the arm32 eval runners needs 18 GB, more than CI runners have
+
+**Status: resolved in `ac71600d8d`** (the arm32 eval runners build in
+ReleaseSmall), proven on GitHub 2026-09-30 by probe run 36675742296 on
+a standard hosted runner (16 GB, 4 cores): the build peaked at 7.7 GB
+(GNU time's maximum RSS) and took 10 minutes, and under qemu cortex-a9
+the eval corpus passed 2171/2171 (45.5 minutes) and host effects 86/86.
+In the full `ci_zig.yml` run the step is still not reached, because the
+runner is killed in the preceding LLVM build (verification note, part 3).
+
+Earlier status: **fix prepared (2026-09-30), to be confirmed by a CI run of the
+lane.** The CI step now builds the runners in ReleaseSmall (results below).
+Before: **open, confirmed in CI.** In the first full run on the public fork
+(run 36494296904, 2026-09-29) the lane's runner died: "The hosted runner lost
+communication with the server… starves it for CPU/Memory". Upstream's own
+nightly loses its `arm-linux-musleabihf` job the same way.
+
+- **Where:** `.github/workflows/ci_zig.yml`, step "Build the eval runner for
+  arm32" (`zig build build-test-eval-runner build-test-eval-host-effects-runner
+  -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseFast`), on GitHub-hosted
+  `ubuntu-24.04`.
+- **Measured** (`--summary all`, 2026-09-27, x86_64 desktop): compiling
+  `eval-test-runner` for arm32 peaks at **18 GB** resident (14 minutes),
+  `eval-host-effects-runner` at **11 GB** (8 minutes); every other step
+  stays under 1 GB. The two build in parallel by default, so the step needs
+  about 29 GB at peak.
+- **Effect:** GitHub's standard hosted Linux runners have 16 GB on public
+  repositories (and less for private ones), so the lane J3a made required
+  will very likely fail from lack of memory on its first CI run. A Raspberry Pi 5
+  (8 GB) rebooted trying the same build with four jobs, and cannot build it
+  even one step at a time.
+- **Fix directions, to investigate in this order:**
+  1. The cheap check first: build the two runners one at a time (`-j1`) and
+     see whether the larger one (18 GB) fits in the hosted runner's 16 GB
+     plus its swap. If it does, this alone may fix the lane.
+  2. Find what takes 18 GB (the LLVM-backend oracle linked into the runner,
+     or Zig's own ReleaseFast code generation of one huge compilation unit)
+     and whether a build option that leaves out the LLVM backend, or
+     `-Doptimize=ReleaseSmall`, cuts it below the runner's memory.
+  3. Build them on a larger GitHub-hosted runner (which costs money even on
+     a public repository) and pass the binaries to the job that runs them
+     under qemu. Not on the owner's own machines: no CI runners there.
+  Whatever the fix, confirm it with `--summary all` (MaxRSS per step) before
+  relying on CI.
+
+**Analysis (2026-09-29, from `build.zig`, no builds yet).**
+
+- `eval-test-runner` is one ReleaseFast compilation of the whole compiler
+  (`roc_modules`), the test harness, bytebox and the SIMD corpus, plus
+  LLVM: `addLlvmSupportToStep` links LLVM's static libraries and C++ glue and
+  adds the `llvm_codegen`/`llvm_compile` modules whenever prebuilt LLVM exists
+  for the target, which it does for arm32. There is no option to leave it out.
+- **The runner never uses LLVM in this lane.** Its LLVM eval backend is
+  opt-in (`--include-llvm`, off by default; `parallel_runner.zig`), and the
+  arm32 lane does not pass it. So every arm32 build compiles and links all
+  of LLVM for nothing.
+- Leaving LLVM out is not only a build switch: the `eval` module imports
+  `llvm_compile`, so the evaluator would need to compile without it (a
+  comptime-known "LLVM linked" option, with the LLVM backend reporting
+  unavailable, as the wasm backend does on 32-bit hosts).
+- The 18 GB is the peak of one `compile exe` step, which includes Zig's own
+  code generation and optimization through LLVM and the in-process link.
+  Which of the two dominates is not known yet.
+
+**Plan.** Every experiment runs inside a simulated hosted runner on the
+desktop (`systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=4G`;
+the desktop delegates the memory controller), so an overrun kills the build,
+not the machine. Each records peak memory with `--summary all`. Run when the
+per-commit sweep is not using the desktop, or on the owner's larger Linux
+machine.
+
+1. **Sequential (`-j1`):** does the 18 GB build fit in 16 GB plus 4 GB swap
+   when built alone? If yes, changing the CI step to build the two runners
+   one at a time may be enough, at the cost of a slower lane.
+2. **Where the memory goes:** the same build with `-femit-llvm-ir` off and
+   a Zig time report, and the arm32 `roc` executable alone (the compiler
+   plus LLVM, without the test runner). If `roc` alone is close to 18 GB,
+   the test code is not the problem; if it is far below, the runner's extra
+   modules are.
+3. **Optimize mode:** the same build in ReleaseSmall and ReleaseSafe. The
+   lane needs the runner to run the corpus in reasonable time, not maximum
+   speed, so ReleaseSmall is acceptable if it fits.
+4. **Without LLVM:** a build option that keeps LLVM out of the eval runners
+   for the arm32 lane (the change described above). Likely the largest
+   saving, but a real code change to existing modules, so only if 1-3 do not
+   suffice.
+
+The fix is chosen from the smallest change that fits with margin, confirmed
+by a CI run of the lane.
+
+**Results (2026-09-30, desktop, inside `systemd-run -p MemoryMax=16G -p
+MemorySwapMax=4G`, fresh cache, peak memory from `--summary all`):**
+
+| Experiment | `eval-test-runner` | `eval-host-effects-runner` | Build time | Verdict |
+|---|---|---|---|---|
+| ReleaseFast, both at once (before) | 18 GB | 11 GB | (29 GB together) | does not fit |
+| 1: ReleaseFast, `-j1` | 17 GB | 12 GB | 22 min | fits only by swapping; too thin |
+| 3: ReleaseSmall, `-j1` | 8 GB | 5 GB | 10 min | fits with a wide margin, even both at once (13 GB) |
+
+The ReleaseSmall runners pass the whole corpus under qemu `cortex-a9`:
+2171/2171 in 19.9 minutes (ReleaseFast: 15.6 minutes, both with six
+threads) and host effects 86/86. So the fix is one flag in the CI step
+(`-Doptimize=ReleaseSmall`); experiments 2 and 4 were not needed.
+Experiment 4 (leaving LLVM out of the arm32 eval runners) stays a possible
+improvement: the lane never uses LLVM.
 
 #### In-process relocation patching guesses the encoding
 
