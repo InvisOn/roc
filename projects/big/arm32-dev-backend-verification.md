@@ -493,6 +493,17 @@ Done 2026-09-29, locally (nothing pushed).
 
 ### Part 5
 
+- 2026-09-30, the real merge: `upstream/main` at `00cab95af8` (517 commits
+  past the base, 43 past the trial) merged into `32-bit-backend` as
+  `41eb92cfaa`. rerere replayed the trial's resolutions for 17 files; one
+  new conflict (`src/cli/test/parallel_cli_runner.zig`, two independent CLI
+  cases added at the same place) keeps both. The 16 `dev_object` snapshots
+  (only their hash lines changed) and `test/dev_code_hashes/eval.blake3`
+  (2,133 cases, 172 new from upstream) are regenerated.
+- Relative 64-bit oracle on the merge: PASS. Eval dev-code hashes: 2,133
+  cases, none differ, none on one side only; the committed hash file is
+  byte-identical to the oracle's merged side. `dev_object` snapshots: 16
+  files, no 64-bit line differs.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
