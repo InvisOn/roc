@@ -443,6 +443,18 @@ Done 2026-09-29, locally (nothing pushed).
   - All 12 `roc-cross-compile` jobs passed, including the arm32 app built on
     Linux, Windows, macOS arm64 and macOS x86_64.
 - Spellcheck on the pull request: seven words in the notes; fixed.
+- Full run 36615593810 on `56029eddf9`: `zig-tests` on Windows 2022 and
+  2025 failed one test of the branch's (see the findings table, fixed).
+  `zig-tests (macos-15)` failed 11 tests, all in its ReleaseFast `-Dfuzz`
+  `run-test-zig` pass (the Debug pass had no failures). Local attribution,
+  2026-09-30, the same command on Linux under a 16 GB cap at `-j4`, at the
+  tip `5d8523a894` and at the base `58508d582b`: both runs reach the same
+  three failures and no others (the LIR proc-pass no-op worker test and two
+  staged SpecConstr tests, one expecting `error.OutOfMemory`), so those
+  three come from upstream. Both runs were then stopped by the cap
+  (`oom-kill`) before finishing, so the other eight macOS failures
+  (interface summaries, range proving, the snapshot tool, three fx
+  stack-overflow tests, `lir_inline_test`) are not attributed yet.
 - Pull-request run 36534635511 on `fe779eee30`: every `zig-minici` shard
   passed except `windows-harness`, cancelled at its 2-hour limit.
   `run-check-dev-code-hashes` alone took 46 minutes there. The hash file is
