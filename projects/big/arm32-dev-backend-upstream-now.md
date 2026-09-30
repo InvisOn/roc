@@ -77,10 +77,10 @@ outside its scope. Details and fix directions:
   Debug pass had none. Reproduced on Linux at our base `58508d582b`: the LIR
   proc-pass test "no-op workers do not append duplicate source bodies" and
   two staged SpecConstr tests (one expecting `error.OutOfMemory` and getting
-  nothing). Five more (interface summaries, range proving, snapshot
-  validation, `lir_inline_test`) fail on Linux at our tip; the base run that
-  attributes them is in progress (see the verification note). Three fx
-  stack-overflow tests fail only on macOS. These look like ReleaseFast-only
+  nothing). Four more fail at the base too (two interface-summary tests,
+  range proving, and `lir_inline_test` "interface summaries relocate across
+  bodies and executor lanes"). Three fx stack-overflow tests fail only on
+  macOS. "snapshot validation" is still open (verification note, part 3). These look like ReleaseFast-only
   behaviour (removed safety checks, allocation-failure injection) in
   upstream's tests.
 - **macOS-15-intel `zig-tests`**: RustGlue plugins fail to load and
