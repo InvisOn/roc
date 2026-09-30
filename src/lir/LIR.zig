@@ -1720,10 +1720,13 @@ pub const LirPattern = union(enum) {
 };
 
 test "canonicalizeSymbolNames renames procedures by first appearance" {
-    var bytes = "x roc__proc_00112233445566778899aabbccddeeff y roc__proc_ffeeddccbbaa99887766554433221100 roc__proc_00112233445566778899aabbccddeeff roc__proc_short".*;
+    const p = ProcIdentity.symbol_name_prefix;
+    var bytes = ("x " ++ p ++ "00112233445566778899aabbccddeeff y " ++ p ++ "ffeeddccbbaa99887766554433221100 " ++
+        p ++ "00112233445566778899aabbccddeeff " ++ p ++ "short").*;
     try ProcIdentity.canonicalizeSymbolNames(std.testing.allocator, &bytes);
     try std.testing.expectEqualStrings(
-        "x roc__proc_00000000000000000000000000000000 y roc__proc_00000000000000000000000000000001 roc__proc_00000000000000000000000000000000 roc__proc_short",
+        "x " ++ p ++ "00000000000000000000000000000000 y " ++ p ++ "00000000000000000000000000000001 " ++
+            p ++ "00000000000000000000000000000000 " ++ p ++ "short",
         &bytes,
     );
 }
