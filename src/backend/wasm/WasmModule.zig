@@ -480,6 +480,13 @@ const DataSegment = struct {
     flags: u32 = 0,
 };
 
+/// Whether a static export is stored as zero-fill: bytes that are all zero
+/// and stay zero after linking, which excludes anything a relocation writes.
+fn isZeroFillExport(data_export: StaticDataExport) bool {
+    if (data_export.bytes.len == 0 or data_export.relocations.len != 0) return false;
+    return std.mem.allEqual(u8, data_export.bytes, 0);
+}
+
 fn isZeroFillSegmentName(name: ?[]const u8) bool {
     const text = name orelse return false;
     return std.mem.eql(u8, text, ".bss") or std.mem.startsWith(u8, text, ".bss.");
@@ -525,6 +532,9 @@ global_imports: std.ArrayList(GlobalImport),
 /// Table imports (e.g. __indirect_function_table for PIC modules).
 table_imports: std.ArrayList(TableImport),
 data_segments: std.ArrayList(DataSegment),
+/// Segment names this module allocated, such as the `.bss.` names that mark a
+/// static export's segment as zero-fill; borrowed names stay with their owner.
+owned_segment_names: std.ArrayList([]u8),
 omit_zero_fill_data_segments: bool,
 /// Next available offset for data placement in linear memory (grows up from 0).
 data_offset: u32,
@@ -590,6 +600,7 @@ pub fn init(allocator: Allocator) Self {
         .global_imports = .empty,
         .table_imports = .empty,
         .data_segments = .empty,
+        .owned_segment_names = .empty,
         .omit_zero_fill_data_segments = false,
         .data_offset = 1024, // reserve first 1KB for future use
         .has_memory = false,
@@ -635,6 +646,8 @@ pub fn deinit(self: *Self) void {
         self.allocator.free(ds.data);
     }
     self.data_segments.deinit(self.allocator);
+    for (self.owned_segment_names.items) |name| self.allocator.free(name);
+    self.owned_segment_names.deinit(self.allocator);
     self.table_func_indices.deinit(self.allocator);
     self.extra_globals.deinit(self.allocator);
     self.code_bytes.deinit(self.allocator);
@@ -1288,10 +1301,21 @@ pub fn addStaticDataExports(self: *Self, exports: []const StaticDataExport) Stat
 
     for (exports, 0..) |data_export, i| {
         segment_indices[i] = @intCast(self.data_segments.items.len);
+        // Linear memory starts zeroed, so an export whose bytes are all zero
+        // and that no relocation writes into needs no bytes in the binary:
+        // its segment is marked zero-fill through the name every wasm
+        // object uses for that, which survives linking, and is left out of
+        // the data section when the memory is known to start zeroed.
+        const segment_name = if (isZeroFillExport(data_export)) blk: {
+            const name = try std.fmt.allocPrint(self.allocator, ".bss.{s}", .{data_export.symbol_name});
+            errdefer self.allocator.free(name);
+            try self.owned_segment_names.append(self.allocator, name);
+            break :blk name;
+        } else data_export.symbol_name;
         _ = try self.addDataSegmentWithInfo(
             data_export.bytes,
             @max(data_export.alignment, 1),
-            data_export.symbol_name,
+            segment_name,
             0,
         );
 
@@ -3147,7 +3171,7 @@ pub fn exportGlobalSymbols(self: *Self) Allocator.Error!void {
         if (sym.kind != .function or sym.isUndefined() or sym.isLocal()) continue;
         if ((sym.flags & WasmLinking.SymFlag.VISIBILITY_HIDDEN) != 0) continue;
         const name = sym.name orelse continue;
-        // Skip roc-internal symbols (roc__proc_*, roc__num_*); entrypoints use
+        // Skip roc-internal symbols (roc__p*, roc__num_*); entrypoints use
         // the literal provides symbols and are exported like any host export.
         if (std.mem.startsWith(u8, name, "roc__")) continue;
         // Avoid duplicate exports.
@@ -7459,13 +7483,40 @@ test "mergeModule final link - resolves stack pointer import to global zero" {
     try std.testing.expectEqual(@as(u32, 0), decodePaddedU32(app.code_bytes.items[1..6]));
 }
 
+test "all-zero static exports without relocations become zero-fill segments" {
+    const allocator = std.testing.allocator;
+    var module = Self.init(allocator);
+    defer module.deinit();
+    var exports: std.ArrayList(StaticDataExport) = .empty;
+    defer exports.deinit(allocator);
+    // Capture the table's actual export index before adding its descriptor.
+    const table_id = exports.items.len;
+    try exports.append(allocator, .{ .symbol_name = "table", .bytes = &([_]u8{0} ** 64), .symbol_offset = 8, .alignment = 8, .is_exported = false });
+    const relocations = [_]StaticDataRelocation{.{ .offset = 0, .target_symbol_name = "table", .target = .{ .data_symbol = @enumFromInt(table_id) }, .addend = 8 }};
+    // The descriptor is zeroed too, but its relocation requires stored data.
+    try exports.append(allocator, .{ .symbol_name = "descriptor", .bytes = &([_]u8{0} ** 12), .alignment = 4, .is_exported = false, .relocations = &relocations });
+    try exports.append(allocator, .{ .symbol_name = "filled", .bytes = &.{ 1, 0, 0, 0 }, .alignment = 4, .is_exported = false });
+    try module.addStaticDataExports(exports.items);
+    // Linear memory starts zeroed, so the table needs no bytes; the
+    // descriptor is written by a relocation and the filled export is not
+    // zero, so both stay byte-backed.
+    try std.testing.expect(module.data_segments.items[0].zero_fill);
+    try std.testing.expectEqualStrings(".bss.table", module.data_segments.items[0].name.?);
+    try std.testing.expect(!module.data_segments.items[1].zero_fill);
+    try std.testing.expectEqualStrings("descriptor", module.data_segments.items[1].name.?);
+    try std.testing.expect(!module.data_segments.items[2].zero_fill);
+    // The zero-fill segment still owns its address range: the following
+    // segments are placed after it.
+    try std.testing.expect(module.data_segments.items[1].offset >= module.data_segments.items[0].offset + 64);
+}
+
 test "addStaticDataExports defines forward data symbols used by code relocations" {
     const allocator = std.testing.allocator;
     var module = Self.init(allocator);
     defer module.deinit();
 
     _ = try module.addDataSegment(&.{ 0xaa, 0xbb, 0xcc }, 1);
-    const symbol = try module.addUndefinedDataSymbol("roc__static_value_0");
+    const symbol = try module.addUndefinedDataSymbol("roc__d0");
 
     try module.code_bytes.append(allocator, Op.i32_const);
     try appendPaddedI32(allocator, &module.code_bytes, 0);
@@ -7477,7 +7528,7 @@ test "addStaticDataExports defines forward data symbols used by code relocations
     } });
 
     const exports = [_]StaticDataExport{.{
-        .symbol_name = "roc__static_value_0",
+        .symbol_name = "roc__d0",
         .bytes = &.{ 9, 8, 7, 6 },
         .alignment = 4,
         .is_global = false,
@@ -7489,7 +7540,7 @@ test "addStaticDataExports defines forward data symbols used by code relocations
     const sym = module.linking.symbol_table.items[symbol.raw()];
     try std.testing.expect(!sym.isUndefined());
     try std.testing.expectEqual(WasmLinking.SymKind.data, sym.kind);
-    try std.testing.expectEqualStrings("roc__static_value_0", sym.name.?);
+    try std.testing.expectEqualStrings("roc__d0", sym.name.?);
     try std.testing.expectEqual(@as(u32, 0), sym.data_offset);
     try std.testing.expectEqual(@as(u32, 4), sym.data_size);
 
@@ -7503,10 +7554,10 @@ test "mergeModuleForObject resolves undefined static data symbols" {
     var app = Self.init(allocator);
     defer app.deinit();
 
-    const symbol = try app.addUndefinedDataSymbol("roc__static_value_0");
+    const symbol = try app.addUndefinedDataSymbol("roc__d0");
 
     const exports = [_]StaticDataExport{.{
-        .symbol_name = "roc__static_value_0",
+        .symbol_name = "roc__d0",
         .bytes = &.{ 9, 8, 7, 6 },
         .alignment = 4,
         .is_global = false,
@@ -7522,7 +7573,7 @@ test "mergeModuleForObject resolves undefined static data symbols" {
     const sym = app.linking.symbol_table.items[symbol.raw()];
     try std.testing.expect(!sym.isUndefined());
     try std.testing.expectEqual(WasmLinking.SymKind.data, sym.kind);
-    try std.testing.expectEqualStrings("roc__static_value_0", sym.name.?);
+    try std.testing.expectEqualStrings("roc__d0", sym.name.?);
     try std.testing.expectEqual(@as(u32, 0), sym.data_offset);
     try std.testing.expectEqual(@as(u32, 4), sym.data_size);
     try app.verifyNoLinkObjectContract();

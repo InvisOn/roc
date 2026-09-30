@@ -169,6 +169,10 @@ pub const Store = struct {
     /// Sorted (origin module identity, statement) -> declaration index. Kept
     /// sorted on insert; lookups binary-search.
     nominal_decl_index: NominalDeclIndexEntry.SafeList,
+    /// False only while no entry of `nominal_decls` has ever been invalid.
+    /// Stores whose history is unknown (zero-copy views of serialized data)
+    /// keep the default.
+    invalid_nominal_decl_written: bool = true,
 
     /// Reusable worklist buffers for `instantiate.Instantiator`'s explicit
     /// graph-copy machine. Runtime-only scratch: never serialized, cloned, or
@@ -231,6 +235,7 @@ pub const Store = struct {
             // nominal declaration table (modules typically declare few types)
             .nominal_decls = try NominalDecl.SafeList.initCapacity(gpa, 16),
             .nominal_decl_index = try NominalDeclIndexEntry.SafeList.initCapacity(gpa, 16),
+            .invalid_nominal_decl_written = false,
         };
     }
 
@@ -284,7 +289,7 @@ pub const Store = struct {
         return .{
             .gpa = gpa,
             .slots = .{ .backing = try self.slots.backing.clone(gpa) },
-            .descs = .{ .backing = try self.descs.backing.clone(gpa) },
+            .descs = .{ .backing = try self.descs.backing.clone(gpa), .err_written = self.descs.err_written },
             .root_metas = try self.root_metas.clone(gpa),
             .union_ranks = try self.union_ranks.clone(gpa),
             .vars = try self.vars.clone(gpa),
@@ -294,7 +299,15 @@ pub const Store = struct {
             .static_dispatch_constraints = try self.static_dispatch_constraints.clone(gpa),
             .nominal_decls = try self.nominal_decls.clone(gpa),
             .nominal_decl_index = try self.nominal_decl_index.clone(gpa),
+            .invalid_nominal_decl_written = self.invalid_nominal_decl_written,
         };
+    }
+
+    /// False only when no variable in this store can reach the error state:
+    /// no descriptor has ever held `.err` and no nominal declaration has ever
+    /// been invalid (applications of invalid declarations are erroneous).
+    pub fn mayContainErrorState(self: *const Self) bool {
+        return self.descs.err_written or self.invalid_nominal_decl_written;
     }
 
     /// Return the number of type variables in the store.
@@ -771,6 +784,16 @@ pub const Store = struct {
         return self.resolveVar(target_var).desc.flags.static_dispatch_rejected;
     }
 
+    /// Record definition-site annotation openness (design.md "Derived Parser
+    /// Tag-Row Closure"). Provenance travels with the flex equivalence class.
+    pub fn markAnnotationTagExt(self: *Self, target_var: Var) Allocator.Error!void {
+        const resolved = self.resolveVar(target_var);
+        std.debug.assert(resolved.desc.content == .flex);
+        var desc = resolved.desc;
+        desc.flags.annotation_tag_ext = true;
+        try self.setDesc(resolved.desc_idx, desc);
+    }
+
     /// The declared rule a `dangerousSetVarRedirect` call site bends the solved
     /// graph under. A redirect outside ordinary unification is indistinguishable
     /// at review time from a change to the language's typing rules, so every call
@@ -802,6 +825,10 @@ pub const Store = struct {
         /// the marker closes: it redirects to the empty tag union, the same
         /// outcome instantiation's `.close` behavior produces.
         derivation_marker_ext_closure,
+        /// (ii) design.md "Row Union Normalization": a row part whose every
+        /// label also occurs further along its extension chain denotes that
+        /// extension once the repeated occurrences are related.
+        row_union_normalization,
     };
 
     /// Set a type variable to redirect to the provided variables.
@@ -1272,12 +1299,14 @@ pub const Store = struct {
                 .gt => lo = mid + 1,
                 .eq => {
                     const existing = entries[mid].decl;
+                    self.noteNominalDeclWrite(decl);
                     self.nominal_decls.set(existing, decl);
                     return existing;
                 },
             }
         }
 
+        self.noteNominalDeclWrite(decl);
         const decl_idx = try self.nominal_decls.append(self.gpa, decl);
         try self.nominal_decl_index.items.insert(self.gpa, lo, .{
             .origin_module = decl.origin_module,
@@ -1327,7 +1356,12 @@ pub const Store = struct {
     /// fill a reserved entry once its formals and backing have been copied).
     pub fn setNominalDecl(self: *Self, idx: NominalDecl.Idx, decl: NominalDecl) void {
         std.debug.assert(!self.savepoint_active);
+        self.noteNominalDeclWrite(decl);
         self.nominal_decls.set(idx, decl);
+    }
+
+    fn noteNominalDeclWrite(self: *Self, decl: NominalDecl) void {
+        if (!decl.isValid()) self.invalid_nominal_decl_written = true;
     }
 
     /// Mark a nominal declaration invalid (malformed backing or invalid
@@ -1336,6 +1370,7 @@ pub const Store = struct {
         std.debug.assert(!self.savepoint_active);
         var decl = self.nominal_decls.get(idx).*;
         decl.flags.valid = false;
+        self.invalid_nominal_decl_written = true;
         self.nominal_decls.set(idx, decl);
     }
 
@@ -1531,6 +1566,8 @@ pub const Store = struct {
         const b_data = self.resolveStorageRoot(b_var);
 
         var merged_desc = new_desc;
+        merged_desc.flags.annotation_tag_ext = merged_desc.content == .flex and
+            (a_data.desc.flags.annotation_tag_ext or b_data.desc.flags.annotation_tag_ext);
         const merged_is_empty_tag_union = merged_desc.content == .structure and
             merged_desc.content.structure == .empty_tag_union;
         if (merged_is_empty_tag_union) {
@@ -1565,18 +1602,19 @@ pub const Store = struct {
     /// Poison a failed unification at its two queried occurrences.
     ///
     /// Successful unification always merges whole equivalence classes. Error
-    /// recovery is intentionally occurrence-directed: `a_var` can be a checked
-    /// expression or pattern occurrence already connected to a shared binding.
-    /// If it is not the class's checked representative, poisoning that exact
-    /// occurrence must not make the binding—or an incidental storage child of
-    /// the occurrence—erroneous. Re-root and flatten the remaining class at its
-    /// checked representative, isolate `a_var` as a rank-zero singleton, then
-    /// rank-merge it with b's error class. If `a_var` is the checked
-    /// representative, the mismatch belongs to the class itself and the whole
-    /// class is merged into the error class.
+    /// recovery is intentionally occurrence-directed: either operand can be a
+    /// checked expression or pattern occurrence already connected to a shared
+    /// binding, such as a lookup of a lambda parameter. If an operand is not
+    /// its class's checked representative, poisoning that exact occurrence
+    /// must not make the binding—or an incidental storage child of the
+    /// occurrence—erroneous: the remaining class is re-rooted and flattened at
+    /// its checked representative and keeps its content, and the occurrence
+    /// joins the error class as a rank-zero singleton. An operand that is its
+    /// class's checked representative owns the mismatch, so its whole class
+    /// joins the error class.
     pub fn poisonOnMismatch(self: *Self, a_var: Var, b_var: Var) Allocator.Error!void {
         var a = self.resolveStorageRoot(a_var);
-        const b = self.resolveStorageRoot(b_var);
+        var b = self.resolveStorageRoot(b_var);
         // Poisoning replaces the content, not the rejection history: a class
         // whose dispatch check was already rejected stays rejected.
         const err_desc = Desc{
@@ -1590,34 +1628,22 @@ pub const Store = struct {
             return;
         }
 
-        try self.setDesc(b.desc_idx, err_desc);
+        if (b_var == b.meta.checked_var) {
+            try self.setDesc(b.desc_idx, err_desc);
+        } else {
+            try self.detachOccurrence(b, b_var);
+            const err_desc_idx = try self.appendClass(err_desc, b_var);
+            try self.setSlot(Self.varToSlotIdx(b_var), .{ .root = err_desc_idx });
+            b = .{
+                .storage_var = b_var,
+                .desc_idx = err_desc_idx,
+                .desc = err_desc,
+                .meta = .{ .checked_var = b_var },
+            };
+        }
+
         if (a_var != a.meta.checked_var) {
-            std.debug.assert(!self.savepoint_active);
-
-            var class_members: std.ArrayListUnmanaged(Var) = .empty;
-            defer class_members.deinit(self.gpa);
-            try class_members.ensureTotalCapacity(self.gpa, @intCast(self.len()));
-            var raw_var: u32 = 0;
-            while (raw_var < self.len()) : (raw_var += 1) {
-                const candidate: Var = @enumFromInt(raw_var);
-                if (self.resolveStorageRoot(candidate).storage_var == a.storage_var) {
-                    class_members.appendAssumeCapacity(candidate);
-                }
-            }
-
-            const checked_var = a.meta.checked_var;
-            try self.setSlot(Self.varToSlotIdx(checked_var), .{ .root = a.desc_idx });
-            const remaining_class_rank: u8 = if (class_members.items.len > 2) 1 else 0;
-            try self.setUnionRank(checked_var, remaining_class_rank);
-            for (class_members.items) |member| {
-                if (member == checked_var or member == a_var) continue;
-                try self.setUnionRank(member, 0);
-                try self.setSlot(Self.varToSlotIdx(member), .{ .redirect = checked_var });
-            }
-
-            // `a_var` has no remaining storage children after the exact class
-            // flatten above, so its singleton structural rank is zero.
-            try self.setUnionRank(a_var, 0);
+            try self.detachOccurrence(a, a_var);
             try self.setSlot(Self.varToSlotIdx(a_var), .{ .root = b.desc_idx });
             a = .{
                 .storage_var = a_var,
@@ -1628,6 +1654,41 @@ pub const Store = struct {
         }
 
         try self.linkStorageRoots(a, b, b.desc_idx, b.meta.checked_var);
+    }
+
+    /// Detach `occurrence`, a member of `class` other than its checked
+    /// representative, from the class. The remaining members are re-rooted and
+    /// flattened at the checked representative and keep the class descriptor.
+    /// `occurrence` is left as a rank-zero storage root whose slot the caller
+    /// assigns.
+    fn detachOccurrence(self: *Self, class: ResolvedStorageRoot, occurrence: Var) Allocator.Error!void {
+        std.debug.assert(!self.savepoint_active);
+        const checked_var = class.meta.checked_var;
+        std.debug.assert(occurrence != checked_var);
+
+        var class_members: std.ArrayListUnmanaged(Var) = .empty;
+        defer class_members.deinit(self.gpa);
+        try class_members.ensureTotalCapacity(self.gpa, @intCast(self.len()));
+        var raw_var: u32 = 0;
+        while (raw_var < self.len()) : (raw_var += 1) {
+            const candidate: Var = @enumFromInt(raw_var);
+            if (self.resolveStorageRoot(candidate).storage_var == class.storage_var) {
+                class_members.appendAssumeCapacity(candidate);
+            }
+        }
+
+        try self.setSlot(Self.varToSlotIdx(checked_var), .{ .root = class.desc_idx });
+        const remaining_class_rank: u8 = if (class_members.items.len > 2) 1 else 0;
+        try self.setUnionRank(checked_var, remaining_class_rank);
+        for (class_members.items) |member| {
+            if (member == checked_var or member == occurrence) continue;
+            try self.setUnionRank(member, 0);
+            try self.setSlot(Self.varToSlotIdx(member), .{ .redirect = checked_var });
+        }
+
+        // `occurrence` has no remaining storage children after the exact class
+        // flatten above, so its singleton structural rank is zero.
+        try self.setUnionRank(occurrence, 0);
     }
 
     // test helpers //
@@ -1749,7 +1810,7 @@ pub const Store = struct {
         /// Deserialize into a Store value with fresh memory allocation.
         /// The returned Store owns its memory and can be safely grown/mutated.
         pub fn deserializeWithCopy(self: *const Serialized, base_addr: usize, gpa: Allocator) Allocator.Error!Store {
-            return Store{
+            var store = Store{
                 .gpa = gpa,
                 .slots = try self.slots.deserializeWithCopy(base_addr, gpa),
                 .descs = try self.descs.deserializeWithCopy(base_addr, gpa),
@@ -1763,6 +1824,9 @@ pub const Store = struct {
                 .nominal_decls = try self.nominal_decls.deserializeWithCopy(base_addr, gpa),
                 .nominal_decl_index = try self.nominal_decl_index.deserializeWithCopy(base_addr, gpa),
             };
+            store.invalid_nominal_decl_written = false;
+            for (store.nominal_decls.items.items) |decl| store.noteNominalDeclWrite(decl);
+            return store;
         }
     };
 
@@ -1779,7 +1843,7 @@ pub const Store = struct {
         offset_self.* = .{
             .gpa = allocator,
             .slots = (try self.slots.serialize(allocator, writer)).*,
-            .descs = (try self.descs.serialize(allocator, writer)).*,
+            .descs = try self.descs.serialize(allocator, writer),
             .root_metas = (try self.root_metas.serialize(allocator, writer)).*,
             .union_ranks = (try self.union_ranks.serialize(allocator, writer)).*,
             .vars = (try self.vars.serialize(allocator, writer)).*,
@@ -1789,6 +1853,7 @@ pub const Store = struct {
             .static_dispatch_constraints = (try self.static_dispatch_constraints.serialize(allocator, writer)).*,
             .nominal_decls = (try self.nominal_decls.serialize(allocator, writer)).*,
             .nominal_decl_index = (try self.nominal_decl_index.serialize(allocator, writer)).*,
+            .invalid_nominal_decl_written = self.invalid_nominal_decl_written,
         };
 
         return @constCast(offset_self);
@@ -1922,10 +1987,22 @@ const DescStore = struct {
     const DescSafeMultiList = collections.SafeMultiList(Desc);
 
     backing: DescSafeMultiList,
+    /// False only while no descriptor in `backing` has ever held `.err`.
+    /// Stores whose history is unknown (zero-copy views of serialized data)
+    /// keep the default.
+    err_written: bool = true,
 
     /// Init & allocated memory
     fn init(gpa: Allocator, capacity: usize) std.mem.Allocator.Error!Self {
-        return .{ .backing = try DescSafeMultiList.initCapacity(gpa, capacity) };
+        return .{ .backing = try DescSafeMultiList.initCapacity(gpa, capacity), .err_written = false };
+    }
+
+    fn fromContents(backing: DescSafeMultiList) Self {
+        var err_written = false;
+        for (backing.items.items(.content)) |content| {
+            if (content == .err) err_written = true;
+        }
+        return .{ .backing = backing, .err_written = err_written };
     }
 
     /// Deinit & free allocated memory
@@ -1959,26 +2036,27 @@ const DescStore = struct {
         /// Deserialize into a DescStore value with fresh memory allocation.
         /// The returned DescStore owns its memory and can be safely grown/mutated.
         pub fn deserializeWithCopy(self: *const Serialized, base_addr: usize, gpa: Allocator) Allocator.Error!DescStore {
-            return DescStore{
-                .backing = try self.backing.deserializeWithCopy(base_addr, gpa),
-            };
+            return DescStore.fromContents(try self.backing.deserializeWithCopy(base_addr, gpa));
         }
     };
 
     /// Insert a value into the store
     fn insert(self: *Self, gpa: Allocator, typ: Desc) std.mem.Allocator.Error!Idx {
+        if (typ.content == .err) self.err_written = true;
         const safe_idx = try self.backing.append(gpa, typ);
         return @enumFromInt(@intFromEnum(safe_idx));
     }
 
     /// Appends a value to the store assuming there is capacity
     fn appendAssumeCapacity(self: *Self, typ: Desc) Idx {
+        if (typ.content == .err) self.err_written = true;
         const safe_idx = self.backing.appendAssumeCapacity(typ);
         return @enumFromInt(@intFromEnum(safe_idx));
     }
 
     /// Set a value in the store
     fn set(self: *Self, idx: Idx, val: Desc) void {
+        if (val.content == .err) self.err_written = true;
         self.backing.set(@enumFromInt(@intFromEnum(idx)), val);
     }
 
@@ -1992,11 +2070,11 @@ const DescStore = struct {
         self: *const Self,
         allocator: Allocator,
         writer: *collections.CompactWriter,
-    ) std.mem.Allocator.Error!*const Self {
-        // Since DescStore is just a wrapper around SafeMultiList, serialize the backing directly
-        const serialized_backing = try self.backing.serialize(allocator, writer);
-        // Cast the serialized SafeMultiList pointer to a DescStore pointer
-        return @ptrCast(serialized_backing);
+    ) std.mem.Allocator.Error!Self {
+        return .{
+            .backing = (try self.backing.serialize(allocator, writer)).*,
+            .err_written = self.err_written,
+        };
     }
 
     /// Add the given offset to the memory addresses of all pointers in `self`.
@@ -2011,8 +2089,7 @@ const DescStore = struct {
 
     /// Deserialize a DescStore from the provided buffer
     pub fn deserializeFrom(buffer: []align(@alignOf(Desc)) const u8, allocator: Allocator) Allocator.Error!Self {
-        const backing = try DescSafeMultiList.deserializeFrom(buffer, allocator);
-        return Self{ .backing = backing };
+        return fromContents(try DescSafeMultiList.deserializeFrom(buffer, allocator));
     }
 
     /// A type-safe index into the store
@@ -2137,6 +2214,57 @@ test "mismatch poisoning detaches an occurrence from its shared binding" {
     try std.testing.expectEqual(mismatched_pattern, store.resolveVar(mismatched_pattern).var_);
     const error_storage = store.resolveStorageRoot(checked_occurrence);
     try std.testing.expectEqual(@as(u8, 1), store.getUnionRank(error_storage.storage_var));
+}
+
+test "mismatch poisoning detaches a second-operand occurrence from its shared binding" {
+    const gpa = std.testing.allocator;
+
+    var store = try Store.init(gpa);
+    defer store.deinit();
+
+    const expected_bool = try store.fresh();
+    const shared_binding = try store.fresh();
+    const lookup_occurrence = try store.freshRedirect(shared_binding);
+    const incidental_storage_child = try store.freshRedirect(lookup_occurrence);
+
+    try store.poisonOnMismatch(expected_bool, lookup_occurrence);
+
+    const shared = store.resolveVar(shared_binding);
+    try std.testing.expectEqual(shared_binding, shared.var_);
+    try std.testing.expectEqual(Content{ .flex = Flex.init() }, shared.desc.content);
+    try std.testing.expectEqual(shared_binding, store.resolveVar(incidental_storage_child).var_);
+    try std.testing.expectEqual(Content{ .flex = Flex.init() }, store.resolveVar(incidental_storage_child).desc.content);
+
+    for ([_]Var{ expected_bool, lookup_occurrence }) |var_| {
+        const resolved = store.resolveVar(var_);
+        try std.testing.expectEqual(lookup_occurrence, resolved.var_);
+        try std.testing.expectEqual(Content.err, resolved.desc.content);
+    }
+}
+
+test "mismatch poisoning detaches both operand occurrences from their shared bindings" {
+    const gpa = std.testing.allocator;
+
+    var store = try Store.init(gpa);
+    defer store.deinit();
+
+    const first_binding = try store.fresh();
+    const first_occurrence = try store.freshRedirect(first_binding);
+    const second_binding = try store.fresh();
+    const second_occurrence = try store.freshRedirect(second_binding);
+
+    try store.poisonOnMismatch(first_occurrence, second_occurrence);
+
+    for ([_]Var{ first_binding, second_binding }) |binding| {
+        const resolved = store.resolveVar(binding);
+        try std.testing.expectEqual(binding, resolved.var_);
+        try std.testing.expectEqual(Content{ .flex = Flex.init() }, resolved.desc.content);
+    }
+    for ([_]Var{ first_occurrence, second_occurrence }) |occurrence| {
+        const resolved = store.resolveVar(occurrence);
+        try std.testing.expectEqual(second_occurrence, resolved.var_);
+        try std.testing.expectEqual(Content.err, resolved.desc.content);
+    }
 }
 
 test "mismatch poisoning a non-storage-root checked representative poisons its whole class" {
@@ -2977,4 +3105,49 @@ test "source declaration overflow is rejected before mutating type store" {
     try std.testing.expectEqual(before_slots, store.len());
     try std.testing.expectEqual(before_descs, store.descs.backing.len());
     try std.testing.expectEqual(before_vars, store.vars.len());
+}
+
+test "Store annotation tag provenance follows flex equivalence classes" {
+    for ([_]bool{ false, true }) |reverse| {
+        var store = try Store.init(std.testing.allocator);
+        defer store.deinit();
+        const annotation_ext = try store.fresh();
+        const inferred_ext = try store.fresh();
+        try store.markAnnotationTagExt(annotation_ext);
+        const a = if (reverse) annotation_ext else inferred_ext;
+        const b = if (reverse) inferred_ext else annotation_ext;
+        try store.union_(a, b, .{ .content = .{ .flex = Flex.init() }, .rank = .outermost });
+        try std.testing.expect(store.resolveVar(inferred_ext).desc.flags.annotation_tag_ext);
+        try std.testing.expect(store.resolveVar(annotation_ext).desc.flags.annotation_tag_ext);
+
+        const empty = try store.freshFromContentWithRank(.{ .structure = .empty_tag_union }, .outermost);
+        try store.union_(inferred_ext, empty, .{ .content = .{ .structure = .empty_tag_union }, .rank = .outermost });
+        try std.testing.expect(!store.resolveVar(annotation_ext).desc.flags.annotation_tag_ext);
+    }
+}
+
+test "mayContainErrorState tracks error descriptors and invalid nominal declarations" {
+    const gpa = std.testing.allocator;
+
+    var store = try Store.init(gpa);
+    defer store.deinit();
+    const backing = try store.fresh();
+    const decl_idx = try store.registerNominalDecl(try testNominalDecl(@enumFromInt(1), 3, backing));
+    try std.testing.expect(!store.mayContainErrorState());
+
+    store.markNominalDeclInvalid(decl_idx);
+    try std.testing.expect(store.mayContainErrorState());
+
+    var errs = try Store.init(gpa);
+    defer errs.deinit();
+    const b = try errs.fresh();
+    try std.testing.expect(!errs.mayContainErrorState());
+    try errs.setVarContent(b, .err);
+    try std.testing.expect(errs.mayContainErrorState());
+    try errs.setVarContent(b, .{ .flex = Flex.init() });
+    try std.testing.expect(errs.mayContainErrorState());
+
+    var copy = try errs.clone(gpa);
+    defer copy.deinit();
+    try std.testing.expect(copy.mayContainErrorState());
 }

@@ -162,7 +162,7 @@ pub fn resolveDeferredImports(
 
 fn sha256Bytes(bytes: []const u8) [32]u8 {
     var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    base.Sha256.hash(bytes, &digest, .{});
     return digest;
 }
 
@@ -971,7 +971,7 @@ const Resolver = struct {
             .file_import_io_error => .{ .file_import_io_error = .{ .path = path, .region = region } },
             .file_import_not_utf8 => .{ .file_import_not_utf8 = .{ .path = path, .region = region } },
         };
-        try self.env.replaceExprWithRuntimeError(expr_idx, diagnostic);
+        try self.env.settleDeferredExprAsRuntimeError(expr_idx, diagnostic);
     }
 
     /// Settle a platform `hosted` entry against the module its mapping names.
@@ -1176,11 +1176,11 @@ const Resolver = struct {
 
         switch (entry.kind) {
             .expr_value, .expr_nominal => {
-                try self.env.replaceExprWithRuntimeError(@enumFromInt(entry.node_idx), diagnostic);
+                try self.env.settleDeferredExprAsRuntimeError(@enumFromInt(entry.node_idx), diagnostic);
             },
             .pattern_nominal => {
                 const diagnostic_idx = try self.env.addDiagnostic(diagnostic);
-                self.env.store.replacePatternWithRuntimeError(@enumFromInt(entry.node_idx), diagnostic_idx);
+                self.env.store.settleDeferredPatternAsRuntimeError(@enumFromInt(entry.node_idx), diagnostic_idx);
             },
             .numeric_suffix => {
                 _ = try self.env.addDiagnostic(diagnostic);

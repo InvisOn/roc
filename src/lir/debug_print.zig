@@ -111,6 +111,7 @@ const Printer = struct {
                         .null_ptr => try writer.writeAll("literal null_ptr"),
                         .proc_ref => |p| try writer.print("literal proc_ref p{d}", .{@intFromEnum(p)}),
                     }
+                    if (s.fresh_alternative) |proc| try writer.print(" fresh=p{d}", .{@intFromEnum(proc)});
                     try writer.writeAll("\n");
                     current = s.next;
                 },
@@ -265,16 +266,6 @@ const Printer = struct {
                 .assign_boxy_inspect => |s| {
                     try self.writeTarget(s.target, indent, writer);
                     try writer.print("boxy_inspect source=l{d} desc=", .{@intFromEnum(s.source)});
-                    try writeBoxyDescRef(s.source_desc, writer);
-                    try writer.print(" mode={s}\n", .{@tagName(s.source_mode)});
-                    current = s.next;
-                },
-                .assign_boxy_eq => |s| {
-                    try self.writeTarget(s.target, indent, writer);
-                    try writer.print("boxy_eq lhs=l{d} rhs=l{d} desc=", .{
-                        @intFromEnum(s.lhs),
-                        @intFromEnum(s.rhs),
-                    });
                     try writeBoxyDescRef(s.source_desc, writer);
                     try writer.print(" mode={s}\n", .{@tagName(s.source_mode)});
                     current = s.next;
@@ -708,19 +699,19 @@ test "debug print includes boxy RC helper descriptor references" {
     defer layouts.deinit();
 
     const value = try store.addLocal(.{ .layout_idx = .str });
-    const ret = try store.addCFStmt(.{ .ret = .{ .value = value } });
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = value } }, .test_fixture);
     const incref = try store.addCFStmt(.{ .incref = .{
         .value = value,
         .rc = .{ .boxy = .{ .static = @enumFromInt(3) } },
         .next = ret,
-    } });
+    } }, .test_fixture);
     const proc = try store.addProcSpec(.{
         .name = .none,
         .identity = LIR.ProcIdentity.forTest(2),
         .args = .empty(),
         .body = incref,
         .ret_layout = .str,
-    });
+    }, .none);
 
     var buffer: std.Io.Writer.Allocating = .init(allocator);
     defer buffer.deinit();
@@ -750,7 +741,7 @@ test "debug print includes boxy statement surface" {
     const call_args = try store.addLocalSpan(&.{adapted});
     const hidden_args = try store.addLocalSpan(&.{desc});
 
-    const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = result } }, .test_fixture);
     const call = try store.addCFStmt(.{ .assign_call_dict = .{
         .target = result,
         .dict = .{ .local = dict },
@@ -761,22 +752,14 @@ test "debug print includes boxy statement surface" {
         .result_desc = .{ .local = desc },
         .is_cold = true,
         .next = ret,
-    } });
+    } }, .test_fixture);
     const inspect = try store.addCFStmt(.{ .assign_boxy_inspect = .{
         .target = result,
         .source = adapted,
         .source_desc = .{ .local = desc },
         .source_mode = .borrow,
         .next = call,
-    } });
-    const eq = try store.addCFStmt(.{ .assign_boxy_eq = .{
-        .target = result,
-        .lhs = adapted,
-        .rhs = boxed,
-        .source_desc = .{ .local = desc },
-        .source_mode = .borrow,
-        .next = inspect,
-    } });
+    } }, .test_fixture);
     const adapt = try store.addCFStmt(.{ .assign_boxy_adapt = .{
         .target = adapted,
         .source = unboxed,
@@ -784,8 +767,8 @@ test "debug print includes boxy statement surface" {
         .source_desc = .{ .local = desc },
         .target_desc = .{ .local = desc },
         .source_mode = .move,
-        .next = eq,
-    } });
+        .next = inspect,
+    } }, .test_fixture);
     const unbox = try store.addCFStmt(.{ .assign_boxy_unbox = .{
         .target = unboxed,
         .source = reused,
@@ -793,13 +776,13 @@ test "debug print includes boxy statement surface" {
         .target_layout = .str,
         .source_mode = .borrow,
         .next = adapt,
-    } });
+    } }, .test_fixture);
     const reuse = try store.addCFStmt(.{ .assign_boxy_reuse_box = .{
         .target = reused,
         .source = boxed,
         .desc = .{ .local = desc },
         .next = unbox,
-    } });
+    } }, .test_fixture);
     const box = try store.addCFStmt(.{ .assign_boxy_box = .{
         .target = boxed,
         .payload = payload,
@@ -807,24 +790,24 @@ test "debug print includes boxy statement surface" {
         .payload_desc = .{ .local = desc },
         .payload_mode = .copy,
         .next = reuse,
-    } });
+    } }, .test_fixture);
     const desc_ref = try store.addCFStmt(.{ .assign_boxy_desc_ref = .{
         .target = desc,
         .desc = .{ .static = @enumFromInt(4) },
         .next = box,
-    } });
+    } }, .test_fixture);
     const dict_ref = try store.addCFStmt(.{ .assign_boxy_dict_ref = .{
         .target = dict,
         .dict = .{ .static = @enumFromInt(7) },
         .next = desc_ref,
-    } });
+    } }, .test_fixture);
     const proc = try store.addProcSpec(.{
         .name = .none,
         .identity = LIR.ProcIdentity.forTest(1),
         .args = .empty(),
         .body = dict_ref,
         .ret_layout = .u64,
-    });
+    }, .none);
 
     var buffer: std.Io.Writer.Allocating = .init(allocator);
     defer buffer.deinit();
@@ -837,7 +820,6 @@ test "debug print includes boxy statement surface" {
     try std.testing.expect(std.mem.find(u8, printed, "l4:opaque_ptr = boxy_reuse_box source=l3 desc=desc=l1\n") != null);
     try std.testing.expect(std.mem.find(u8, printed, "l5:str = boxy_unbox source=l4 desc=desc=l1 target_layout=str mode=borrow\n") != null);
     try std.testing.expect(std.mem.find(u8, printed, "l6:opaque_ptr = boxy_adapt source=l5 adapter=5 source_desc=desc=l1 target_desc=desc=l1 mode=move\n") != null);
-    try std.testing.expect(std.mem.find(u8, printed, "l7:u64 = boxy_eq lhs=l6 rhs=l3 desc=desc=l1 mode=borrow\n") != null);
     try std.testing.expect(std.mem.find(u8, printed, "l7:u64 = boxy_inspect source=l6 desc=desc=l1 mode=borrow\n") != null);
     try std.testing.expect(std.mem.find(u8, printed, "l7:u64 = call_dict dict=l2 method=0 slot=2 args=[l6] arg_descs=[] hidden=[l1] result_desc=desc=l1 cold=true\n") != null);
 }

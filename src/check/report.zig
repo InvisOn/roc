@@ -9,6 +9,7 @@ const tracy = @import("tracy");
 const types_mod = @import("types");
 const can = @import("can");
 const reporting = @import("reporting");
+const tokenize = @import("parse").tokenize;
 
 const snapshot = @import("snapshot.zig");
 const diff = @import("snapshot/diff.zig");
@@ -85,6 +86,7 @@ const HostBoundaryOpenRow = problem_mod.HostBoundaryOpenRow;
 const HostBoundaryOptionalField = problem_mod.HostBoundaryOptionalField;
 const AnnotationOnlyValue = problem_mod.AnnotationOnlyValue;
 const AnnotationOnlyValueUse = problem_mod.AnnotationOnlyValueUse;
+const DerivedMethodValueUse = problem_mod.DerivedMethodValueUse;
 const UnsupportedGeneratedMethod = problem_mod.UnsupportedGeneratedMethod;
 const AssociatedItemNotFound = problem_mod.AssociatedItemNotFound;
 const PolymorphicVarAnnotation = problem_mod.PolymorphicVarAnnotation;
@@ -107,6 +109,7 @@ const InvalidNumericLiteral = problem_mod.InvalidNumericLiteral;
 const TupleAccessNeedsAnnotation = problem_mod.TupleAccessNeedsAnnotation;
 const InvalidTupleAccess = problem_mod.InvalidTupleAccess;
 const OptionalAccessOfRequiredField = problem_mod.OptionalAccessOfRequiredField;
+const DerivedParserErrorRow = problem_mod.DerivedParserErrorRow;
 const EffectfulDefaultValue = problem_mod.EffectfulDefaultValue;
 const RecursiveDefaultValue = problem_mod.RecursiveDefaultValue;
 const CircularValueDefinition = problem_mod.CircularValueDefinition;
@@ -114,6 +117,7 @@ const LiteralDefaulted = problem_mod.LiteralDefaulted;
 
 // Generic errors
 const VarWithSnapshot = problem_mod.VarWithSnapshot;
+const RowLabelConflict = problem_mod.types.RowLabelConflict;
 
 // Context types for precise error reporting
 const Context = problem_mod.Context;
@@ -156,6 +160,9 @@ pub const ReportBuilder = struct {
     diff_fields: SnapshotRecordFieldSafeList,
     diff_tags: SnapshotTagSafeList,
     typo_suggestions: diff.TypoSuggestion.ArrayList,
+    /// Interned display text lets mismatch reports recognize identical renderings
+    /// without conflating them with semantic type equality.
+    type_displays: base.SerialStringInterner = .{},
     /// When the current report is a record-destructure pattern mismatch, holds
     /// the pattern and value type snapshots so `makeMismatchReport` can show the
     /// tailored `field: _` / `..` hint in place of the generic field diff.
@@ -212,6 +219,7 @@ pub const ReportBuilder = struct {
         self.diff_fields.deinit(self.gpa);
         self.diff_tags.deinit(self.gpa);
         self.typo_suggestions.deinit();
+        self.type_displays.deinit(self.gpa);
     }
 
     /// Reset report builder, only fields it owns
@@ -250,8 +258,39 @@ pub const ReportBuilder = struct {
         return self.can_ir.store.getExprRegion(@enumFromInt(id.expr_node));
     }
 
+    /// Point at the construct introducing an expression instead of covering its
+    /// body, where independent diagnostics may need their own highlights.
+    fn expressionHighlightRegion(self: *Self, region: Region) Allocator.Error!Region {
+        const source = self.source[region.start.offset..region.end.offset];
+        if (source.len == 0 or (source[0] != 'm' and source[0] != '|')) return region;
+
+        // Use tokens to distinguish the keyword from an identifier and to keep
+        // pipes inside strings, comments, or nested patterns out of the header.
+        var env = try base.CommonEnv.init(self.gpa, source);
+        defer env.deinit(self.gpa);
+        var messages: [0]tokenize.Diagnostic = .{};
+        var tokenizer = try tokenize.Tokenizer.init(&env, self.gpa, source, &messages);
+        defer tokenizer.deinit(self.gpa);
+        try tokenizer.tokenize(self.gpa);
+        const tags = tokenizer.output.tokens.items(.tag);
+        if (tags[0] == .KwMatch)
+            return Region.from_raw_offsets(region.start.offset, region.start.offset + tokenizer.output.resolve(0).end.offset);
+        if (tags[0] != .OpBar) return region;
+        var depth: usize = 0;
+        for (tags[1..], 1..) |tag, i| {
+            if (tag == .OpenRound or tag == .NoSpaceOpenRound or tag == .OpenSquare or tag == .OpenCurly or tag == .OpenStringInterpolation) {
+                depth += 1;
+            } else if (tag == .CloseRound or tag == .CloseSquare or tag == .CloseCurly or tag == .CloseStringInterpolation) {
+                depth -|= 1;
+            } else if (tag == .OpBar and depth == 0) {
+                return Region.from_raw_offsets(region.start.offset, region.start.offset + tokenizer.output.resolve(i).end.offset);
+            }
+        }
+        return region;
+    }
+
     fn addSourceHighlightRegion(self: *Self, report: *Report, region: Region) Allocator.Error!void {
-        const region_info = self.module_env.calcRegionInfo(region);
+        const region_info = self.module_env.calcRegionInfo(try self.expressionHighlightRegion(region));
         try report.document.addSourceRegion(
             region_info,
             .error_highlight,
@@ -292,7 +331,7 @@ pub const ReportBuilder = struct {
         const outer_region_info = self.module_env.calcRegionInfo(outer_region.*);
 
         const inner_region = self.getRegionSafe(inner_region_idx) orelse return;
-        const inner_region_info = self.module_env.calcRegionInfo(inner_region.*);
+        const inner_region_info = self.module_env.calcRegionInfo(try self.expressionHighlightRegion(inner_region.*));
 
         const display_region = SourceCodeDisplayRegion{
             .line_text = try self.gpa.dupe(u8, outer_region_info.calculateLineText(self.source, self.module_env.getLineStarts())),
@@ -577,8 +616,10 @@ pub const ReportBuilder = struct {
 
         const actual_formatted = self.getFormattedString(actual_snapshot);
         const expected_formatted = self.getFormattedString(expected_snapshot);
+        const actual_display = try self.type_displays.insert(self.gpa, actual_formatted);
+        const expected_display = try self.type_displays.insert(self.gpa, expected_formatted);
 
-        if (std.mem.eql(u8, actual_formatted, expected_formatted)) {
+        if (actual_display == expected_display) {
             try D.renderSlice(&.{D.bytes("The type involved is:")}, self, &report);
             try report.document.addLineBreak();
             try report.document.addLineBreak();
@@ -1036,6 +1077,9 @@ pub const ReportBuilder = struct {
             .anonymous_recursion => |data| {
                 return self.buildAnonymousRecursionReport(data);
             },
+            .row_label_conflict => |data| {
+                return self.buildRowLabelConflictReport(data);
+            },
             .polymorphic_value => |data| {
                 return self.buildPolymorphicValueReport(data);
             },
@@ -1059,6 +1103,9 @@ pub const ReportBuilder = struct {
             },
             .annotation_only_value_use => |data| {
                 return self.buildAnnotationOnlyValueUseReport(data);
+            },
+            .derived_method_value_use => |data| {
+                return self.buildDerivedMethodValueUseReport(data);
             },
             .unsupported_generated_method => |data| {
                 return self.buildUnsupportedGeneratedMethodReport(data);
@@ -1099,6 +1146,7 @@ pub const ReportBuilder = struct {
             .tuple_access_needs_annotation => |data| return self.buildTupleAccessNeedsAnnotationReport(data),
             .invalid_tuple_access => |data| return self.buildInvalidTupleAccessReport(data),
             .optional_access_of_required_field => |data| return self.buildOptionalAccessOfRequiredFieldReport(data),
+            .derived_parser_error_row => |data| return self.buildDerivedParserErrorRowReport(data),
             .unset_of_required_field => |data| return self.buildUnsetOfRequiredFieldReport(data),
             .unset_of_defaulted_field => |data| return self.buildUnsetOfDefaultedFieldReport(data),
             .effectful_default_value => |data| return self.buildEffectfulDefaultValueReport(data),
@@ -2589,6 +2637,19 @@ pub const ReportBuilder = struct {
         return report;
     }
 
+    /// Whether this failed dispatch is the `iter` call of a plain `for` loop
+    /// whose operand is a `Stream`, which only `for!` can consume.
+    fn isPlainForLoopOverStream(self: *Self, data: DispatcherDoesNotImplMethod) bool {
+        const types_store = &self.module_env.types;
+        const failed_fn = types_store.resolveVar(data.fn_var).var_;
+        for (self.module_env.for_loop_dispatch_plans.items.items) |plan| {
+            if (types_store.resolveVar(@enumFromInt(plan.iter_fn_var)).var_ != failed_fn) continue;
+            const nominal = types_store.resolveVar(data.dispatcher_var).desc.content.unwrapNominalType() orelse return false;
+            return nominal.ident.ident_idx.eql(self.module_env.idents.builtin_stream);
+        }
+        return false;
+    }
+
     /// Build a report for when a type doesn't have the expected static dispatch
     /// method
     fn buildStaticDispatchDispatcherDoesNotImplMethod(
@@ -2688,6 +2749,19 @@ pub const ReportBuilder = struct {
                             D.bytes("associated with it in the type's declaration."),
                         }, self, &report);
                     }
+                } else if (self.isPlainForLoopOverStream(data)) {
+                    try D.renderSlice(&.{
+                        D.bytes("Hint:").withAnnotation(.emphasized),
+                        D.bytes("A"),
+                        D.bytes("for").withAnnotation(.inline_code),
+                        D.bytes("loop can only go through pure iterators. To loop over a"),
+                        D.bytes("Stream").withAnnotation(.inline_code),
+                        D.bytes(", use").withNoPrecedingSpace(),
+                        D.bytes("for!").withAnnotation(.inline_code),
+                        D.bytes("instead, which pulls each item with the effectful"),
+                        D.bytes("next!").withAnnotation(.inline_code),
+                        D.bytes("and so can only be used in an effectful function."),
+                    }, self, &report);
                 } else {
                     try D.renderSlice(&.{
                         D.bytes("Hint:").withAnnotation(.emphasized),
@@ -3636,6 +3710,99 @@ pub const ReportBuilder = struct {
         return report;
     }
 
+    /// Build a report for a derived parser whose error-row demand failed
+    /// against a closed row. The location is the expression that introduced
+    /// the parser relation (the call that fixes the record type), and the
+    /// body names the record type, the tags, and the row they had to fit in.
+    fn buildDerivedParserErrorRowReport(
+        self: *Self,
+        data: DerivedParserErrorRow,
+    ) Allocator.Error!Report {
+        var report = try Report.init(self.gpa, "Parser Error Row Missing Tag", "", .runtime_error);
+        errdefer report.deinit();
+
+        switch (data.reason) {
+            .required_field => {
+                try D.renderSliceInto(&.{
+                    D.bytes("This parser can fail with the tag"),
+                    D.bytes("MissingRequiredField(Str)").withAnnotation(.inline_code),
+                    D.bytes("but its error row does not include it."),
+                }, self, &report, &report.headline);
+            },
+            .nested_row => {
+                try D.renderSliceInto(&.{
+                    D.bytes("This parser can fail with a tag that its error row does not include."),
+                }, self, &report, &report.headline);
+            },
+        }
+
+        const region_info = self.module_env.calcRegionInfo(data.region);
+        try report.document.addSourceRegion(
+            region_info,
+            .error_highlight,
+            self.filename,
+            self.source,
+            self.module_env.getLineStarts(),
+        );
+        try report.document.addLineBreak();
+
+        switch (data.reason) {
+            .required_field => {
+                try report.document.addReflowingText("The parser is derived for the record type:");
+                try report.document.addLineBreak();
+                try report.document.addLineBreak();
+                const record_str = try report.addOwnedString(self.getFormattedString(data.record_snapshot.?));
+                try report.document.addCodeBlock(record_str);
+                try report.document.addLineBreak();
+                const fields_text = self.problems.getExtraString(data.required_fields.?);
+                if (data.required_field_count == 1) {
+                    try report.document.addReflowingText("The field ");
+                    try report.document.addAnnotated(fields_text, .inline_code);
+                    try report.document.addReflowingText(" is required, so the derived parser can fail when it is missing.");
+                } else {
+                    try report.document.addReflowingText("The fields ");
+                    try report.document.addAnnotated(fields_text, .inline_code);
+                    try report.document.addReflowingText(" are required, so the derived parser can fail when one is missing.");
+                }
+            },
+            .nested_row => {
+                try report.document.addReflowingText("The nested parser can produce the tags:");
+                try report.document.addLineBreak();
+                try report.document.addLineBreak();
+                const tags_str = try report.addOwnedString(self.getFormattedString(data.tags_snapshot.?));
+                try report.document.addCodeBlock(tags_str);
+            },
+        }
+
+        try report.document.addLineBreak();
+        try report.document.addLineBreak();
+        try report.document.addReflowingText("But the error row is closed at:");
+        try report.document.addLineBreak();
+        try report.document.addLineBreak();
+        const row_str = try report.addOwnedString(self.getFormattedString(data.row_snapshot));
+        try report.document.addCodeBlock(row_str);
+        try report.document.addLineBreak();
+
+        switch (data.reason) {
+            .required_field => {
+                try report.document.addReflowingText("Make the required field optional with ");
+                try report.document.addAnnotated("?:", .inline_code);
+                try report.document.addReflowingText(", ");
+                try report.document.addAnnotated("??", .inline_code);
+                try report.document.addReflowingText(", or ");
+                try report.document.addAnnotated("Try(_, [Missing])", .inline_code);
+                try report.document.addReflowingText(", or add ");
+                try report.document.addAnnotated("MissingRequiredField(Str)", .inline_code);
+                try report.document.addReflowingText(" to the error row.");
+            },
+            .nested_row => {
+                try report.document.addReflowingText("Add the missing tags to the error row, or widen it so it includes them.");
+            },
+        }
+
+        return report;
+    }
+
     /// Build a report for unsetting (`x: _`) a field whose presence resolved
     /// to `required`: the field is always present, so there is no missing
     /// state to select (design.md "In Progress: Unsetting an Optional Field").
@@ -4505,6 +4672,59 @@ pub const ReportBuilder = struct {
     }
 
     /// Build a report for infinite type recursion (e.g., `func = |a| func([a])` creates `a = List(a)`)
+    fn buildRowLabelConflictReport(self: *Self, data: RowLabelConflict) Allocator.Error!Report {
+        const title, const noun, const payload, const rule = switch (data.row_kind) {
+            .tag_union => .{ "Conflicting Tag", "tag", "payloads", "A tag union has each tag once, so every occurrence of a tag must have the same payload." },
+            .record => .{ "Conflicting Field", "field", "types", "A record has each field once, so every occurrence of a field must have the same type." },
+        };
+        var report = try Report.init(self.gpa, title, "", .runtime_error);
+        errdefer report.deinit();
+        try D.renderSliceInto(&.{
+            D.bytes("The"),
+            D.ident(data.label).withAnnotation(.inline_code),
+            D.bytes(noun),
+            D.bytes("comes from two places with different"),
+            D.bytes(payload),
+            D.bytes(".").withNoPrecedingSpace(),
+        }, self, &report, &report.headline);
+
+        // The first source region is the report's location: the value whose
+        // type holds both occurrences when checking knows it, otherwise the
+        // outer occurrence.
+        if (data.value_region) |value_region| {
+            try self.addSourceHighlightRegion(&report, value_region);
+            try report.document.addLineBreak();
+            try D.renderSlice(&.{D.bytes("One comes from here:")}, self, &report);
+            try report.document.addLineBreak();
+            try self.addSourceHighlightRegion(&report, data.outer_region);
+            try report.document.addLineBreak();
+        } else {
+            try self.addSourceHighlightRegion(&report, data.outer_region);
+            try report.document.addLineBreak();
+            try D.renderSlice(&.{D.bytes("Here it is:")}, self, &report);
+            try report.document.addLineBreak();
+        }
+        try report.document.addLineBreak();
+        try report.document.addCodeBlock(try report.addOwnedString(self.getFormattedString(data.outer_snapshot)));
+        try report.document.addLineBreak();
+        try report.document.addLineBreak();
+
+        try D.renderSlice(&.{D.bytes("It also comes from here:")}, self, &report);
+        try report.document.addLineBreak();
+        try self.addSourceHighlightRegion(&report, data.inner_region);
+        try report.document.addLineBreak();
+        try report.document.addLineBreak();
+        try D.renderSlice(&.{D.bytes("where it is:")}, self, &report);
+        try report.document.addLineBreak();
+        try report.document.addLineBreak();
+        try report.document.addCodeBlock(try report.addOwnedString(self.getFormattedString(data.inner_snapshot)));
+        try report.document.addLineBreak();
+        try report.document.addLineBreak();
+
+        try D.renderSlice(&.{D.bytes(rule)}, self, &report);
+        return report;
+    }
+
     fn buildAnonymousRecursionReport(self: *Self, data: VarWithSnapshot) Allocator.Error!Report {
         var report = try Report.init(self.gpa, "Anonymous Recursion", "", .runtime_error);
         errdefer report.deinit();
@@ -4898,6 +5118,26 @@ pub const ReportBuilder = struct {
         return report;
     }
 
+    fn buildDerivedMethodValueUseReport(self: *Self, data: DerivedMethodValueUse) Allocator.Error!Report {
+        var report = try Report.init(self.gpa, "Derived Method Used As Value", "", .runtime_error);
+        errdefer report.deinit();
+
+        try D.renderSliceInto(&.{
+            D.bytes("The compiler derives"),
+            D.ident(data.method_name).withAnnotation(.inline_code),
+            D.bytes("for this type, so it can only be called directly, not used as a value."),
+        }, self, &report, &report.headline);
+
+        try self.addSourceHighlightRegion(&report, data.region);
+
+        try report.document.addLineBreak();
+        try report.document.addLineBreak();
+        try D.renderSlice(&.{
+            D.bytes("Call it here with its arguments instead."),
+        }, self, &report);
+        return report;
+    }
+
     fn buildUnsupportedGeneratedMethodReport(self: *Self, data: UnsupportedGeneratedMethod) Allocator.Error!Report {
         var report = try Report.init(self.gpa, "Unsupported Generated Method", "", .warning);
         errdefer report.deinit();
@@ -5195,14 +5435,7 @@ pub const ReportBuilder = struct {
 
         // Add source region highlighting
         if (self.getRegionSafe(@enumFromInt(@intFromEnum(data.match_expr)))) |match_region| {
-            const region_info = self.module_env.calcRegionInfo(match_region.*);
-            try report.document.addSourceRegion(
-                region_info,
-                .error_highlight,
-                self.filename,
-                self.source,
-                self.module_env.getLineStarts(),
-            );
+            try self.addSourceHighlightRegion(&report, match_region.*);
             try report.document.addLineBreak();
         }
 

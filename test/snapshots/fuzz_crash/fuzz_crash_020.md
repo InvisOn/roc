@@ -157,7 +157,6 @@ NAME NOT IN SCOPE - fuzz_crash_020.md:72:2:72:4
 UNDECLARED TYPE - fuzz_crash_020.md:74:9:74:15
 VAR NAME MISSING `$` - fuzz_crash_020.md:77:6:77:8
 NAME NOT IN SCOPE - fuzz_crash_020.md:78:9:78:14
-UNRECOGNIZED SYNTAX - fuzz_crash_020.md:83:2:83:5
 NAME NOT IN SCOPE - fuzz_crash_020.md:86:9:86:11
 NAME NOT IN SCOPE - fuzz_crash_020.md:87:11:87:12
 NAME NOT IN SCOPE - fuzz_crash_020.md:92:11:92:15
@@ -688,16 +687,6 @@ MISSING METHOD - fuzz_crash_020.md:105:55:105:72
 			(source-region (file "fuzz_crash_020.md") (start 78 9) (end 78 14) (annotation error) (line-text "\texpect blaue"))))
 	(report
 		(severity runtime_error)
-		(title "Unrecognized Syntax")
-		(region (start 83 2) (end 83 5))
-		(headline
-			(reflow "I don't recognize this syntax."))
-		(document
-			(source-region (file "fuzz_crash_020.md") (start 83 2) (end 83 5) (annotation error) (line-text "\t..."))
-			(line-break)
-			(reflow "This might be a syntax error, an unsupported language feature, or a typo.")))
-	(report
-		(severity runtime_error)
 		(title "Name Not In Scope")
 		(region (start 86 9) (end 86 11))
 		(headline
@@ -1216,7 +1205,7 @@ MISSING METHOD - fuzz_crash_020.md:105:55:105:72
 	(report
 		(severity runtime_error)
 		(title "Type Mismatch")
-		(region (start 52 2) (end 69 3))
+		(region (start 58 17) (end 58 22))
 		(headline
 			(reflow "The")
 			(reflow " ")

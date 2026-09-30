@@ -383,7 +383,7 @@ test "Monotype generated-private selection cannot become ordinary or reopen fini
     const ordinary_unify = sourceSliceBetween(
         solve_source,
         "pub fn unify(self: *InstGraph",
-        "fn relationStamp(",
+        "fn mergeVariables(",
     );
     try expectContains(ordinary_unify, "unifyRootsTransitively(a, b, false, .exact)");
     try expectContains(ordinary_unify, "unifyRootsTransitively(a, b, false, .construction)");
@@ -411,7 +411,7 @@ test "Monotype generated-private selection cannot become ordinary or reopen fini
     const dispatch_instantiation = sourceSliceBetween(
         lower_source,
         "fn instantiateCallableDispatchPlanCallNodeFromCallerAtNode(",
-        "fn relateFormalToOperand(",
+        "fn instantiateTargetFromPlanNode(",
     );
     try expectContains(dispatch_instantiation, "callable_plan: CallableDispatchPlan");
     try expectContains(dispatch_instantiation, "try relateRequestComponent(self.graph, fn_graph.args[index], dispatcher_node)");
@@ -1553,6 +1553,9 @@ test "boxy representation queries have one definition on the plan" {
         "repSubtreeContainsRep",
         "repSubtreeContainsRepInner",
         "structuralWrapperBackingRep",
+        "structureBackingRep",
+        "bindCallWrappedStructure",
+        "structureChildCallRep",
         "descriptorArgumentIdentityRep",
         "dictionaryArgumentIdentityRep",
         "workerChildCanMatchUnwrappedCallRep",

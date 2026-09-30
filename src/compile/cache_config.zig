@@ -232,7 +232,30 @@ pub const Constants = struct {
     ///      already covers names the derivation that covers it.
     /// 106: A stored nested-function use records its scheme substitution and
     ///      the checked instance its containing value stores.
-    pub const CACHE_VERSION = 106;
+    /// 107: An expression that did not parse canonicalizes to a runtime error
+    ///      carrying `expr_syntax_error`, and the canonicalize diagnostic tags
+    ///      no stage produces are gone.
+    /// 108: A source expression or statement replaced by a runtime error stays
+    ///      readable to source tooling.
+    /// 109: Every source node replaced by a runtime error, patterns included,
+    ///      stays readable through the node store's `replaced_source_nodes`,
+    ///      named by the `.malformed` payload.
+    /// 110: Expect roots reaching checked errors are ineligible for execution,
+    ///      including errors in referenced procedures and constants.
+    /// 111: Checked type keys refer to each context-free subtree by its own
+    ///      key, use one-byte tags and varint integers, and a synthetic
+    ///      function over composed children shares its source key.
+    /// 112: `for` nodes carry their `ForKind`, `ForLoopDispatchPlan` records its
+    ///      dispatched method names, and common idents include `Builtin.Stream`.
+    /// 113: `Stream` is a checked builtin nominal, so every module interns its
+    ///      unqualified and fully qualified type names as common identifiers.
+    /// 114: Combined with the Stream loop format, derived-method markers record
+    ///      their owner type declaration, and a type-rooted dispatch call can
+    ///      dispatch on an explicit type var. Version 113 is reserved for the
+    ///      separate Stream builtin change.
+    /// 115: Reserved for wide-representation-capacity.
+    /// 116: Combine Stream builtin identity with derived-method dispatch metadata.
+    pub const CACHE_VERSION = 116;
 };
 
 /// Configuration for the Roc cache system.

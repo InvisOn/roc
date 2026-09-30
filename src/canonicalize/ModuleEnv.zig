@@ -129,6 +129,7 @@ pub const CommonIdents = extern struct {
     str: Ident.Idx,
     list: Ident.Idx,
     iter: Ident.Idx,
+    stream: Ident.Idx,
     box: Ident.Idx,
     dict: Ident.Idx,
     set: Ident.Idx,
@@ -152,6 +153,7 @@ pub const CommonIdents = extern struct {
 
     // Fully-qualified type identifiers for type checking and layout generation
     builtin_iter: Ident.Idx,
+    builtin_stream: Ident.Idx,
     builtin_range: Ident.Idx,
     builtin_try: Ident.Idx,
     builtin_numeral: Ident.Idx,
@@ -270,6 +272,7 @@ pub const CommonIdents = extern struct {
             .str = try common.insertIdent(gpa, Ident.for_text("Str")),
             .list = try common.insertIdent(gpa, Ident.for_text("List")),
             .iter = try common.insertIdent(gpa, Ident.for_text("Iter")),
+            .stream = try common.insertIdent(gpa, Ident.for_text("Stream")),
             .box = try common.insertIdent(gpa, Ident.for_text("Box")),
             .dict = try common.insertIdent(gpa, Ident.for_text("Dict")),
             .set = try common.insertIdent(gpa, Ident.for_text("Set")),
@@ -290,6 +293,7 @@ pub const CommonIdents = extern struct {
             .f64 = try common.insertIdent(gpa, Ident.for_text("F64")),
             .dec = try common.insertIdent(gpa, Ident.for_text("Dec")),
             .builtin_iter = try common.insertIdent(gpa, Ident.for_text("Builtin.Iter")),
+            .builtin_stream = try common.insertIdent(gpa, Ident.for_text("Builtin.Stream")),
             .builtin_range = try common.insertIdent(gpa, Ident.for_text("Builtin.Num.Range")),
             .builtin_try = try common.insertIdent(gpa, Ident.for_text("Builtin.Try")),
             .builtin_numeral = try common.insertIdent(gpa, Ident.for_text("Builtin.Num.Numeral")),
@@ -406,6 +410,7 @@ pub const CommonIdents = extern struct {
             .str = common.findIdent("Str") orelse unreachable,
             .list = common.findIdent("List") orelse unreachable,
             .iter = common.findIdent("Iter") orelse unreachable,
+            .stream = common.findIdent("Stream") orelse unreachable,
             .box = common.findIdent("Box") orelse unreachable,
             .dict = common.findIdent("Dict") orelse unreachable,
             .set = common.findIdent("Set") orelse unreachable,
@@ -426,6 +431,7 @@ pub const CommonIdents = extern struct {
             .f64 = common.findIdent("F64") orelse unreachable,
             .dec = common.findIdent("Dec") orelse unreachable,
             .builtin_iter = common.findIdent("Builtin.Iter") orelse unreachable,
+            .builtin_stream = common.findIdent("Builtin.Stream") orelse unreachable,
             .builtin_range = common.findIdent("Builtin.Num.Range") orelse unreachable,
             .builtin_try = common.findIdent("Builtin.Try") orelse unreachable,
             .builtin_numeral = common.findIdent("Builtin.Num.Numeral") orelse unreachable,
@@ -646,6 +652,10 @@ pub const ForLoopDispatchPlan = extern struct {
     step_var: u32,
     iter_fn_var: u32,
     next_fn_var: u32,
+    /// The method dispatched on the loop operand: `iter` for `for`, `stream` for `for!`.
+    iter_method_ident: u32,
+    /// The method that pulls each step: `next` for `for`, `next!` for `for!`.
+    next_method_ident: u32,
     step_topology: IteratorStepTopology,
 
     pub const SafeList = collections.SafeList(@This());
@@ -1791,7 +1801,15 @@ pub fn pushRuntimeErrorExpr(self: *Self, comptime RetIdx: type, reason: CIR.Diag
 /// Replaces an existing expression with a runtime error and records the diagnostic.
 pub fn replaceExprWithRuntimeError(self: *Self, expr_idx: CIR.Expr.Idx, reason: CIR.Diagnostic) std.mem.Allocator.Error!void {
     const diag_idx = try self.addDiagnostic(reason);
-    self.store.setExprRuntimeError(expr_idx, diag_idx);
+    try self.store.replaceExprWithRuntimeError(expr_idx, diag_idx);
+    self.debugAssertArraysInSync();
+}
+
+/// Settles a deferred import reference expression that resolves to nothing
+/// as a runtime error and records the diagnostic.
+pub fn settleDeferredExprAsRuntimeError(self: *Self, expr_idx: CIR.Expr.Idx, reason: CIR.Diagnostic) std.mem.Allocator.Error!void {
+    const diag_idx = try self.addDiagnostic(reason);
+    self.store.settleDeferredExprAsRuntimeError(expr_idx, diag_idx);
     self.debugAssertArraysInSync();
 }
 
@@ -2083,6 +2101,24 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
             try report.headline.addUnqualifiedSymbol(owned_ident);
             try report.headline.addReflowingText(" was rewritten to crash because the referenced top-level value failed type checking earlier.");
             try report.document.addReflowingText("Fix the earlier type error instead of trying to execute this value.");
+            try report.document.addLineBreak();
+            try report.document.addLineBreak();
+            const owned_filename = try report.addOwnedString(filename);
+            try report.document.addSourceRegion(
+                region_info,
+                .error_highlight,
+                owned_filename,
+                self.getSourceAll(),
+                self.getLineStartsAll(),
+            );
+
+            break :blk report;
+        },
+        .expr_syntax_error => |data| blk: {
+            const region_info = self.calcRegionInfo(data.region);
+
+            var report = try Report.init(allocator, "Syntax Error", "This expression was replaced by a crash because it could not be parsed.", .runtime_error);
+            try report.document.addReflowingText("Fix the syntax error reported for this expression instead of trying to execute it.");
             try report.document.addLineBreak();
             try report.document.addLineBreak();
             const owned_filename = try report.addOwnedString(filename);
@@ -2650,41 +2686,6 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
 
             break :blk report;
         },
-        .if_condition_not_canonicalized => blk: {
-            var report = try Report.init(allocator, "Invalid If Condition", "", .runtime_error);
-            try report.headline.addReflowingText("The condition in this ");
-            try report.headline.addKeyword("if");
-            try report.headline.addReflowingText(" expression could not be processed.");
-            try report.document.addReflowingText("The condition must be a valid expression that evaluates to a ");
-            try report.document.addKeyword("Bool");
-            try report.document.addReflowingText(" value (");
-            try report.document.addKeyword("Bool.true");
-            try report.document.addReflowingText(" or ");
-            try report.document.addKeyword("Bool.false");
-            try report.document.addReflowingText(").");
-            break :blk report;
-        },
-        .if_then_not_canonicalized => blk: {
-            var report = try Report.init(allocator, "Invalid If Branch", "", .runtime_error);
-            try report.headline.addReflowingText("The branch in this ");
-            try report.headline.addKeyword("if");
-            try report.headline.addReflowingText(" expression could not be processed.");
-            try report.document.addReflowingText("The branch must contain a valid expression. Check for syntax errors or missing values.");
-            break :blk report;
-        },
-        .if_else_not_canonicalized => blk: {
-            var report = try Report.init(allocator, "Invalid If Branch", "", .runtime_error);
-            try report.headline.addReflowingText("The ");
-            try report.headline.addKeyword("else");
-            try report.headline.addReflowingText(" branch of this ");
-            try report.headline.addKeyword("if");
-            try report.headline.addReflowingText(" expression could not be processed.");
-            try report.document.addReflowingText("The ");
-            try report.document.addKeyword("else");
-            try report.document.addReflowingText(" branch must contain a valid expression. Check for syntax errors or missing values.");
-            try report.document.addLineBreak();
-            break :blk report;
-        },
         .if_expr_without_else => blk: {
             var report = try Report.init(allocator, "If Expression Without Else", "", .runtime_error);
             try report.headline.addReflowingText("This ");
@@ -2854,11 +2855,6 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
 
             break :blk report;
         },
-        .lambda_body_not_canonicalized => blk: {
-            const report = try Report.init(allocator, "Invalid Lambda", "The body of this lambda expression is not valid.", .runtime_error);
-
-            break :blk report;
-        },
         .malformed_where_clause => |data| blk: {
             const region_info = self.calcRegionInfo(data.region);
 
@@ -2884,11 +2880,6 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
             try report.document.addReflowingText("Variables declared with ");
             try report.document.addKeyword("var");
             try report.document.addReflowingText(" can only be reassigned within the same function scope.");
-
-            break :blk report;
-        },
-        .tuple_elem_not_canonicalized => blk: {
-            const report = try Report.init(allocator, "Invalid Tuple Element", "This tuple element is malformed or contains invalid syntax.", .runtime_error);
 
             break :blk report;
         },
@@ -4276,11 +4267,6 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
                 self.getLineStartsAll(),
             );
         },
-        .invalid_string_interpolation,
-        .can_lambda_not_implemented,
-        .unused_type_var_name,
-        .type_var_marked_unused,
-        => std.debug.panic("Unhandled canonicalize diagnostic in diagnosticToReport: {s}", .{@tagName(diagnostic)}),
     };
 }
 
@@ -4842,6 +4828,8 @@ pub fn recordForLoopDispatchPlan(
     step_var: TypeVar,
     iter_fn_var: TypeVar,
     next_fn_var: TypeVar,
+    iter_method: Ident.Idx,
+    next_method: Ident.Idx,
     step_topology: IteratorStepTopology,
 ) std.mem.Allocator.Error!void {
     const raw_node: u32 = @intFromEnum(node_idx);
@@ -4857,6 +4845,8 @@ pub fn recordForLoopDispatchPlan(
             .step_var = @intFromEnum(step_var),
             .iter_fn_var = @intFromEnum(iter_fn_var),
             .next_fn_var = @intFromEnum(next_fn_var),
+            .iter_method_ident = @bitCast(iter_method),
+            .next_method_ident = @bitCast(next_method),
             .step_topology = step_topology,
         };
         return;
@@ -4869,6 +4859,8 @@ pub fn recordForLoopDispatchPlan(
         .step_var = @intFromEnum(step_var),
         .iter_fn_var = @intFromEnum(iter_fn_var),
         .next_fn_var = @intFromEnum(next_fn_var),
+        .iter_method_ident = @bitCast(iter_method),
+        .next_method_ident = @bitCast(next_method),
         .step_topology = step_topology,
     });
 }

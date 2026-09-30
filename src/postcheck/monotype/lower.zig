@@ -297,6 +297,10 @@ pub const Options = struct {
     static_data_literals: bool = false,
     /// Produce immutable selected-root reads for a shared evaluation/runtime session.
     comptime_value_reads: bool = false,
+    /// Turn each specialized custom literal's conversion into a literal root
+    /// whose completed value the specialization reads. The consumer that
+    /// asks for this evaluates every literal root the program registers.
+    literal_roots: bool = false,
     target_usize: base.target.TargetUsize = base.target.TargetUsize.native,
     /// Optional executor for isolated procedure roots and ordinary
     /// specialization batches.
@@ -778,7 +782,14 @@ fn recordComptimeValueReads(allocator: Allocator, program: *Ast.Program) Allocat
     for (program.exprsView()) |expr| {
         if (expr.data != .comptime_value) continue;
         const root = program.getComptimeValueRoot(expr.data.comptime_value.root);
-        const entry = try recorded.getOrPut(.{ .module = root.module, .root = root.root });
+        // A literal root belongs to this program alone: every consumer that
+        // lowers its reads also evaluates it, so no checked module data asks
+        // for its completed value.
+        const checked_root = switch (root.root) {
+            .checked => |id| id,
+            .literal => continue,
+        };
+        const entry = try recorded.getOrPut(.{ .module = root.module, .root = checked_root });
         if (entry.found_existing) continue;
         try program.addComptimeValueRead(root);
     }
@@ -843,12 +854,23 @@ const CallableInstantiation = struct {
     callable_ty: checked.CheckedTypeId,
 };
 
+/// The substitution checking applied to a selected target's scheme at the
+/// edge that selected it: one checked type per quantified variable, in the
+/// target scheme's `scheme_vars` order, read in `view`.
+const CheckedTargetSubstitution = struct {
+    view: ModuleView,
+    tys: []const checked.CheckedTypeId,
+};
+
 const DraftLocalProcContextId = enum(u32) { _ };
 
 const MethodLookup = struct {
     view: ModuleView,
     target: static_dispatch.MethodTarget,
     instantiation: ?CallableInstantiation = null,
+    /// The checked edge's substitution for the target's scheme, when checking
+    /// selected this target for this relation.
+    substitution: ?CheckedTargetSubstitution = null,
     /// Exact lexical declaration instance for a local method target. Checked
     /// binder ids identify source syntax, not the specialization-local capture
     /// environment in which that declaration was lowered.
@@ -870,6 +892,7 @@ const SpecEvidence = union(enum) {
     /// index from a forwarding frame may survive into the destination schema.
     from_callable: struct {
         independent_callable: bool,
+        callable_contracts: []const SpecEvidence = &.{},
     },
     /// Abstract local scheme parameter, supplied by the checked use edge.
     from_scheme: u32,
@@ -894,6 +917,7 @@ const CheckedSpecStructuralEvidence = struct {
 const SpecStructuralEvidence = struct {
     derivation: static_dispatch.StructuralDerivation,
     checked: ?CheckedSpecStructuralEvidence = null,
+    callable_contracts: []const SpecEvidence = &.{},
 };
 
 const SpecEvidenceTarget = struct {
@@ -902,7 +926,57 @@ const SpecEvidenceTarget = struct {
     instantiation: ?CallableInstantiation,
     local_proc_context: ?DraftLocalProcContextId,
     nested: NestedSpecEvidence,
+    /// The substitution checking applied to the target's scheme where it
+    /// selected the target, which binds quantified variables that neither the
+    /// target's root nor its requirement's callable reaches. It is consumed
+    /// when the target specializes and is not part of the evidence's
+    /// identity: those variables are determined by the selected targets, and
+    /// the specialization is keyed by its completed substitution.
+    substitution: ?CheckedTargetSubstitution = null,
+    callable_contracts: []const SpecEvidence = &.{},
 };
+
+fn evidenceCallableContracts(evidence: SpecEvidence) []const SpecEvidence {
+    return switch (evidence) {
+        .target => |target| target.callable_contracts,
+        .structural => |structural| structural.callable_contracts,
+        .from_callable => |use| use.callable_contracts,
+        .from_scheme, .unreachable_value, .checked_error => &.{},
+    };
+}
+
+fn withCallableContracts(arena: Allocator, evidence: SpecEvidence, contracts: []const SpecEvidence) Allocator.Error!SpecEvidence {
+    const current = evidenceCallableContracts(evidence);
+    if (current.len == contracts.len and (contracts.len == 0 or current.ptr == contracts.ptr)) return evidence;
+    return switch (evidence) {
+        .target => |target| blk: {
+            const copy = try arena.create(SpecEvidenceTarget);
+            copy.* = target.*;
+            copy.callable_contracts = contracts;
+            break :blk .{ .target = copy };
+        },
+        .structural => |structural| blk: {
+            var copy = structural;
+            copy.callable_contracts = contracts;
+            break :blk .{ .structural = copy };
+        },
+        .from_callable => |use| .{ .from_callable = .{
+            .independent_callable = use.independent_callable,
+            .callable_contracts = contracts,
+        } },
+        .from_scheme, .unreachable_value, .checked_error => evidence,
+    };
+}
+
+/// An empty side vector explicitly leaves callable-derived evidence to the
+/// request. Record-owned evidence must always have its exact indexed contract.
+fn selectCallableContract(evidence: SpecEvidence, index: ?u32) ?SpecEvidence {
+    const contract_index = index orelse return null;
+    const contracts = evidenceCallableContracts(evidence);
+    if (contracts.len == 0) return null;
+    if (contract_index >= contracts.len) Common.invariant("dispatch callable contract index out of bounds");
+    return contracts[contract_index];
+}
 
 /// A target's own requirements: resolved by checked evidence in checked module data,
 /// or synthesized lazily at the target's consumption site (compiler-generated
@@ -923,6 +997,9 @@ const NestedSpecEvidence = union(enum) {
 const EvidenceMaterializationPurpose = enum {
     body_lowering,
     specialization_interface,
+    /// Materialize the input to an interface summary. Its selected contracts
+    /// are related on the detached expansion graph and captured in the summary.
+    interface_summary_input,
 };
 
 /// One quantified variable's binding at a specialization request: the live
@@ -961,6 +1038,103 @@ const SealedSubstSlot = union(enum) {
 
 const SealedSubstitution = []const SealedSubstSlot;
 
+/// Whether a procedure template's checked function type is its complete
+/// specialization interface. With no type variables in that root, none
+/// quantified by its scheme (hidden requirement receivers included), and no
+/// evidence supplied by its callers, a request is exactly the checked root:
+/// the template's relation table relates only cells private to its own body,
+/// so requesters never replay it.
+fn templateInterfaceIsClosed(view: ModuleView, template: *const checked.CheckedProcedureTemplate) bool {
+    const raw = @intFromEnum(template.checked_fn_root);
+    if (raw >= view.types.roots.len) {
+        Common.invariant("procedure template interface query referenced a missing checked root");
+    }
+    return template.scheme_vars.len == 0 and
+        template.evidence_params.len == 0 and
+        !view.types.roots[raw].contains_identity_variables;
+}
+
+/// A Roc template without evidence parameters cannot dispatch on its quantified
+/// variables, so its interface relates a variable that occurs only in value
+/// positions of its function type by unification alone. A request captures
+/// such a variable's representation-neutral instantiation as a hole: one
+/// summary serves every instantiation, and relating the summary back to the
+/// request fills the hole. Row tails and arguments of nominal types other than
+/// `List` and `Box` are not value positions.
+fn parametricSchemeVarMask(
+    allocator: Allocator,
+    view: ModuleView,
+    template: *const checked.CheckedProcedureTemplate,
+) Allocator.Error![]const bool {
+    const scheme_vars = view.templates.templateSchemeVars(template);
+    const mask = try allocator.alloc(bool, scheme_vars.len);
+    errdefer allocator.free(mask);
+    @memset(mask, false);
+    if (template.target != .roc or template.evidence_params.len != 0 or scheme_vars.len == 0) return mask;
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const excluded = try arena.alloc(bool, scheme_vars.len);
+    @memset(excluded, false);
+    const Visit = struct { ty: checked.CheckedTypeId, value_position: bool };
+    var pending = std.ArrayList(Visit).empty;
+    var visited = [_]collections.DenseMap(checked.CheckedTypeId, void){
+        collections.DenseMap(checked.CheckedTypeId, void).init(arena),
+        collections.DenseMap(checked.CheckedTypeId, void).init(arena),
+    };
+    try pending.append(arena, .{ .ty = template.checked_fn_root, .value_position = true });
+    while (pending.pop()) |visit| {
+        if ((try visited[@intFromBool(visit.value_position)].getOrPut(visit.ty)).found_existing) continue;
+        const scheme_index = for (scheme_vars, 0..) |scheme_var, index| {
+            if (scheme_var == visit.ty) break index;
+        } else null;
+        if (scheme_index) |index| {
+            if (visit.value_position) mask[index] = true else excluded[index] = true;
+            continue;
+        }
+        switch (view.types.payload(visit.ty)) {
+            .function => |function| {
+                for (function.args) |arg| try pending.append(arena, .{ .ty = arg, .value_position = visit.value_position });
+                try pending.append(arena, .{ .ty = function.ret, .value_position = visit.value_position });
+            },
+            .tuple => |items| for (items) |item| try pending.append(arena, .{ .ty = item, .value_position = visit.value_position }),
+            .record => |record| {
+                for (record.fields) |field| try pending.append(arena, .{ .ty = field.ty, .value_position = visit.value_position });
+                try pending.append(arena, .{ .ty = record.ext, .value_position = false });
+            },
+            .tag_union => |tag_union| {
+                for (tag_union.tags) |tag| {
+                    for (tag.argsSlice(view.types)) |arg| try pending.append(arena, .{ .ty = arg, .value_position = visit.value_position });
+                }
+                try pending.append(arena, .{ .ty = tag_union.ext, .value_position = false });
+            },
+            .nominal => |nominal| {
+                const container = if (nominal.builtin) |builtin_nominal| builtin_nominal == .list or builtin_nominal == .box else false;
+                for (nominal.args) |arg| try pending.append(arena, .{ .ty = arg, .value_position = visit.value_position and container });
+                for (nominal.padding_field_types) |padding| try pending.append(arena, .{ .ty = padding, .value_position = false });
+            },
+            .alias => |alias| try pending.append(arena, .{ .ty = alias.backing, .value_position = visit.value_position }),
+            .pending,
+            .err,
+            .flex,
+            .rigid,
+            .empty_record,
+            .empty_tag_union,
+            => {},
+        }
+    }
+    for (mask, excluded) |*is_parametric, is_excluded| {
+        if (is_excluded) is_parametric.* = false;
+    }
+    return mask;
+}
+
+/// A request's parametric substitution cells and their request-root positions.
+const ParametricHoles = struct {
+    nodes: []const NodeId = &.{},
+    root_indices: []const u32 = &.{},
+};
+
 /// The requirement schema of a procedure template's scheme.
 fn templateSchemaIn(view: ModuleView, template: *const checked.CheckedProcedureTemplate) SchemeRequirements {
     return .{
@@ -988,6 +1162,19 @@ const TargetEvidenceSource = union(enum) {
     materialized_contract: []const SpecEvidence,
 };
 
+/// The substitution an evidence node recorded for its target's scheme, or
+/// null for a monomorphic target.
+fn checkedTargetSubstitution(site_view: ModuleView, node: static_dispatch.EvidenceNode) ?CheckedTargetSubstitution {
+    if (node.subst.len == 0) return null;
+    const table = site_view.static_dispatch_plans;
+    const start: usize = node.subst.start;
+    const len: usize = node.subst.len;
+    if (start > table.site_substitutions.len or len > table.site_substitutions.len - start) {
+        Common.invariant("checked target substitution range was outside its checked module");
+    }
+    return .{ .view = site_view, .tys = table.site_substitutions[start .. start + len] };
+}
+
 /// A materialized contract already names the checked targets and their nested
 /// contracts. Once its callable relations have been consumed, those edge-local
 /// callable identities must not distinguish otherwise identical specializations.
@@ -997,17 +1184,29 @@ fn normalizeMaterializedEvidence(
     contract: []const SpecEvidence,
 ) Allocator.Error![]const SpecEvidence {
     var normalized: ?[]SpecEvidence = null;
-    for (contract, 0..) |entry, index| switch (entry) {
-        .target => |target| {
-            if (target.instantiation == null) continue;
-            if (normalized == null) normalized = try arena.dupe(SpecEvidence, contract);
-            const replacement = try arena.create(SpecEvidenceTarget);
-            replacement.* = target.*;
-            replacement.instantiation = null;
-            normalized.?[index] = .{ .target = replacement };
-        },
-        .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
-    };
+    for (contract, 0..) |entry, index| {
+        const original_contracts = evidenceCallableContracts(entry);
+        const contracts = try normalizeMaterializedEvidence(arena, original_contracts);
+        const contracts_changed = contracts.ptr != original_contracts.ptr;
+        var replacement = entry;
+        switch (entry) {
+            .target => |target| {
+                if (target.instantiation == null and !contracts_changed) continue;
+                const copy = try arena.create(SpecEvidenceTarget);
+                copy.* = target.*;
+                copy.instantiation = null;
+                copy.callable_contracts = contracts;
+                replacement = .{ .target = copy };
+            },
+            .structural, .from_callable => {
+                if (!contracts_changed) continue;
+                replacement = try withCallableContracts(arena, entry, contracts);
+            },
+            .from_scheme, .unreachable_value, .checked_error => continue,
+        }
+        if (normalized == null) normalized = try arena.dupe(SpecEvidence, contract);
+        normalized.?[index] = replacement;
+    }
     return normalized orelse contract;
 }
 
@@ -2295,6 +2494,7 @@ fn functionRequestNode(
 }
 
 fn specEvidenceEql(a: SpecEvidence, b: SpecEvidence) bool {
+    if (!specEvidenceVectorEql(evidenceCallableContracts(a), evidenceCallableContracts(b))) return false;
     return switch (a) {
         .target => |a_target| switch (b) {
             .target => |b_target| blk: {
@@ -2332,7 +2532,7 @@ fn specEvidenceEql(a: SpecEvidence, b: SpecEvidence) bool {
             .target, .from_callable, .from_scheme, .unreachable_value, .checked_error => false,
         },
         .from_callable => |a_use| switch (b) {
-            .from_callable => |b_use| std.meta.eql(a_use, b_use),
+            .from_callable => |b_use| a_use.independent_callable == b_use.independent_callable,
             .target, .structural, .from_scheme, .unreachable_value, .checked_error => false,
         },
         .from_scheme => |index| b == .from_scheme and b.from_scheme == index,
@@ -2383,28 +2583,34 @@ fn specEvidenceVectorEql(a: []const SpecEvidence, b: []const SpecEvidence) bool 
 }
 
 fn specEvidenceRequiresLocalContext(evidence: []const SpecEvidence) bool {
-    for (evidence) |entry| switch (entry) {
-        .target => |target| {
-            if (target.local_proc_context != null) return true;
-            switch (target.nested) {
-                .resolved => |nested| if (specEvidenceRequiresLocalContext(nested)) return true,
-                .synthesize => {},
-            }
-        },
-        .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
-    };
+    for (evidence) |entry| {
+        if (specEvidenceRequiresLocalContext(evidenceCallableContracts(entry))) return true;
+        switch (entry) {
+            .target => |target| {
+                if (target.local_proc_context != null) return true;
+                switch (target.nested) {
+                    .resolved => |nested| if (specEvidenceRequiresLocalContext(nested)) return true,
+                    .synthesize => {},
+                }
+            },
+            .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
+        }
+    }
     return false;
 }
 
 fn specEvidenceContainsStructural(evidence: []const SpecEvidence) bool {
-    for (evidence) |entry| switch (entry) {
-        .target => |target| switch (target.nested) {
-            .resolved => |nested| if (specEvidenceContainsStructural(nested)) return true,
-            .synthesize => {},
-        },
-        .structural => return true,
-        .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
-    };
+    for (evidence) |entry| {
+        if (specEvidenceContainsStructural(evidenceCallableContracts(entry))) return true;
+        switch (entry) {
+            .target => |target| switch (target.nested) {
+                .resolved => |nested| if (specEvidenceContainsStructural(nested)) return true,
+                .synthesize => {},
+            },
+            .structural => return true,
+            .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
+        }
+    }
     return false;
 }
 
@@ -2445,33 +2651,40 @@ fn specEvidenceLocalOwner(
     evidence: []const SpecEvidence,
 ) ?DraftOwner {
     var owner: ?DraftOwner = null;
-    for (evidence) |entry| switch (entry) {
-        .target => |target| {
-            if (target.local_proc_context) |context_id| {
-                const raw = @intFromEnum(context_id);
-                if (raw >= draft.local_proc_contexts.items.len) {
-                    Common.invariant("specialization evidence referenced an unknown local declaration context");
-                }
-                const target_owner = draft.local_proc_contexts.items[raw].lexical_owner;
-                if (owner) |existing| {
-                    if (!std.meta.eql(existing, target_owner)) {
-                        Common.invariant("one specialization depended on local methods from different lexical owners");
+    for (evidence) |entry| {
+        if (specEvidenceLocalOwner(draft, evidenceCallableContracts(entry))) |contract_owner| {
+            if (owner) |existing| {
+                if (!std.meta.eql(existing, contract_owner)) Common.invariant("callable contracts had different local lexical owners");
+            } else owner = contract_owner;
+        }
+        switch (entry) {
+            .target => |target| {
+                if (target.local_proc_context) |context_id| {
+                    const raw = @intFromEnum(context_id);
+                    if (raw >= draft.local_proc_contexts.items.len) {
+                        Common.invariant("specialization evidence referenced an unknown local declaration context");
                     }
-                } else owner = target_owner;
-            }
-            switch (target.nested) {
-                .resolved => |nested| if (specEvidenceLocalOwner(draft, nested)) |nested_owner| {
+                    const target_owner = draft.local_proc_contexts.items[raw].lexical_owner;
                     if (owner) |existing| {
-                        if (!std.meta.eql(existing, nested_owner)) {
-                            Common.invariant("nested specialization evidence had a different local lexical owner");
+                        if (!std.meta.eql(existing, target_owner)) {
+                            Common.invariant("one specialization depended on local methods from different lexical owners");
                         }
-                    } else owner = nested_owner;
-                },
-                .synthesize => {},
-            }
-        },
-        .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
-    };
+                    } else owner = target_owner;
+                }
+                switch (target.nested) {
+                    .resolved => |nested| if (specEvidenceLocalOwner(draft, nested)) |nested_owner| {
+                        if (owner) |existing| {
+                            if (!std.meta.eql(existing, nested_owner)) {
+                                Common.invariant("nested specialization evidence had a different local lexical owner");
+                            }
+                        } else owner = nested_owner;
+                    },
+                    .synthesize => {},
+                }
+            },
+            .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
+        }
+    }
     return owner;
 }
 
@@ -2739,7 +2952,7 @@ const TemplateBodyScheduling = enum { immediate, queued };
 
 /// Bound running plus completed-but-unaccepted jobs. Extra slots let free
 /// lanes continue working when an earlier dispatch delays ordered acceptance.
-const parallel_spec_jobs_per_lane: usize = 4;
+pub const parallel_spec_jobs_per_lane: usize = 64;
 const SharedSummaries = WorkerInputs.AppendIndex(InterfaceReplayAddress, InterfaceSummaryEntry);
 
 const SpecJobRunId = enum(u32) { _ };
@@ -3159,6 +3372,7 @@ const SpecJobWorkerInputs = struct {
     inline_expects: InlineExpectMode,
     static_data_literals: bool,
     comptime_value_reads: bool,
+    literal_roots: bool,
     declared_comptime_root_functions: *const DeclaredComptimeRootFunctions,
     hosted_catalog: []const HostedCatalogEntry,
     current_loc: base.SourceLoc,
@@ -3518,6 +3732,7 @@ const Builder = struct {
     inline_expects: InlineExpectMode,
     static_data_literals: bool,
     comptime_value_reads: bool,
+    literal_roots: bool,
     declared_comptime_root_functions: DeclaredComptimeRootFunctions,
     borrowed_comptime_root_functions: ?*const DeclaredComptimeRootFunctions = null,
     post_check_executor: ?base.post_check_task_executor.Executor,
@@ -3550,6 +3765,9 @@ const Builder = struct {
     worker_inputs: WorkerInputs.ProgramInputs = .{},
     shared_summaries: ?SharedSummaries = null,
     interface_summaries: InterfaceSummaryCache,
+    /// Per template, which quantified variables its interface relates only
+    /// by unification (see `parametricSchemeVarMask`).
+    parametric_scheme_vars: std.AutoHashMapUnmanaged(names.ProcTemplate, []const bool) = .empty,
     coordinator_interface_summaries: ?*const SharedSummaries = null,
     coordinator_interface_summary_end: usize = 0,
     interface_summary_checks: u32 = 0,
@@ -3730,6 +3948,7 @@ const Builder = struct {
             .inline_expects = options.inline_expects,
             .static_data_literals = options.static_data_literals,
             .comptime_value_reads = options.comptime_value_reads,
+            .literal_roots = options.literal_roots,
             .declared_comptime_root_functions = DeclaredComptimeRootFunctions.init(allocator),
             .post_check_executor = options.post_check_executor,
             .timing = options.timing,
@@ -3873,6 +4092,7 @@ const Builder = struct {
             .inline_expects = inputs.inline_expects,
             .static_data_literals = inputs.static_data_literals,
             .comptime_value_reads = inputs.comptime_value_reads,
+            .literal_roots = inputs.literal_roots,
             .post_check_executor = null,
             .timing = null,
         });
@@ -3935,6 +4155,9 @@ const Builder = struct {
     }
 
     fn deinit(self: *Builder) void {
+        var parametric_masks = self.parametric_scheme_vars.valueIterator();
+        while (parametric_masks.next()) |mask| self.allocator.free(mask.*);
+        self.parametric_scheme_vars.deinit(self.allocator);
         self.source_file_ids.deinit();
         self.lowering_module_ids.deinit();
         self.declared_comptime_root_functions.deinit();
@@ -4099,11 +4322,15 @@ const Builder = struct {
         defer roots.deinit(self.allocator);
         for (entries) |entry| {
             try roots.appendSlice(self.allocator, entry.request.leaves);
-            for (entry.summary.nodes) |node| switch (node) {
+            const summary = switch (entry.summary) {
+                .unchanged => continue,
+                .constraints => |constraints| constraints,
+            };
+            for (summary.nodes) |node| switch (node) {
                 .mono => |ty| try roots.append(self.allocator, ty),
                 .open => {},
             };
-            for (entry.summary.open_nodes) |node| {
+            for (summary.open_nodes) |node| {
                 if (node.finished) |ty| try roots.append(self.allocator, ty);
             }
         }
@@ -4604,6 +4831,7 @@ const Builder = struct {
             .inline_expects = self.inline_expects,
             .static_data_literals = self.static_data_literals,
             .comptime_value_reads = self.comptime_value_reads,
+            .literal_roots = self.literal_roots,
             .declared_comptime_root_functions = self.borrowed_comptime_root_functions orelse &self.declared_comptime_root_functions,
             .hosted_catalog = self.hosted_catalog,
             .current_loc = self.current_loc,
@@ -4703,7 +4931,7 @@ const Builder = struct {
                         break :body try self.program.addExpr(.{
                             .ty = ret_ty,
                             .data = .{ .comptime_value = .{
-                                .root = try self.program.addComptimeValueRoot(.{ .module = view.key, .root = root, .const_locator = request.const_locator }),
+                                .root = try self.program.addComptimeValueRoot(.{ .module = view.key, .root = .{ .checked = root }, .const_locator = request.const_locator }),
                                 .initializer = initializer,
                             } },
                         });
@@ -5200,6 +5428,14 @@ const Builder = struct {
         template: checked.CallableEvalTemplateId,
     };
 
+    /// The callable-eval binding behind a procedure use when that binding is
+    /// an exact procedure alias, which calls forward through.
+    fn forwardingCallableEvalForProcedureUse(self: *Builder, proc: checked.ProcedureUseTemplate) ?CallableEvalUse {
+        const callable_eval = self.callableEvalForProcedureUse(proc) orelse return null;
+        const template = callable_eval.view.callable_eval_templates.templates[@intFromEnum(callable_eval.template)];
+        return if (template.forwarded_lookup != null) callable_eval else null;
+    }
+
     fn callableEvalForProcedureUse(self: *Builder, proc: checked.ProcedureUseTemplate) ?CallableEvalUse {
         return switch (proc.binding) {
             .top_level => |top_level| blk: {
@@ -5370,59 +5606,82 @@ const Builder = struct {
         };
     }
 
+    /// Copy committed evidence out of the growable program lists so a lowered
+    /// template can compare later requests against its exact topology.
+    fn retainFnEvidence(self: *Builder, evidence: StoredConstFnEvidence) Allocator.Error!StoredConstFnEvidence {
+        return .{
+            .nodes = try self.evidence_arena.allocator().dupe(check.ConstStore.ConstFnEvidence, evidence.nodes),
+            .frames = try self.evidence_arena.allocator().dupe(check.ConstStore.ConstFnEvidenceFrame, evidence.frames),
+            .head = evidence.head,
+        };
+    }
+
     fn appendConstFnEvidence(
         self: *Builder,
         nodes: *std.ArrayList(check.ConstStore.ConstFnEvidence),
         evidence: []const SpecEvidence,
     ) Allocator.Error!void {
-        for (evidence) |entry| switch (entry) {
-            .target => |target| {
-                const target_index = nodes.items.len;
-                try nodes.append(self.allocator, undefined);
-                const nested: check.ConstStore.ConstFnNestedEvidence = switch (target.nested) {
-                    .synthesize => .from_callable,
-                    .resolved => |resolved| blk: {
-                        const nested_start = nodes.items.len;
-                        try self.appendConstFnEvidence(nodes, resolved);
-                        break :blk .{ .resolved = .{
-                            .count = @intCast(resolved.len),
-                            .subtree_len = @intCast(nodes.items.len - nested_start),
-                        } };
-                    },
-                };
-                nodes.items[target_index] = .{ .target = .{
-                    .view = .{ .bytes = target.view.key.bytes },
-                    .method = target.target,
-                    .method_callable_key = target.view.types.rootKey(target.target.callable_ty),
-                    .instantiation = if (target.instantiation) |instantiation| .{
-                        .view = .{ .bytes = instantiation.view.key.bytes },
-                        .callable_key = instantiation.view.types.rootKey(instantiation.callable_ty),
-                        .callable_ty = instantiation.callable_ty,
+        for (evidence) |entry| {
+            const root_index = nodes.items.len;
+            switch (entry) {
+                .target => |target| {
+                    const target_index = nodes.items.len;
+                    try nodes.append(self.allocator, undefined);
+                    const nested: check.ConstStore.ConstFnNestedEvidence = switch (target.nested) {
+                        .synthesize => .from_callable,
+                        .resolved => |resolved| blk: {
+                            const nested_start = nodes.items.len;
+                            try self.appendConstFnEvidence(nodes, resolved);
+                            break :blk .{ .resolved = .{
+                                .count = @intCast(resolved.len),
+                                .subtree_len = @intCast(nodes.items.len - nested_start),
+                            } };
+                        },
+                    };
+                    nodes.items[target_index] = .{ .target = .{
+                        .view = .{ .bytes = target.view.key.bytes },
+                        .method = target.target,
+                        .method_callable_key = target.view.types.rootKey(target.target.callable_ty),
+                        .instantiation = if (target.instantiation) |instantiation| .{
+                            .view = .{ .bytes = instantiation.view.key.bytes },
+                            .callable_key = instantiation.view.types.rootKey(instantiation.callable_ty),
+                            .callable_ty = instantiation.callable_ty,
+                        } else null,
+                        .nested = nested,
+                    } };
+                },
+                .structural => |structural| try nodes.append(self.allocator, .{ .structural = .{
+                    .derivation = structural.derivation,
+                    .checked = if (structural.checked) |checked_structural| .{
+                        .view = .{ .bytes = checked_structural.view.key.bytes },
+                        .dispatcher_key = checked_structural.view.types.rootKey(checked_structural.evidence.dispatcher_ty),
+                        .dispatcher_ty = checked_structural.evidence.dispatcher_ty,
+                        .callable_key = checked_structural.view.types.rootKey(checked_structural.evidence.callable_ty),
+                        .callable_ty = checked_structural.evidence.callable_ty,
+                        .generated_codec_derivation = checked_structural.evidence.generated_codec_derivation,
+                        .generated_codec_identity = codecEvidenceIdentity(checked_structural),
                     } else null,
-                    .nested = nested,
-                } };
-            },
-            .structural => |structural| try nodes.append(self.allocator, .{ .structural = .{
-                .derivation = structural.derivation,
-                .checked = if (structural.checked) |checked_structural| .{
-                    .view = .{ .bytes = checked_structural.view.key.bytes },
-                    .dispatcher_key = checked_structural.view.types.rootKey(checked_structural.evidence.dispatcher_ty),
-                    .dispatcher_ty = checked_structural.evidence.dispatcher_ty,
-                    .callable_key = checked_structural.view.types.rootKey(checked_structural.evidence.callable_ty),
-                    .callable_ty = checked_structural.evidence.callable_ty,
-                    .generated_codec_derivation = checked_structural.evidence.generated_codec_derivation,
-                    .generated_codec_identity = codecEvidenceIdentity(checked_structural),
-                } else null,
-            } }),
-            .from_callable => |use| {
-                try nodes.append(self.allocator, .{ .from_callable = .{
-                    .independent_callable = use.independent_callable,
-                } });
-            },
-            .from_scheme => |index| try nodes.append(self.allocator, .{ .from_scheme = index }),
-            .unreachable_value => try nodes.append(self.allocator, .unreachable_value),
-            .checked_error => try nodes.append(self.allocator, .checked_error),
-        };
+                } }),
+                .from_callable => |use| {
+                    try nodes.append(self.allocator, .{ .from_callable = .{
+                        .independent_callable = use.independent_callable,
+                    } });
+                },
+                .from_scheme => |index| try nodes.append(self.allocator, .{ .from_scheme = index }),
+                .unreachable_value => try nodes.append(self.allocator, .unreachable_value),
+                .checked_error => try nodes.append(self.allocator, .checked_error),
+            }
+            const contracts = evidenceCallableContracts(entry);
+            if (contracts.len != 0) {
+                try self.appendConstFnEvidence(nodes, contracts);
+                switch (nodes.items[root_index]) {
+                    .target => |*target| target.callable_contracts = @intCast(contracts.len),
+                    .structural => |*structural| structural.callable_contracts = @intCast(contracts.len),
+                    .from_callable => |*use| use.callable_contracts = @intCast(contracts.len),
+                    .from_scheme, .unreachable_value, .checked_error => unreachable,
+                }
+            }
+        }
     }
 
     fn completeRootTemplateEvidence(
@@ -5582,8 +5841,10 @@ const Builder = struct {
         var fn_template = self.fnDefForTemplate(view, template_ref, source_fn_ty, source_fn_key, lower_fn_ty);
         fn_template.evidence_digest = evidence_digest;
         // Only a closed request names a specialization the object cache can
-        // hold: a function type anywhere in it makes the body depend on the
-        // program's lambda sets.
+        // hold: a function type in its arguments or result makes the body
+        // depend on the program's lambda sets. The request's outer arrow does
+        // not: procedure identity selects its source and captures explicitly,
+        // independently of the callable set its value joins in the caller.
         // A hosted template has no procedure of its own to cache: callers
         // reach the host directly through its declared ABI.
         if (template.target != .hosted and !try self.monoFnTypeMentionsFunction(lower_fn_ty)) {
@@ -6280,6 +6541,7 @@ const Builder = struct {
                             .inline_expects = self.inline_expects,
                             .static_data_literals = self.static_data_literals,
                             .comptime_value_reads = self.comptime_value_reads,
+                            .literal_roots = self.literal_roots,
                             .declared_comptime_root_functions = self.borrowed_comptime_root_functions orelse &self.declared_comptime_root_functions,
                             .hosted_catalog = self.hosted_catalog,
                             .current_loc = self.current_loc,
@@ -7455,11 +7717,17 @@ const Builder = struct {
                 contract.shape_node,
             );
         }
-        try body_ctx.instantiateTemplateDispatchRelations(template, null);
-        try body_ctx.applyCheckedTemplateInterfaceRelations(template, root_node);
         if (!local_context_dependent) {
+            // A deferred body lowers in its own specialization, so only an
+            // open interface needs the template's relations replayed here.
+            if (!templateInterfaceIsClosed(view, &template)) {
+                try body_ctx.instantiateTemplateDispatchRelations(template, null);
+                try body_ctx.applyCheckedTemplateInterfaceRelations(template, root_node);
+            }
             return .{ .local = .{ .draft = fn_id } };
         }
+        try body_ctx.instantiateTemplateDispatchRelations(template, null);
+        try body_ctx.applyCheckedTemplateInterfaceRelations(template, root_node);
         if (template.target == .hosted) {
             Common.invariant("hosted template specialization depended on a local procedure context");
         }
@@ -9607,7 +9875,7 @@ const Builder = struct {
                 // A recursive edge into a function with no arguments carries
                 // its recursive value flow through the result alone.
                 const request = try source_ctx.graph.functionNodes(request_fn_node);
-                if (request.args.len == 0) try source_ctx.graph.markRecursiveValueSlot(request.ret);
+                if (request.args.len == 0) source_ctx.graph.markRecursiveValueSlot(request.ret);
                 try source_ctx.graph.unifyRecursiveFunctionInterface(
                     spec.request_fn_node,
                     spec.initial_request_arg_classes,
@@ -11652,7 +11920,13 @@ const Builder = struct {
                 specializationEvidenceView(evidence),
             )) |hit| {
                 if (hit.fn_id != fn_id) {
-                    Common.invariant("eager template duplicate committed to a different winning function");
+                    // The commit map never merges a specialization that must
+                    // stay local, so it keeps its own function beside an
+                    // equal committed one.
+                    if (!spec.requires_local) {
+                        Common.invariant("eager template duplicate committed to a different winning function");
+                    }
+                    continue;
                 }
                 self.promoteFnSignatureRelation(
                     fn_id,
@@ -11675,7 +11949,7 @@ const Builder = struct {
                 .def = ids.def(draft_def),
                 .spec = spec_id,
                 .evidence = spec.evidence,
-                .topology = null,
+                .topology = try self.retainFnEvidence(evidence),
             });
             try self.markTemplateReady(fn_id, solved_fn_ty);
         }
@@ -13581,6 +13855,17 @@ const DraftStaticDataId = enum(u32) { _ };
 /// Qualified by the owning BodyDraftStore, never by a worker Program.
 const DraftComptimeValueRootId = enum(u32) { _ };
 
+/// A literal root this draft registers: its definition, the literal it
+/// converts, and the compile-time value descriptor its read uses. The
+/// descriptor names the root by its position in the draft's list until the
+/// commit gives the root its program id.
+const DraftLiteralRoot = struct {
+    def: DraftDefId,
+    module: checked.ModuleId,
+    site: Common.LiteralRejectionSite,
+    read: DraftComptimeValueRootId,
+};
+
 fn DraftSpan(comptime _: type) type {
     return extern struct {
         start: u32,
@@ -13812,6 +14097,11 @@ const DraftExpectErrExpr = struct {
     region: base.Region,
 };
 
+const DraftLiteralRejected = struct {
+    msg: DraftExprId,
+    site: Common.LiteralRejectionSite,
+};
+
 const DraftReturn = struct {
     value: DraftExprId,
     target: DraftTypeCell,
@@ -13927,6 +14217,7 @@ const DraftExprData = union(enum(u8)) {
     dbg: DraftExprId,
     expect_err: DraftExpectErrExpr,
     expect: DraftExprId,
+    literal_rejected: DraftLiteralRejected,
 };
 
 const DraftPat = struct {
@@ -15761,6 +16052,7 @@ const BodyDraftStore = struct {
     /// Keep exact descriptors append-only until ordered commit; abandoned
     /// speculative expressions cannot invalidate ids held by surviving ones.
     comptime_value_roots: std.ArrayList(Common.ComptimeValueRoot),
+    literal_roots: std.ArrayList(DraftLiteralRoot),
     /// These memoized TypeIds belong to this draft's graph, so their lifetime
     /// cannot exceed the body that owns that graph. Type-store entries are
     /// immutable snapshots: later graph refinement allocates a new TypeId
@@ -15868,6 +16160,7 @@ const BodyDraftStore = struct {
             .static_data_requests = .empty,
             .static_data_request_ids = std.AutoHashMap(DraftStaticDataRequestAddress, DraftStaticDataId).init(allocator),
             .comptime_value_roots = .empty,
+            .literal_roots = .empty,
             .parse_result_ok_types = std.AutoHashMap(GeneratedParseResultOkTypeAddress, Type.TypeId).init(allocator),
             .generated_try_types = std.AutoHashMap(GeneratedTryTypeAddress, Type.TypeId).init(allocator),
             .uninhabited_type_cache = collections.DenseMap(Type.TypeId, bool).init(allocator),
@@ -16019,6 +16312,7 @@ const BodyDraftStore = struct {
         self.static_data_request_ids.deinit();
         self.static_data_requests.deinit(self.allocator);
         self.comptime_value_roots.deinit(self.allocator);
+        self.literal_roots.deinit(self.allocator);
         self.static_data_candidate_exprs.deinit();
         self.stmt_regions.deinit(self.allocator);
         self.stmt_locs.deinit(self.allocator);
@@ -16173,6 +16467,20 @@ const BodyDraftStore = struct {
         return std.meta.eql(self.ownerForCore(kind, index), self.current_owner);
     }
 
+    /// Register a literal root whose definition is `def`, returning the
+    /// descriptor its read uses.
+    fn addLiteralRoot(
+        self: *BodyDraftStore,
+        def: DraftDefId,
+        module: checked.ModuleId,
+        site: Common.LiteralRejectionSite,
+    ) Allocator.Error!DraftComptimeValueRootId {
+        const position: Common.LiteralRootId = @enumFromInt(@as(u32, @intCast(self.literal_roots.items.len)));
+        const read = try self.addComptimeValueRoot(.{ .module = module, .root = .{ .literal = position }, .const_locator = null });
+        try self.literal_roots.append(self.allocator, .{ .def = def, .module = module, .site = site, .read = read });
+        return read;
+    }
+
     fn addComptimeValueRoot(self: *BodyDraftStore, root: Common.ComptimeValueRoot) Allocator.Error!DraftComptimeValueRootId {
         const id: DraftComptimeValueRootId = @enumFromInt(@as(u32, @intCast(self.comptime_value_roots.items.len)));
         try self.comptime_value_roots.append(self.allocator, root);
@@ -16186,7 +16494,13 @@ const BodyDraftStore = struct {
         root: DraftComptimeValueRootId,
     ) Allocator.Error!Common.ComptimeValueRootId {
         if (roots.get(root)) |id| return id;
-        const id = try program.addComptimeValueRoot(self.comptime_value_roots.items[@intFromEnum(root)]);
+        const descriptor = self.comptime_value_roots.items[@intFromEnum(root)];
+        switch (descriptor.root) {
+            .checked => {},
+            // Committing the draft's literal roots commits their reads first.
+            .literal => Common.invariant("literal root read was retained without its literal root"),
+        }
+        const id = try program.addComptimeValueRoot(descriptor);
         try roots.put(root, id);
         return id;
     }
@@ -17030,6 +17344,26 @@ const BodyDraftStore = struct {
             });
         }
 
+        // A literal root commits with its definition, which commits exactly
+        // when the function owning it does; its read then names the root by
+        // its program id. The same literal at the same type is one literal
+        // root however many specializations convert it: its definition's
+        // content identity names the conversion, so a later one reads the
+        // first one's root.
+        for (self.literal_roots.items) |root| {
+            if (emit_defs) |emit| if (!emit[@intFromEnum(root.def)]) continue;
+            const def = self.defs.items[@intFromEnum(root.def)];
+            const seed = def.identity_seed orelse Common.invariant("literal root definition had no identity seed");
+            const identity = try sealedDefIdentity(program, committed_types, seed, ids.typedLocalSpan(def.args), try def.ret.sealCommitted(committed_types));
+            const entry = try program.literal_root_by_identity.getOrPut(program.allocator, identity);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = try program.addLiteralRoot(.{ .def = ids.def(root.def), .module = root.module, .site = root.site });
+            }
+            var descriptor = self.comptime_value_roots.items[@intFromEnum(root.read)];
+            descriptor.root = .{ .literal = entry.value_ptr.* };
+            try comptime_roots.put(root.read, try program.addComptimeValueRoot(descriptor));
+        }
+
         var retained_expr_count: usize = 0;
         for (self.exprs.items, 0..) |_, index| {
             if (ids.retained(.exprs, index)) retained_expr_count += 1;
@@ -17341,6 +17675,7 @@ const BodyDraftStore = struct {
             .comptime_exhaustiveness_failed,
             .dbg,
             .expect_err,
+            .literal_rejected,
             .expect,
             => .{ .ty = ty, .data = data },
         };
@@ -17445,6 +17780,7 @@ const BodyDraftStore = struct {
                 .comptime_exhaustiveness_failed,
                 .dbg,
                 .expect_err,
+                .literal_rejected,
                 .expect,
                 => Common.invariant("Monotype direct-call capture operand was not a local expression"),
             };
@@ -17641,6 +17977,10 @@ const BodyDraftStore = struct {
                 .region = expect_err.region,
             } },
             .expect => |expr| .{ .expect = ids.expr(expr) },
+            .literal_rejected => |rejected| .{ .literal_rejected = .{
+                .msg = ids.expr(rejected.msg),
+                .site = rejected.site,
+            } },
         };
     }
 
@@ -18083,10 +18423,19 @@ const ActiveConstBindingScope = struct {
 const InterfaceReplayStatus = enum { expanding, expanded, ready };
 
 const InterfaceReplayAddress = struct {
+    kind: enum { procedure, method_signature, method_contract, local_method_contract } = .procedure,
     family: DraftTemplateFamilyAddress,
     evidence_digest: [32]u8,
+    /// Bucket selector over the request's exact identity bytes, which remain
+    /// the collision authority.
     input_digest: [32]u8,
 };
+
+fn interfaceRequestBucket(bytes: []const u8) [32]u8 {
+    var bucket = [_]u8{0} ** 32;
+    std.mem.writeInt(u64, bucket[0..8], std.hash.Wyhash.hash(0, bytes), .little);
+    return bucket;
+}
 
 /// Immutable input identity and parameterized output constraints. Only settled
 /// leaves refer to the owner's type store; all open cells use local indices.
@@ -18094,7 +18443,36 @@ const InterfaceSummaryEntry = struct {
     address: InterfaceReplayAddress,
     evidence: StoredConstFnEvidence,
     request: InterfaceConstraints.Identity,
-    summary: InterfaceConstraints,
+    summary: InterfaceSummary,
+};
+
+/// A completed expansion's contribution to its request roots. An expansion
+/// whose captured roots equal its captured input added no constraint, so
+/// replaying it relates nothing and instantiates nothing.
+const InterfaceSummary = union(enum) {
+    unchanged,
+    constraints: InterfaceConstraints,
+
+    fn copy(self: InterfaceSummary, allocator: Allocator, context: anytype) Allocator.Error!InterfaceSummary {
+        return switch (self) {
+            .unchanged => .unchanged,
+            .constraints => |constraints| .{ .constraints = try constraints.copy(allocator, context) },
+        };
+    }
+
+    fn eql(self: InterfaceSummary, other: InterfaceSummary, graph: *InstGraph, allocator: Allocator, types_: *Type.Store, name_store: *const names.NameStore) Allocator.Error!bool {
+        return switch (self) {
+            .unchanged => other == .unchanged,
+            .constraints => |constraints| switch (other) {
+                .unchanged => false,
+                .constraints => |other_constraints| try (try constraints.identityInto(graph, allocator)).eql(
+                    try other_constraints.identityInto(graph, allocator),
+                    types_,
+                    name_store,
+                ),
+            },
+        };
+    }
 };
 
 const InterfaceSummaryCopy = struct {
@@ -18149,7 +18527,7 @@ const InterfaceSummaryCache = struct {
         self.evidence_arena.deinit();
     }
 
-    fn insert(self: *InterfaceSummaryCache, types_: *Type.Store, name_store: *const names.NameStore, entry: InterfaceSummaryEntry) Allocator.Error!InterfaceConstraints {
+    fn insert(self: *InterfaceSummaryCache, types_: *Type.Store, name_store: *const names.NameStore, entry: InterfaceSummaryEntry) Allocator.Error!InterfaceSummary {
         const bucket = try self.buckets.getOrPut(entry.address);
         if (!bucket.found_existing) bucket.value_ptr.* = .empty;
         for (bucket.value_ptr.items) |index| {
@@ -18177,10 +18555,17 @@ const InterfaceSummaryCache = struct {
 const InterfaceReplayEntry = struct {
     address: InterfaceReplayAddress,
     evidence: StoredConstFnEvidence,
+    /// `request.bytes[0..input_len]` identifies the captured input interface;
+    /// the remaining bytes mark the checked-error substitution slots.
     request: InterfaceConstraints.Identity,
+    input_len: usize,
+    /// The classes the request's parametric holes stood for.
+    hole_classes: []const ?NodeId,
+    /// This expansion's instantiated cell for each parametric hole slot.
+    hole_cells: []const NodeId,
     roots: []const NodeId,
-    summary: ?InterfaceConstraints = null,
-    verify_summary: ?InterfaceConstraints = null,
+    summary: ?InterfaceSummary = null,
+    verify_summary: ?InterfaceSummary = null,
     status: InterfaceReplayStatus = .expanding,
     lowlink: usize,
 };
@@ -19819,6 +20204,7 @@ const BodyContext = struct {
             .comptime_branch_taken => |branch| self.exprImpossibilityProof(branch.body),
             .dbg => |child| self.exprImpossibilityProof(child),
             .expect_err => |expect_err| self.exprImpossibilityProof(expect_err.msg),
+            .literal_rejected => |rejected| self.exprImpossibilityProof(rejected.msg),
             .expect => |child| if (self.builder.inline_expects == .shared) null else self.exprImpossibilityProof(child),
         };
     }
@@ -20011,13 +20397,13 @@ const BodyContext = struct {
                 if (named.kind == .alias) Common.invariant("constructor witness retained a transparent alias node");
                 const backing = named.backing orelse
                     Common.invariant("named constructor witness had no explicit backing");
-                var witness = raw_named;
+                var witness = raw_named.*;
                 witness.backing = .{
                     .node = try self.constructorWitnessWithStructuralNode(backing.node, structural_node),
                     .use = backing.use,
                     .authority = backing.authority,
                 };
-                break :blk try self.graph.newNode(.{ .named = witness });
+                break :blk try self.graph.newNode(try self.graph.namedContent(witness));
             },
             .redirect, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst => try self.constructorWitnessAliasLayers(node, structural_node),
         };
@@ -20038,13 +20424,13 @@ const BodyContext = struct {
                 if (named.kind != .alias) break :blk structural_node;
                 const backing = named.backing orelse
                     Common.invariant("transparent alias graph node had no explicit backing");
-                var witness = raw_named;
+                var witness = raw_named.*;
                 witness.backing = .{
                     .node = try self.constructorWitnessAliasLayers(backing.node, structural_node),
                     .use = backing.use,
                     .authority = backing.authority,
                 };
-                break :blk try self.graph.newNode(.{ .named = witness });
+                break :blk try self.graph.newNode(try self.graph.namedContent(witness));
             },
             .redirect, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst => structural_node,
         };
@@ -21483,6 +21869,7 @@ const BodyContext = struct {
             .comptime_exhaustiveness_failed,
             .dbg,
             .expect_err,
+            .literal_rejected,
             .expect,
             => false,
         };
@@ -21594,6 +21981,7 @@ const BodyContext = struct {
             => |child| return try self.exprDependsOnFreeLocalInner(child, target, bound),
             .return_ => |ret| return try self.exprDependsOnFreeLocalInner(ret.value, target, bound),
             .expect_err => |expect_err| return try self.exprDependsOnFreeLocalInner(expect_err.msg, target, bound),
+            .literal_rejected => |rejected| return try self.exprDependsOnFreeLocalInner(rejected.msg, target, bound),
             .comptime_branch_taken => |taken| return try self.exprDependsOnFreeLocalInner(taken.body, target, bound),
             .let_ => |let_| {
                 if (try self.exprDependsOnFreeLocalInner(let_.value, target, bound)) return true;
@@ -22414,7 +22802,7 @@ const BodyContext = struct {
         } else null;
         const def = try self.typeDef(self.view, nominal.origin_module, nominal.name, nominal.source_decl);
         self.builder.noteBuiltinTryDef(nominal.builtin, self.nameStore(), def);
-        return try self.graph.newNode(.{ .named = .{
+        return try self.graph.newNode(try self.graph.namedContent(.{
             .named_type = .{ .module = self.builder.declaredModuleForNominal(self.view, nominal), .ty = checked_ty },
             .def = def,
             .kind = if (nominal.is_opaque) .@"opaque" else .nominal,
@@ -22422,7 +22810,7 @@ const BodyContext = struct {
             .args = args,
             .backing = backing,
             .declared_order = try self.instDeclaredOrderForNominal(nominal),
-        } });
+        }));
     }
 
     fn instDeclaredOrderForNominal(
@@ -22883,7 +23271,7 @@ const BodyContext = struct {
         return .{ .cache = &workspace.interface_summaries, .types_are_durable = false };
     }
 
-    fn findInterfaceSummary(self: *BodyContext, address: InterfaceReplayAddress, evidence: StoredConstFnEvidence, request: InterfaceConstraints.Identity) Allocator.Error!?InterfaceConstraints {
+    fn findInterfaceSummary(self: *BodyContext, address: InterfaceReplayAddress, evidence: StoredConstFnEvidence, request: InterfaceConstraints.Identity) Allocator.Error!?InterfaceSummary {
         const local = self.interfaceSummaryCache().cache;
         if (local.buckets.get(address)) |candidates| for (candidates.items) |index| {
             const entry = local.entries.items[index];
@@ -22907,7 +23295,7 @@ const BodyContext = struct {
         return null;
     }
 
-    fn importInterfaceSummary(self: *BodyContext, entry: InterfaceSummaryEntry, request: InterfaceConstraints.Identity) Allocator.Error!?InterfaceConstraints {
+    fn importInterfaceSummary(self: *BodyContext, entry: InterfaceSummaryEntry, request: InterfaceConstraints.Identity) Allocator.Error!?InterfaceSummary {
         const relocation = InterfaceSummaryRelocation{
             .source_names = &self.builder.program.names,
             .destination_names = self.nameStoreMut(),
@@ -22921,7 +23309,7 @@ const BodyContext = struct {
         return try self.insertInterfaceSummary(.{ .address = entry.address, .evidence = entry.evidence, .request = imported_request, .summary = summary });
     }
 
-    fn insertInterfaceSummary(self: *BodyContext, entry: InterfaceSummaryEntry) Allocator.Error!InterfaceConstraints {
+    fn insertInterfaceSummary(self: *BodyContext, entry: InterfaceSummaryEntry) Allocator.Error!InterfaceSummary {
         const binding = self.interfaceSummaryCache();
         if (binding.types_are_durable) {
             // Coordinator leaves already belong to permanent program storage.
@@ -22943,6 +23331,70 @@ const BodyContext = struct {
             .request = try entry.request.copy(scratch.allocator(), relocation),
             .summary = try entry.summary.copy(scratch.allocator(), relocation),
         });
+    }
+
+    fn parametricRequestHoles(
+        self: *BodyContext,
+        allocator: Allocator,
+        template_ref: names.ProcTemplate,
+        view: ModuleView,
+        template: *const checked.CheckedProcedureTemplate,
+        subst: SpecSubstitution,
+    ) Allocator.Error!ParametricHoles {
+        if (subst.len == 0) return .{};
+        const cached = try self.builder.parametric_scheme_vars.getOrPut(self.builder.allocator, template_ref);
+        if (!cached.found_existing) {
+            cached.value_ptr.* = parametricSchemeVarMask(self.builder.allocator, view, template) catch |err| {
+                _ = self.builder.parametric_scheme_vars.remove(template_ref);
+                return err;
+            };
+        }
+        const mask = cached.value_ptr.*;
+        if (mask.len != subst.len) Common.invariant("parametric request substitution differed from its scheme's quantified variables");
+        var count: usize = 0;
+        for (mask, subst) |is_parametric, slot| {
+            if (is_parametric and slot == .node) count += 1;
+        }
+        if (count == 0) return .{};
+        const nodes = try allocator.alloc(NodeId, count);
+        const root_indices = try allocator.alloc(u32, count);
+        var next: usize = 0;
+        // Request roots are the function request followed by each node slot.
+        var root_index: u32 = 1;
+        for (mask, subst) |is_parametric, slot| {
+            switch (slot) {
+                .node => |node| {
+                    if (is_parametric) {
+                        nodes[next] = node;
+                        root_indices[next] = root_index;
+                        next += 1;
+                    }
+                    root_index += 1;
+                },
+                .checked_error => {},
+            }
+        }
+        return .{ .nodes = nodes, .root_indices = root_indices };
+    }
+
+    /// An unfinished expansion is joined only by the instantiation it expands:
+    /// each hole slot names the class the expansion's request supplied or
+    /// the expansion's own hole cell.
+    fn joinsUnfinishedExpansion(
+        self: *BodyContext,
+        entry: InterfaceReplayEntry,
+        holes: []const NodeId,
+        hole_classes: []const ?NodeId,
+    ) bool {
+        if (entry.hole_classes.len != hole_classes.len) return false;
+        for (entry.hole_classes, entry.hole_cells, holes, hole_classes) |expanded_class, expanded_cell, hole, hole_class| {
+            const expanded = expanded_class orelse {
+                if (hole_class != null) return false;
+                continue;
+            };
+            if (!self.graph.sameClass(hole, expanded) and !self.graph.sameClass(hole, expanded_cell)) return false;
+        }
+        return true;
     }
 
     fn relateInterfaceRoots(self: *BodyContext, produced: []const NodeId, requested: []const NodeId) Allocator.Error!void {
@@ -22967,6 +23419,8 @@ const BodyContext = struct {
             .promoted_top_level_proc,
             => |procedure| .{ procedure, @as(?checked.CheckedEvidenceSpan, null) },
             .platform_required_proc => |required| .{ required.procedure, required.root_evidence },
+            // The nested specialization applies its checked scope relations
+            // before joining this contextual graph node.
             .local_proc => return,
             .local_param,
             .local_value,
@@ -22980,10 +23434,13 @@ const BodyContext = struct {
             .platform_required_const,
             => Common.invariant("checked specialization call relation targeted a non-procedure"),
         };
+        // A call through an exact procedure alias forwards when it is drafted,
+        // and that forwarded specialization applies its own relations.
+        if (self.builder.forwardingCallableEvalForProcedureUse(procedure) != null) return;
         const template_ref = self.builder.templateRefForProcedureUse(procedure);
         const callee_view = self.builder.moduleForDigest(names.procTemplateModuleDigest(template_ref));
         const template = callee_view.templates.get(template_ref.template);
-        const partial_edge = try self.evidenceForProcedureUseAtNode(procedure, record.expr, root_evidence, request_fn_node, .specialization_interface);
+        const partial_edge = try self.evidenceForProcedureUseAtNode(procedure, record.expr, root_evidence, request_fn_node, .interface_summary_input);
         var edge = if (partial_edge.vector.len == template.evidence_params.len)
             partial_edge
         else
@@ -22992,14 +23449,14 @@ const BodyContext = struct {
                 template_ref,
                 template,
                 partial_edge,
-                .specialization_interface,
+                .interface_summary_input,
             );
         edge.vector = try self.resolveCallableEvidenceAtNode(
             callee_view,
             template,
             edge.vector,
             request_fn_node,
-            .specialization_interface,
+            .interface_summary_input,
         );
         const evidence = edge.vector;
         const stored_evidence = try self.builder.constFnEvidence(rootEvidence(template_ref, evidence));
@@ -23016,7 +23473,13 @@ const BodyContext = struct {
         };
         var input_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer input_arena.deinit();
-        const input = try InterfaceConstraints.capture(self.graph, input_arena.allocator(), request_roots.items);
+        const holes = try self.parametricRequestHoles(input_arena.allocator(), template_ref, callee_view, &template, edge.subst);
+        const hole_classes = try input_arena.allocator().alloc(?NodeId, holes.nodes.len);
+        const input = try InterfaceConstraints.captureWithHoles(self.graph, input_arena.allocator(), request_roots.items, holes.nodes, hole_classes);
+        for (hole_classes) |hole_class| if (hole_class != null) {
+            self.builder.count("interface_parametric_requests");
+            break;
+        };
         const shape = try input.identityInto(self.graph, input_arena.allocator());
         const request_bytes = try input_arena.allocator().alloc(u8, shape.bytes.len + edge.subst.len);
         @memcpy(request_bytes[0..shape.bytes.len], shape.bytes);
@@ -23025,13 +23488,16 @@ const BodyContext = struct {
         const address = InterfaceReplayAddress{
             .family = DraftTemplateFamilyAddress.init(template_ref, self.method_scope.key, self.view.types.rootKey(source_fn_ty)),
             .evidence_digest = evidence_digest.bytes,
-            .input_digest = TypeDigestHasher.hash(request.bytes),
+            .input_digest = interfaceRequestBucket(request.bytes),
         };
 
-        var cached: ?InterfaceConstraints = null;
+        var cached: ?InterfaceSummary = null;
         if (replay_state.buckets.get(address)) |candidates| for (candidates.items) |raw_entry| {
             const entry = replay_state.entries.items[raw_entry];
             if (!storedConstFnEvidenceEql(entry.evidence, stored_evidence) or !try entry.request.eql(request, self.typeStore(), self.nameStore())) continue;
+            // An unfinished expansion is joined only by the exact request it
+            // expands; parametric holes generalize completed summaries.
+            if (entry.status != .ready and !self.joinsUnfinishedExpansion(entry, holes.nodes, hole_classes)) continue;
             self.builder.count("interface_replay_hits");
             switch (entry.status) {
                 .expanding, .expanded => {
@@ -23043,13 +23509,13 @@ const BodyContext = struct {
                 },
                 .ready => {
                     if (!replay_state.use_finished_summaries) continue;
-                    cached = entry.summary.?;
+                    cached = entry.summary orelse continue;
                     break;
                 },
             }
         };
         if (cached == null and replay_state.use_finished_summaries) cached = try self.findInterfaceSummary(address, stored_evidence, request);
-        var verify_summary: ?InterfaceConstraints = null;
+        var verify_summary: ?InterfaceSummary = null;
         const saved_use_summaries = replay_state.use_finished_summaries;
         defer replay_state.use_finished_summaries = saved_use_summaries;
         if (cached) |summary| {
@@ -23059,9 +23525,15 @@ const BodyContext = struct {
                 self.builder.count("interface_summary_verifications");
                 verify_summary = summary;
                 replay_state.use_finished_summaries = false;
-            } else {
-                try self.relateInterfaceRoots(try summary.instantiate(self.graph), request_roots.items);
-                return;
+            } else switch (summary) {
+                .unchanged => {
+                    self.builder.count("interface_summary_unchanged_hits");
+                    return;
+                },
+                .constraints => |constraints| {
+                    try self.relateInterfaceRoots(try constraints.instantiate(self.graph), request_roots.items);
+                    return;
+                },
             }
         }
         self.builder.count("interface_summary_expansions");
@@ -23080,6 +23552,13 @@ const BodyContext = struct {
             .address = address,
             .evidence = stored_evidence,
             .request = try request.copy(self.graph.arena(), InterfaceSummaryCopy{}),
+            .input_len = shape.bytes.len,
+            .hole_classes = try self.graph.arena().dupe(?NodeId, hole_classes),
+            .hole_cells = hole_cells: {
+                const cells = try self.graph.arena().alloc(NodeId, holes.root_indices.len);
+                for (holes.root_indices, cells) |root_index, *cell| cell.* = roots[root_index];
+                break :hole_cells cells;
+            },
             .roots = roots,
             .lowlink = replay_index,
             .verify_summary = verify_summary,
@@ -23128,17 +23607,38 @@ const BodyContext = struct {
         )) {
             try relateConstructionFunctionRequestInterface(self.graph, root_node, roots[0]);
         }
-        try callee_ctx.instantiateTemplateDispatchRelations(template, null);
+        try callee_ctx.relateMaterializedEvidenceConstraints(&callee_ctx, callee_ctx.evidence.schema.?, edge.vector);
+        if (templateInterfaceIsClosed(callee_view, &template)) {
+            // A closed interface is complete once the request is related to
+            // its checked root; its relation table never enters this graph.
+            self.builder.count("interface_closed_expansions");
+        } else {
+            try callee_ctx.instantiateTemplateDispatchRelations(template, null);
 
-        var active_local_scopes = collections.DenseMap(checked.DispatchScopeId, NodeId).init(self.allocator);
-        defer active_local_scopes.deinit();
-        try callee_ctx.applyCheckedTemplateInterfaceScopeRelations(
-            template,
-            null,
-            root_node,
-            &active_local_scopes,
-            replay_state,
-        );
+            var active_local_scopes = collections.DenseMap(checked.DispatchScopeId, NodeId).init(self.allocator);
+            defer active_local_scopes.deinit();
+            try callee_ctx.applyCheckedTemplateInterfaceScopeRelations(
+                template,
+                null,
+                root_node,
+                &active_local_scopes,
+                replay_state,
+            );
+        }
+        // A component of one request is complete before it relates back to
+        // that request. A parametric request's summary is therefore taken
+        // from its expansion alone, so relating back cannot fill its holes.
+        const single_request_component = replay_state.entries.items[replay_index].lowlink == replay_index and
+            replay_state.stack.items[replay_state.stack.items.len - 1] == replay_index;
+        const parametric_request = for (hole_classes) |hole_class| {
+            if (hole_class != null) break true;
+        } else false;
+        var component_scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer component_scratch.deinit();
+        const single_request_constraints: ?InterfaceConstraints = if (single_request_component and parametric_request)
+            try InterfaceConstraints.capture(self.graph, component_scratch.allocator(), roots)
+        else
+            null;
         try self.relateInterfaceRoots(roots, request_roots.items);
         replay_state.entries.items[replay_index].status = .expanded;
         const lowlink = replay_state.entries.items[replay_index].lowlink;
@@ -23152,12 +23652,27 @@ const BodyContext = struct {
                 const entry = &replay_state.entries.items[index];
                 var scratch = std.heap.ArenaAllocator.init(self.allocator);
                 defer scratch.deinit();
-                const summary = try InterfaceConstraints.capture(self.graph, scratch.allocator(), entry.roots);
+                // Members of a larger component are captured after relating
+                // back to each other's requests, so their interfaces hold the
+                // settled types their holes stood for; only exact requests
+                // may reuse them.
+                const parametric = for (entry.hole_classes) |hole_class| {
+                    if (hole_class != null) break true;
+                } else false;
+                if (parametric and !single_request_component) {
+                    entry.status = .ready;
+                    if (index == replay_index) break;
+                    continue;
+                }
+                const constraints = single_request_constraints orelse try InterfaceConstraints.capture(self.graph, scratch.allocator(), entry.roots);
+                const entry_input: InterfaceConstraints.Identity = .{ .bytes = entry.request.bytes[0..entry.input_len], .leaves = entry.request.leaves };
+                const summary: InterfaceSummary = if (try (try constraints.identityInto(self.graph, scratch.allocator())).eql(entry_input, self.typeStore(), self.nameStore()))
+                    .unchanged
+                else
+                    .{ .constraints = constraints };
                 entry.status = .ready;
                 if (entry.verify_summary) |expected| {
-                    const expected_identity = try expected.identityInto(self.graph, scratch.allocator());
-                    const actual_identity = try summary.identityInto(self.graph, scratch.allocator());
-                    if (!try expected_identity.eql(actual_identity, self.typeStore(), self.nameStore())) {
+                    if (!try expected.eql(summary, self.graph, scratch.allocator(), self.typeStore(), self.nameStore())) {
                         Common.compilerBug("cached interface constraints disagreed with fresh checked relation expansion");
                     }
                 }
@@ -23197,10 +23712,9 @@ const BodyContext = struct {
             .repl_expr,
             => saved_source_region_override,
         };
-        const body = if (root.literalConversionKind() != null) blk: {
-            const ret_ty = try self.activeTypeFromCell(ret_cell);
-            break :blk try self.lowerNumeralRootBody(wrapper.body_expr, ret_ty);
-        } else switch (root.kind) {
+        const body = if (root.literalConversionKind() != null)
+            try self.lowerLiteralConversionRootBody(wrapper.body_expr, ret_cell)
+        else switch (root.kind) {
             .constant,
             .hoisted_constant,
             .hoisted_validation,
@@ -23683,13 +24197,13 @@ const BodyContext = struct {
                         visiting,
                     );
                     if (self.graph.sameClass(backing, produced_backing.node)) return produced_node;
-                    var witness = produced_named;
+                    var witness = produced_named.*;
                     witness.backing = .{
                         .node = backing,
                         .use = produced_backing.use,
                         .authority = produced_backing.authority,
                     };
-                    return try self.graph.newNode(.{ .named = witness });
+                    return try self.graph.newNode(try self.graph.namedContent(witness));
                 },
                 .redirect, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst => return null,
             },
@@ -24249,16 +24763,20 @@ const BodyContext = struct {
                 .lambda = lambda_id,
                 .body = checked_body,
             } }, body_ret_cell);
+        // Wrappers around the body carry the body's own result cell, which
+        // may be a producer-selected representation distinct from the
+        // declared return; the declared return is related to it below.
         if (arg_literal_guards.items.len != 0) {
+            const guarded_cell = self.exprTypeCell(body);
             const miss = try self.addExprWithTypeCell(
-                body_ret_cell,
+                guarded_cell,
                 .{ .crash = try self.addStringLiteral("pattern match failed") },
             );
             body = try self.applyPatternLiteralGuardsAtCell(
                 arg_literal_guards.items,
                 body,
                 miss,
-                body_ret_cell,
+                guarded_cell,
             );
         }
         const body_loc = self.exprLoc(body);
@@ -24273,7 +24791,7 @@ const BodyContext = struct {
         while (remaining > 0) {
             remaining -= 1;
             const arg_let = arg_lets.items[remaining];
-            body = try self.addExprWithTypeCell(body_ret_cell, .{ .let_ = .{
+            body = try self.addExprWithTypeCell(self.exprTypeCell(body), .{ .let_ = .{
                 .bind = arg_let.pat,
                 .value = arg_let.value,
                 .rest = body,
@@ -24493,11 +25011,20 @@ const BodyContext = struct {
             // requesting an active view of their still-unresolved payload.
             .numeral, .str_from_quote => {
                 const expr_node = try self.lowerExprTypeNode(expr_id);
+                if (checked.literalConversionRootOf(expr.data)) |root_id| {
+                    return try self.lowerLiteralConversionAtNode(expr_id, root_id, expr_node);
+                }
                 // Only an unpinned target variable takes the checked literal
                 // default. Openness inside a custom target is not evidence
                 // that the target itself should default to a builtin.
-                if (self.graph.content(expr_node) == .unresolved) {
-                    try self.graph.materializeLiteralDefault(expr_node);
+                switch (self.graph.content(expr_node)) {
+                    .unresolved => try self.graph.materializeLiteralDefault(expr_node),
+                    .primitive => {},
+                    // A custom target converts through its checked conversion
+                    // plan at this node; the target's own arguments may still
+                    // resolve through later relations in this body.
+                    .named, .record, .tuple, .tag_union, .empty_tag_union, .empty_record, .list, .box, .func, .erased, .zst => return try self.lowerSpecializedLiteralConversion(expr_id, expr_node),
+                    .redirect => Common.invariant("literal type node was not a class root"),
                 }
                 const expr_ty = try self.resolvedTypeViewForNode(expr_node);
                 return try self.lowerExprWithType(expr_id, expr_ty);
@@ -24741,8 +25268,7 @@ const BodyContext = struct {
         expr_id: checked.CheckedExprId,
         ty: Type.TypeId,
     ) Allocator.Error!?DraftExprId {
-        const entry = self.view.hoisted_constants.lookupByExpr(expr_id) orelse return null;
-        if (self.loweringOwnHoistedConstRoot(entry)) return null;
+        const entry = self.restoredHoistedConstEntry(expr_id) orelse return null;
         return try self.restoredHoistedConstAtType(entry, ty);
     }
 
@@ -24751,9 +25277,19 @@ const BodyContext = struct {
         expr_id: checked.CheckedExprId,
         request_node: NodeId,
     ) Allocator.Error!?DraftExprId {
+        const entry = self.restoredHoistedConstEntry(expr_id) orelse return null;
+        return try self.restoredHoistedConstAtNode(entry, request_node);
+    }
+
+    /// The hoisted const an expression lowers by restoring, rather than by
+    /// lowering its own checked body.
+    fn restoredHoistedConstEntry(
+        self: *BodyContext,
+        expr_id: checked.CheckedExprId,
+    ) ?checked.HoistedConstEntry {
         const entry = self.view.hoisted_constants.lookupByExpr(expr_id) orelse return null;
         if (self.loweringOwnHoistedConstRoot(entry)) return null;
-        return try self.restoredHoistedConstAtNode(entry, request_node);
+        return entry;
     }
 
     fn selectedHoistedConstEntry(
@@ -24834,12 +25370,12 @@ const BodyContext = struct {
             => Common.invariant("non-runtime checked expression reached Monotype lowering"),
             .runtime_error => return try self.runtimeCrashExpr(ty, "runtime error"),
             .numeral => |numeral| {
-                if (try self.restoredNumeralConst(expr_id, ty)) |restored| return restored;
-                return try self.lowerNumeralExpr(expr.ty, numeral, ty);
+                if (numeral.conversion_root) |root_id| return try self.lowerLiteralConversionAtNode(expr_id, root_id, try self.graph.importMono(ty));
+                return try self.lowerNumeralExpr(expr_id, numeral, ty);
             },
             .str_from_quote => |quote| {
-                if (try self.restoredNumeralConst(expr_id, ty)) |restored| return restored;
-                return try self.lowerQuoteExpr(expr.ty, quote, ty);
+                if (quote.conversion_root) |root_id| return try self.lowerLiteralConversionAtNode(expr_id, root_id, try self.graph.importMono(ty));
+                return try self.lowerQuoteExpr(expr_id, quote, ty);
             },
             .str_segment => |str| .{ .str_lit = try self.lowerStringLiteral(str) },
             .bytes_literal => |str| blk: {
@@ -24948,7 +25484,10 @@ const BodyContext = struct {
                 .{ .expect = try self.lowerExpr(child) },
             .break_ => try self.breakCurrentLoopExprData(),
             .return_ => |ret| .{ .return_ = try self.lowerReturn(ret, ret.context) },
-            .for_ => |for_| try self.lowerIteratorFor(for_, .{ .sealed = ty }, &.{}),
+            .for_ => |for_| .{ .block = .{
+                .statements = try self.addStmtSpan(&.{try self.addStmt(try self.lowerForStatement(for_))}),
+                .final_expr = try self.addExpr(.{ .ty = ty, .data = .unit }),
+            } },
             .hosted_lambda => Common.invariant("hosted lambda expression reached ordinary Monotype expression lowering"),
             .run_low_level => |low_level| .{ .low_level = .{ .op = low_level.op, .args = try self.lowerExprSpan(low_level.args) } },
         };
@@ -25870,7 +26409,7 @@ const BodyContext = struct {
             .args = .empty(),
         } });
         return try self.addExprWithTypeCell(cell, .{ .comptime_value = .{
-            .root = try self.draft.addComptimeValueRoot(.{ .module = view.key, .root = root_id, .const_locator = const_locator }),
+            .root = try self.draft.addComptimeValueRoot(.{ .module = view.key, .root = .{ .checked = root_id }, .const_locator = const_locator }),
             .initializer = initializer,
         } });
     }
@@ -26210,11 +26749,7 @@ const BodyContext = struct {
     }
 
     fn resolvedTargetIsStrInspect(self: *BodyContext, target: checked.ResolvedValueId) bool {
-        const raw = @intFromEnum(target);
-        if (raw >= self.view.resolved_refs.records.len) {
-            Common.invariant("checked direct call target is outside resolved value table");
-        }
-        return switch (self.view.resolved_refs.records[raw].ref) {
+        return switch (self.finalDirectTarget(target).record.ref) {
             .top_level_proc,
             .imported_proc,
             .hosted_proc,
@@ -26229,11 +26764,7 @@ const BodyContext = struct {
         self: *BodyContext,
         target: checked.ResolvedValueId,
     ) ?checked.IteratorProcedureId {
-        const raw = @intFromEnum(target);
-        if (raw >= self.view.resolved_refs.records.len) {
-            Common.invariant("checked direct call target is outside resolved value table");
-        }
-        return switch (self.view.resolved_refs.records[raw].ref) {
+        return switch (self.finalDirectTarget(target).record.ref) {
             .top_level_proc,
             .imported_proc,
             .hosted_proc,
@@ -26249,8 +26780,8 @@ const BodyContext = struct {
         procedure: ?checked.IteratorProcedureId,
         args: []const checked.CheckedExprId,
     ) Allocator.Error!bool {
-        if (procedure != .iter_custom) return false;
-        if (args.len != 3) Common.invariant("Iter.custom call did not have three arguments");
+        if (procedure != .custom) return false;
+        if (args.len != 3) Common.invariant("custom iterator call did not have three arguments");
         return try self.graph.containsIteratorInterface(try self.instNode(self.view.bodies.expr(args[0]).ty));
     }
 
@@ -26281,11 +26812,7 @@ const BodyContext = struct {
     }
 
     fn callsiteIntrinsicForResolvedTarget(self: *BodyContext, target: checked.ResolvedValueId) ?checked.IntrinsicId {
-        const raw = @intFromEnum(target);
-        if (raw >= self.view.resolved_refs.records.len) {
-            Common.invariant("checked direct call target is outside resolved value table");
-        }
-        const intrinsic = switch (self.view.resolved_refs.records[raw].ref) {
+        const intrinsic = switch (self.finalDirectTarget(target).record.ref) {
             .top_level_proc,
             .imported_proc,
             .hosted_proc,
@@ -26826,7 +27353,7 @@ const BodyContext = struct {
         defer self.allocator.free(fields);
         const backing_ty = self.namedBackingType(ret_ty) orelse
             Common.invariant("FieldNames iterator result was not an Iter nominal type");
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         const len_field = self.recordFieldByName(backing_ty, topology.len_field);
         const step_field = self.recordFieldByName(backing_ty, topology.step_field);
         const step_fn_ty = step_field.ty;
@@ -27054,14 +27581,13 @@ const BodyContext = struct {
         const expected_ret = if (self.isGeneratedIteratorEvidenceNode(request_fn.ret)) request_fn.ret else null;
 
         if (expected_ret) |expected| switch (procedure) {
-            .iter_from_step => return try self.generatedIteratorConstructorFunctionNode(expected),
+            .from_step => return try self.generatedIteratorConstructorFunctionNode(expected),
             .range_done => return try self.graphFunctionNode(request_fn.args, expected),
-            .numeric_range_delegate => return try self.graphFunctionNode(request_fn.args, expected),
-            .iter_iter, .iter_next, .iter_custom, .iter_single, .list_iter, .list_iter_rev, .str_iter_utf8, .iter_map, .iter_keep_if, .iter_drop_if, .iter_take_first, .iter_drop_first, .iter_concat, .iter_append, .iter_with_index, .iter_step_by, .range_iter, .numeric_to, .numeric_until => {},
+            .identity, .next, .custom, .single, .list_iter, .list_iter_rev, .str_iter_utf8, .map, .keep_if, .drop_if, .take_first, .drop_first, .concat, .append, .with_index, .step_by, .from_iter, .range_iter, .numeric_range_iter, .numeric_to, .numeric_until => {},
         };
 
         switch (procedure) {
-            .iter_iter => {
+            .identity => {
                 if (checked_args.len != 1 or request_fn.args.len != 1) {
                     Common.invariant("Iter.iter reached Monotype with an unexpected arity");
                 }
@@ -27069,9 +27595,9 @@ const BodyContext = struct {
                     return try self.graphFunctionNode(&.{request_fn.args[0]}, request_fn.args[0]);
                 }
             },
-            .iter_next => {
+            .next => {
                 if (checked_args.len != 1 or request_fn.args.len != 1) {
-                    Common.invariant("Iter.next reached Monotype with an unexpected arity");
+                    Common.invariant("iterator next reached Monotype with an unexpected arity");
                 }
                 if (self.isGeneratedIteratorEvidenceNode(request_fn.args[0])) {
                     return try self.graphFunctionNode(
@@ -27080,9 +27606,9 @@ const BodyContext = struct {
                     );
                 }
             },
-            .iter_custom => {
+            .custom => {
                 if (checked_args.len != 3 or request_fn.args.len != 3) {
-                    Common.invariant("Iter.custom reached Monotype with an unexpected arity");
+                    Common.invariant("custom iterator source reached Monotype with an unexpected arity");
                 }
                 if (self.expectedGeneratedIteratorProducerNode(expected_ret, mintedProducerKind(procedure))) |expected| {
                     if (self.isForcedDynamicIteratorNode(expected)) {
@@ -27135,7 +27661,7 @@ const BodyContext = struct {
                     try self.generatedIteratorNode(mintedProducerKind(procedure), public_fn.ret, &.{request_fn.args[0]}, null),
                 );
             },
-            .iter_single => {
+            .single => {
                 if (checked_args.len != 1 or request_fn.args.len != 1) {
                     Common.invariant("Iter.single reached Monotype with an unexpected arity");
                 }
@@ -27151,16 +27677,16 @@ const BodyContext = struct {
                     ),
                 );
             },
-            .range_iter, .numeric_until, .numeric_to => {
+            .numeric_until, .numeric_to => {
                 if (try self.generatedIteratorExpectedProducerFunctionNode(mintedProducerKind(procedure), request_fn.args, expected_ret)) |expected_fn| return expected_fn;
                 return try self.graphFunctionNode(
                     request_fn.args,
                     try self.generatedIteratorNode(mintedProducerKind(procedure), public_fn.ret, &.{}, null),
                 );
             },
-            .iter_map, .iter_keep_if, .iter_drop_if => return try self.generatedIteratorAdapterFunctionNode(mintedProducerKind(procedure), public_fn.ret, request_fn.args, checked_args, expected_ret, 1),
-            .iter_take_first, .iter_drop_first, .iter_append, .iter_with_index, .iter_step_by => return try self.generatedIteratorAdapterFunctionNode(mintedProducerKind(procedure), public_fn.ret, request_fn.args, checked_args, expected_ret, null),
-            .iter_concat => {
+            .map, .keep_if, .drop_if => return try self.generatedIteratorAdapterFunctionNode(mintedProducerKind(procedure), public_fn.ret, request_fn.args, checked_args, expected_ret, 1),
+            .take_first, .drop_first, .append, .with_index, .step_by, .from_iter => return try self.generatedIteratorAdapterFunctionNode(mintedProducerKind(procedure), public_fn.ret, request_fn.args, checked_args, expected_ret, null),
+            .concat => {
                 if (checked_args.len != 2 or request_fn.args.len != 2) {
                     Common.invariant("Iter.concat reached Monotype with an unexpected arity");
                 }
@@ -27174,16 +27700,17 @@ const BodyContext = struct {
                     );
                 }
             },
-            .numeric_range_delegate, .iter_from_step, .range_done => {},
+            .range_iter, .numeric_range_iter, .from_step, .range_done => {},
         }
         return null;
     }
 
-    /// Build the `Iter.custom` transition request with its checked state role
-    /// bound to the seed's exact representation. The transition's argument and
-    /// successful next-state result share that checked identity, so a fresh
-    /// instantiation propagates the representation through both positions
-    /// without mutating a finished seed Monotype or reconstructing a type path.
+    /// Build the transition request of `Iter.custom` or `Stream.custom` with
+    /// its checked state role bound to the seed's exact representation. The
+    /// transition's argument and successful next-state result share that
+    /// checked identity, so a fresh instantiation propagates the
+    /// representation through both positions without mutating a finished seed
+    /// Monotype or reconstructing a type path.
     fn iterCustomAdvanceRequestNode(
         self: *BodyContext,
         checked_advance: checked.CheckedExprId,
@@ -27192,29 +27719,29 @@ const BodyContext = struct {
         const checked_fn_ty = self.view.bodies.expr(checked_advance).ty;
         const checked_fn = self.checkedFunctionType(checked_fn_ty);
         if (checked_fn.args.len != 1) {
-            Common.invariant("Iter.custom advance callable did not have exactly one state argument");
+            Common.invariant("custom iterator advance callable did not have exactly one state argument");
         }
         var checked_try_ty = checked_fn.ret;
         const checked_try = while (true) switch (checkedPayload(self.view, checked_try_ty)) {
             .alias => |alias| checked_try_ty = alias.backing,
             .nominal => |nominal| break nominal,
-            .pending, .err, .flex, .rigid, .record, .tuple, .function, .tag_union, .empty_record, .empty_tag_union => Common.invariant("Iter.custom advance callable did not return Try"),
+            .pending, .err, .flex, .rigid, .record, .tuple, .function, .tag_union, .empty_record, .empty_tag_union => Common.invariant("custom iterator advance callable did not return Try"),
         };
         const checked_try_builtin = switch (checked_try.representation) {
             .builtin => |builtin| builtin,
-            .local_declaration, .imported_declaration, .local_box_payload_capability, .imported_box_payload_capability, .opaque_without_backing => Common.invariant("Iter.custom advance callable returned a non-builtin Try"),
+            .local_declaration, .imported_declaration, .local_box_payload_capability, .imported_box_payload_capability, .opaque_without_backing => Common.invariant("custom iterator advance callable returned a non-builtin Try"),
         };
         if (checked.builtinRuntimeEncoding(checked_try_builtin) != .try_nominal or checked_try.args.len != 2) {
-            Common.invariant("Iter.custom advance callable did not return the builtin Try type");
+            Common.invariant("custom iterator advance callable did not return the builtin Try type");
         }
         var checked_ok = checked_try.args[0];
         const checked_ok_items = while (true) switch (checkedPayload(self.view, checked_ok)) {
             .alias => |alias| checked_ok = alias.backing,
             .tuple => |items| break items,
-            .pending, .err, .flex, .rigid, .record, .nominal, .function, .tag_union, .empty_record, .empty_tag_union => Common.invariant("Iter.custom advance success value was not an item-state tuple"),
+            .pending, .err, .flex, .rigid, .record, .nominal, .function, .tag_union, .empty_record, .empty_tag_union => Common.invariant("custom iterator advance success value was not an item-state tuple"),
         };
         if (checked_ok_items.len != 2) {
-            Common.invariant("Iter.custom advance success tuple did not have item and state elements");
+            Common.invariant("custom iterator advance success tuple did not have item and state elements");
         }
         const checked_next_state = checked_ok_items[1];
 
@@ -27234,7 +27761,7 @@ const BodyContext = struct {
         const advance_node = try self.instNode(checked_fn_ty);
         const advance_fn = try self.graph.functionNodes(advance_node);
         if (advance_fn.args.len != 1 or !self.graph.sameClass(advance_fn.args[0], state_node)) {
-            Common.invariant("Iter.custom advance request lost its exact state argument");
+            Common.invariant("custom iterator advance request lost its exact state argument");
         }
         self.graph.registerConstructorEvidenceRequest(advance_node);
         return advance_node;
@@ -27255,7 +27782,9 @@ const BodyContext = struct {
         expected_ret: ?NodeId,
         callable_index: ?usize,
     ) Allocator.Error!?NodeId {
-        if (checked_args.len != 2 or args.len != 2) {
+        // The adapted iterator is always the first argument; the remaining
+        // arguments are the operation's own inputs.
+        if (checked_args.len != args.len or args.len == 0 or args.len > 2) {
             Common.invariant("iterator adapter reached Monotype with an unexpected arity");
         }
         if (try self.generatedIteratorExpectedProducerFunctionNode(kind, args, expected_ret)) |expected_fn| return expected_fn;
@@ -27319,12 +27848,12 @@ const BodyContext = struct {
 
     const IteratorRepresentationNames = Type.IteratorTopology;
 
-    fn iteratorRepresentationNames(self: *BodyContext) Allocator.Error!IteratorRepresentationNames {
+    fn iteratorRepresentationNames(self: *BodyContext, owner: static_dispatch.IteratorOwner) Allocator.Error!IteratorRepresentationNames {
         const topologies = self.view.static_dispatch_plans.iterator_topologies;
-        if (topologies.len != 1) {
-            Common.invariant("checked module omitted its unique iterator representation topology");
+        if (topologies.len != std.enums.values(static_dispatch.IteratorOwner).len) {
+            Common.invariant("checked module omitted an iterator representation topology");
         }
-        const topology = topologies[0];
+        const topology = topologies[@intFromEnum(owner)];
         return .{
             .len_field = try self.recordFieldName(self.view, topology.len_field),
             .step_field = try self.recordFieldName(self.view, topology.step_field),
@@ -27338,11 +27867,19 @@ const BodyContext = struct {
         };
     }
 
+    /// The public iterator type a generated or public iterator node belongs to.
+    fn iteratorOwnerOfNamed(builtin_owner: ?static_dispatch.BuiltinOwner) static_dispatch.IteratorOwner {
+        const owner = builtin_owner orelse
+            Common.invariant("iterator representation requested for a type without builtin identity");
+        return static_dispatch.iteratorOwner(owner) orelse
+            Common.invariant("iterator representation requested for a non-iterator builtin type");
+    }
+
     fn generatedIteratorConstructorFunctionNode(self: *BodyContext, iterator: NodeId) Allocator.Error!NodeId {
         const named = self.graph.content(iterator).named;
         const backing = named.backing orelse
             Common.invariant("generated iterator constructor requested a type without backing");
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(iteratorOwnerOfNamed(named.builtin_owner));
         return try self.graphFunctionNode(&.{
             try self.graph.recordFieldNode(backing.node, topology.len_field),
             try self.graph.recordFieldNode(backing.node, topology.step_field),
@@ -27353,7 +27890,7 @@ const BodyContext = struct {
         const named = self.graph.content(iterator).named;
         const backing = named.backing orelse
             Common.invariant("generated iterator next requested a type without backing");
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(iteratorOwnerOfNamed(named.builtin_owner));
         const step = try self.graph.functionNodes(try self.graph.recordFieldNode(backing.node, topology.step_field));
         return step.ret;
     }
@@ -27442,8 +27979,9 @@ const BodyContext = struct {
                 def.iterator_representation = .minted;
                 def.iterator_kind = ctx.kind;
                 def.iterator_depth = ctx.mint_depth;
-                def.iterator_topology = try ctx.body.iteratorRepresentationNames();
-                return .{ .named = .{
+                const topology = try ctx.body.iteratorRepresentationNames(iteratorOwnerOfNamed(ctx.public_source.builtin_owner));
+                def.iterator_topology = topology;
+                return try ctx.body.graph.namedContent(.{
                     .named_type = ctx.public_source.named_type,
                     .def = def,
                     .kind = ctx.public_source.kind,
@@ -27451,6 +27989,7 @@ const BodyContext = struct {
                     .args = args,
                     .backing = .{
                         .node = try ctx.body.generatedIteratorBackingNode(
+                            topology,
                             ctx.public_source.backing.node,
                             self_node,
                             ctx.item_node,
@@ -27458,12 +27997,12 @@ const BodyContext = struct {
                         .use = ctx.public_source.backing.use,
                         .authority = .generated_private,
                     },
-                    .generated_iterator = .{
+                    .generated_iterator = try ctx.body.graph.generatedIterator(.{
                         .callable_evidence = ctx.callable_evidence,
                         .public_source = ctx.public_source,
-                    },
+                    }),
                     .declared_order = ctx.public_source.declared_order,
-                } };
+                });
             }
         };
         return try self.graph.addRecursiveNode(Context{
@@ -27538,8 +28077,9 @@ const BodyContext = struct {
                 def.iterator_representation = .forced_dynamic;
                 def.iterator_kind = .forced_dynamic;
                 def.iterator_depth = 0;
-                def.iterator_topology = try ctx.body.iteratorRepresentationNames();
-                return .{ .named = .{
+                const topology = try ctx.body.iteratorRepresentationNames(iteratorOwnerOfNamed(ctx.public_source.builtin_owner));
+                def.iterator_topology = topology;
+                return try ctx.body.graph.namedContent(.{
                     .named_type = ctx.public_source.named_type,
                     .def = def,
                     .kind = ctx.public_source.kind,
@@ -27547,6 +28087,7 @@ const BodyContext = struct {
                     .args = args,
                     .backing = .{
                         .node = try ctx.body.generatedIteratorBackingNode(
+                            topology,
                             ctx.public_source.backing.node,
                             self_node,
                             ctx.item_node,
@@ -27554,12 +28095,12 @@ const BodyContext = struct {
                         .use = ctx.public_source.backing.use,
                         .authority = .generated_private,
                     },
-                    .generated_iterator = .{
+                    .generated_iterator = try ctx.body.graph.generatedIterator(.{
                         .callable_evidence = null,
                         .public_source = ctx.public_source,
-                    },
+                    }),
                     .declared_order = ctx.public_source.declared_order,
-                } };
+                });
             }
         };
         return try self.graph.addRecursiveNode(Context{
@@ -27571,18 +28112,18 @@ const BodyContext = struct {
 
     fn generatedIteratorBackingNode(
         self: *BodyContext,
+        topology: IteratorRepresentationNames,
         public_backing: NodeId,
         self_node: NodeId,
         item_node: NodeId,
     ) Allocator.Error!NodeId {
-        const topology = try self.iteratorRepresentationNames();
         const public_fields = (try self.graph.recordNodes(public_backing)).fields;
         const fields = try self.graph.arena().alloc(InstField, public_fields.len);
         for (public_fields, fields) |field, *out| {
             out.* = .{
                 .name = field.name,
                 .ty = if (field.name == topology.step_field)
-                    try self.generatedIteratorStepFunctionNode(field.ty, self_node, item_node)
+                    try self.generatedIteratorStepFunctionNode(topology, field.ty, self_node, item_node)
                 else
                     field.ty,
                 .value_ty = field.value_ty,
@@ -27598,6 +28139,7 @@ const BodyContext = struct {
 
     fn generatedIteratorStepFunctionNode(
         self: *BodyContext,
+        topology: IteratorRepresentationNames,
         public_step: NodeId,
         self_node: NodeId,
         item_node: NodeId,
@@ -27605,17 +28147,17 @@ const BodyContext = struct {
         const step = try self.graph.functionNodes(public_step);
         return try self.graphFunctionNode(
             step.args,
-            try self.generatedIteratorStepResultNode(step.ret, self_node, item_node),
+            try self.generatedIteratorStepResultNode(topology, step.ret, self_node, item_node),
         );
     }
 
     fn generatedIteratorStepResultNode(
         self: *BodyContext,
+        topology: IteratorRepresentationNames,
         public_result: NodeId,
         self_node: NodeId,
         item_node: NodeId,
     ) Allocator.Error!NodeId {
-        const topology = try self.iteratorRepresentationNames();
         const public_tags = (try self.graph.tagRowNodes(public_result)).tags;
         const tags = try self.graph.arena().alloc(InstTag, public_tags.len);
         for (public_tags, tags) |tag, *out| {
@@ -28084,7 +28626,7 @@ const BodyContext = struct {
         ty: Type.TypeId,
         mode: FieldNamesIterMode,
     ) Allocator.Error!DraftExprId {
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         return switch (mode) {
             .all => try self.lowerInterpolationLenIfKnown(remaining, ty),
             .for_size => blk: {
@@ -28108,7 +28650,7 @@ const BodyContext = struct {
     ) Allocator.Error!DraftExprId {
         const demand_scope = try self.enterCallableBodyDemandScope(&.{}, &.{});
         defer demand_scope.leave();
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         const done_tag = self.monoTagByName(step_ret_ty, topology.done_tag);
         const body = try self.addExpr(.{ .ty = step_ret_ty, .data = .{ .tag = .{
             .name = done_tag.name,
@@ -28131,7 +28673,7 @@ const BodyContext = struct {
         const rest_ty = try self.exprType(rest_expr);
         const demand_scope = try self.enterCallableBodyDemandScope(&.{}, &.{ item_ty, rest_ty });
         defer demand_scope.leave();
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         const one_tag = self.monoTagByName(step_ret_ty, topology.one_tag);
         const one_payloads = self.typeStore().span(one_tag.payloads);
         if (one_payloads.len != 1) Common.invariant("Iter step One tag did not have one record payload");
@@ -28162,7 +28704,7 @@ const BodyContext = struct {
         defer demand_scope.leave();
         const item_local = try self.addLocal(self.builder.symbols.fresh(), field_handle_ty);
         const item_local_expr = try self.localExpr(item_local, field_handle_ty);
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
 
         const one_tag = self.monoTagByName(step_ret_ty, topology.one_tag);
         const one_payloads = self.typeStore().span(one_tag.payloads);
@@ -28205,7 +28747,7 @@ const BodyContext = struct {
         const fields = self.typeStore().fieldSpan(self.recordFieldsSpan(ty));
         const lowered = try self.allocator.alloc(DraftFieldExpr, fields.len);
         defer self.allocator.free(lowered);
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
 
         for (0..GuardedList.borrowLen(fields)) |i| {
             const field = GuardedList.at(fields, i);
@@ -30552,16 +31094,7 @@ const BodyContext = struct {
         if (self.setPayloadType(shape_ty)) |payload_ty| {
             return try self.lowerParseSetFromState(payload_ty, shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan);
         }
-        switch (self.shapeContent(shape_ty)) {
-            .list => |elem_ty| return try self.lowerParseListFromState(elem_ty, shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan),
-            .tuple => |items| {
-                const item_tys = try GuardedList.dupe(self.allocator, Type.TypeId, self.typeStore().span(items));
-                defer self.allocator.free(item_tys);
-                return try self.lowerParseTupleFromState(item_tys, shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan);
-            },
-            .box => |payload_ty| return try self.lowerParseBoxFromState(payload_ty, shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan),
-            .primitive, .named, .record, .tag_union, .func, .erased, .zst => {},
-        }
+        // The checked nominal codec owns this value, regardless of its backing shape.
         if (self.frozenCustomCodecCallForShape(.parser, shape_ty)) |prepared| {
             return try self.lowerCustomParserFromState(
                 prepared.*,
@@ -30572,6 +31105,16 @@ const BodyContext = struct {
                 state_ty,
                 ret_ty,
             );
+        }
+        switch (self.shapeContent(shape_ty)) {
+            .list => |elem_ty| return try self.lowerParseListFromState(elem_ty, shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan),
+            .tuple => |items| {
+                const item_tys = try GuardedList.dupe(self.allocator, Type.TypeId, self.typeStore().span(items));
+                defer self.allocator.free(item_tys);
+                return try self.lowerParseTupleFromState(item_tys, shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan);
+            },
+            .box => |payload_ty| return try self.lowerParseBoxFromState(payload_ty, shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan),
+            .primitive, .named, .record, .tag_union, .func, .erased, .zst => {},
         }
         return try self.lowerParseShapeFromState(shape_ty, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan);
     }
@@ -33131,9 +33674,9 @@ const BodyContext = struct {
         checked_args: []const checked.CheckedExprId,
         fn_nodes: FunctionNodes,
     ) Allocator.Error!?LoweredCall {
-        if (procedure != .iter_next) return null;
+        if (procedure != .next) return null;
         if (checked_args.len != 1 or fn_nodes.args.len != 1) {
-            Common.invariant("Iter.next reached Monotype with an unexpected arity");
+            Common.invariant("iterator next reached Monotype with an unexpected arity");
         }
         const iterator_node = fn_nodes.args[0];
         if (!self.isGeneratedIteratorEvidenceNode(iterator_node)) return null;
@@ -33155,7 +33698,8 @@ const BodyContext = struct {
     ) Allocator.Error!BodyExprData {
         const backing = self.graph.namedNodes(iterator_node).backing orelse
             Common.invariant("generated iterator next requested a type without backing");
-        const step_name = try self.nameStoreMut().internRecordFieldLabel("step");
+        const owner = iteratorOwnerOfNamed(self.graph.content(iterator_node).named.builtin_owner);
+        const step_name = (try self.iteratorRepresentationNames(owner)).step_field;
         const step_node = try self.graph.opaqueDefinitionFieldNode(backing.node, step_name);
         const step = try self.addExprWithTypeCell(
             DraftTypeCell.fromGraphNode(step_node),
@@ -33303,12 +33847,7 @@ const BodyContext = struct {
         self: *BodyContext,
         target: checked.ResolvedValueId,
     ) Allocator.Error!?HostedTryAdapterCapability {
-        const raw = @intFromEnum(target);
-        if (raw >= self.view.resolved_refs.records.len) {
-            Common.invariant("checked direct call target is outside resolved value table");
-        }
-        const record = self.view.resolved_refs.records[raw];
-        return switch (record.ref) {
+        return switch (self.finalDirectTarget(target).record.ref) {
             .top_level_proc,
             .imported_proc,
             .hosted_proc,
@@ -33591,54 +34130,6 @@ const BodyContext = struct {
             }
         }
         return try functionRequestNode(self.graph, fn_node, request_args, request_ret);
-    }
-
-    fn relateFormalToOperand(
-        self: *BodyContext,
-        formal_node: NodeId,
-        caller: *BodyContext,
-        operand: static_dispatch.StaticDispatchOperand,
-    ) Allocator.Error!void {
-        switch (operand) {
-            .checked_expr => |checked_arg| {
-                const arg_ty = caller.view.bodies.expr(checked_arg).ty;
-                try relateRequestComponent(self.graph, formal_node, try caller.instNode(arg_ty));
-            },
-            .generated_interpolation_iter,
-            .generated_numeral,
-            .generated_quote,
-            => {},
-        }
-    }
-
-    fn instantiateNumeralPlanCallNode(
-        self: *BodyContext,
-        source_fn_ty: checked.CheckedTypeId,
-        caller: *BodyContext,
-        checked_ret_ty: checked.CheckedTypeId,
-        target_ty: Type.TypeId,
-        operands: []const static_dispatch.StaticDispatchOperand,
-    ) Allocator.Error!NodeId {
-        const function = self.checkedFunctionType(source_fn_ty);
-        if (function.args.len != operands.len) {
-            Common.invariant("checked from_numeral plan arity differs from its function type");
-        }
-        const fn_node = try self.instNode(source_fn_ty);
-        const fn_graph = switch (self.graph.content(fn_node)) {
-            .func => |func| func,
-            .redirect, .unresolved, .primitive, .list, .box, .tuple, .tag_union, .record, .empty_tag_union, .empty_record, .named, .erased, .zst => Common.invariant("checked from_numeral plan had a non-function instantiation node"),
-        };
-        if (fn_graph.args.len != operands.len) {
-            Common.invariant("checked from_numeral plan graph arity differed from its operand span");
-        }
-        // The numeral expression's checked type is the converted value type;
-        // the plan's checked structure relates it to the Try-shaped return.
-        try self.graph.unify(try caller.instNode(checked_ret_ty), try self.graph.importMono(target_ty));
-        try self.graph.unify(try self.instNode(checked_ret_ty), try self.graph.importMono(target_ty));
-        for (fn_graph.args, operands) |formal_node, operand| {
-            try self.relateFormalToOperand(formal_node, caller, operand);
-        }
-        return fn_node;
     }
 
     fn instantiateTargetFromPlanNode(
@@ -34167,10 +34658,7 @@ const BodyContext = struct {
                 // final segment's relation is the trailing whole-expression
                 // constraint below.
                 .required => {
-                    const slot_node = switch (segment.backing_access) {
-                        .inspectable => try self.graph.requiredRecordFieldNode(field_node, mono_field_name),
-                        .opaque_definition_private => try self.graph.requiredOpaqueDefinitionFieldNode(field_node, mono_field_name),
-                    };
+                    const slot_node = try self.graph.requiredRecordFieldNode(field_node, mono_field_name);
                     if (!is_last) {
                         try self.constrainCheckedInterfaceToCell(
                             segment.success_ty,
@@ -34183,10 +34671,7 @@ const BodyContext = struct {
                 // value; the chain continues from the Present payload.
                 .optional => {
                     saw_optional = true;
-                    const field = switch (segment.backing_access) {
-                        .inspectable => try self.graph.optionalRecordFieldNodes(field_node, mono_field_name),
-                        .opaque_definition_private => try self.graph.optionalOpaqueDefinitionFieldNodes(field_node, mono_field_name),
-                    };
+                    const field = try self.graph.optionalRecordFieldNodes(field_node, mono_field_name);
                     const value_node = try self.instNode(segment.success_ty);
                     try self.graph.unify(field.value, value_node);
                     try self.graph.unify(field.slot, try self.optionalSlotNode(value_node));
@@ -34461,7 +34946,7 @@ const BodyContext = struct {
             if (try self.nodeIsProvenUninhabited(arg_node)) return fn_nodes.ret;
         }
         if (self.iteratorProcedureForResolvedTarget(target)) |procedure| {
-            if (procedure == .iter_next and fn_nodes.args.len == 1 and self.isGeneratedIteratorEvidenceNode(fn_nodes.args[0])) {
+            if (procedure == .next and fn_nodes.args.len == 1 and self.isGeneratedIteratorEvidenceNode(fn_nodes.args[0])) {
                 return fn_nodes.ret;
             }
         }
@@ -34524,39 +35009,189 @@ const BodyContext = struct {
         }
         const record = self.view.resolved_refs.records[raw];
         return switch (record.ref) {
-            .local_proc => |local| .{ .local = try self.lowerDraftLocalProcAtNode(
-                local,
-                self.view,
-                try self.localProcContextId(self.view, local.binder, local.expr),
-                source_fn_ty,
-                source_fn_key,
-                request_fn_node,
-                try self.evidenceForUseSiteAtNode(record.expr, request_fn_node),
-                record.recursive_reference,
-                .inherit,
-            ) },
+            .local_proc => |local| if (local.is_alias)
+                try self.forwardedLocalAliasCalleeAtNode(local, record.expr, request_fn_node)
+            else
+                .{ .local = try self.lowerDraftLocalProcAtNode(
+                    local,
+                    self.view,
+                    try self.localProcContextId(self.view, local.binder, local.expr),
+                    source_fn_ty,
+                    source_fn_key,
+                    request_fn_node,
+                    try self.evidenceForUseSiteAtNode(record.expr, request_fn_node),
+                    record.recursive_reference,
+                    .inherit,
+                ) },
             .top_level_proc,
             .imported_proc,
             .hosted_proc,
             .promoted_top_level_proc,
-            => |proc| try self.draftFnSlotForProcedureUseAtNode(
-                proc,
-                source_fn_ty,
-                source_fn_key,
-                request_fn_node,
-                try self.evidenceForProcedureUseAtNode(proc, record.expr, null, request_fn_node, .body_lowering),
-                record.recursive_reference,
-            ),
-            .platform_required_proc => |proc| try self.draftFnSlotForProcedureUseAtNode(
-                proc.procedure,
-                source_fn_ty,
-                source_fn_key,
-                request_fn_node,
-                try self.evidenceForProcedureUseAtNode(proc.procedure, record.expr, proc.root_evidence, request_fn_node, .body_lowering),
-                record.recursive_reference,
-            ),
+            => |proc| if (self.builder.forwardingCallableEvalForProcedureUse(proc)) |alias|
+                try self.forwardedCallableEvalCalleeAtNode(alias, record.expr, request_fn_node)
+            else
+                try self.draftFnSlotForProcedureUseAtNode(
+                    proc,
+                    source_fn_ty,
+                    source_fn_key,
+                    request_fn_node,
+                    try self.evidenceForProcedureUseAtNode(proc, record.expr, null, request_fn_node, .body_lowering),
+                    record.recursive_reference,
+                ),
+            .platform_required_proc => |proc| if (self.builder.forwardingCallableEvalForProcedureUse(proc.procedure)) |alias|
+                try self.forwardedCallableEvalCalleeAtNode(alias, record.expr, request_fn_node)
+            else
+                try self.draftFnSlotForProcedureUseAtNode(
+                    proc.procedure,
+                    source_fn_ty,
+                    source_fn_key,
+                    request_fn_node,
+                    try self.evidenceForProcedureUseAtNode(proc.procedure, record.expr, proc.root_evidence, request_fn_node, .body_lowering),
+                    record.recursive_reference,
+                ),
             .local_param, .local_value, .local_mutable_version, .pattern_binder, .selected_hoisted_const, .top_level_const, .imported_const, .platform_required_declaration, .platform_required_checked_error, .platform_required_const => Common.invariant("checked direct call target was not a procedure"),
         };
+    }
+
+    /// A call through a local exact procedure alias calls the alias's lookup
+    /// directly. The alias owns an instantiation scope: its use-site evidence
+    /// enters that scope, and the lookup's own evidence is resolved inside it,
+    /// exactly as a value use of the alias lowers its lookup.
+    fn forwardedLocalAliasCalleeAtNode(
+        self: *BodyContext,
+        alias: checked.LocalProcedureBinding,
+        use_expr: checked.CheckedExprId,
+        request_fn_node: NodeId,
+    ) Allocator.Error!DraftFnSlot {
+        const scope_id = alias.dispatch_scope orelse
+            Common.invariant("generalized callable alias has no checked scheme scope");
+        const edge = try self.evidenceForUseSiteAtNode(use_expr, request_fn_node);
+        const evidence = try enterEvidenceScope(self.builder, self.evidence, scope_id, alias.expr, edge);
+        const scope = self.view.templates.dispatch_scopes[@intFromEnum(scope_id)];
+        const previous_instantiation = self.instantiation;
+        const previous_evidence = self.evidence;
+        self.instantiation = TypeInstantiationContext.init(self.allocator, self.builder.allocateInstantiationScope(), self.view.key.bytes);
+        self.evidence = evidence;
+        defer {
+            self.instantiation.deinit();
+            self.instantiation = previous_instantiation;
+            self.evidence = previous_evidence;
+        }
+        try self.seedSubstitution(evidence.schema.?, edge.subst);
+        try relateFunctionRequestInterface(self.graph, try self.instNode(scope.scheme_root), request_fn_node);
+        return try self.forwardedLookupCalleeAtNode(alias.expr, request_fn_node);
+    }
+
+    /// A call through a top-level exact procedure alias calls the alias's
+    /// lookup directly, inside the alias's entry-wrapper evidence scope, the
+    /// same scope a value use of the alias lowers its lookup in.
+    fn forwardedCallableEvalCalleeAtNode(
+        self: *BodyContext,
+        alias: Builder.CallableEvalUse,
+        use_expr: checked.CheckedExprId,
+        request_fn_node: NodeId,
+    ) Allocator.Error!DraftFnSlot {
+        const view = alias.view;
+        const template = view.callable_eval_templates.templates[@intFromEnum(alias.template)];
+        const lookup = template.forwarded_lookup orelse
+            Common.invariant("forwarded callable-eval alias had no checked lookup");
+        const root = view.compile_time_roots.root(template.root);
+        const wrapper = view.entry_wrappers.lookupByRoot(template.root) orelse
+            Common.invariant("callable eval template root had no checked entry wrapper");
+        const edge = try self.evidenceForUseSiteAtNode(use_expr, request_fn_node);
+
+        var body_ctx = try BodyContext.initWithMethodScope(self.allocator, self.builder, view, self.method_scope, wrapper.template, self.graph, self.draft);
+        defer body_ctx.deinit();
+        const entry_template = view.templates.get(wrapper.template.template);
+        const schema = templateSchemaIn(view, &entry_template);
+        const subst = try body_ctx.substitutionFromCheckedTypes(view, schema.scheme_vars);
+        body_ctx.evidence = rootEvidenceWithSubstitution(wrapper.template, schema, .{
+            .subst = subst,
+            .vector = edge.vector,
+        });
+        try body_ctx.seedSubstitution(schema, subst);
+        body_ctx.frozen_sealed_emission = self.frozen_sealed_emission;
+        body_ctx.frozen_type_finals = self.frozen_type_finals;
+        body_ctx.frozen_codec_calls = self.frozen_codec_calls;
+        body_ctx.frozen_field_defaults = self.frozen_field_defaults;
+        const root_fn_key = view.types.rootKey(wrapper.checked_fn_root);
+        body_ctx.owner_context_fn_key = root_fn_key;
+        body_ctx.current_fn_key = root_fn_key;
+
+        const wrapper_fn_node = try body_ctx.graphFunctionNode(&.{}, request_fn_node);
+        try self.graph.unify(try body_ctx.instNode(wrapper.checked_fn_root), wrapper_fn_node);
+        try self.graph.unify(try body_ctx.instNode(template.checked_fn_root), request_fn_node);
+        try self.graph.unify(try body_ctx.instNode(root.checked_type), request_fn_node);
+        return try body_ctx.forwardedLookupCalleeAtNode(lookup, request_fn_node);
+    }
+
+    /// The direct callee an alias's lookup names, requested at the alias
+    /// call's own interface. A lookup of another alias forwards again.
+    fn forwardedLookupCalleeAtNode(
+        self: *BodyContext,
+        lookup: checked.CheckedExprId,
+        request_fn_node: NodeId,
+    ) Allocator.Error!DraftFnSlot {
+        const target = self.view.resolved_refs.lookupIdByCheckedExpr(lookup) orelse
+            Common.invariant("forwarded procedure alias lookup had no resolved value");
+        const lookup_ty = self.view.bodies.expr(lookup).ty;
+        try relateFunctionRequestInterface(self.graph, try self.instNode(lookup_ty), request_fn_node);
+        return try self.fnTemplateForDirectCallAtNode(
+            target,
+            lookup_ty,
+            self.view.types.rootKey(lookup_ty),
+            request_fn_node,
+        );
+    }
+
+    /// The procedure a direct call finally reaches, following exact procedure
+    /// aliases, and the checked module view that owns its resolved value. The
+    /// callee's compiler-owned roles (call-site intrinsics, iterator
+    /// procedures, `Str.inspect`, hosted `Try` adapters) belong to it.
+    const FinalDirectTarget = struct {
+        view: ModuleView,
+        record: checked.ResolvedValueRefRecord,
+    };
+
+    fn finalDirectTarget(self: *BodyContext, target: checked.ResolvedValueId) FinalDirectTarget {
+        const raw = @intFromEnum(target);
+        if (raw >= self.view.resolved_refs.records.len) {
+            Common.invariant("checked direct call target is outside resolved value table");
+        }
+        var view = self.view;
+        var record = view.resolved_refs.records[raw];
+        while (true) {
+            switch (record.ref) {
+                .local_proc => |local| if (local.is_alias) {
+                    const final = local.alias_target orelse
+                        Common.invariant("callable alias has no published target");
+                    record = view.resolved_refs.records[@intFromEnum(final)];
+                    continue;
+                },
+                .top_level_proc,
+                .imported_proc,
+                .hosted_proc,
+                .promoted_top_level_proc,
+                => |proc| if (self.builder.forwardingCallableEvalForProcedureUse(proc)) |alias| {
+                    view = alias.view;
+                    const template = view.callable_eval_templates.templates[@intFromEnum(alias.template)];
+                    const lookup = view.resolved_refs.lookupIdByCheckedExpr(template.forwarded_lookup.?) orelse
+                        Common.invariant("forwarded procedure alias lookup had no resolved value");
+                    record = view.resolved_refs.records[@intFromEnum(lookup)];
+                    continue;
+                },
+                .platform_required_proc => |required| if (self.builder.forwardingCallableEvalForProcedureUse(required.procedure)) |alias| {
+                    view = alias.view;
+                    const template = view.callable_eval_templates.templates[@intFromEnum(alias.template)];
+                    const lookup = view.resolved_refs.lookupIdByCheckedExpr(template.forwarded_lookup.?) orelse
+                        Common.invariant("forwarded procedure alias lookup had no resolved value");
+                    record = view.resolved_refs.records[@intFromEnum(lookup)];
+                    continue;
+                },
+                .local_param, .local_value, .local_mutable_version, .pattern_binder, .selected_hoisted_const, .top_level_const, .imported_const, .platform_required_declaration, .platform_required_checked_error, .platform_required_const => {},
+            }
+            return .{ .view = view, .record = record };
+        }
     }
 
     fn draftFnSlotForProcedureUseAtNode(
@@ -34577,7 +35212,7 @@ const BodyContext = struct {
             request_fn_node,
             edge,
             if (recursive_reference) .recursive_reference else .instantiation,
-            if (proc.iterator_procedure == .iter_from_step) .exact_graph else .independent_roots,
+            if (proc.iterator_procedure == .from_step) .exact_graph else .independent_roots,
             .inherit,
         );
     }
@@ -34780,19 +35415,18 @@ const BodyContext = struct {
     }
 
     fn directCallCaptureSpan(self: *BodyContext, target: checked.ResolvedValueId) Allocator.Error!DraftSpan(DraftExprId) {
-        const raw = @intFromEnum(target);
-        if (raw >= self.view.resolved_refs.records.len) {
-            Common.invariant("checked direct call target is outside resolved value table");
-        }
-        const record = self.view.resolved_refs.records[raw];
-        return switch (record.ref) {
-            .local_proc => |local| try self.localProcCaptureExprSpan(
-                try self.localProcContextId(self.view, local.binder, local.expr),
-                self.view.key.bytes,
-                local.binder,
-                local.expr,
-                null,
-            ),
+        const final = self.finalDirectTarget(target);
+        return switch (final.record.ref) {
+            .local_proc => |local| if (!moduleBytesEqual(final.view.key.bytes, self.view.key.bytes))
+                Common.invariant("forwarded direct call reached a local procedure of another module")
+            else
+                try self.localProcCaptureExprSpan(
+                    try self.localProcContextId(self.view, local.binder, local.expr),
+                    self.view.key.bytes,
+                    local.binder,
+                    local.expr,
+                    null,
+                ),
             .top_level_proc,
             .imported_proc,
             .hosted_proc,
@@ -35675,7 +36309,10 @@ const BodyContext = struct {
     ) Allocator.Error!NodeId {
         return switch (slot) {
             .local => |local| switch (local) {
-                .draft => |draft_fn| try self.completeDeferredIteratorResult(draft_fn),
+                .draft => |draft_fn| try self.completedDraftCalleeWitness(
+                    draft_fn,
+                    try self.completeDeferredIteratorResult(draft_fn),
+                ),
                 .final => |final_fn| blk: {
                     const completed_node = try self.programFnSourceTypeNode(final_fn);
                     const request_fn = try self.graph.functionNodes(imported_fallback);
@@ -35689,6 +36326,23 @@ const BodyContext = struct {
                 },
             },
         };
+    }
+
+    /// A completed draft callee's type is immutable producer output: other
+    /// requests with the same identity must seal to the same type. A caller
+    /// therefore consumes a witness of it, so joining the call's result with
+    /// the caller's own producers (the branches of an `if`, say) cannot change
+    /// the callee's result representation. A callee still being lowered is
+    /// shared instead, because its recursive edges must join its own live
+    /// representation.
+    fn completedDraftCalleeWitness(
+        self: *BodyContext,
+        draft_fn: DraftFnId,
+        callee_node: NodeId,
+    ) Allocator.Error!NodeId {
+        const spec_index = self.draft.template_spec_by_fn.get(draft_fn) orelse return callee_node;
+        if (self.draft.template_specs.items[spec_index].state != .lowered) return callee_node;
+        return try self.graph.privateResultWitness(callee_node);
     }
 
     /// Relate a callee-authored iterator representation to the checked public
@@ -38644,7 +39298,7 @@ const BodyContext = struct {
 
         const backing_ty = self.namedBackingType(ty) orelse
             Common.invariant("generated interpolation iterator expected Iter nominal type");
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         const len_field = self.recordFieldByName(backing_ty, topology.len_field);
         const step_field = self.recordFieldByName(backing_ty, topology.step_field);
         const step_fn_ty = step_field.ty;
@@ -38725,7 +39379,7 @@ const BodyContext = struct {
         const fields = self.typeStore().fieldSpan(self.recordFieldsSpan(backing_ty));
         const lowered = try self.allocator.alloc(DraftFieldExpr, fields.len);
         defer self.allocator.free(lowered);
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
 
         for (0..GuardedList.borrowLen(fields)) |i| {
             const field = GuardedList.at(fields, i);
@@ -38755,7 +39409,7 @@ const BodyContext = struct {
         remaining: usize,
         ty: Type.TypeId,
     ) Allocator.Error!DraftExprId {
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         const known_tag = self.monoTagByName(ty, topology.known_tag);
         const payloads = self.typeStore().span(known_tag.payloads);
         if (payloads.len != 1) Common.invariant("Iter.len_if_known Known tag did not have one payload");
@@ -38776,7 +39430,7 @@ const BodyContext = struct {
     ) Allocator.Error!DraftExprId {
         const demand_scope = try self.enterCallableBodyDemandScope(&.{}, &.{});
         defer demand_scope.leave();
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         const done_tag = self.monoTagByName(step_ret_ty, topology.done_tag);
         const body = try self.addExpr(.{ .ty = step_ret_ty, .data = .{ .tag = .{
             .name = done_tag.name,
@@ -38809,7 +39463,7 @@ const BodyContext = struct {
             .tuple = try self.addExprSpan(&[_]DraftExprId{ value_expr, segment_expr }),
         } });
 
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
         const one_tag = self.monoTagByName(step_ret_ty, topology.one_tag);
         const payloads = self.typeStore().span(one_tag.payloads);
         if (payloads.len != 1) Common.invariant("Iter step One tag did not have one record payload");
@@ -38832,7 +39486,7 @@ const BodyContext = struct {
         const fields = self.typeStore().fieldSpan(self.recordFieldsSpan(ty));
         const lowered = try self.allocator.alloc(DraftFieldExpr, fields.len);
         defer self.allocator.free(lowered);
-        const topology = try self.iteratorRepresentationNames();
+        const topology = try self.iteratorRepresentationNames(.iter);
 
         for (0..GuardedList.borrowLen(fields)) |i| {
             const field = GuardedList.at(fields, i);
@@ -39024,6 +39678,12 @@ const BodyContext = struct {
                     },
                     .record => |record| break :blk try self.lowerRecordConstructorAtNode(checked_expr, record, expected_node),
                     .call => break :blk try self.lowerCallExprAtNode(checked_expr, expected_node),
+                    .numeral => |numeral| if (numeral.conversion_root) |root_id| {
+                        break :blk try self.lowerLiteralConversionAtNode(checked_expr, root_id, expected_node);
+                    },
+                    .str_from_quote => |quote| if (quote.conversion_root) |root_id| {
+                        break :blk try self.lowerLiteralConversionAtNode(checked_expr, root_id, expected_node);
+                    },
                     .dispatch_call => |plan| {
                         try self.selectExprRepresentationAtNode(checked_expr, expected_node);
                         break :blk try self.lowerDispatchExprAtType(self.view.bodies.expr(checked_expr).ty, plan, cell);
@@ -39045,7 +39705,7 @@ const BodyContext = struct {
                     .if_ => |if_| break :blk try self.lowerIfExprAtTypeCell(checked_expr, if_, cell),
                     .runtime_error => break :blk try self.runtimeCrashExprAtCell(cell, "runtime error"),
                     .anno_only => Common.invariant("non-runtime checked expression reached Monotype lowering"),
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+                    .pending, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
                 }
                 switch (expr.data) {
                     .tuple_access => |access| {
@@ -39191,10 +39851,7 @@ const BodyContext = struct {
         var prefix_node = receiver_node;
         for (field.segments) |segment| {
             const field_name = try self.recordFieldName(self.view, segment.field_name);
-            prefix_node = switch (segment.backing_access) {
-                .inspectable => try self.graph.requiredRecordFieldNode(prefix_node, field_name),
-                .opaque_definition_private => try self.graph.requiredOpaqueDefinitionFieldNode(prefix_node, field_name),
-            };
+            prefix_node = try self.graph.requiredRecordFieldNode(prefix_node, field_name);
             self.draft.field_access_segments.appendAssumeCapacity(.{ .field = field_name });
         }
         try relateRequestComponent(self.graph, expected_node, prefix_node);
@@ -40121,10 +40778,7 @@ const BodyContext = struct {
         const field_name = try self.recordFieldName(self.view, segment.field_name);
         switch (segment.mode) {
             .required => {
-                const field_node = switch (segment.backing_access) {
-                    .inspectable => try self.graph.requiredRecordFieldNode(current_node, field_name),
-                    .opaque_definition_private => try self.graph.requiredOpaqueDefinitionFieldNode(current_node, field_name),
-                };
+                const field_node = try self.graph.requiredRecordFieldNode(current_node, field_name);
                 const field_expr = try self.addExprWithTypeCell(
                     DraftTypeCell.fromGraphNode(field_node),
                     .{ .field_access = .{
@@ -40141,10 +40795,7 @@ const BodyContext = struct {
                 );
             },
             .optional => {
-                const field = switch (segment.backing_access) {
-                    .inspectable => try self.graph.optionalRecordFieldNodes(current_node, field_name),
-                    .opaque_definition_private => try self.graph.optionalOpaqueDefinitionFieldNodes(current_node, field_name),
-                };
+                const field = try self.graph.optionalRecordFieldNodes(current_node, field_name);
                 const slot_cell = DraftTypeCell.fromGraphNode(field.slot);
                 const payload_cell = DraftTypeCell.fromGraphNode(field.value);
                 const slot_expr = try self.addExprWithTypeCell(slot_cell, .{ .field_access = .{
@@ -41634,7 +42285,7 @@ const BodyContext = struct {
             }
             break :blk existing.slot;
         } else blk: {
-            const subst = (try self.dispatchTargetSubstitution(plan)) orelse
+            const subst = (try self.directDispatchTargetSubstitution(plan, lookup, callable_node)) orelse
                 Common.invariant("closed direct procedure call had no checked substitution");
             const template = lookup.view.templates.get(procedure.template.template);
             if (subst.len != template.scheme_vars.len) {
@@ -41693,6 +42344,7 @@ const BodyContext = struct {
         const call = try self.addExprWithTypeCell(call_ret_cell, .{ .call_proc = .{
             .callee = draftProcCalleeForSlot(slot),
             .args = lowered,
+            .iterator_procedure = procedure.runtime_target.iteratorProcedure(),
             .captures = try self.methodTargetCaptureSpan(lookup),
         } });
         return try self.applyDispatchResultMode(plan.result_mode, call);
@@ -41822,106 +42474,200 @@ const BodyContext = struct {
         };
     }
 
-    fn lowerNumeralCall(
-        self: *BodyContext,
-        checked_ret_ty: checked.CheckedTypeId,
-        maybe_plan: ?static_dispatch.StaticDispatchPlanId,
-        target_ty: Type.TypeId,
-    ) Allocator.Error!DraftExprId {
-        const callable = switch (self.literalDispatchRuntimePlan(maybe_plan)) {
-            .callable => |callable| callable,
-            .crash => |reason| return try self.runtimeCrashExpr(target_ty, dispatchCrashMessage(reason)),
-        };
-        const result = try self.lowerNumeralCallRaw(checked_ret_ty, callable, target_ty);
-        return try self.unwrapNumeralResult(result.call, result.try_ty, target_ty);
-    }
-
-    fn literalDispatchRuntimePlan(
-        self: *BodyContext,
-        maybe_plan: ?static_dispatch.StaticDispatchPlanId,
-    ) DispatchRuntimePlan {
-        const plan_id = maybe_plan orelse Common.invariant("checked literal conversion reached Monotype without a dispatch plan");
-        const plan = self.view.static_dispatch_plans.plans[@intFromEnum(plan_id)];
-        if (plan.result_mode != .value) Common.invariant("checked literal conversion plan had a non-value result mode");
-        return self.dispatchRuntimePlan(plan);
-    }
-
-    const NumeralCall = struct {
-        call: DraftExprId,
-        try_ty: Type.TypeId,
-    };
-
-    fn lowerNumeralCallRaw(
-        self: *BodyContext,
-        checked_ret_ty: checked.CheckedTypeId,
-        callable: CallableDispatchPlan,
-        target_ty: Type.TypeId,
-    ) Allocator.Error!NumeralCall {
-        const plan = callable.plan;
-        const plan_args = callable.operands;
-
-        var call_ctx = try BodyContext.initWithMethodScope(self.allocator, self.builder, self.view, self.method_scope, self.owner_template, self.graph, self.draft);
-        call_ctx.evidence = self.evidence;
-        defer call_ctx.deinit();
-        call_ctx.owner_context_fn_key = self.owner_context_fn_key;
-        call_ctx.current_fn_key = self.current_fn_key;
-        call_ctx.source_region_override = self.source_region_override;
-        call_ctx.current_entry_root = self.current_entry_root;
-        call_ctx.in_deferred_body = self.in_deferred_body;
-
-        const callable_node = try call_ctx.instantiateNumeralPlanCallNode(plan.callable_ty, self, checked_ret_ty, target_ty, plan_args);
-
-        const resolved = self.dispatchTarget(plan) orelse
-            Common.invariant("checked from_numeral dispatch unexpectedly resolved to structural equality");
-
-        const target_node = try self.methodTargetNodeFromPlan(resolved, &call_ctx, plan.callable_ty);
-        try self.relateDispatchTargetRequestInterface(resolved, target_node, callable_node);
-        const fn_nodes = try self.graph.functionNodes(callable_node);
-        const ret_ty = try self.activeTypeFromNode(fn_nodes.ret);
-
-        const call_expr = try self.addExprWithTypeCell(
-            DraftTypeCell.fromGraphNode(fn_nodes.ret),
-            try self.lowerResolvedDispatchAtNode(plan, resolved, callable_node, self, &.{}),
-        );
-        return .{ .call = call_expr, .try_ty = ret_ty };
-    }
-
-    fn lowerNumeralRootBody(
+    /// A literal whose conversion is selected per specialization: the checked
+    /// conversion call at this specialization's target, unwrapped to its value.
+    fn lowerSpecializedLiteralConversion(
         self: *BodyContext,
         expr_id: checked.CheckedExprId,
-        try_ty: Type.TypeId,
+        value_node: NodeId,
     ) Allocator.Error!DraftExprId {
-        const expr = self.view.bodies.expr(expr_id);
-        const plan = switch (expr.data) {
+        const plan = self.literalConversionPlan(expr_id);
+        const try_ty = self.literalConversionTryType(plan);
+        const try_node = try self.instNode(try_ty);
+        const try_value = try self.lowerDispatchExprAtType(try_ty, plan, DraftTypeCell.fromGraphNode(try_node));
+        const site = self.literalRejectionSite(expr_id);
+        const value = try self.unwrapLiteralConversionAtNode(try_value, try_node, value_node, site);
+        if (!self.builder.literal_roots) return value;
+        return try self.literalRootRead(expr_id, site, value, value_node);
+    }
+
+    /// A program whose compile-time roots are evaluated with it evaluates a
+    /// specialized literal's conversion at compile time too: the conversion
+    /// becomes the body of a literal root, and the specialization reads the
+    /// root's completed value.
+    fn literalRootRead(
+        self: *BodyContext,
+        expr_id: checked.CheckedExprId,
+        site: Common.LiteralRejectionSite,
+        value: DraftExprId,
+        value_node: NodeId,
+    ) Allocator.Error!DraftExprId {
+        const value_cell = DraftTypeCell.fromGraphNode(value_node);
+        const def_id = try self.draft.reserveDef(self.draft.current_owner);
+        self.draft.setDef(def_id, .{
+            .symbol = self.builder.symbols.fresh(),
+            .fn_def = null,
+            .fn_id = null,
+            .identity_seed = .{ .kind = "literal-root", .extra = literalRootIdentity(self.view.key, expr_id) },
+            .args = try self.addTypedLocalSpan(&.{}),
+            .body = .{ .roc = value },
+            .ret = value_cell,
+        });
+        const read = try self.draft.addLiteralRoot(def_id, self.view.key, site);
+        // The call is representation evidence for the read; the read never
+        // runs it.
+        const callee = try self.addExprWithTypeCell(
+            DraftTypeCell.fromGraphNode(try self.graphFunctionNode(&.{}, value_node)),
+            .{ .def_ref = .{ .draft = def_id } },
+        );
+        const initializer = try self.addExprWithTypeCell(value_cell, .{ .call_value = .{
+            .callee = callee,
+            .args = try self.addExprSpan(&.{}),
+        } });
+        return try self.addExprWithTypeCell(value_cell, .{ .comptime_value = .{
+            .root = read,
+            .initializer = initializer,
+        } });
+    }
+
+    /// The source literal a rejected conversion of this literal reports.
+    fn literalRejectionSite(self: *BodyContext, expr_id: checked.CheckedExprId) Common.LiteralRejectionSite {
+        return .{
+            .owner = self.builder.loweringModuleId(self.view.key),
+            .checked_expr = @intFromEnum(expr_id),
+            .kind = if (self.view.bodies.expr(expr_id).data == .numeral) .numeral else .quote,
+        };
+    }
+
+    /// The checked conversion plan of a literal expression.
+    fn literalConversionPlan(self: *BodyContext, expr_id: checked.CheckedExprId) ?static_dispatch.StaticDispatchPlanId {
+        return switch (self.view.bodies.expr(expr_id).data) {
             .numeral => |numeral| numeral.plan,
             .str_from_quote => |quote| quote.plan,
-            .pending, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("literal conversion root did not point at a conversion expression"),
+            .pending, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("literal conversion did not point at a conversion expression"),
         };
-        const callable = switch (self.literalDispatchRuntimePlan(plan)) {
-            .callable => |callable| callable,
-            .crash => |reason| return try self.runtimeCrashExpr(try_ty, dispatchCrashMessage(reason)),
-        };
-        const ok_tag = self.monoTagByText(try_ty, "Ok");
-        const ok_payloads = self.typeStore().span(ok_tag.payloads);
-        if (ok_payloads.len != 1) Common.invariant("numeral conversion root Try.Ok did not carry one payload");
-        const result = try self.lowerNumeralCallRaw(expr.ty, callable, GuardedList.at(ok_payloads, 0));
-        if (!self.sameType(result.try_ty, try_ty)) {
-            Common.invariant("numeral conversion root type differed from the from_numeral result type");
-        }
-        return result.call;
     }
 
-    fn restoredNumeralConst(
+    /// The checked `Try` result type of a literal's conversion call.
+    fn literalConversionTryType(self: *BodyContext, plan_id: ?static_dispatch.StaticDispatchPlanId) checked.CheckedTypeId {
+        const id = plan_id orelse Common.invariant("checked literal conversion reached Monotype without a dispatch plan");
+        const plan = self.view.static_dispatch_plans.plans[@intFromEnum(id)];
+        if (plan.result_mode != .value) Common.invariant("checked literal conversion plan had a non-value result mode");
+        return self.checkedFunctionType(plan.callable_ty).ret;
+    }
+
+    /// A literal-conversion root evaluates its literal's checked conversion
+    /// call and validates it once. Its declared result and shared slot hold
+    /// the `Ok` payload; `Err` terminates with the literal's own rejection.
+    fn lowerLiteralConversionRootBody(
         self: *BodyContext,
         expr_id: checked.CheckedExprId,
-        ty: Type.TypeId,
-    ) Allocator.Error!?DraftExprId {
-        const root = self.view.compile_time_roots.lookupNumeralRootByExpr(expr_id) orelse return null;
-        return switch (root.payload) {
-            .const_node => |node| try self.restoreConstNodeAtType(self.view, self.view, node, ty),
-            .pending => null,
-            .fn_value, .discarded, .expect => Common.invariant("numeral conversion root stored a non-constant payload"),
+        ret_cell: DraftTypeCell,
+    ) Allocator.Error!DraftExprId {
+        const plan = self.literalConversionPlan(expr_id);
+        const try_ty = self.literalConversionTryType(plan);
+        const try_node = try self.instNode(try_ty);
+        const value = try self.lowerDispatchExprAtType(try_ty, plan, DraftTypeCell.fromGraphNode(try_node));
+        return try self.unwrapLiteralConversionAtNode(value, try_node, try ret_cell.toGraphNode(self.graph), self.literalRejectionSite(expr_id));
+    }
+
+    /// Lower one use of a literal whose conversion checking selected, as that
+    /// literal's conversion root. The root evaluates the conversion once at
+    /// compile time. A use restores the root's stored value once it is
+    /// finalized; during finalization a use reads the root's declared
+    /// compile-time value, whose guard reports a rejected conversion as the
+    /// root's failure. A lowering that can do neither evaluates the same
+    /// checked conversion call.
+    fn lowerLiteralConversionAtNode(
+        self: *BodyContext,
+        expr_id: checked.CheckedExprId,
+        root_id: checked.ComptimeRootId,
+        request_node: NodeId,
+    ) Allocator.Error!DraftExprId {
+        const root = self.view.compile_time_roots.root(root_id);
+        const kind = root.literalConversionKind() orelse
+            Common.invariant("literal conversion root link named a non-conversion root");
+        switch (root.payload) {
+            .const_node => |node| return try self.restoreConstNodeAtNode(self.view, self.view, node, request_node),
+            .pending => {},
+            .fn_value, .discarded, .expect => Common.invariant("literal conversion root stored a non-constant payload"),
+        }
+        if (self.builder.comptimeValueReadDeclared(self.view, root_id)) {
+            return try self.declaredComptimeValueRead(self.view, root_id, DraftTypeCell.fromGraphNode(request_node), null);
+        }
+        const plan = self.literalConversionPlan(expr_id);
+        const try_ty = self.literalConversionTryType(plan);
+        const try_node = try self.instNode(try_ty);
+        const try_value = try self.lowerDispatchExprAtType(try_ty, plan, DraftTypeCell.fromGraphNode(try_node));
+        const site = self.literalRejectionSite(expr_id);
+        const expected_kind: Common.LiteralRejectionKind = switch (kind) {
+            .numeral => .numeral,
+            .quote => .quote,
         };
+        if (site.kind != expected_kind) Common.invariant("literal conversion root kind differed from its literal");
+        const value = try self.unwrapLiteralConversionAtNode(try_value, try_node, request_node, site);
+        // A conversion root no evaluation requested (its type holds a
+        // callable, so the checker left it specialization-owned) is still
+        // hoisted, as a literal root of this program.
+        if (!self.builder.literal_roots) return value;
+        return try self.literalRootRead(expr_id, site, value, request_node);
+    }
+
+    /// The value of a literal conversion's `Try` result: its `Ok` payload, or,
+    /// when the conversion rejected the literal, a literal rejection carrying
+    /// the conversion's error message.
+    fn unwrapLiteralConversionAtNode(
+        self: *BodyContext,
+        try_value: DraftExprId,
+        try_node: NodeId,
+        value_node: NodeId,
+        site: Common.LiteralRejectionSite,
+    ) Allocator.Error!DraftExprId {
+        const payloads = try self.graphTryPayloads(try_node);
+        try relateRequestComponent(self.graph, payloads.ok, value_node);
+        const ok_name = try self.nameStoreMut().internTagLabel("Ok");
+        const err_name = try self.nameStoreMut().internTagLabel("Err");
+        const try_cell = DraftTypeCell.fromGraphNode(try_node);
+        const value_cell = DraftTypeCell.fromGraphNode(value_node);
+        const err_cell = DraftTypeCell.fromGraphNode(payloads.err);
+
+        var branches = std.ArrayList(DraftBranch).empty;
+        defer branches.deinit(self.allocator);
+
+        const ok_local = try self.addLocalWithBinderCell(self.builder.symbols.fresh(), value_cell, null);
+        try branches.append(self.allocator, .{
+            .pat = try self.addPatWithTypeCell(try_cell, .{ .tag = .{
+                .name = ok_name,
+                .payloads = try self.addPatSpan(&.{try self.addPatWithTypeCell(value_cell, .{ .bind = ok_local })}),
+            } }),
+            .body = try self.addExprWithTypeCell(value_cell, .{ .local = ok_local }),
+        });
+
+        // Every tag of a literal conversion's error row carries its message.
+        const error_tags = (try self.graph.tagRowNodes(payloads.err)).tags;
+        for (error_tags) |error_tag| {
+            if (error_tag.payloads.len != 1) Common.invariant("literal conversion error tag did not carry one message");
+            const message_cell = DraftTypeCell.fromGraphNode(error_tag.payloads[0]);
+            const message_local = try self.addLocalWithBinderCell(self.builder.symbols.fresh(), message_cell, null);
+            const error_pat = try self.addPatWithTypeCell(err_cell, .{ .tag = .{
+                .name = error_tag.name,
+                .payloads = try self.addPatSpan(&.{try self.addPatWithTypeCell(message_cell, .{ .bind = message_local })}),
+            } });
+            try branches.append(self.allocator, .{
+                .pat = try self.addPatWithTypeCell(try_cell, .{ .tag = .{
+                    .name = err_name,
+                    .payloads = try self.addPatSpan(&.{error_pat}),
+                } }),
+                .body = try self.addExprWithTypeCell(value_cell, .{ .literal_rejected = .{
+                    .msg = try self.addExprWithTypeCell(message_cell, .{ .local = message_local }),
+                    .site = site,
+                } }),
+            });
+        }
+        return try self.addExprWithTypeCell(value_cell, .{ .match_ = .{
+            .scrutinee = try_value,
+            .branches = try self.addBranchSpan(branches.items),
+        } });
     }
 
     /// Produce a numeric literal's constant—the ONE place in the compiler
@@ -41930,13 +42676,13 @@ const BodyContext = struct {
     /// real user-defined `from_numeral` dispatch call instead.
     fn lowerNumeralExpr(
         self: *BodyContext,
-        checked_ret_ty: checked.CheckedTypeId,
+        expr_id: checked.CheckedExprId,
         numeral: checked.CheckedNumeralData,
         target_ty: Type.TypeId,
     ) Allocator.Error!DraftExprId {
         const primitive = switch (self.shapeContent(target_ty)) {
             .primitive => |p| p,
-            .named, .record, .tuple, .tag_union, .list, .box, .func, .erased, .zst => return try self.lowerNumeralCall(checked_ret_ty, numeral.plan, target_ty),
+            .named, .record, .tuple, .tag_union, .list, .box, .func, .erased, .zst => return try self.lowerSpecializedLiteralConversion(expr_id, try self.graph.importMono(target_ty)),
         };
         const data = (try self.numeralBits(numeral.literal, primitive)) orelse blk: {
             // A value that does not fit its concrete integer or Dec target (a
@@ -41955,7 +42701,7 @@ const BodyContext = struct {
     /// every custom target follows the explicit from_quote dispatch plan.
     fn lowerQuoteExpr(
         self: *BodyContext,
-        checked_ret_ty: checked.CheckedTypeId,
+        expr_id: checked.CheckedExprId,
         quote: checked.CheckedQuoteData,
         target_ty: Type.TypeId,
     ) Allocator.Error!DraftExprId {
@@ -41972,7 +42718,7 @@ const BodyContext = struct {
                 }
                 return try self.lowerQuoteValue(quote.literal, target_ty);
             },
-            .named, .record, .tuple, .tag_union, .list, .box, .func, .erased, .zst => return try self.lowerNumeralCall(checked_ret_ty, quote.plan, target_ty),
+            .named, .record, .tuple, .tag_union, .list, .box, .func, .erased, .zst => return try self.lowerSpecializedLiteralConversion(expr_id, try self.graph.importMono(target_ty)),
         }
     }
 
@@ -42137,52 +42883,6 @@ const BodyContext = struct {
             .ty = ty,
             .data = .{ .list = try self.addExprSpan(items) },
         });
-    }
-
-    fn unwrapNumeralResult(
-        self: *BodyContext,
-        result: DraftExprId,
-        try_ty: Type.TypeId,
-        target_ty: Type.TypeId,
-    ) Allocator.Error!DraftExprId {
-        const ok_tag = self.monoTagByText(try_ty, "Ok");
-        const err_tag = self.monoTagByText(try_ty, "Err");
-        const ok_payloads = self.typeStore().span(ok_tag.payloads);
-        const err_payloads = self.typeStore().span(err_tag.payloads);
-        if (ok_payloads.len != 1) Common.invariant("Try.Ok from from_numeral did not carry one payload");
-        if (!self.sameType(GuardedList.at(ok_payloads, 0), target_ty)) {
-            Common.invariant("Try.Ok from from_numeral carried a type different from the literal target type");
-        }
-
-        const ok_local = try self.addLocal(self.builder.symbols.fresh(), target_ty);
-        const ok_payload_pat = try self.bindPat(ok_local, target_ty);
-        const ok_pat = try self.addPat(.{ .ty = try_ty, .data = .{ .tag = .{
-            .name = ok_tag.name,
-            .payloads = try self.addPatSpan(&[_]DraftPatId{ok_payload_pat}),
-        } } });
-        const ok_body = try self.localExpr(ok_local, target_ty);
-
-        const err_payload_pats = try self.allocator.alloc(DraftPatId, err_payloads.len);
-        defer self.allocator.free(err_payload_pats);
-        for (0..GuardedList.borrowLen(err_payloads)) |i| {
-            const payload_ty = GuardedList.at(err_payloads, i);
-            err_payload_pats[i] = try self.addPat(.{ .ty = payload_ty, .data = .wildcard });
-        }
-        const err_pat = try self.addPat(.{ .ty = try_ty, .data = .{ .tag = .{
-            .name = err_tag.name,
-            .payloads = try self.addPatSpan(err_payload_pats),
-        } } });
-        const msg = try self.addStringLiteral("invalid numeric literal");
-        const err_body = try self.addExpr(.{ .ty = target_ty, .data = .{ .crash = msg } });
-
-        const branches = [_]DraftBranch{
-            .{ .pat = ok_pat, .body = ok_body },
-            .{ .pat = err_pat, .body = err_body },
-        };
-        return try self.addExpr(.{ .ty = target_ty, .data = .{ .match_ = .{
-            .scrutinee = result,
-            .branches = try self.addBranchSpan(&branches),
-        } } });
     }
 
     fn monoTagByText(self: *BodyContext, ty: Type.TypeId, text: []const u8) Type.Tag {
@@ -42639,6 +43339,10 @@ const BodyContext = struct {
     }
 
     fn graphFreeResultTypeForExpr(self: *BodyContext, expr_id: checked.CheckedExprId) Allocator.Error!?Type.TypeId {
+        // A restored hoisted const never performs its checked dispatch, so
+        // that dispatch's graph-free classification does not describe the
+        // restored value's type cell.
+        if (self.restoredHoistedConstEntry(expr_id) != null) return null;
         const expr = self.view.bodies.expr(expr_id);
         const plan_id = switch (expr.data) {
             .dispatch_call => |plan| plan,
@@ -42827,8 +43531,9 @@ const BodyContext = struct {
 
     /// Stored functions have graph-free evidence. Recreate its lexical
     /// substitution in the restoration context, where saved callable and
-    /// capture interfaces will constrain the same checked identities. Hidden
-    /// receivers additionally consume their retained method contracts.
+    /// capture interfaces will constrain the same checked identities. Every
+    /// retained method contract also constrains the variables reached through
+    /// its signature, even when its receiver is reachable from the callable.
     fn restoreEvidenceFrame(
         self: *BodyContext,
         view: ModuleView,
@@ -42845,7 +43550,6 @@ const BodyContext = struct {
         var ctx: ?BodyContext = null;
         defer if (ctx) |*context| context.deinit();
         for (schema.params, vector) |param, entry| {
-            if (!evidenceParamRequiresConstraintRelation(param)) continue;
             switch (entry) {
                 .target => |target| {
                     if (ctx == null) {
@@ -42854,7 +43558,14 @@ const BodyContext = struct {
                     }
                     try self.relateTargetToConstraint(target, &ctx.?, param);
                 },
-                .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
+                .structural => |structural| if (structural.checked) |checked_structural| {
+                    if (ctx == null) {
+                        ctx = try BodyContext.initWithMethodScope(self.allocator, self.builder, view, self.method_scope, owner, self.graph, self.draft);
+                        try ctx.?.seedSubstitution(schema, subst);
+                    }
+                    try self.relateStructuralEvidenceToConstraint(checked_structural, &ctx.?, param);
+                },
+                .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
             }
         }
         return .{ .scope = .{ .owner = owner, .lexical = scope }, .schema = schema, .subst = subst, .vector = vector, .parent = parent };
@@ -42909,6 +43620,7 @@ const BodyContext = struct {
                             .procedure, .structural => null,
                         },
                         .nested = nested,
+                        .callable_contracts = try self.materializeConstFnEvidenceVector(nodes, cursor, target.callable_contracts),
                     };
                     break :blk .{ .target = materialized };
                 },
@@ -42939,10 +43651,12 @@ const BodyContext = struct {
                     break :blk .{ .structural = .{
                         .derivation = stored_structural.derivation,
                         .checked = restored_checked,
+                        .callable_contracts = try self.materializeConstFnEvidenceVector(nodes, cursor, stored_structural.callable_contracts),
                     } };
                 },
                 .from_callable => |use| .{ .from_callable = .{
                     .independent_callable = use.independent_callable,
+                    .callable_contracts = try self.materializeConstFnEvidenceVector(nodes, cursor, use.callable_contracts),
                 } },
                 .from_scheme => |index| .{ .from_scheme = index },
                 .unreachable_value => .unreachable_value,
@@ -43449,6 +44163,31 @@ const BodyContext = struct {
         param: static_dispatch.EvidenceParamRecord,
         purpose: EvidenceMaterializationPurpose,
     ) Allocator.Error!SpecEvidence {
+        const evidence = try self.materializeCheckedEvidenceRefPrimary(site_view, ref, param, purpose);
+        if (ref.callable_contracts.len == 0) return try withCallableContracts(self.builder.evidence_arena.allocator(), evidence, &.{});
+        switch (evidence) {
+            .from_scheme, .unreachable_value, .checked_error => return evidence,
+            .target, .structural, .from_callable => {},
+        }
+        const refs = site_view.static_dispatch_plans.evidence_refs[ref.callable_contracts.start..][0..ref.callable_contracts.len];
+        const arena = self.builder.evidence_arena.allocator();
+        const original = evidenceCallableContracts(evidence);
+        var changed: ?[]SpecEvidence = if (original.len == refs.len) null else try arena.alloc(SpecEvidence, refs.len);
+        for (refs, 0..) |contract, index| {
+            const entry = try self.materializeCheckedEvidenceRef(site_view, contract, param, purpose);
+            if (changed == null and !specEvidenceEql(original[index], entry)) changed = try arena.dupe(SpecEvidence, original);
+            if (changed) |contracts| contracts[index] = entry;
+        }
+        return try withCallableContracts(arena, evidence, changed orelse original);
+    }
+
+    fn materializeCheckedEvidenceRefPrimary(
+        self: *BodyContext,
+        site_view: ModuleView,
+        ref: static_dispatch.CheckedEvidence,
+        param: static_dispatch.EvidenceParamRecord,
+        purpose: EvidenceMaterializationPurpose,
+    ) Allocator.Error!SpecEvidence {
         return switch (ref.resolution) {
             .direct => |node_id| .{ .target = try self.materializeCheckedEvidenceTarget(
                 site_view,
@@ -43459,6 +44198,9 @@ const BodyContext = struct {
             .constraint => |constraint| blk: {
                 const entry = self.evidence.at(constraint.index) orelse
                     Common.invariant("checked requirement reference was absent from its lexical evidence chain");
+                // The side-vector indexes belong to the receiving schema.
+                // The outer materializer applies its checked forwarding map.
+                if (selectCallableContract(entry, constraint.callable_contract)) |contract| break :blk contract;
                 if (!constraint.independent_callable) break :blk entry;
                 break :blk switch (entry) {
                     .target => |target| independent: {
@@ -43521,6 +44263,7 @@ const BodyContext = struct {
                 .callable => |callable_ty| .{ .view = site_view, .callable_ty = callable_ty },
             } else null,
             .local_proc_context = lookup.local_proc_context,
+            .substitution = checkedTargetSubstitution(site_view, node),
             .nested = switch (node.nested) {
                 .from_callable => .synthesize,
                 .resolved => blk: {
@@ -43546,7 +44289,7 @@ const BodyContext = struct {
     fn evidenceVectorCarriesCheckedContract(vector: []const SpecEvidence) bool {
         for (vector) |entry| switch (entry) {
             .target => |target| {
-                if (target.instantiation != null) return true;
+                if (target.instantiation != null or target.callable_contracts.len != 0) return true;
                 switch (target.nested) {
                     .resolved => return true,
                     .synthesize => {},
@@ -43578,14 +44321,16 @@ const BodyContext = struct {
                     {
                         Common.invariant("substitution-derived target differed from checked target contract");
                     }
-                    const contract_nested = switch (contract_target.nested) {
-                        .synthesize => break :blk derived,
-                        .resolved => |resolved| NestedSpecEvidence{ .resolved = resolved },
-                    };
+                    if (contract_target.nested == .synthesize and contract_target.substitution == null and contract_target.callable_contracts.len == 0) break :blk derived;
                     const merged = try self.builder.evidence_arena.allocator().create(SpecEvidenceTarget);
                     merged.* = derived_target.*;
                     merged.instantiation = null;
-                    merged.nested = contract_nested;
+                    merged.substitution = contract_target.substitution;
+                    switch (contract_target.nested) {
+                        .synthesize => {},
+                        .resolved => |resolved| merged.nested = .{ .resolved = resolved },
+                    }
+                    merged.callable_contracts = contract_target.callable_contracts;
                     break :blk .{ .target = merged };
                 },
                 .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => Common.invariant("checked target contract differed from substitution-derived evidence kind"),
@@ -43611,7 +44356,7 @@ const BodyContext = struct {
         // stored inside that value; that recipe is not an initializer edge.
         if (schema.params.len == 0) return &.{};
         if (site_refs) |refs| {
-            if (refs.len != schema.params.len) Common.invariant("checked site evidence length differed from its scheme's requirements");
+            return try self.deriveCheckedEvidenceVector(schema, subst, site_view, refs, purpose);
         }
         const arena = self.builder.evidence_arena.allocator();
         const out = try arena.alloc(SpecEvidence, schema.params.len);
@@ -43620,68 +44365,9 @@ const BodyContext = struct {
         @memset(derived, false);
         for (schema.params, 0..) |param, k| {
             if (param.source == .scheme_requirement) {
-                if (param.slot != null) Common.invariant("composite requirement occupied a quantified-variable slot");
-                const refs = site_refs orelse Common.invariant("composite scheme requirement had no checked call-site evidence");
-                out[k] = if (refs[k].resolution == .from_scheme)
-                    .{ .from_scheme = @intCast(k) }
-                else
-                    try self.materializeCheckedEvidenceRef(site_view, refs[k], param, purpose);
-                derived[k] = true;
-                continue;
+                Common.invariant("composite scheme requirement had no checked call-site evidence");
             }
             if (param.slot.? >= subst.len) Common.invariant("requirement receiver slot was outside the request substitution");
-            const site_ref: ?static_dispatch.CheckedEvidence = if (site_refs) |refs| refs[k] else null;
-            if (site_ref) |ref| switch (ref.resolution) {
-                .structural => |evidence| {
-                    out[k] = .{ .structural = .{
-                        .derivation = evidence.derivation,
-                        .checked = .{ .view = site_view, .evidence = evidence },
-                    } };
-                    derived[k] = true;
-                },
-                .unreachable_value => {
-                    out[k] = .unreachable_value;
-                    derived[k] = true;
-                },
-                .checked_error => {
-                    out[k] = .checked_error;
-                    derived[k] = true;
-                },
-                .from_scheme => Common.invariant("abstract scheme evidence named an ordinary callable parameter"),
-                .from_callable => {
-                    out[k] = .{ .from_callable = .{
-                        .independent_callable = false,
-                    } };
-                    derived[k] = true;
-                },
-                .constraint => |constraint| switch (self.evidence.at(constraint.index) orelse
-                    Common.invariant("checked requirement reference was absent from its lexical evidence chain")) {
-                    .structural => |structural| {
-                        out[k] = .{ .structural = structural };
-                        derived[k] = true;
-                    },
-                    .unreachable_value => {
-                        out[k] = .unreachable_value;
-                        derived[k] = true;
-                    },
-                    .checked_error => {
-                        out[k] = .checked_error;
-                        derived[k] = true;
-                    },
-                    .from_scheme => |index| {
-                        out[k] = .{ .from_scheme = index };
-                        derived[k] = true;
-                    },
-                    .from_callable => |use| {
-                        out[k] = .{ .from_callable = .{
-                            .independent_callable = use.independent_callable or constraint.independent_callable,
-                        } };
-                        derived[k] = true;
-                    },
-                    .target => {},
-                },
-                .direct => {},
-            };
             if (subst[param.slot.?] == .checked_error) {
                 out[k] = .checked_error;
                 derived[k] = true;
@@ -43693,14 +44379,10 @@ const BodyContext = struct {
         // selected target to its constraint binds every quantified variable
         // only that callable reaches. Each such binding can resolve another
         // requirement's receiver, so the derivation runs to a fixpoint before
-        // any receiver is judged open. A checked instantiation record already
-        // binds every slot, hidden ones included, so its edge relates no
-        // target callable; nor does a requirement the site recorded as
-        // structural, unreachable, or rejected. A forwarded structural codec
+        // any receiver is judged open. A forwarded structural codec
         // carries its checked callable, which can reach variables its receiver
         // does not (a parser's error row), so it is related like a target.
         // The context is created by the first relation.
-        const relate_targets = site_refs == null;
         var scheme_ctx: ?BodyContext = null;
         defer if (scheme_ctx) |*ctx| ctx.deinit();
         var progress = true;
@@ -43719,7 +44401,7 @@ const BodyContext = struct {
                         out[k] = forwarded;
                         derived[k] = true;
                         progress = true;
-                        if (relate_targets) switch (forwarded) {
+                        switch (forwarded) {
                             .structural => |structural| if (structural.checked) |checked_structural| {
                                 if (scheme_ctx == null) {
                                     scheme_ctx = try BodyContext.initWithMethodScope(
@@ -43736,7 +44418,7 @@ const BodyContext = struct {
                                 try self.relateStructuralEvidenceToConstraint(checked_structural, &scheme_ctx.?, param);
                             },
                             .target, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
-                        };
+                        }
                         continue;
                     },
                     .target => {},
@@ -43745,7 +44427,6 @@ const BodyContext = struct {
                 out[k] = try self.synthesizeComponentEvidenceAtNodeForPurpose(schema.view, param.method, param.structural, node, purpose);
                 derived[k] = true;
                 progress = true;
-                if (!relate_targets) continue;
                 switch (out[k]) {
                     .target => |target| {
                         if (scheme_ctx == null) {
@@ -43771,16 +44452,70 @@ const BodyContext = struct {
             if (derived[k]) continue;
             out[k] = try self.deriveOpenRequirement(schema.view, param, subst[param.slot.?].node, purpose);
         }
-        if (site_refs) |refs| {
-            for (refs, schema.params, out) |ref, param, *entry| switch (ref.resolution) {
-                .direct, .constraint => {
-                    entry.* = try self.mergeCheckedEvidenceContract(
-                        entry.*,
-                        try self.materializeCheckedEvidenceRef(site_view, ref, param, purpose),
-                    );
-                },
-                .structural, .from_callable, .from_scheme, .checked_error, .unreachable_value => {},
+        return out;
+    }
+
+    /// Checked edges supply every target contract before receiver-based
+    /// selection. Relate those contracts first: one method's signature can
+    /// bind a different requirement's hidden receiver. Reuse the output vector
+    /// for materialization and merging, without a second vector or fixpoint.
+    fn deriveCheckedEvidenceVector(
+        self: *BodyContext,
+        schema: SchemeRequirements,
+        subst: SpecSubstitution,
+        site_view: ModuleView,
+        refs: []const static_dispatch.CheckedEvidence,
+        purpose: EvidenceMaterializationPurpose,
+    ) Allocator.Error![]const SpecEvidence {
+        if (refs.len != schema.params.len) Common.invariant("checked site evidence length differed from its scheme's requirements");
+        const out = try self.builder.evidence_arena.allocator().alloc(SpecEvidence, schema.params.len);
+        for (refs, schema.params, out, 0..) |ref, param, *entry, k| {
+            if (param.source == .scheme_requirement) {
+                if (param.slot != null) Common.invariant("composite requirement occupied a quantified-variable slot");
+                entry.* = if (ref.resolution == .from_scheme)
+                    .{ .from_scheme = @intCast(k) }
+                else
+                    try self.materializeCheckedEvidenceRef(site_view, ref, param, purpose);
+                continue;
+            }
+            if (param.slot.? >= subst.len) Common.invariant("requirement receiver slot was outside the request substitution");
+            entry.* = switch (ref.resolution) {
+                .from_callable => .{ .from_callable = .{ .independent_callable = false } },
+                .from_scheme => Common.invariant("abstract scheme evidence named an ordinary callable parameter"),
+                .direct, .constraint, .structural, .unreachable_value, .checked_error => try self.materializeCheckedEvidenceRef(site_view, ref, param, purpose),
             };
+            if (subst[param.slot.?] == .checked_error) {
+                entry.* = switch (ref.resolution) {
+                    .direct, .constraint => try self.mergeCheckedEvidenceContract(.checked_error, entry.*),
+                    .structural, .from_callable, .from_scheme, .checked_error, .unreachable_value => .checked_error,
+                };
+            }
+        }
+        // Summary lookup describes the unrefined input. On a cache miss its
+        // expansion applies these relations to detached substitution cells;
+        // a hit replays the completed relation without repeating this work.
+        if (purpose != .interface_summary_input) {
+            var checked_ctx = try BodyContext.initWithMethodScope(self.allocator, self.builder, schema.view, self.method_scope, self.owner_template, self.graph, self.draft);
+            defer checked_ctx.deinit();
+            try checked_ctx.seedSubstitution(schema, subst);
+            try self.relateMaterializedEvidenceConstraints(&checked_ctx, schema, out);
+        }
+        for (schema.params, out) |param, *entry| {
+            // Structural entries already carry the checked callable contracts
+            // materialized above; only targets need receiver-based selection.
+            if (param.source == .scheme_requirement or entry.* != .target) continue;
+            const node = subst[param.slot.?].node;
+            const derived = derive: {
+                if (self.forwardedRequirement(node, schema.view.names, param.method)) |forwarded| switch (forwarded) {
+                    .target => {},
+                    .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => break :derive forwarded,
+                };
+                break :derive if (self.methodOwnerFromNode(node) != null)
+                    try self.synthesizeComponentEvidenceAtNodeForPurpose(schema.view, param.method, param.structural, node, purpose)
+                else
+                    try self.deriveOpenRequirement(schema.view, param, node, purpose);
+            };
+            entry.* = try self.mergeCheckedEvidenceContract(derived, entry.*);
         }
         return out;
     }
@@ -43793,7 +44528,93 @@ const BodyContext = struct {
         scheme_ctx: *BodyContext,
         param: static_dispatch.EvidenceParamRecord,
     ) Allocator.Error!void {
-        const target_node = if (target.instantiation) |instantiation| blk: {
+        const constraint_node = try scheme_ctx.instNode(param.callable_ty);
+        const root_view = if (target.instantiation) |instantiation| instantiation.view else target.view;
+        const root_fn_ty = if (target.instantiation) |instantiation| instantiation.callable_ty else target.target.callable_ty;
+        const reachability = dispatchTargetAdapterReachability(target.target);
+        const owner = switch (target.target.kind) {
+            .procedure => |procedure| procedure.template,
+            .local_proc => |local| self.localMethodOwnerTemplate(.{
+                .view = target.view,
+                .target = target.target,
+                .local_proc_context = target.local_proc_context,
+            }, local),
+            .structural => unreachable,
+        };
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const input = try InterfaceConstraints.capture(self.graph, scratch.allocator(), &.{constraint_node});
+        const request = try input.identityInto(self.graph, scratch.allocator());
+        // This relation consumes only the selected checked signature, not its
+        // nested dispatch evidence. Its source identity and adapter rule fully
+        // determine the operation over the complete input constraint.
+        const evidence: StoredConstFnEvidence = .{ .nodes = &.{}, .frames = &.{}, .head = null };
+        const address: InterfaceReplayAddress = .{
+            .kind = switch (reachability) {
+                .adapter_reachable => .method_contract,
+                .no_adapter => .local_method_contract,
+            },
+            .family = DraftTemplateFamilyAddress.init(owner, self.method_scope.key, root_view.types.rootKey(root_fn_ty)),
+            .evidence_digest = @splat(0),
+            .input_digest = interfaceRequestBucket(request.bytes),
+        };
+        const use_summaries = self.draft.interface_replay.use_finished_summaries;
+        if (use_summaries) {
+            if (try self.findInterfaceSummary(address, evidence, request)) |summary| {
+                switch (summary) {
+                    .unchanged => {},
+                    .constraints => |constraints| try self.graph.unify((try constraints.instantiate(self.graph))[0], constraint_node),
+                }
+                return;
+            }
+        }
+        // Relate an independent copy, so unrelated caller state cannot enter
+        // the retained result. Open variables remain fresh on each replay.
+        const detached = (try input.instantiate(self.graph))[0];
+        const target_node = try self.instantiateEvidenceTargetSignature(target, address.family);
+        try self.relateEvidenceTargetRootToRequest(root_view, root_fn_ty, target_node, detached, reachability);
+        if (use_summaries) {
+            const constraints = try InterfaceConstraints.capture(self.graph, scratch.allocator(), &.{detached});
+            const summary: InterfaceSummary = if (try (try constraints.identityInto(self.graph, scratch.allocator())).eql(request, self.typeStore(), self.nameStore()))
+                .unchanged
+            else
+                .{ .constraints = constraints };
+            _ = try self.insertInterfaceSummary(.{
+                .address = address,
+                .evidence = evidence,
+                .request = request,
+                .summary = summary,
+            });
+        }
+        try self.graph.unify(detached, constraint_node);
+    }
+
+    /// A checked procedure signature is independent of the request it will
+    /// constrain. Snapshot its construction once, then instantiate fresh open
+    /// cells for each relation, preserving independent callable evidence.
+    fn instantiateEvidenceTargetSignature(
+        self: *BodyContext,
+        target: *const SpecEvidenceTarget,
+        family: DraftTemplateFamilyAddress,
+    ) Allocator.Error!NodeId {
+        const cacheable = target.target.kind == .procedure and self.draft.interface_replay.use_finished_summaries;
+        const address: InterfaceReplayAddress = .{
+            .kind = .method_signature,
+            .family = family,
+            .evidence_digest = @splat(0),
+            .input_digest = @splat(0),
+        };
+        const evidence: StoredConstFnEvidence = .{ .nodes = &.{}, .frames = &.{}, .head = null };
+        const request: InterfaceConstraints.Identity = .{ .bytes = &.{}, .leaves = &.{} };
+        if (cacheable) {
+            if (try self.findInterfaceSummary(address, evidence, request)) |summary| {
+                return switch (summary) {
+                    .constraints => |constraints| (try constraints.instantiate(self.graph))[0],
+                    .unchanged => Common.invariant("checked method signature snapshot had no root"),
+                };
+            }
+        }
+        const node = if (target.instantiation) |instantiation| blk: {
             var instantiation_ctx = try BodyContext.initWithMethodScope(
                 self.allocator,
                 self.builder,
@@ -43815,10 +44636,17 @@ const BodyContext = struct {
             defer target_ctx.deinit();
             break :blk try target_ctx.instNode(lookup.target.callable_ty);
         };
-        const constraint_node = try scheme_ctx.instNode(param.callable_ty);
-        const root_view = if (target.instantiation) |instantiation| instantiation.view else target.view;
-        const root_fn_ty = if (target.instantiation) |instantiation| instantiation.callable_ty else target.target.callable_ty;
-        try self.relateEvidenceTargetRootToRequest(root_view, root_fn_ty, target_node, constraint_node, dispatchTargetAdapterReachability(target.target));
+        if (cacheable) {
+            var scratch = std.heap.ArenaAllocator.init(self.allocator);
+            defer scratch.deinit();
+            _ = try self.insertInterfaceSummary(.{
+                .address = address,
+                .evidence = evidence,
+                .request = request,
+                .summary = .{ .constraints = try InterfaceConstraints.capture(self.graph, scratch.allocator(), &.{node}) },
+            });
+        }
+        return node;
     }
 
     /// Relate a checked structural codec's callable to the scheme constraint
@@ -43982,6 +44810,12 @@ const BodyContext = struct {
         dependent: anytype,
         target: *const SpecEvidenceTarget,
     ) NestedSpecEvidence {
+        if (selectCallableContract(.{ .target = target }, dependent.callable_contract)) |contract| {
+            return switch (contract) {
+                .target => |selected| selected.nested,
+                .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => Common.invariant("callable target contract selected non-callable evidence"),
+            };
+        }
         return self.dependentCallableNestedEvidenceChecked(dependent, target) catch
             Common.invariant("independent dispatch callable attempted to synthesize SchemeUseRecord-supplied nested evidence");
     }
@@ -44039,6 +44873,38 @@ const BodyContext = struct {
     /// The substitution a checked direct dispatch plan recorded for its
     /// target: the target scheme's quantified variables as copied at that
     /// edge, instantiated in this context.
+    /// The substitution of a direct dispatch target's scheme. The checked
+    /// record substitutes the scheme the dispatch edge instantiated; for a
+    /// target reached through an exact procedure alias that is the alias's
+    /// scheme, so the target's own scheme is instantiated at the dispatch's
+    /// callable instead, which the alias's instantiation fixes.
+    fn directDispatchTargetSubstitution(
+        self: *BodyContext,
+        plan: static_dispatch.StaticDispatchCallPlan,
+        lookup: MethodLookup,
+        callable_node: NodeId,
+    ) Allocator.Error!?SpecSubstitution {
+        if (!lookup.target.reached_through_alias) return try self.dispatchTargetSubstitution(plan);
+        const procedure = switch (lookup.target.kind) {
+            .procedure => |procedure| procedure,
+            .local_proc, .structural => Common.invariant("a non-procedure method target was reached through a procedure alias"),
+        };
+        const template = lookup.view.templates.get(procedure.template.template);
+        var target_ctx = try BodyContext.initWithMethodScope(
+            self.allocator,
+            self.builder,
+            lookup.view,
+            self.method_scope,
+            procedure.template,
+            self.graph,
+            self.draft,
+        );
+        defer target_ctx.deinit();
+        const subst = try target_ctx.substitutionFromCheckedTypes(lookup.view, templateSchemaIn(lookup.view, &template).scheme_vars);
+        try relateFunctionRequestInterface(self.graph, try target_ctx.instNode(template.checked_fn_root), callable_node);
+        return subst;
+    }
+
     fn dispatchTargetSubstitution(
         self: *BodyContext,
         plan: static_dispatch.StaticDispatchCallPlan,
@@ -44056,6 +44922,31 @@ const BodyContext = struct {
             Common.invariant("direct dispatch target substitution range was outside its checked module");
         }
         return try self.substitutionFromCheckedTypes(self.view, table.site_substitutions[start .. start + len]);
+    }
+
+    /// Seed a selected target's scheme context with the substitution checking
+    /// applied where it selected the target, as a direct target specializes
+    /// under its recorded substitution. The checked types are instantiated
+    /// together in one context of the selecting module, so variables they
+    /// share stay shared, and relating the target's root to the request then
+    /// refines the slots that root reaches.
+    fn seedCheckedTargetSubstitution(
+        self: *BodyContext,
+        target_ctx: *BodyContext,
+        schema: SchemeRequirements,
+        substitution: CheckedTargetSubstitution,
+    ) Allocator.Error!void {
+        var site_ctx = try BodyContext.initWithMethodScope(
+            self.allocator,
+            self.builder,
+            substitution.view,
+            self.method_scope,
+            self.owner_template,
+            self.graph,
+            self.draft,
+        );
+        defer site_ctx.deinit();
+        try target_ctx.seedSubstitution(schema, try site_ctx.substitutionFromCheckedTypes(substitution.view, substitution.tys));
     }
 
     /// The requirement contract a checked iterator dispatch call recorded for
@@ -44123,15 +45014,19 @@ const BodyContext = struct {
             .evidence_dependent => |dependent| {
                 const entry = self.evidence.at(dependent.index) orelse
                     Common.invariant("dispatch resolution evidence was absent from its lexical chain");
-                return switch (entry) {
+                return switch (selectCallableContract(entry, dependent.callable_contract) orelse entry) {
                     .target => |target| .{
                         .target = .{
                             .view = target.view,
                             .target = target.target,
-                            .instantiation = if (dependent.independent_callable)
+                            .instantiation = if (dependent.independent_callable and selectCallableContract(entry, dependent.callable_contract) == null)
                                 null
                             else
                                 target.instantiation,
+                            .substitution = if (dependent.independent_callable)
+                                null
+                            else
+                                target.substitution,
                             .local_proc_context = target.local_proc_context,
                         },
                     },
@@ -44272,7 +45167,7 @@ const BodyContext = struct {
         return switch (resolution) {
             .@"unreachable" => .unreachable_value,
             .checked_error => .checked_error,
-            .evidence_dependent => |dependent| if (self.evidence.at(dependent.index)) |entry| switch (entry) {
+            .evidence_dependent => |dependent| if (self.evidence.at(dependent.index)) |entry| switch (selectCallableContract(entry, dependent.callable_contract) orelse entry) {
                 .from_callable, .unreachable_value => .unreachable_value,
                 .from_scheme => Common.invariant("abstract scheme requirement reached executable dispatch without use evidence"),
                 .checked_error => .checked_error,
@@ -44280,18 +45175,6 @@ const BodyContext = struct {
             } else Common.invariant("dispatch runtime evidence was absent from its lexical chain"),
             .direct_pending => Common.invariant("unfinalized direct call reached Monotype"),
             .direct_closed, .direct_parametric, .structural => null,
-        };
-    }
-
-    fn dispatchTarget(
-        self: *BodyContext,
-        plan: static_dispatch.StaticDispatchCallPlan,
-    ) ?MethodLookup {
-        const resolution = self.evidenceResolution(plan) orelse
-            Common.invariant("dispatch plan reached monotype lowering without a resolution");
-        return switch (resolution) {
-            .target => |lookup| lookup,
-            .structural => null,
         };
     }
 
@@ -44512,7 +45395,7 @@ const BodyContext = struct {
     ) Allocator.Error!MethodLookup {
         return switch (purpose) {
             .body_lowering => try self.withLocalProcContext(lookup),
-            .specialization_interface => blk: {
+            .specialization_interface, .interface_summary_input => blk: {
                 if (lookup.local_proc_context != null) {
                     Common.invariant("checked specialization-interface evidence unexpectedly carried a draft-local context");
                 }
@@ -44574,9 +45457,13 @@ const BodyContext = struct {
             if (structural) |kind| return .{ .structural = .{ .derivation = structuralDerivationWithoutMap(kind) } };
             Common.invariant("compiler-generated graph component owner had no exact checked method target");
         }
+        if (try self.nodeIsProvenUninhabited(component_node) or self.nodeFinalizesAsUninhabitedLeaf(component_node)) {
+            return switch (static_dispatch.unpinnedDispatchResolution(structural)) {
+                .structural => .{ .structural = .{ .derivation = structuralDerivationWithoutMap(structural.?) } },
+                .unreachable_value => .unreachable_value,
+            };
+        }
         if (structural) |kind| return .{ .structural = .{ .derivation = structuralDerivationWithoutMap(kind) } };
-        if (try self.nodeIsProvenUninhabited(component_node)) return .unreachable_value;
-        if (self.nodeFinalizesAsUninhabitedLeaf(component_node)) return .unreachable_value;
         Common.invariant("compiler-generated ownerless graph component had no checked structural or uninhabited evidence");
     }
 
@@ -44868,11 +45755,13 @@ const BodyContext = struct {
         return switch (lookup.target.kind) {
             .procedure => |procedure| blk: {
                 const template = lookup.view.templates.get(procedure.template.template);
+                const schema = templateSchemaIn(lookup.view, &template);
                 var target_ctx = try self.methodTargetContext(lookup);
                 defer target_ctx.deinit();
+                if (lookup.substitution) |substitution| try self.seedCheckedTargetSubstitution(&target_ctx, schema, substitution);
                 const target_root_node = try target_ctx.instNode(template.checked_fn_root);
                 try self.relateEvidenceTargetRootToRequest(lookup.view, template.checked_fn_root, target_root_node, request_fn_node, dispatchTargetAdapterReachability(lookup.target));
-                const edge = try self.deriveTargetEdge(&target_ctx, templateSchemaIn(lookup.view, &template), evidence_source);
+                const edge = try self.deriveTargetEdge(&target_ctx, schema, evidence_source);
                 break :blk try self.builder.lowerDraftTemplateFromContext(
                     self,
                     procedure.template,
@@ -44881,16 +45770,18 @@ const BodyContext = struct {
                     request_fn_node,
                     edge,
                     .instantiation,
-                    if (procedure.runtime_target.iteratorProcedure() == .iter_from_step) .exact_graph else .independent_roots,
+                    if (procedure.runtime_target.iteratorProcedure() == .from_step) .exact_graph else .independent_roots,
                     codec_contract_selection,
                 );
             },
             .local_proc => |local| blk: {
+                const schema = self.scopeSchema(lookup.view, local.dispatch_scope);
                 var target_ctx = try self.methodTargetContext(lookup);
                 defer target_ctx.deinit();
+                if (lookup.substitution) |substitution| try self.seedCheckedTargetSubstitution(&target_ctx, schema, substitution);
                 const target_root_node = try target_ctx.instNode(source_fn_ty);
                 try self.relateEvidenceTargetRootToRequest(lookup.view, source_fn_ty, target_root_node, request_fn_node, dispatchTargetAdapterReachability(lookup.target));
-                const edge = try self.deriveTargetEdge(&target_ctx, self.scopeSchema(lookup.view, local.dispatch_scope), evidence_source);
+                const edge = try self.deriveTargetEdge(&target_ctx, schema, evidence_source);
                 break :blk .{ .local = try self.lowerDraftLocalProcAtNode(
                     .{
                         .binder = local.binder,
@@ -44910,6 +45801,50 @@ const BodyContext = struct {
             },
             .structural => Common.invariant("structural method registry result has no callable procedure body"),
         };
+    }
+
+    fn relateMaterializedEvidenceConstraints(
+        self: *BodyContext,
+        target_ctx: *BodyContext,
+        schema: SchemeRequirements,
+        contract: []const SpecEvidence,
+    ) Allocator.Error!void {
+        if (contract.len != schema.params.len) {
+            Common.invariant("materialized target contract length differed from its scheme requirements");
+        }
+        for (schema.params, contract) |param, entry| {
+            // Even a callable-root receiver's method can bind variables
+            // reached only through its constraint signature. Every
+            // selected target supplies that relation exactly once;
+            // selection itself needs no graph-driven fixpoint here.
+            try self.relateMaterializedEvidenceConstraint(target_ctx, param, entry);
+            const contracts = evidenceCallableContracts(entry);
+            if (contracts.len != 0) {
+                if (contracts.len != param.callable_contracts.len) Common.invariant("callable contracts differed from their checked schema");
+                const callables = schema.view.templates.evidence_param_callables[param.callable_contracts.start..][0..param.callable_contracts.len];
+                for (contracts, callables) |contract_entry, callable| {
+                    var contract_param = param;
+                    contract_param.callable_ty = callable;
+                    contract_param.callable_contracts = .{};
+                    try self.relateMaterializedEvidenceConstraint(target_ctx, contract_param, contract_entry);
+                }
+            }
+        }
+    }
+
+    fn relateMaterializedEvidenceConstraint(
+        self: *BodyContext,
+        target_ctx: *BodyContext,
+        param: static_dispatch.EvidenceParamRecord,
+        entry: SpecEvidence,
+    ) Allocator.Error!void {
+        switch (entry) {
+            .target => |target| try self.relateTargetToConstraint(target, target_ctx, param),
+            .structural => |structural| if (structural.checked) |checked_structural| {
+                try self.relateStructuralEvidenceToConstraint(checked_structural, target_ctx, param);
+            },
+            .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
+        }
     }
 
     /// The substitution and evidence a target scheme receives from a request
@@ -44937,22 +45872,7 @@ const BodyContext = struct {
                 .body_lowering,
             ),
             .materialized_contract => |contract| blk: {
-                if (contract.len != schema.params.len) {
-                    Common.invariant("materialized target contract length differed from its scheme requirements");
-                }
-                for (schema.params, contract) |param, entry| {
-                    // Even a callable-root receiver's method can bind variables
-                    // reached only through its constraint signature. Every
-                    // selected target supplies that relation exactly once;
-                    // selection itself needs no graph-driven fixpoint here.
-                    switch (entry) {
-                        .target => |target| try self.relateTargetToConstraint(target, target_ctx, param),
-                        .structural => |structural| if (structural.checked) |checked_structural| {
-                            try self.relateStructuralEvidenceToConstraint(checked_structural, target_ctx, param);
-                        },
-                        .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
-                    }
-                }
+                try self.relateMaterializedEvidenceConstraints(target_ctx, schema, contract);
                 // Reuse is authorized by the checked dispatch plan. Independent
                 // callables without that proof use .derive instead. This contract
                 // already supplies every target and terminal verdict, including
@@ -44980,7 +45900,7 @@ const BodyContext = struct {
         const lookup = try self.withLocalProcContext(raw_lookup);
         const source_fn_ty = lookup.target.callable_ty;
         const source_fn_key = lookup.view.types.rootKey(source_fn_ty);
-        const subst = (try self.dispatchTargetSubstitution(plan)) orelse
+        const subst = (try self.directDispatchTargetSubstitution(plan, lookup, request_fn_node)) orelse
             Common.invariant("direct dispatch target had no checked substitution");
         const contract: ?[]const static_dispatch.CheckedEvidence = if (self.dispatchTargetContract(plan)) |c| c.entries else null;
         return switch (lookup.target.kind) {
@@ -45002,7 +45922,7 @@ const BodyContext = struct {
                     request_fn_node,
                     edge,
                     .instantiation,
-                    if (procedure.runtime_target.iteratorProcedure() == .iter_from_step) .exact_graph else .independent_roots,
+                    if (procedure.runtime_target.iteratorProcedure() == .from_step) .exact_graph else .independent_roots,
                     .inherit,
                 );
             },
@@ -45128,6 +46048,7 @@ const BodyContext = struct {
                 plan,
             )),
             .args = args,
+            .iterator_procedure = self.iteratorProcedureForMethodTarget(contextual_lookup.target),
             .captures = try self.methodTargetCaptureSpan(contextual_lookup),
         } };
     }
@@ -45725,6 +46646,19 @@ const BodyContext = struct {
         if (self.setPayloadType(shape_ty)) |payload_ty| {
             return try self.lowerEncodeSetToState(payload_ty, shape_ty, value_expr, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan);
         }
+        // The checked nominal codec owns this value, regardless of its backing shape.
+        if (self.frozenCustomCodecCallForShape(.encoder, shape_ty)) |prepared| {
+            return try self.lowerCustomEncoderForState(
+                prepared.*,
+                shape_ty,
+                value_expr,
+                encoding_expr,
+                encoding_ty,
+                state_expr,
+                state_ty,
+                ret_ty,
+            );
+        }
         switch (self.shapeContent(shape_ty)) {
             .list => |elem_ty| return try self.lowerEncodeListToState(elem_ty, value_expr, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan),
             .tuple => |items| {
@@ -45737,18 +46671,6 @@ const BodyContext = struct {
                 return try self.lowerEncodeShapeToState(payload_ty, unboxed, encoding_expr, encoding_ty, state_expr, state_ty, ret_ty, precomputed_plan);
             },
             .primitive, .named, .record, .tag_union, .func, .erased, .zst => {},
-        }
-        if (self.frozenCustomCodecCallForShape(.encoder, shape_ty)) |prepared| {
-            return try self.lowerCustomEncoderForState(
-                prepared.*,
-                shape_ty,
-                value_expr,
-                encoding_expr,
-                encoding_ty,
-                state_expr,
-                state_ty,
-                ret_ty,
-            );
         }
         if (self.encodeScalarMethodName(shape_ty)) |method_name| {
             return try self.lowerEncodeFormatMethod(method_name, &.{ value_expr, state_expr }, &.{ shape_ty, state_ty }, shape_ty, ret_ty);
@@ -49301,7 +50223,7 @@ const BodyContext = struct {
             .named => |named| named,
             .redirect, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst => Common.invariant("generated codec protocol template was not a named graph node"),
         };
-        return try self.graph.newNode(.{ .named = .{
+        return try self.graph.newNode(try self.graph.namedContent(.{
             .named_type = template.named_type,
             .def = template.def,
             .kind = template.kind,
@@ -49313,7 +50235,7 @@ const BodyContext = struct {
                 .authority = authority,
             },
             .declared_order = template.declared_order,
-        } });
+        }));
     }
 
     fn cloneGraphNamedWithGeneratedBacking(
@@ -54118,6 +55040,9 @@ const BodyContext = struct {
         outer_merge_binders: []const MergeBinder,
     ) Allocator.Error!DraftExprId {
         const checked_body = self.view.bodies.expr(body);
+        if (checked_body.data == .for_) {
+            return try self.lowerForThenStateResult(checked_body.data.for_, result_cell, outer_state_cell, outer_merge_binders);
+        }
         switch (checked_body.data) {
             .if_ => |if_| return try self.lowerNestedIfThenStateResultAtTypeCells(
                 body,
@@ -54325,6 +55250,12 @@ const BodyContext = struct {
         expr_id: checked.CheckedExprId,
     ) Allocator.Error!LoweredDiscardedExpr {
         const checked_expr = self.view.bodies.expr(expr_id);
+        if (checked_expr.data == .for_ and !self.checkedExprDivergesInLoweredRuntime(expr_id)) {
+            return .{
+                .stmt = try self.addStmt(try self.lowerForStatement(checked_expr.data.for_)),
+                .termination = .none,
+            };
+        }
         switch (checked_expr.data) {
             .if_, .match_ => {
                 const merge_binders = try self.stateMergeBinders(expr_id);
@@ -54363,13 +55294,18 @@ const BodyContext = struct {
             .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
         }
 
-        const cell = DraftTypeCell.fromGraphNode(try self.lowerExprTypeNode(expr_id));
-        if (self.checkedExprDivergesInLoweredRuntime(expr_id)) {
+        // A divergent discarded expression never yields the value this
+        // statement discards, so it lowers exactly like a divergent block
+        // statement. Its value type is never requested: a checked runtime
+        // error has a deliberately erroneous type, and value evidence for a
+        // divergent call could instantiate a rejected dispatch.
+        if (try self.lowerDivergentExprInContext(expr_id, .uncontextual)) |divergent| {
             return .{
-                .stmt = try self.addStmt(.{ .expr = try self.lowerDivergentExprAtTypeCell(expr_id, cell) }),
+                .stmt = try self.addStmt(.{ .expr = divergent }),
                 .termination = .checked_control_transfer,
             };
         }
+        const cell = DraftTypeCell.fromGraphNode(try self.lowerExprTypeNode(expr_id));
         const node = try cell.toGraphNode(self.graph);
         if (try self.nodeIsProvenUninhabited(node)) {
             return .{
@@ -54608,6 +55544,7 @@ const BodyContext = struct {
         const statement = self.view.bodies.statement(statement_id);
         const expr_id = switch (statement.data) {
             .decl => |decl| if (self.statementDeclIsLocalProc(decl.pattern, decl.expr)) return null else decl.expr,
+            .promoted_proc => return null,
             .var_ => |decl| decl.expr,
             .reassign => |decl| decl.expr,
             .expr => |expr| expr,
@@ -54652,6 +55589,7 @@ const BodyContext = struct {
                 if (self.statementDeclIsLocalProc(decl.pattern, decl.expr)) return false;
                 break :blk .{ decl.pattern, decl.expr };
             },
+            .promoted_proc => return false,
             .var_ => |decl| .{ decl.pattern, decl.expr },
             .reassign => |decl| .{ decl.pattern, decl.expr },
             .pending, .var_uninitialized, .crash, .dbg, .expr, .expect, .for_, .while_, .infinite_loop, .breakable_loop, .break_, .return_, .import_, .alias_decl, .where_alias_decl, .nominal_decl, .type_anno, .type_var_alias, .runtime_error => return false,
@@ -54718,8 +55656,8 @@ const BodyContext = struct {
     ) Allocator.Error!bool {
         const checked_expr = self.view.bodies.expr(expr_id);
         switch (checked_expr.data) {
-            .if_, .match_ => {},
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return false,
+            .if_, .match_, .for_ => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .hosted_lambda, .run_low_level => return false,
         }
 
         const merge_binders = try self.stateMergeBinders(expr_id);
@@ -54730,6 +55668,7 @@ const BodyContext = struct {
         try self.constrainCheckedInterfaceToCell(self.view.bodies.pattern(pattern).ty, value_cell);
         const state_cell = try self.stateResultTypeCell(merge_binders, value_cell);
         const state_value = switch (checked_expr.data) {
+            .for_ => |for_| try self.lowerForThenStateResult(for_, value_cell, state_cell, merge_binders),
             .if_ => |if_| try self.addExprWithTypeCell(
                 state_cell,
                 try self.lowerIfAtTypeCells(
@@ -54750,7 +55689,7 @@ const BodyContext = struct {
                 } },
                 try self.matchComptimeSite(expr_id, match),
             ),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => unreachable,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .hosted_lambda, .run_low_level => unreachable,
         };
 
         const state_pattern_items = try self.allocator.alloc(DraftPatId, merge_binders.len + 1);
@@ -54904,6 +55843,9 @@ const BodyContext = struct {
             .runtime_error,
             => true,
             .expect => self.builder.inline_expects.includesConditions(),
+            // A promoted procedure is declared by its own template, not by a
+            // statement of the body that contains its source.
+            .promoted_proc => false,
             .import_,
             .alias_decl,
             .where_alias_decl,
@@ -55230,6 +56172,47 @@ const BodyContext = struct {
         carries: []const LoopCarry,
     };
 
+    fn lowerForThenStateResult(
+        self: *BodyContext,
+        for_: anytype,
+        result_cell: DraftTypeCell,
+        state_cell: DraftTypeCell,
+        merge_binders: []const MergeBinder,
+    ) Allocator.Error!DraftExprId {
+        const stmt = try self.addStmt(try self.lowerForStatement(for_));
+        const unit = try self.addExprWithTypeCell(result_cell, .unit);
+        return try self.addExprWithTypeCell(state_cell, .{ .block = .{
+            .statements = try self.addStmtSpan(&.{stmt}),
+            .final_expr = try self.stateResultTupleExprAtTypeCells(state_cell, merge_binders, unit),
+        } });
+    }
+
+    /// Both source loop forms bind their exit state in the enclosing
+    /// continuation. Expression callers supply unit only after that binding.
+    fn lowerForStatement(self: *BodyContext, for_: anytype) Allocator.Error!DraftStmt {
+        const carries = try self.prepareLoopCarries(for_.mutations);
+        defer self.allocator.free(carries);
+        const loop_cell = try self.loopStateTypeCell(try self.unitType(), carries);
+        const expr = try self.addExprWithTypeCell(loop_cell, try self.lowerIteratorFor(for_, loop_cell, carries));
+        return try self.loopExitStatement(expr, carries, loop_cell);
+    }
+
+    fn lowerConditionLoopStatement(self: *BodyContext, loop: checked.CheckedConditionLoop, condition: WhileCondition) Allocator.Error!DraftStmt {
+        const carries = try self.prepareLoopCarries(loop.mutations);
+        defer self.allocator.free(carries);
+        const loop_cell = try self.loopStateTypeCell(try self.unitType(), carries);
+        const expr = try self.addExprWithTypeCell(loop_cell, try self.lowerWhile(loop, loop_cell, carries, condition));
+        return try self.loopExitStatement(expr, carries, loop_cell);
+    }
+
+    fn loopExitStatement(self: *BodyContext, expr: DraftExprId, carries: []const LoopCarry, loop_cell: DraftTypeCell) Allocator.Error!DraftStmt {
+        if (carries.len == 0) return .{ .expr = expr };
+        return .{ .let_ = .{
+            .pat = try self.finalCarryPattern(carries, loop_cell),
+            .value = expr,
+        } };
+    }
+
     fn lowerIteratorFor(
         self: *BodyContext,
         for_: anytype,
@@ -55490,7 +56473,7 @@ const BodyContext = struct {
         expected_ret_ty: ?DraftTypeCell,
     ) Allocator.Error!?DraftExprId {
         const procedure = self.iteratorProcedureForMethodTarget(lookup.target) orelse return null;
-        if (procedure != .iter_iter and procedure != .iter_next) return null;
+        if (procedure != .identity and procedure != .next) return null;
 
         if (!self.isGeneratedIteratorEvidenceNode(dispatcher_node)) return null;
         try self.constrainCheckedInterfaceToCell(plan.dispatcher_ty, DraftTypeCell.fromGraphNode(dispatcher_node));
@@ -55501,13 +56484,13 @@ const BodyContext = struct {
             dispatcher_node,
         );
         switch (procedure) {
-            .iter_iter => {
+            .identity => {
                 if (expected_ret_ty) |expected| {
                     try relateRequestComponent(self.graph, dispatcher_node, try expected.toGraphNode(self.graph));
                 }
                 return iterator;
             },
-            .iter_next => {
+            .next => {
                 const step_ret_node = try self.generatedIteratorStepReturnNode(dispatcher_node);
                 if (expected_ret_ty) |expected| {
                     try relateRequestComponent(self.graph, step_ret_node, try expected.toGraphNode(self.graph));
@@ -55517,7 +56500,7 @@ const BodyContext = struct {
                     try self.lowerGeneratedIteratorNextData(iterator, dispatcher_node),
                 );
             },
-            .iter_custom, .iter_single, .list_iter, .list_iter_rev, .str_iter_utf8, .iter_map, .iter_keep_if, .iter_drop_if, .iter_take_first, .iter_drop_first, .iter_concat, .iter_append, .iter_with_index, .iter_step_by, .range_iter, .numeric_range_delegate, .numeric_to, .numeric_until, .iter_from_step, .range_done => unreachable,
+            .custom, .single, .list_iter, .list_iter_rev, .str_iter_utf8, .map, .keep_if, .drop_if, .take_first, .drop_first, .concat, .append, .with_index, .step_by, .from_iter, .range_iter, .numeric_range_iter, .numeric_to, .numeric_until, .from_step, .range_done => unreachable,
         }
     }
 
@@ -55532,7 +56515,7 @@ const BodyContext = struct {
                 };
                 break :blk lookup;
             },
-            .evidence_dependent => |dependent| if (self.evidence.at(dependent.index)) |entry| switch (entry) {
+            .evidence_dependent => |dependent| if (self.evidence.at(dependent.index)) |entry| switch (selectCallableContract(entry, dependent.callable_contract) orelse entry) {
                 .target => |target| .{
                     .view = target.view,
                     .target = target.target,
@@ -55540,7 +56523,7 @@ const BodyContext = struct {
                     // whichever same-name relation the caller materialized.
                     // An independent relation supplies only the target
                     // identity and instantiates against its own plan.
-                    .instantiation = if (dependent.independent_callable)
+                    .instantiation = if (dependent.independent_callable and selectCallableContract(entry, dependent.callable_contract) == null)
                         null
                     else
                         target.instantiation,
@@ -55975,7 +56958,7 @@ const BodyContext = struct {
             // the loop parameter. Record the edge itself; representation
             // finalization will force only slots that actually joined distinct
             // minted iterator identities.
-            try self.graph.markRecursiveValueSlot(carry_node);
+            self.graph.markRecursiveValueSlot(carry_node);
         }
         if (!self.graph.sameClass(carry_node, current_node)) {
             try selectRequestRepresentation(self.graph, carry_node, current_node);
@@ -55996,10 +56979,10 @@ const BodyContext = struct {
         return try self.typeStore().internRecord(self.nameStore(), &.{});
     }
 
-    fn prepareLoopCarries(self: *BodyContext, binders: []const checked.PatternBinderId) Allocator.Error![]LoopCarry {
+    fn prepareLoopCarries(self: *BodyContext, plan: ?checked.LoopMutationPlanId) Allocator.Error![]LoopCarry {
         var carries = std.ArrayList(LoopCarry).empty;
         errdefer carries.deinit(self.allocator);
-        for (binders) |binder| {
+        for (self.loopMutationSpans(plan)) |binders| for (binders) |binder| {
             const initial = self.binders.get(binder) orelse continue;
             const ty = self.localTypeCell(initial);
             // The loop parameter is an ordinary version of the binder's local:
@@ -56013,7 +56996,7 @@ const BodyContext = struct {
                 .param_local = param_local,
                 .ty = ty,
             });
-        }
+        };
         return try carries.toOwnedSlice(self.allocator);
     }
 
@@ -56100,7 +57083,7 @@ const BodyContext = struct {
             .return_ => |ret| try self.collectReassignedBindersInExpr(ret.expr, out),
             .for_ => |for_| {
                 try self.collectReassignedBindersInExpr(for_.expr, out);
-                try self.collectReassignedBindersInExpr(for_.body, out);
+                try self.collectLoopMutationBinders(for_.mutations, out);
             },
             .run_low_level => |low_level| for (low_level.args) |arg| try self.collectReassignedBindersInExpr(arg, out),
             .lambda,
@@ -56139,7 +57122,7 @@ const BodyContext = struct {
         switch (statement.data) {
             .decl => |decl| try self.collectReassignedBindersInExpr(decl.expr, out),
             .var_ => |var_| try self.collectReassignedBindersInExpr(var_.expr, out),
-            .var_uninitialized => {},
+            .var_uninitialized, .promoted_proc => {},
             .reassign => |reassign| {
                 for (reassign.reassigned_binders) |binder| try self.appendUniqueBinder(out, binder);
                 try self.collectReassignedBindersInExpr(reassign.expr, out);
@@ -56152,20 +57135,9 @@ const BodyContext = struct {
             },
             .for_ => |for_| {
                 try self.collectReassignedBindersInExpr(for_.expr, out);
-                try self.collectReassignedBindersInExpr(for_.body, out);
+                try self.collectLoopMutationBinders(for_.mutations, out);
             },
-            .while_ => |while_| {
-                try self.collectReassignedBindersInExpr(while_.cond, out);
-                try self.collectReassignedBindersInExpr(while_.body, out);
-            },
-            .infinite_loop => |loop| {
-                try self.collectReassignedBindersInExpr(loop.cond, out);
-                try self.collectReassignedBindersInExpr(loop.body, out);
-            },
-            .breakable_loop => |loop| {
-                try self.collectReassignedBindersInExpr(loop.cond, out);
-                try self.collectReassignedBindersInExpr(loop.body, out);
-            },
+            inline .while_, .infinite_loop, .breakable_loop => |loop| try self.collectLoopMutationBinders(loop.mutations, out),
             .return_ => |ret| try self.collectReassignedBindersInExpr(ret.expr, out),
             .pending,
             .crash,
@@ -56179,6 +57151,25 @@ const BodyContext = struct {
             .runtime_error,
             => {},
         }
+    }
+
+    fn collectLoopMutationBinders(
+        self: *BodyContext,
+        plan: ?checked.LoopMutationPlanId,
+        out: *std.ArrayList(checked.PatternBinderId),
+    ) Allocator.Error!void {
+        const spans = self.loopMutationSpans(plan);
+        for (spans) |binders| for (binders) |binder| try self.appendUniqueBinder(out, binder);
+    }
+
+    /// The published binders a loop carries under this compilation's expect mode.
+    fn loopMutationSpans(self: *BodyContext, plan: ?checked.LoopMutationPlanId) [2][]const checked.PatternBinderId {
+        const mutations = self.view.bodies.loopMutations(plan orelse Common.invariant("checked loop omitted its mutation plan"));
+        const pool = self.view.bodies.patternBinderIdPool();
+        return .{
+            pool[mutations.always.start..][0..mutations.always.len],
+            if (self.builder.inline_expects.includesConditions()) pool[mutations.expect_only.start..][0..mutations.expect_only.len] else &.{},
+        };
     }
 
     fn appendUniqueBinder(
@@ -56272,7 +57263,7 @@ const BodyContext = struct {
         termination: StatementTermination,
     };
 
-    fn lowerSharedExpectStatement(self: *BodyContext, child: checked.CheckedExprId) Allocator.Error!DraftStmt {
+    fn lowerStatefulExpectStatement(self: *BodyContext, child: checked.CheckedExprId) Allocator.Error!DraftStmt {
         const merges = try self.stateMergeBinders(child);
         defer self.allocator.free(merges);
         if (merges.len == 0) return .{ .expect = try self.lowerExpr(child) };
@@ -56281,7 +57272,10 @@ const BodyContext = struct {
         const state_cell = try self.stateResultTypeCell(merges, unit_cell);
         const condition_state_cell = try self.stateResultTypeCell(merges, condition_cell);
         const unit = try self.addExprWithTypeCell(unit_cell, .unit);
-        const omitted = try self.stateResultTupleExprAtTypeCells(state_cell, merges, unit);
+        const omitted = if (self.builder.inline_expects == .shared)
+            try self.stateResultTupleExprAtTypeCells(state_cell, merges, unit)
+        else
+            null;
         const condition_state = try self.lowerBodyThenStateResultAtTypeCells(child, condition_cell, condition_state_cell, merges);
         const condition_pattern = try self.allocator.alloc(DraftPatId, merges.len + 1);
         defer self.allocator.free(condition_pattern);
@@ -56304,11 +57298,13 @@ const BodyContext = struct {
             .statements = try self.addStmtSpan(&run_statements),
             .final_expr = try self.stateResultTupleExprAtTypeCells(state_cell, merges, unit),
         } });
-        const enabled = try self.addExpr(.{ .ty = try self.primitiveType(.bool), .data = .inline_expects_enabled });
-        const choice = try self.addExprWithTypeCell(state_cell, .{ .if_ = .{
-            .branches = try self.addIfBranchSpan(&.{.{ .cond = enabled, .body = executed }}),
-            .final_else = omitted,
-        } });
+        const choice = if (omitted) |omitted_state| blk: {
+            const enabled = try self.addExpr(.{ .ty = try self.primitiveType(.bool), .data = .inline_expects_enabled });
+            break :blk try self.addExprWithTypeCell(state_cell, .{ .if_ = .{
+                .branches = try self.addIfBranchSpan(&.{.{ .cond = enabled, .body = executed }}),
+                .final_else = omitted_state,
+            } });
+        } else executed;
         const output_pattern = try self.allocator.alloc(DraftPatId, merges.len + 1);
         defer self.allocator.free(output_pattern);
         for (merges, 0..) |merge, i| {
@@ -56345,6 +57341,7 @@ const BodyContext = struct {
             .nominal_decl,
             .type_anno,
             .type_var_alias,
+            .promoted_proc,
             => Common.invariant("non-runtime checked statement reached Monotype lowering"),
             .runtime_error => .{ .crash = try self.addStringLiteral("runtime error") },
             .decl => |decl| blk: {
@@ -56376,85 +57373,11 @@ const BodyContext = struct {
             .expect => |child| if (self.builder.inline_expects == .omit) blk: {
                 const unit_ty = try self.unitType();
                 break :blk .{ .expr = try self.addExpr(.{ .ty = unit_ty, .data = .unit }) };
-            } else if (self.builder.inline_expects == .shared)
-                try self.lowerSharedExpectStatement(child)
-            else
-                .{ .expect = try self.lowerExpr(child) },
-            .for_ => |for_| blk: {
-                var reassigned = std.ArrayList(checked.PatternBinderId).empty;
-                defer reassigned.deinit(self.allocator);
-                try self.collectReassignedBindersInExpr(for_.body, &reassigned);
-
-                const carries = try self.prepareLoopCarries(reassigned.items);
-                defer self.allocator.free(carries);
-
-                const unit_ty = try self.unitType();
-                const loop_cell = try self.loopStateTypeCell(unit_ty, carries);
-                const expr = try self.addExprWithTypeCell(loop_cell, try self.lowerIteratorFor(for_, loop_cell, carries));
-                if (carries.len == 0) break :blk .{ .expr = expr };
-
-                break :blk .{ .let_ = .{
-                    .pat = try self.finalCarryPattern(carries, loop_cell),
-                    .value = expr,
-                } };
-            },
-            .while_ => |while_| blk: {
-                var reassigned = std.ArrayList(checked.PatternBinderId).empty;
-                defer reassigned.deinit(self.allocator);
-                try self.collectReassignedBindersInExpr(while_.cond, &reassigned);
-                try self.collectReassignedBindersInExpr(while_.body, &reassigned);
-
-                const carries = try self.prepareLoopCarries(reassigned.items);
-                defer self.allocator.free(carries);
-
-                const unit_ty = try self.unitType();
-                const loop_cell = try self.loopStateTypeCell(unit_ty, carries);
-                const expr = try self.addExprWithTypeCell(loop_cell, try self.lowerWhile(while_, loop_cell, carries, .checked));
-                if (carries.len == 0) break :blk .{ .expr = expr };
-
-                break :blk .{ .let_ = .{
-                    .pat = try self.finalCarryPattern(carries, loop_cell),
-                    .value = expr,
-                } };
-            },
-            .infinite_loop => |loop| blk: {
-                var reassigned = std.ArrayList(checked.PatternBinderId).empty;
-                defer reassigned.deinit(self.allocator);
-                try self.collectReassignedBindersInExpr(loop.cond, &reassigned);
-                try self.collectReassignedBindersInExpr(loop.body, &reassigned);
-
-                const carries = try self.prepareLoopCarries(reassigned.items);
-                defer self.allocator.free(carries);
-
-                const unit_ty = try self.unitType();
-                const loop_cell = try self.loopStateTypeCell(unit_ty, carries);
-                const expr = try self.addExprWithTypeCell(loop_cell, try self.lowerWhile(loop, loop_cell, carries, .always_true));
-                if (carries.len == 0) break :blk .{ .expr = expr };
-
-                break :blk .{ .let_ = .{
-                    .pat = try self.finalCarryPattern(carries, loop_cell),
-                    .value = expr,
-                } };
-            },
-            .breakable_loop => |loop| blk: {
-                var reassigned = std.ArrayList(checked.PatternBinderId).empty;
-                defer reassigned.deinit(self.allocator);
-                try self.collectReassignedBindersInExpr(loop.cond, &reassigned);
-                try self.collectReassignedBindersInExpr(loop.body, &reassigned);
-
-                const carries = try self.prepareLoopCarries(reassigned.items);
-                defer self.allocator.free(carries);
-
-                const unit_ty = try self.unitType();
-                const loop_cell = try self.loopStateTypeCell(unit_ty, carries);
-                const expr = try self.addExprWithTypeCell(loop_cell, try self.lowerWhile(loop, loop_cell, carries, .always_true));
-                if (carries.len == 0) break :blk .{ .expr = expr };
-
-                break :blk .{ .let_ = .{
-                    .pat = try self.finalCarryPattern(carries, loop_cell),
-                    .value = expr,
-                } };
-            },
+            } else try self.lowerStatefulExpectStatement(child),
+            .for_ => |for_| try self.lowerForStatement(for_),
+            .while_ => |while_| try self.lowerConditionLoopStatement(while_, .checked),
+            .infinite_loop => |loop| try self.lowerConditionLoopStatement(loop, .always_true),
+            .breakable_loop => |loop| try self.lowerConditionLoopStatement(loop, .always_true),
             .break_ => .{ .expr = try self.breakCurrentLoopExpr() },
             .return_ => |ret| .{ .return_ = try self.lowerReturn(ret, .return_expr) },
         };
@@ -58772,30 +59695,30 @@ test "graph constructor representation follows aliases and preserves nominal lay
     const nominal_name = try name_store.internTypeName("Nominal");
     const outer_alias_name = try name_store.internTypeName("OuterAlias");
     const structural = try graph.newNode(.empty_tag_union);
-    const alias = try graph.newNode(.{ .named = .{
+    const alias = try graph.newNode(try graph.namedContent(.{
         .named_type = .{ .module = .{}, .ty = @enumFromInt(1) },
         .def = .{ .module = module_identity, .type_name = alias_name },
         .kind = .alias,
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = structural, .use = .inspectable },
-    } });
-    const nominal = try graph.newNode(.{ .named = .{
+    }));
+    const nominal = try graph.newNode(try graph.namedContent(.{
         .named_type = .{ .module = .{}, .ty = @enumFromInt(2) },
         .def = .{ .module = module_identity, .type_name = nominal_name },
         .kind = .nominal,
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = alias, .use = .inspectable },
-    } });
-    const outer_alias = try graph.newNode(.{ .named = .{
+    }));
+    const outer_alias = try graph.newNode(try graph.namedContent(.{
         .named_type = .{ .module = .{}, .ty = @enumFromInt(3) },
         .def = .{ .module = module_identity, .type_name = outer_alias_name },
         .kind = .alias,
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = nominal, .use = .inspectable },
-    } });
+    }));
 
     var ctx: BodyContext = undefined;
     ctx.graph = graph;
@@ -60048,6 +60971,16 @@ fn moduleDigestFromId(key: checked.ModuleId) names.CheckedModuleDigest {
 /// Content bytes identifying a procedure-use root: the module it was
 /// requested from, the request's kind and checked source site, and the
 /// procedure binding's declared function type key.
+/// The literal a literal root converts; its return type joins the
+/// definition's identity when the definition seals.
+fn literalRootIdentity(module: checked.ModuleId, expr_id: checked.CheckedExprId) [32]u8 {
+    var hasher = TypeDigestHasher.init();
+    hasher.update("roc.monotype.literal-root.v1");
+    hasher.update(&module.bytes);
+    hashU32(&hasher, @intFromEnum(expr_id));
+    return hasher.finalResult();
+}
+
 fn procedureUseRootIdentity(request: checked.RootRequest, procedure: checked.ProcedureUseTemplate, source_module: checked.ModuleId) [32]u8 {
     var hasher = TypeDigestHasher.init();
     hasher.update("roc.monotype.procedure-use-root.v1");
@@ -60147,6 +61080,7 @@ fn builtinOwner(builtin: ?checked.CheckedBuiltinNominal) ?static_dispatch.Builti
         .field => .field,
         .try_ => null,
         .iter => .iter,
+        .stream => .stream,
         .crypto_sha256_digest => .crypto_sha256_digest,
         .crypto_sha256_hasher => .crypto_sha256_hasher,
         .crypto_blake3_digest => .crypto_blake3_digest,
@@ -60592,30 +61526,30 @@ test "hosted Try graph walk crosses transparent alias layers to the Try nominal"
 
     const ok_node = try graph.newNode(.{ .primitive = .str });
     const err_node = try graph.newNode(.empty_tag_union);
-    const try_node = try graph.newNode(.{ .named = .{
+    const try_node = try graph.newNode(try graph.namedContent(.{
         .named_type = try_named,
         .def = try_def,
         .kind = .nominal,
         .builtin_owner = null,
         .args = try graph.arena().dupe(NodeId, &.{ ok_node, err_node }),
         .backing = .{ .node = try graph.newNode(.empty_tag_union), .use = .inspectable },
-    } });
-    const alias_node = try graph.newNode(.{ .named = .{
+    }));
+    const alias_node = try graph.newNode(try graph.namedContent(.{
         .named_type = alias_named,
         .def = alias_def,
         .kind = .alias,
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = try_node, .use = .inspectable },
-    } });
-    const outer_alias_node = try graph.newNode(.{ .named = .{
+    }));
+    const outer_alias_node = try graph.newNode(try graph.namedContent(.{
         .named_type = outer_alias_named,
         .def = outer_alias_def,
         .kind = .alias,
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = alias_node, .use = .inspectable },
-    } });
+    }));
 
     const capability = HostedTryAdapterCapability{
         .def = try_def,
@@ -60639,14 +61573,14 @@ test "hosted Try graph walk crosses transparent alias layers to the Try nominal"
 
     // A nominal that is not the capability's `Try` is not crossed into: only a
     // transparent alias layer is followed.
-    const impostor_node = try graph.newNode(.{ .named = .{
+    const impostor_node = try graph.newNode(try graph.namedContent(.{
         .named_type = alias_named,
         .def = impostor_def,
         .kind = .nominal,
         .builtin_owner = null,
         .args = try graph.arena().dupe(NodeId, &.{ ok_node, err_node }),
         .backing = .{ .node = try_node, .use = .inspectable },
-    } });
+    }));
     try std.testing.expect(graphHostedTryInfoOrNull(graph, capability, impostor_node) == null);
 }
 
@@ -60814,7 +61748,7 @@ test "request component relation follows root authority before nested private ev
     const inner_named_type: Type.NamedType = .{ .module = .{}, .ty = @enumFromInt(9) };
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const inner_def: Type.TypeDef = .{ .module = module_identity, .type_name = inner_type_name };
-    const private_arg = try graph.newNode(.{ .named = .{
+    const private_arg = try graph.newNode(try graph.namedContent(.{
         .named_type = inner_named_type,
         .def = inner_def,
         .kind = .@"opaque",
@@ -60825,16 +61759,16 @@ test "request component relation follows root authority before nested private ev
             .use = .runtime_layout_only,
             .authority = .generated_private,
         },
-    } });
-    const public = try graph.newNode(.{ .named = .{
+    }));
+    const public = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = .fields,
         .args = try graph.arena().dupe(NodeId, &.{private_arg}),
         .backing = .{ .node = try graph.newNode(.empty_record), .use = .runtime_layout_only },
-    } });
-    const private = try graph.newNode(.{ .named = .{
+    }));
+    const private = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
@@ -60845,7 +61779,7 @@ test "request component relation follows root authority before nested private ev
             .use = .runtime_layout_only,
             .authority = .generated_private,
         },
-    } });
+    }));
 
     try relateRequestComponent(graph, public, private);
 
@@ -60873,7 +61807,7 @@ test "request component relation descends through matching private-bearing conta
     const inner_named_type: Type.NamedType = .{ .module = .{}, .ty = @enumFromInt(11) };
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const inner_def: Type.TypeDef = .{ .module = module_identity, .type_name = inner_type_name };
-    const shared_private_arg = try graph.newNode(.{ .named = .{
+    const shared_private_arg = try graph.newNode(try graph.namedContent(.{
         .named_type = inner_named_type,
         .def = inner_def,
         .kind = .@"opaque",
@@ -60884,16 +61818,16 @@ test "request component relation descends through matching private-bearing conta
             .use = .runtime_layout_only,
             .authority = .generated_private,
         },
-    } });
-    const public_elem = try graph.newNode(.{ .named = .{
+    }));
+    const public_elem = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = .fields,
         .args = try graph.arena().dupe(NodeId, &.{shared_private_arg}),
         .backing = .{ .node = try graph.newNode(.empty_record), .use = .runtime_layout_only },
-    } });
-    const private_elem = try graph.newNode(.{ .named = .{
+    }));
+    const private_elem = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
@@ -60904,7 +61838,7 @@ test "request component relation descends through matching private-bearing conta
             .use = .runtime_layout_only,
             .authority = .generated_private,
         },
-    } });
+    }));
     const public_list = try graph.newNode(.{ .list = public_elem });
     const private_list = try graph.newNode(.{ .list = private_elem });
 
@@ -60938,15 +61872,15 @@ test "checked-to-mono relation preserves generated-private evidence inside a com
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const checked_backing = try graph.newNode(.empty_record);
     const mono_backing = try graph.newNode(.empty_record);
-    const checked_opaque = try graph.newNode(.{ .named = .{
+    const checked_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = .fields,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = checked_backing, .use = .runtime_layout_only },
-    } });
-    const mono_opaque = try graph.newNode(.{ .named = .{
+    }));
+    const mono_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
@@ -60957,7 +61891,7 @@ test "checked-to-mono relation preserves generated-private evidence inside a com
             .use = .runtime_layout_only,
             .authority = .generated_private,
         },
-    } });
+    }));
     const checked_composite = try graph.newNode(.{ .list = checked_opaque });
     const mono_composite = try graph.newNode(.{ .list = mono_opaque });
 
@@ -60991,22 +61925,22 @@ test "checked-to-mono relation joins exact tag request roots without collapsing 
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const checked_backing = try graph.newNode(.empty_record);
     const mono_backing = try graph.newNode(.empty_record);
-    const checked_payload = try graph.newNode(.{ .named = .{
+    const checked_payload = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = .fields,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = checked_backing, .use = .runtime_layout_only },
-    } });
-    const mono_payload = try graph.newNode(.{ .named = .{
+    }));
+    const mono_payload = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = .fields,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = mono_backing, .use = .runtime_layout_only },
-    } });
+    }));
     const checked_row = try graph.newNode(.{ .tag_union = .{
         .tags = try graph.arena().dupe(InstTag, &.{.{
             .name = tag_name,
@@ -61085,22 +62019,22 @@ test "direct call request preserves generated-private return provenance" {
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const public_backing = try graph.newNode(.empty_record);
     const private_backing = try graph.newNode(.empty_record);
-    const public_opaque = try graph.newNode(.{ .named = .{
+    const public_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = public_backing, .use = .runtime_layout_only },
-    } });
-    const private_opaque = try graph.newNode(.{ .named = .{
+    }));
+    const private_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = private_backing, .use = .runtime_layout_only, .authority = .generated_private },
-    } });
+    }));
     const public_ret = try graph.newNode(.{ .list = public_opaque });
     const private_ret = try graph.newNode(.{ .list = private_opaque });
     const args = try graph.arena().alloc(NodeId, 0);
@@ -61132,22 +62066,22 @@ test "dispatch call target relation preserves generated-private return provenanc
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const public_backing = try graph.newNode(.empty_record);
     const private_backing = try graph.newNode(.empty_record);
-    const public_opaque = try graph.newNode(.{ .named = .{
+    const public_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = public_backing, .use = .runtime_layout_only },
-    } });
-    const private_opaque = try graph.newNode(.{ .named = .{
+    }));
+    const private_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = private_backing, .use = .runtime_layout_only, .authority = .generated_private },
-    } });
+    }));
     const public_ret = try graph.newNode(.{ .box = public_opaque });
     const private_ret = try graph.newNode(.{ .box = private_opaque });
     const args = try graph.arena().alloc(NodeId, 0);
@@ -61182,15 +62116,15 @@ test "iterator request nodes preserve generated-private operand and result prove
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const public_backing = try graph.newNode(.empty_record);
     const private_backing = try graph.newNode(.empty_record);
-    const public_opaque = try graph.newNode(.{ .named = .{
+    const public_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = public_backing, .use = .runtime_layout_only },
-    } });
-    const private_opaque = try graph.newNode(.{ .named = .{
+    }));
+    const private_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
@@ -61201,7 +62135,7 @@ test "iterator request nodes preserve generated-private operand and result prove
             .use = .runtime_layout_only,
             .authority = .generated_private,
         },
-    } });
+    }));
     const public_operand = try graph.newNode(.{ .list = public_opaque });
     const private_operand = try graph.newNode(.{ .list = private_opaque });
     const public_result = try graph.newNode(.{ .tuple = try graph.arena().dupe(NodeId, &.{public_opaque}) });
@@ -61236,15 +62170,15 @@ test "partial synthetic request nodes preserve generated-private argument and re
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const public_backing = try graph.newNode(.empty_record);
     const private_backing = try graph.newNode(.empty_record);
-    const public_opaque = try graph.newNode(.{ .named = .{
+    const public_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
         .builtin_owner = null,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .{ .node = public_backing, .use = .runtime_layout_only },
-    } });
-    const private_opaque = try graph.newNode(.{ .named = .{
+    }));
+    const private_opaque = try graph.newNode(try graph.namedContent(.{
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
@@ -61255,7 +62189,7 @@ test "partial synthetic request nodes preserve generated-private argument and re
             .use = .runtime_layout_only,
             .authority = .generated_private,
         },
-    } });
+    }));
     const public_arg = try graph.newNode(.{ .box = public_opaque });
     const private_arg = try graph.newNode(.{ .box = private_opaque });
     const public_ret = try graph.newNode(.{ .list = public_opaque });
@@ -61995,7 +62929,7 @@ test "body draft comptime roots relocate independent shards and survive source d
     const descriptors = [_]Common.ComptimeValueRoot{
         .{
             .module = .{ .bytes = @splat(0x31) },
-            .root = @enumFromInt(7),
+            .root = .{ .checked = @enumFromInt(7) },
             .const_locator = .{
                 .artifact = .{ .bytes = @splat(0x41) },
                 .owner = .{ .hoisted_expr = .{ .module_idx = 19, .expr = @enumFromInt(23) } },
@@ -62005,7 +62939,7 @@ test "body draft comptime roots relocate independent shards and survive source d
         },
         .{
             .module = .{ .bytes = @splat(0x32) },
-            .root = @enumFromInt(11),
+            .root = .{ .checked = @enumFromInt(11) },
             .const_locator = null,
         },
     };
@@ -63213,4 +64147,30 @@ test "issue 11453: stored aliases preserve sharing recursion and nominal backing
     const recursive_items = program.types.span(program.types.get(restored_recursive).tuple);
     try std.testing.expectEqual(restored_recursive, GuardedList.at(recursive_items, 0));
     try std.testing.expectEqual(@as(usize, 4), program.types.typeCount());
+}
+
+test "issue 11737: independent call selects its own nested contract without copying" {
+    const first = [_]SpecEvidence{.unreachable_value};
+    const second = [_]SpecEvidence{.checked_error};
+    const selected: SpecEvidenceTarget = .{
+        .view = undefined,
+        .target = undefined,
+        .instantiation = null,
+        .local_proc_context = null,
+        .nested = .{ .resolved = &second },
+    };
+    const contracts = [_]SpecEvidence{.{ .target = &selected }};
+    var primary = selected;
+    primary.nested = .{ .resolved = &first };
+    primary.callable_contracts = &contracts;
+    const selection = selectCallableContract(.{ .target = &primary }, 0).?;
+    try std.testing.expect(selection.target == &selected);
+    try std.testing.expect(selection.target.nested.resolved.ptr == &second);
+    try std.testing.expect(selectCallableContract(.{ .target = &primary }, null) == null);
+    // Already-consumed relations, including their side contracts, borrow all
+    // vectors. The specialization fast path must allocate nothing.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const vector = [_]SpecEvidence{.{ .target = &primary }};
+    const normalized = try normalizeMaterializedEvidence(failing.allocator(), &vector);
+    try std.testing.expect(normalized.ptr == &vector);
 }
