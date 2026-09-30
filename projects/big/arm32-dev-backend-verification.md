@@ -520,6 +520,13 @@ Done 2026-09-29, locally (nothing pushed).
   - At `99a837b08b`: the arm32 eval corpus under qemu 2381/2381 (the issue
     11471 crash did not recur); `run-check-dev-code-hashes` 2,133/2,133;
     format, zig lints, tidy and git lints pass.
+- CI on the merge (`ac3e333001`, full run 36764332316):
+  `roc-cross-compile (ubuntu-24.04, x64musl)` fails because two fx programs
+  (`parallel_fusion.roc`, `inspect_dict_set.roc`) panic when cross-built for
+  x64musl with the default (LLVM) backend: `std.debug.assert(size > 0)` in
+  `classifySystemV` (`src/layout/abi/x86_64.zig:124`), reached for a
+  zero-sized member of an aggregate. Upstream: the same command fails the
+  same way at `00cab95af8` (`.git/verify-tools/x64musl_cross_attr.sh`).
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.

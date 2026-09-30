@@ -57,6 +57,7 @@ outside its scope. Details and fix directions:
 | **git-lints pads a file name with NUL bytes** in "src/ file never imported". | `tidy --git-lints` | Cosmetic | Not rechecked |
 | **The compiler at our base panics type-checking basic-cli 0.22.2** ("trying to add var at rank 5, but current rank is 4"); the nightly checks it cleanly. | type checker | Crash | Probably fixed; recheck after the merge |
 | Redundant narrowing shifts before byte stores. | `LirCodeGen.zig` | Dead work | Not rechecked |
+| **The x86_64 SysV classifier asserts on a zero-sized aggregate member.** `test/fx/parallel_fusion.roc` and `test/fx/inspect_dict_set.roc` panic (`assert(size > 0)`) when built with `--target=x64musl` and the default LLVM backend, so `roc-cross-compile (ubuntu-24.04, x64musl)` fails. Found 2026-10-01. | `layout/abi/x86_64.zig`, `classifySystemV` via `classifyMemberSysV` | Compiler crash | Present at `00cab95af8` |
 
 ## 3. CI, build and tooling findings
 
@@ -322,6 +323,17 @@ git rm -q --cached src/zz_probe.zig && rm src/zz_probe.zig
 `~/repos/roc_32bit/.git/verify-tools/sitrep-roc/sitrep.roc`. It panics with
 "trying to add var at rank 5, but current rank is 4". Repeat at
 `upstream/main` to see whether it is fixed there.
+
+**2.13 x86_64 SysV zero-sized member.** **Heavy** (builds the test
+platforms):
+
+```sh
+zig build run-test-cli -- --suite platforms --filter test/fx/parallel_fusion.roc \
+  --filter test/fx/inspect_dict_set.roc --cross-target=x64musl
+```
+
+Both crash in the build phase with `assert(size > 0)` in
+`src/layout/abi/x86_64.zig`.
 
 ### Section 3: CI, build and tooling
 
