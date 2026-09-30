@@ -531,7 +531,9 @@ Done 2026-09-29, locally (nothing pushed).
   and `eval-llvm (ubuntu-24.04)` fails 30 of 2,381 cases (Set, Iter and
   inspect cases), every one an LLVM-backend abort (`signal: 6`) at the same
   assertion. Attributed to the same upstream defect by that assertion; the
-  LLVM eval corpus was not separately rerun at upstream.
+  LLVM eval corpus was not separately rerun at upstream. Upstream issue
+  #11909; the fix (PR #11915) is folded into the open PR #11885, so these
+  jobs pass after the next catch-up that includes it.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
