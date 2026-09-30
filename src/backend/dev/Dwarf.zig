@@ -431,7 +431,7 @@ test "DWARF subprograms without a source location omit their declaration" {
     const procs = [_]ProcEntry{
         .{ .name = "roc_generated", .code_start = 0, .code_size = 16, .loc = base.SourceLoc.none },
     };
-    var sections = try build(gpa, "roc test", &files, &entries, &procs, 16);
+    var sections = try build(gpa, "roc test", .eight, &files, &entries, &procs, 16);
     defer sections.deinit(gpa);
 
     // The last DIE before the children terminator: abbrev code, name,
