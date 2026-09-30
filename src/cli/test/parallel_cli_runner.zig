@@ -2530,8 +2530,10 @@ test "resolveCrossRunner keeps commands and absolute paths and anchors relative 
     const a = arena.allocator();
     try std.testing.expectEqualStrings("qemu-arm-static", try resolveCrossRunner(a, "/repo", "qemu-arm-static"));
     try std.testing.expectEqualStrings("/opt/run.sh", try resolveCrossRunner(a, "/repo", "/opt/run.sh"));
-    try std.testing.expectEqualStrings("/repo/ci/ssh_cross_runner.sh", try resolveCrossRunner(a, "/repo", "ci/ssh_cross_runner.sh"));
-    try std.testing.expectEqualStrings("/repo/./run.sh", try resolveCrossRunner(a, "/repo", "./run.sh"));
+    // Joined with the host's separator: `/repo\ci/ssh_cross_runner.sh` on Windows.
+    const sep = std.fs.path.sep_str;
+    try std.testing.expectEqualStrings("/repo" ++ sep ++ "ci/ssh_cross_runner.sh", try resolveCrossRunner(a, "/repo", "ci/ssh_cross_runner.sh"));
+    try std.testing.expectEqualStrings("/repo" ++ sep ++ "./run.sh", try resolveCrossRunner(a, "/repo", "./run.sh"));
 }
 /// The backend `--cross-opt` selects; `roc build`'s default (speed) when absent.
 var cross_build_opt: OptMode = .speed;
