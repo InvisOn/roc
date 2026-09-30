@@ -746,8 +746,9 @@ const HostRecord = extern struct { name: RocStr };
 // that *contains another struct* at an even core register, as if it were
 // 8-byte aligned, while AAPCS32 (and clang) start it at the next register. For
 // this function the result pointer takes r0, so Zig reads `HostRecord` from r2,
-// r3 and the stack, but Roc (following AAPCS32) passes it in r1-r3. See
-// "Zig 0.16 passes nested `extern struct` arguments off-ABI on arm" in
+// r3 and the stack, but Roc (following AAPCS32) passes it in r1-r3. Zig issue:
+// https://codeberg.org/ziglang/zig/issues/37018. See also "Zig 0.16 passes
+// nested `extern struct` arguments off-ABI on arm" in
 // projects/big/arm32-dev-backend-issues.md.
 //
 // The workaround takes the inner `RocStr` directly on arm32. A struct with one
