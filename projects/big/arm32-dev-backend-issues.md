@@ -30,6 +30,7 @@ Where a new note goes:
 | A design decision the work still owes, laid out for the owner | its own `projects/big/arm32-dev-backend-<topic>-decision.md`, linked from its issues entry |
 | A follow-up project's plan (fuzzing, for example) | its own `projects/big/arm32-dev-backend-<topic>.md`, indexed in `projects/README.md` |
 | A guided tour of a phase, for the owner | `projects/big/arm32-dev-backend-walkthroughs.md` |
+| A finding that upstream can use now (a fix, defect, CI finding or lesson) | its details where this table says, plus a line in `projects/big/arm32-dev-backend-upstream-now.md` |
 
 Contents:
 
@@ -567,7 +568,8 @@ Fix each one in its own commit, and remove its entry in that commit.
   A full run spends about 15 minutes in `build-ci` before the first check,
   so each quick lint failure costs a full cycle. Run the `run-check-*`
   phases directly first, and resume with `--minici-after <phase>`.
-- **Building the test platforms deletes the user's whole Roc cache.**
+- **Building the test platforms deletes the user's whole Roc cache,** and
+  so does a plain `zig build`, whose install step depends on the same step.
   `ClearRocCacheStep` in `build.zig` (upstream code, run before the test
   platforms are rebuilt) calls `deleteTree` on `~/.cache/roc` (or
   `$XDG_CACHE_HOME/roc`), which also holds downloaded packages such as
