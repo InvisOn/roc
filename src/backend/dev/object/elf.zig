@@ -904,7 +904,9 @@ pub const ElfWriter = struct {
     }
 
     /// ELF32 with REL relocations (arm32). Section indices 1-12 match
-    /// write64; section 13 is `.ARM.attributes`. REL records carry no addend
+    /// write64; section 13 is `.ARM.attributes` and 14 is `.bss` (write64's
+    /// 13), so arm32's indices stay where they were before `.bss` existed.
+    /// REL records carry no addend
     /// field, so each relocation's explicit addend is stored into the
     /// relocated field of the output copy, encoded as its type requires.
     fn write32(self: *Self, output: *std.ArrayList(u8)) Allocator.Error!void {
@@ -917,7 +919,8 @@ pub const ElfWriter = struct {
         const SHIDX_DEBUG_LINE = 8;
         const SHIDX_DEBUG_ABBREV = 9;
         const SHIDX_DEBUG_INFO = 10;
-        const NUM_SECTIONS = 14;
+        const SHIDX_BSS = 14;
+        const NUM_SECTIONS = 15;
 
         const shname_text = try self.addString(&self.shstrtab, ".text");
         const shname_rodata = try self.addString(&self.shstrtab, ".rodata");
@@ -932,6 +935,7 @@ pub const ElfWriter = struct {
         const shname_rel_debug_line = try self.addString(&self.shstrtab, ".rel.debug_line");
         const shname_rel_debug_info = try self.addString(&self.shstrtab, ".rel.debug_info");
         const shname_attributes = try self.addString(&self.shstrtab, ".ARM.attributes");
+        const shname_bss = try self.addString(&self.shstrtab, ".bss");
 
         // Symbols: null, the section symbols DWARF relocations target, the
         // `$a` mapping symbol marking .text as A32, then the writer's symbols.
@@ -1044,7 +1048,7 @@ pub const ElfWriter = struct {
         var name_offset: u32 = 1 + mapping_symbol_name.len + 1;
         for (self.symbols.items) |sym| {
             const bind: u8 = if (sym.is_global) ELF.STB_GLOBAL else ELF.STB_LOCAL;
-            const sym_type: u8 = if (sym.is_function) ELF.STT_FUNC else if (sym.section == .rodata) ELF.STT_OBJECT else ELF.STT_NOTYPE;
+            const sym_type: u8 = if (sym.is_function) ELF.STT_FUNC else if (sym.section == .rodata or sym.section == .bss) ELF.STT_OBJECT else ELF.STT_NOTYPE;
             const elf_sym = Elf32_Sym{
                 .st_name = name_offset,
                 .st_value = @intCast(sym.offset),
@@ -1055,7 +1059,7 @@ pub const ElfWriter = struct {
                     .text => SHIDX_TEXT,
                     .data => 0,
                     .rodata => SHIDX_RODATA,
-                    .bss => 0,
+                    .bss => SHIDX_BSS,
                     .undef => ELF.SHN_UNDEF,
                 },
             };
@@ -1103,6 +1107,9 @@ pub const ElfWriter = struct {
             section32(shname_rel_debug_line, ELF.SHT_REL, ELF.SHF_INFO_LINK, rel_debug_line_offset, rel_debug_line_size, SHIDX_SYMTAB, SHIDX_DEBUG_LINE, 4, @sizeOf(Elf32_Rel)),
             section32(shname_rel_debug_info, ELF.SHT_REL, ELF.SHF_INFO_LINK, rel_debug_info_offset, rel_debug_info_size, SHIDX_SYMTAB, SHIDX_DEBUG_INFO, 4, @sizeOf(Elf32_Rel)),
             section32(shname_attributes, ELF.SHT_ARM_ATTRIBUTES, 0, attributes_offset, attributes.len, 0, 0, 1, 0),
+            // Declared by size alone; SHT_NOBITS stores no bytes, so its file
+            // offset only has to be inside the file.
+            section32(shname_bss, ELF.SHT_NOBITS, ELF.SHF_ALLOC | ELF.SHF_WRITE, shdr_offset, self.zero_fill_size, 0, 0, 16, 0),
         };
         for (headers) |header| output.appendSliceAssumeCapacity(std.mem.asBytes(&header));
         std.debug.assert(output.items.len == object_size);
@@ -1424,6 +1431,44 @@ test "arm32 object is ELF32, EM_ARM, hard-float, with REL relocations and in-pla
     try std.testing.expectEqual(@as(u32, 0xE34F0FF4), std.mem.readInt(u32, t[8..12], .little)); // movt r0, #0xfff4
     const ro = Section32.find(shdrs, strtab, ".rodata");
     try std.testing.expectEqual(@as(i32, 3), std.mem.readInt(i32, bytes[ro.sh_offset + 4 ..][0..4], .little));
+}
+
+test "arm32 object declares zero-fill data in .bss and points its symbols there" {
+    var writer = try ElfWriter.init(std.testing.allocator, .arm, .none);
+    defer writer.deinit();
+    writer.setCode(&.{ 0x1E, 0xFF, 0x2F, 0xE1 }); // bx lr
+    writer.setZeroFill(4096);
+    _ = try writer.addSymbol(.{ .name = "table", .section = .bss, .offset = 8, .size = 4088, .is_global = true, .is_function = false });
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+    try writer.write(&output);
+    const bytes = output.items;
+
+    const ehdr = std.mem.bytesToValue(Elf32_Ehdr, bytes[0..@sizeOf(Elf32_Ehdr)]);
+    const shdrs = std.mem.bytesAsSlice(Elf32_Shdr, bytes[ehdr.e_shoff..][0 .. ehdr.e_shnum * @sizeOf(Elf32_Shdr)]);
+    const shstr = shdrs[ehdr.e_shstrndx];
+    const names = bytes[shstr.sh_offset..][0..shstr.sh_size];
+    const bss_index = for (shdrs, 0..) |h, i| {
+        if (std.mem.eql(u8, std.mem.sliceTo(names[h.sh_name..], 0), ".bss")) break i;
+    } else return error.TestExpectedEqual;
+    const bss = shdrs[bss_index];
+    try std.testing.expectEqual(@as(u32, ELF.SHT_NOBITS), bss.sh_type);
+    try std.testing.expectEqual(@as(u32, 4096), bss.sh_size);
+    // The file stores none of it.
+    try std.testing.expect(bytes.len < 4096);
+
+    const symtab = for (shdrs) |h| {
+        if (h.sh_type == ELF.SHT_SYMTAB) break h;
+    } else return error.TestExpectedEqual;
+    const strtab = shdrs[symtab.sh_link];
+    const symbols = std.mem.bytesAsSlice(Elf32_Sym, bytes[symtab.sh_offset..][0..symtab.sh_size]);
+    const table = for (symbols) |sym| {
+        if (std.mem.eql(u8, std.mem.sliceTo(bytes[strtab.sh_offset + sym.st_name ..], 0), "table")) break sym;
+    } else return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u16, @intCast(bss_index)), table.st_shndx);
+    try std.testing.expectEqual(@as(u32, 8), table.st_value);
+    try std.testing.expectEqual(@as(u8, ELF.STT_OBJECT), table.st_info & 0xf);
 }
 
 test "aarch64 DWARF relocations use AArch64 absolute types" {
