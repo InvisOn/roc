@@ -1331,8 +1331,8 @@ const core_tests = [_]TestCase{
     .{ .name = "problem: int minus dec type mismatch", .source = "1.I64 - 2.0.Dec", .expected = .{ .problem = {} } },
     .{ .name = "problem: int times dec type mismatch", .source = "1.I64 * 2.0.Dec", .expected = .{ .problem = {} } },
     .{ .name = "problem: int div dec type mismatch", .source = "1.I64 / 2.0.Dec", .expected = .{ .problem = {} } },
-    .{ .name = "problem: F32.is_eq is intentionally unavailable", .source = "F32.is_eq(1.0.F32, 1.0.F32)", .expected = .{ .problem = {} } },
-    .{ .name = "problem: F64.is_eq is intentionally unavailable", .source = "F64.is_eq(1.0.F64, 1.0.F64)", .expected = .{ .problem = {} } },
+    .{ .name = "inspect: F32 opts in to qualified is_eq dispatch", .source = "F32.is_eq(1.0.F32, 1.0.F32)", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: F64 opts in to qualified is_eq dispatch", .source = "F64.is_eq(1.0.F64, 1.0.F64)", .expected = .{ .inspect_str = "True" } },
     .{ .name = "inspect: F32 opts in to receiver is_eq dispatch", .source = "1.0.F32.is_eq(1.0.F32)", .expected = .{ .inspect_str = "True" } },
     .{
         .name = "pipe inserts its lhs and accepts optional direct empty parens",
@@ -5692,6 +5692,201 @@ const core_tests = [_]TestCase{
         ,
         .expected = .{ .inspect_str = "12" },
     },
+    // A method bound to an exact procedure alias of a where-constrained
+    // generic procedure: the dispatch edge instantiates the alias's scheme, and
+    // the target's own evidence follows from its instantiated callable.
+    .{
+        .name = "where-clause dispatch through a method alias of a constrained generic procedure",
+        .source_kind = .module,
+        .source =
+        \\gen_range : num, num -> Iter(num)
+        \\    where [num.is_lt : num, num -> Bool, num.succ : num -> num]
+        \\gen_range = |lo, hi| Iter.custom(lo, Unknown, |c| if c < hi Ok((c, c.succ())) else Err(NoMore))
+        \\
+        \\Step :: { v : U64 }.{
+        \\    is_lt : Step, Step -> Bool
+        \\    is_lt = |a, b| a.v < b.v
+        \\    succ : Step -> Step
+        \\    succ = |a| Step.{ v: a.v + 1 }
+        \\    value : Step -> U64
+        \\    value = |a| a.v
+        \\    upto : Step, Step -> Iter(Step)
+        \\    upto = gen_range
+        \\}
+        \\
+        \\count : a, a -> U64
+        \\    where [a.upto : a, a -> Iter(a), a.value : a -> U64]
+        \\count = |lo, hi| {
+        \\    var $sum = 0
+        \\    for x in lo.upto(hi) {
+        \\        $sum = $sum + x.value()
+        \\    }
+        \\    $sum
+        \\}
+        \\
+        \\main = count(Step.{ v: 1 }, Step.{ v: 5 })
+        ,
+        .expected = .{ .inspect_str = "10" },
+    },
+    .{
+        .name = "generic method alias with its own requirements dispatches at each instance",
+        .source_kind = .module,
+        .source =
+        \\Pair(a) :: { x : a, y : a }.{
+        \\    describe : Pair(a) -> Str
+        \\        where [a.to_str : a -> Str]
+        \\    describe = describe_pair
+        \\    first : Pair(a) -> a
+        \\    first = |Pair.{ x, y: _ }| x
+        \\    second : Pair(a) -> a
+        \\    second = |Pair.{ x: _, y }| y
+        \\}
+        \\
+        \\describe_pair : Pair(a) -> Str
+        \\    where [a.to_str : a -> Str]
+        \\describe_pair = |p| Str.concat(p.first().to_str(), p.second().to_str())
+        \\
+        \\show : t -> Str where [t.describe : t -> Str]
+        \\show = |v| v.describe()
+        \\
+        \\main = (show(Pair.{ x: 2.U64, y: 3 }), show(Pair.{ x: "a", y: "b" }), Pair.{ x: 4.U64, y: 5 }.describe())
+        ,
+        .expected = .{ .inspect_str = "(\"23\", \"ab\", \"45\")" },
+    },
+    // Calls through exact procedure aliases forward to the aliased procedure;
+    // an alias of a function-valued constant is still a call of that value.
+    .{
+        .name = "calls through local and top-level procedure aliases",
+        .source_kind = .module,
+        .source =
+        \\add_one : U64 -> U64
+        \\add_one = |x| x + 1
+        \\
+        \\inc : U64 -> U64
+        \\inc = add_one
+        \\
+        \\inc_again : U64 -> U64
+        \\inc_again = inc
+        \\
+        \\make_adder : U64 -> (U64 -> U64)
+        \\make_adder = |k| |x| x + k
+        \\
+        \\add_ten : U64 -> U64
+        \\add_ten = make_adder(10)
+        \\
+        \\plus_ten : U64 -> U64
+        \\plus_ten = add_ten
+        \\
+        \\gen_add : num, num -> num where [num.plus : num, num -> num]
+        \\gen_add = |a, b| a.plus(b)
+        \\
+        \\add_u64 : U64, U64 -> U64
+        \\add_u64 = gen_add
+        \\
+        \\run : U64 -> (U64, U64, U64, U64, U64, U64)
+        \\run = |n| {
+        \\    local_inc = add_one
+        \\    local_plus = plus_ten
+        \\    (inc(n), inc_again(n), local_inc(n), plus_ten(n), local_plus(n), add_u64(n, 5))
+        \\}
+        \\
+        \\main = run(1)
+        ,
+        .expected = .{ .inspect_str = "(2, 2, 2, 11, 11, 6)" },
+    },
+    // The completed callee's result representation is its own: joining the
+    // call's result with a list iterator in the caller must not rewrite the
+    // callee's specialization, which other callers share.
+    .{
+        .name = "nominal method delegating to a numeric range producer joins a list producer",
+        .source_kind = .module,
+        .source =
+        \\Span(num) :: { lower : num, upper : num, step : num }.{
+        \\    make : Span(num) -> Iter(num)
+        \\        where [num.range_iter : num, num, num, [Exclusive, Inclusive], [To, From], [Known(U64), Unknown] -> Iter(num)]
+        \\    make = |span| span.lower.range_iter(span.upper, span.step, Exclusive, To, Unknown)
+        \\}
+        \\
+        \\pick : List(U64), U64, Bool -> Iter(U64)
+        \\pick = |xs, n, flag| if flag { xs.iter() } else { Span.{ lower: 0, upper: n, step: 1 }.make() }
+        \\
+        \\sum_it : List(U64), U64, Bool -> U64
+        \\sum_it = |xs, n, flag| {
+        \\    var $sum = 0
+        \\    for x in pick(xs, n, flag) {
+        \\        $sum = $sum + x
+        \\    }
+        \\    $sum
+        \\}
+        \\
+        \\main = (sum_it([1, 2, 3], 4, Bool.True), sum_it([1, 2, 3], 4, Bool.False))
+        ,
+        .expected = .{ .inspect_str = "(6, 6)" },
+    },
+    // Each loop is a fusion candidate whose continuation holds every later
+    // loop. Fusion copies only what a candidate rewrites, so the procedure
+    // grows linearly in the number of loops rather than doubling per loop.
+    .{
+        .name = "many sequential range loops in one procedure lower in linear size",
+        .source_kind = .module,
+        .source =
+        \\total : U64 -> U64
+        \\total = |n| {
+        \\    var $a = 0
+        \\    for item in (1.U64..=n) {
+        \\        $a = $a + item
+        \\    }
+        \\    var $b = 0
+        \\    for item in (1.U64..=n) {
+        \\        $b = $b + item
+        \\    }
+        \\    var $c = 0
+        \\    for item in (1.U64..=n) {
+        \\        $c = $c + item
+        \\    }
+        \\    var $d = 0
+        \\    for item in (1.U64..=n) {
+        \\        $d = $d + item
+        \\    }
+        \\    var $e = 0
+        \\    for item in (1.U64..=n) {
+        \\        $e = $e + item
+        \\    }
+        \\    var $f = 0
+        \\    for item in (1.U64..=n) {
+        \\        $f = $f + item
+        \\    }
+        \\    var $g = 0
+        \\    for item in (1.U64..=n) {
+        \\        $g = $g + item
+        \\    }
+        \\    var $h = 0
+        \\    for item in (1.U64..=n) {
+        \\        $h = $h + item
+        \\    }
+        \\    var $i = 0
+        \\    for item in (1.U64..=n) {
+        \\        $i = $i + item
+        \\    }
+        \\    var $j = 0
+        \\    for item in (1.U64..=n) {
+        \\        $j = $j + item
+        \\    }
+        \\    var $k = 0
+        \\    for item in (1.U64..=n) {
+        \\        $k = $k + item
+        \\    }
+        \\    var $l = 0
+        \\    for item in (1.U64..=n) {
+        \\        $l = $l + item
+        \\    }
+        \\    $a + $b + $c + $d + $e + $f + $g + $h + $i + $j + $k + $l
+        \\}
+        \\
+        \\main = total(3)
+        ,
+        .expected = .{ .inspect_str = "72" },
+    },
     .{
         .name = "for loop over a procedure joining two producer representations",
         .source_kind = .module,
@@ -6101,6 +6296,28 @@ const core_tests = [_]TestCase{
         \\}
         ,
         .expected = .{ .inspect_str = "[0, 1, 1, 2, 3]" },
+    },
+    .{
+        .name = "inspect: Iter.custom overcounted Known hint collects every item",
+        .source =
+        \\{
+        \\    adv : U64 -> Try((U64, U64), [NoMore])
+        \\    adv = |n| if n < 4 Try.Ok((n, n + 1)) else Try.Err(NoMore)
+        \\    List.from_iter(Iter.custom(0, Known(10), adv))
+        \\}
+        ,
+        .expected = .{ .inspect_str = "[0, 1, 2, 3]" },
+    },
+    .{
+        .name = "Iter.custom crashes when the source outlives its Known size hint",
+        .source =
+        \\{
+        \\    adv : U64 -> Try((U64, U64), [NoMore])
+        \\    adv = |n| if n < 4 Try.Ok((n, n + 1)) else Try.Err(NoMore)
+        \\    List.from_iter(Iter.custom(0, Known(2), adv))
+        \\}
+        ,
+        .expected = .{ .crash = {} },
     },
     .{
         .name = "inspect: Iter.step_by yields first then every nth",
@@ -7546,6 +7763,118 @@ const core_tests = [_]TestCase{
     .{ .name = "inspect: bool inequality", .source = "True != False", .expected = .{ .inspect_str = "True" } },
     .{ .name = "inspect: decimal inequality false", .source = "0.5 != 0.5", .expected = .{ .inspect_str = "False" } },
     .{ .name = "inspect: f64 is_float_eq false", .source = "F64.is_float_eq(3.25.F64, 4.0.F64)", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec round half up", .source = "Dec.round(2.5)", .expected = .{ .inspect_str = "3.0" } },
+    .{ .name = "inspect: dec round half negative", .source = "Dec.round(-2.5)", .expected = .{ .inspect_str = "-3.0" } },
+    .{ .name = "inspect: dec round below half", .source = "Dec.round(2.499999999999999999)", .expected = .{ .inspect_str = "2.0" } },
+    .{ .name = "inspect: dec round negative below half", .source = "Dec.round(-2.499999999999999999)", .expected = .{ .inspect_str = "-2.0" } },
+    .{ .name = "inspect: dec round whole unchanged", .source = "Dec.round(7.0)", .expected = .{ .inspect_str = "7.0" } },
+    .{ .name = "inspect: dec round zero", .source = "Dec.round(0.0)", .expected = .{ .inspect_str = "0.0" } },
+    .{ .name = "inspect: dec round smallest positive", .source = "Dec.round(Dec.from_attos(1))", .expected = .{ .inspect_str = "0.0" } },
+    .{ .name = "inspect: dec round highest overflows", .source = "Dec.round_try(Dec.highest)", .expected = .{ .inspect_str = "Err(Overflow)" } },
+    .{ .name = "inspect: dec round lowest overflows", .source = "Dec.round_try(Dec.lowest)", .expected = .{ .inspect_str = "Err(Overflow)" } },
+    .{ .name = "inspect: dec round near highest ok", .source = "Dec.round_try(170141183460469231731.4)", .expected = .{ .inspect_str = "Ok(170141183460469231731.0)" } },
+    .{ .name = "inspect: dec round crashes on overflow", .source = "Dec.round(Dec.highest)", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec floor positive", .source = "Dec.floor(2.7)", .expected = .{ .inspect_str = "2.0" } },
+    .{ .name = "inspect: dec floor negative", .source = "Dec.floor(-2.1)", .expected = .{ .inspect_str = "-3.0" } },
+    .{ .name = "inspect: dec floor whole negative", .source = "Dec.floor(-2.0)", .expected = .{ .inspect_str = "-2.0" } },
+    .{ .name = "inspect: dec floor highest", .source = "Dec.floor(Dec.highest)", .expected = .{ .inspect_str = "170141183460469231731.0" } },
+    .{ .name = "inspect: dec floor lowest overflows", .source = "Dec.floor_try(Dec.lowest)", .expected = .{ .inspect_str = "Err(Overflow)" } },
+    .{ .name = "inspect: dec floor crashes on overflow", .source = "Dec.floor(Dec.lowest)", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec ceiling positive", .source = "Dec.ceiling(2.1)", .expected = .{ .inspect_str = "3.0" } },
+    .{ .name = "inspect: dec ceiling negative", .source = "Dec.ceiling(-2.7)", .expected = .{ .inspect_str = "-2.0" } },
+    .{ .name = "inspect: dec ceiling lowest", .source = "Dec.ceiling(Dec.lowest)", .expected = .{ .inspect_str = "-170141183460469231731.0" } },
+    .{ .name = "inspect: dec ceiling highest overflows", .source = "Dec.ceiling_try(Dec.highest)", .expected = .{ .inspect_str = "Err(Overflow)" } },
+    .{ .name = "inspect: dec ceiling crashes on overflow", .source = "Dec.ceiling(Dec.highest)", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec trunc positive", .source = "Dec.trunc(2.7)", .expected = .{ .inspect_str = "2.0" } },
+    .{ .name = "inspect: dec trunc negative", .source = "Dec.trunc(-2.7)", .expected = .{ .inspect_str = "-2.0" } },
+    .{ .name = "inspect: dec trunc highest", .source = "Dec.trunc(Dec.highest)", .expected = .{ .inspect_str = "170141183460469231731.0" } },
+    .{ .name = "inspect: dec trunc lowest", .source = "Dec.trunc(Dec.lowest)", .expected = .{ .inspect_str = "-170141183460469231731.0" } },
+    .{ .name = "inspect: dec round_to cents away", .source = "Dec.round_to(2.345, { step: 0.01, ties: AwayFromZero })", .expected = .{ .inspect_str = "2.35" } },
+    .{ .name = "inspect: dec round_to cents even down", .source = "Dec.round_to(2.345, { step: 0.01, ties: ToEven })", .expected = .{ .inspect_str = "2.34" } },
+    .{ .name = "inspect: dec round_to cents even up", .source = "Dec.round_to(2.355, { step: 0.01, ties: ToEven })", .expected = .{ .inspect_str = "2.36" } },
+    .{ .name = "inspect: dec round_to negative away", .source = "Dec.round_to(-2.345, { step: 0.01, ties: AwayFromZero })", .expected = .{ .inspect_str = "-2.35" } },
+    .{ .name = "inspect: dec round_to negative even", .source = "Dec.round_to(-2.345, { step: 0.01, ties: ToEven })", .expected = .{ .inspect_str = "-2.34" } },
+    .{ .name = "inspect: dec round_to carries", .source = "Dec.round_to(19.995, { step: 0.01, ties: AwayFromZero })", .expected = .{ .inspect_str = "20.0" } },
+    .{ .name = "inspect: dec round_to cash", .source = "Dec.round_to(7.23, { step: 0.05, ties: AwayFromZero })", .expected = .{ .inspect_str = "7.25" } },
+    .{ .name = "inspect: dec round_to cash down", .source = "Dec.round_to(7.22, { step: 0.05, ties: AwayFromZero })", .expected = .{ .inspect_str = "7.2" } },
+    .{ .name = "inspect: dec round_to thousands even", .source = "Dec.round_to(2500, { step: 1000, ties: ToEven })", .expected = .{ .inspect_str = "2000.0" } },
+    .{ .name = "inspect: dec round_to thousands away", .source = "Dec.round_to(2500, { step: 1000, ties: AwayFromZero })", .expected = .{ .inspect_str = "3000.0" } },
+    .{ .name = "inspect: dec round_to even zero quotient", .source = "Dec.round_to(0.5, { step: 1, ties: ToEven })", .expected = .{ .inspect_str = "0.0" } },
+    .{ .name = "inspect: dec round_to even negative zero quotient", .source = "Dec.round_to(-0.5, { step: 1, ties: ToEven })", .expected = .{ .inspect_str = "0.0" } },
+    .{ .name = "inspect: dec round_to non-decimal step", .source = "Dec.round_to(1.0, { step: 0.3, ties: AwayFromZero })", .expected = .{ .inspect_str = "0.9" } },
+    .{ .name = "inspect: dec round_to smallest step identity", .source = "Dec.round_to(1.234567890123456789, { step: Dec.from_attos(1), ties: ToEven })", .expected = .{ .inspect_str = "1.234567890123456789" } },
+    .{ .name = "inspect: dec round_to step larger than value", .source = "Dec.round_to(0.4, { step: 1000, ties: AwayFromZero })", .expected = .{ .inspect_str = "0.0" } },
+    .{ .name = "inspect: dec round_to highest step", .source = "Dec.round_to(Dec.highest, { step: Dec.highest, ties: ToEven })", .expected = .{ .inspect_str = "170141183460469231731.687303715884105727" } },
+    .{ .name = "inspect: dec round_to lowest with highest step", .source = "Dec.round_to(Dec.lowest, { step: Dec.highest, ties: ToEven })", .expected = .{ .inspect_str = "-170141183460469231731.687303715884105727" } },
+    .{ .name = "inspect: dec round_to try overflow", .source = "Dec.round_to_try(Dec.highest, { step: 1000, ties: ToEven })", .expected = .{ .inspect_str = "Err(Overflow)" } },
+    .{ .name = "inspect: dec round_to try ok", .source = "Dec.round_to_try(2.345, { step: 0.01, ties: AwayFromZero })", .expected = .{ .inspect_str = "Ok(2.35)" } },
+    .{ .name = "inspect: dec round_to crashes on overflow", .source = "Dec.round_to(Dec.highest, { step: 1000, ties: ToEven })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec round_to crashes on zero step", .source = "Dec.round_to(1.0, { step: 0.0, ties: ToEven })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec round_to crashes on negative step", .source = "Dec.round_to(1.0, { step: -0.01, ties: ToEven })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec round_to try crashes on zero step", .source = "Dec.round_to_try(1.0, { step: 0.0, ties: ToEven })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f64 is_approx_eq large relative close", .source = "F64.is_approx_eq(1.0e12, 1.0e12 + 1.0, { rel: 1e-9, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq small difference outside rel", .source = "F64.is_approx_eq(1.0, 1.0 + 1e-8, { rel: 1e-9, abs: 1e-12 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq near zero needs abs false", .source = "F64.is_approx_eq(1e-20, 0.0, { rel: 1e-9, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq near zero with abs true", .source = "F64.is_approx_eq(1e-20, 0.0, { rel: 1e-9, abs: 1e-12 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq inf equals inf", .source = "F64.is_approx_eq(F64.infinity, F64.infinity, { rel: 1e-9, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq inf vs neg inf", .source = "F64.is_approx_eq(F64.infinity, -F64.infinity, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq inf vs highest", .source = "F64.is_approx_eq(F64.infinity, F64.highest, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq nan vs nan", .source = "F64.is_approx_eq(F64.nan, F64.nan, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq nan vs finite", .source = "F64.is_approx_eq(F64.nan, 1.0, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq finite vs nan", .source = "F64.is_approx_eq(1.0, F64.nan, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq pos zero vs neg zero", .source = "F64.is_approx_eq(0.0, -0.0, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq zero tolerance exact equal", .source = "F64.is_approx_eq(1.5, 1.5, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq zero tolerance differs", .source = "F64.is_approx_eq(0.1 + 0.2, 0.3, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq opposite sign near highest overflows", .source = "F64.is_approx_eq(F64.highest, -F64.highest, { rel: 1.0, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f64 is_approx_eq abs only within", .source = "F64.is_approx_eq(100.0, 109.0, { rel: 0.0, abs: 10.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq abs only swapped within", .source = "F64.is_approx_eq(109.0, 100.0, { rel: 0.0, abs: 10.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq rel swapped", .source = "F64.is_approx_eq(1.0 + 1e-3, 1.0, { rel: 1e-2, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f64 is_approx_eq crash rel negative", .source = "F64.is_approx_eq(1.0, 1.0, { rel: -0.5, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f64 is_approx_eq crash rel above one", .source = "F64.is_approx_eq(1.0, 1.0, { rel: 1.5, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f64 is_approx_eq crash abs negative", .source = "F64.is_approx_eq(1.0, 1.0, { rel: 0.0, abs: -1.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f64 is_approx_eq crash rel nan", .source = "F64.is_approx_eq(1.0, 1.0, { rel: F64.nan, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f64 is_approx_eq crash abs nan", .source = "F64.is_approx_eq(1.0, 1.0, { rel: 0.0, abs: F64.nan })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f64 is_approx_eq crash abs inf", .source = "F64.is_approx_eq(1.0, 1.0, { rel: 0.0, abs: F64.infinity })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f32 is_approx_eq large relative close", .source = "F32.is_approx_eq(1.0e6, 1.0e6 + 0.0625, { rel: 1e-6, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq small difference outside rel", .source = "F32.is_approx_eq(1.0, 1.0 + 1e-6, { rel: 1e-9, abs: 1e-12 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq near zero needs abs false", .source = "F32.is_approx_eq(1e-20, 0.0, { rel: 1e-9, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq near zero with abs true", .source = "F32.is_approx_eq(1e-20, 0.0, { rel: 1e-9, abs: 1e-12 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq inf equals inf", .source = "F32.is_approx_eq(F32.infinity, F32.infinity, { rel: 1e-9, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq inf vs neg inf", .source = "F32.is_approx_eq(F32.infinity, -F32.infinity, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq inf vs highest", .source = "F32.is_approx_eq(F32.infinity, F32.highest, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq nan vs nan", .source = "F32.is_approx_eq(F32.nan, F32.nan, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq nan vs finite", .source = "F32.is_approx_eq(F32.nan, 1.0, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq finite vs nan", .source = "F32.is_approx_eq(1.0, F32.nan, { rel: 1.0, abs: 1.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq pos zero vs neg zero", .source = "F32.is_approx_eq(0.0, -0.0, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq zero tolerance exact equal", .source = "F32.is_approx_eq(1.5, 1.5, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq zero tolerance differs", .source = "F32.is_approx_eq(0.1 + 0.2, 0.3, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq opposite sign near highest overflows", .source = "F32.is_approx_eq(F32.highest, -F32.highest, { rel: 1.0, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: f32 is_approx_eq abs only within", .source = "F32.is_approx_eq(100.0, 109.0, { rel: 0.0, abs: 10.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq abs only swapped within", .source = "F32.is_approx_eq(109.0, 100.0, { rel: 0.0, abs: 10.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq rel swapped", .source = "F32.is_approx_eq(1.0 + 1e-3, 1.0, { rel: 1e-2, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: f32 is_approx_eq crash rel negative", .source = "F32.is_approx_eq(1.0, 1.0, { rel: -0.5, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f32 is_approx_eq crash rel above one", .source = "F32.is_approx_eq(1.0, 1.0, { rel: 1.5, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f32 is_approx_eq crash abs negative", .source = "F32.is_approx_eq(1.0, 1.0, { rel: 0.0, abs: -1.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f32 is_approx_eq crash rel nan", .source = "F32.is_approx_eq(1.0, 1.0, { rel: F32.nan, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f32 is_approx_eq crash abs nan", .source = "F32.is_approx_eq(1.0, 1.0, { rel: 0.0, abs: F32.nan })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: f32 is_approx_eq crash abs inf", .source = "F32.is_approx_eq(1.0, 1.0, { rel: 0.0, abs: F32.infinity })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec is_approx_eq relative within", .source = "Dec.is_approx_eq(1.0, 1.01, { rel: 0.01, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: dec is_approx_eq relative outside", .source = "Dec.is_approx_eq(1.0, 1.02, { rel: 0.01, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec is_approx_eq abs within", .source = "Dec.is_approx_eq(100.0, 109.0, { rel: 0.0, abs: 10.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: dec is_approx_eq abs outside", .source = "Dec.is_approx_eq(100.0, 111.0, { rel: 0.0, abs: 10.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec is_approx_eq near zero", .source = "Dec.is_approx_eq(0.000000001, 0.0, { rel: 0.5, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec is_approx_eq near zero abs", .source = "Dec.is_approx_eq(0.000000001, 0.0, { rel: 0.0, abs: 0.00000001 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: dec is_approx_eq zero tolerance equal", .source = "Dec.is_approx_eq(0.1 + 0.2, 0.3, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: dec is_approx_eq zero tolerance differs", .source = "Dec.is_approx_eq(1.0, 1.000000000000000001, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec is_approx_eq highest vs lowest overflow", .source = "Dec.is_approx_eq(Dec.highest, Dec.lowest, { rel: 1.0, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec is_approx_eq lowest vs highest overflow", .source = "Dec.is_approx_eq(Dec.lowest, Dec.highest, { rel: 1.0, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec is_approx_eq lowest vs near lowest", .source = "Dec.is_approx_eq(Dec.lowest, Dec.lowest + 1.0, { rel: 0.5, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: dec is_approx_eq near lowest vs lowest", .source = "Dec.is_approx_eq(Dec.lowest + 1.0, Dec.lowest, { rel: 0.5, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: dec is_approx_eq lowest reflexive", .source = "Dec.is_approx_eq(Dec.lowest, Dec.lowest, { rel: 0.0, abs: 0.0 })", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: dec is_approx_eq opposite sign rel one", .source = "Dec.is_approx_eq(1.0, -1.0, { rel: 1.0, abs: 0.0 })", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: dec is_approx_eq crash rel negative", .source = "Dec.is_approx_eq(1.0, 1.0, { rel: -0.5, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec is_approx_eq crash rel above one", .source = "Dec.is_approx_eq(1.0, 1.0, { rel: 1.5, abs: 0.0 })", .expected = .{ .crash = {} } },
+    .{ .name = "inspect: dec is_approx_eq crash abs negative", .source = "Dec.is_approx_eq(1.0, 1.0, { rel: 0.0, abs: -1.0 })", .expected = .{ .crash = {} } },
     .{ .name = "inspect: decimal equality false", .source = "0.125 == 0.25", .expected = .{ .inspect_str = "False" } },
     .{ .name = "inspect: direct record literal render", .source = "{ x: 1, y: 2 }", .expected = .{ .inspect_str = "{ x: 1.0, y: 2.0 }" } },
     .{

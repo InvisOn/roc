@@ -242,7 +242,6 @@ NAME NOT IN SCOPE - syntax_grab_bag.md:141:2:141:6
 UNDECLARED TYPE - syntax_grab_bag.md:143:14:143:20
 VAR NAME MISSING `$` - syntax_grab_bag.md:146:6:146:12
 NAME NOT IN SCOPE - syntax_grab_bag.md:147:9:147:13
-UNRECOGNIZED SYNTAX - syntax_grab_bag.md:154:2:154:5
 NAME NOT IN SCOPE - syntax_grab_bag.md:158:2:158:11
 NAME NOT IN SCOPE - syntax_grab_bag.md:178:63:178:69
 NAME NOT IN SCOPE - syntax_grab_bag.md:179:42:179:48
@@ -675,16 +674,6 @@ MISSING METHOD - syntax_grab_bag.md:189:26:189:66
 			(source-region (file "syntax_grab_bag.md") (start 147 9) (end 147 13) (annotation error) (line-text "\texpect blah == 1"))))
 	(report
 		(severity runtime_error)
-		(title "Unrecognized Syntax")
-		(region (start 154 2) (end 154 5))
-		(headline
-			(reflow "I don't recognize this syntax."))
-		(document
-			(source-region (file "syntax_grab_bag.md") (start 154 2) (end 154 5) (annotation error) (line-text "\t..."))
-			(line-break)
-			(reflow "This might be a syntax error, an unsupported language feature, or a typo.")))
-	(report
-		(severity runtime_error)
 		(title "Name Not In Scope")
 		(region (start 158 2) (end 158 11))
 		(headline
@@ -1061,7 +1050,7 @@ MISSING METHOD - syntax_grab_bag.md:189:26:189:66
 	(report
 		(severity runtime_error)
 		(title "Type Mismatch")
-		(region (start 84 2) (end 138 3))
+		(region (start 102 3) (end 102 24))
 		(headline
 			(reflow "The")
 			(reflow " ")
@@ -1154,7 +1143,7 @@ MISSING METHOD - syntax_grab_bag.md:189:26:189:66
 	(report
 		(severity runtime_error)
 		(title "Type Mismatch")
-		(region (start 167 3) (end 170 4))
+		(region (start 168 4) (end 169 11))
 		(headline
 			(reflow "The")
 			(reflow " ")
@@ -2238,7 +2227,27 @@ expect {
 					(e-num (value "5"))))))
 	(d-let
 		(p-assign (ident "add_one"))
-		(e-runtime-error (tag "erroneous_value_expr"))
+		(e-lambda
+			(args
+				(p-assign (ident "num")))
+			(e-block
+				(s-let
+					(p-assign (ident "other"))
+					(e-num (value "1")))
+				(e-if
+					(if-branches
+						(if-branch
+							(e-runtime-error (tag "erroneous_value_expr"))
+							(e-block
+								(s-dbg
+									(e-runtime-error (tag "erroneous_value_expr")))
+								(e-num (value "0")))))
+					(if-else
+						(e-block
+							(s-dbg
+								(e-num (value "123")))
+							(e-lookup-local
+								(p-assign (ident "other"))))))))
 		(annotation
 			(ty-fn (effectful false)
 				(ty-lookup (name "U64") (builtin))

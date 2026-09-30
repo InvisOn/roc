@@ -216,8 +216,8 @@ fn readStageTimer(io: std.Io, timer: *?StageTimer) u64 {
     return 0;
 }
 
-const checked_module_cache_magic = "roc-mod-cache-v9";
-const checked_module_entry_version: u32 = 9;
+const checked_module_cache_magic = "roc-mod-cache-v11";
+const checked_module_entry_version: u32 = 11;
 const checked_module_entry_version_hash: [32]u8 = computeCheckedModuleEntryVersionHash();
 
 // Header: magic, composite entry-version hash (32), artifact key (32), env-blob
@@ -1265,6 +1265,11 @@ pub const Coordinator = struct {
     /// result. Post-check work shares those channels and cannot start earlier.
     frontend_complete: bool,
     runtime_lowering: ?compile_build.RuntimeLoweringConfig = null,
+    compile_time_object_cache: ?eval.CompileTimeFinalization.CompileTimeObjectCache = null,
+    /// The checked modules whose `expect`s are the developer's own tests, in
+    /// the order their test roots join compile-time evaluation. Every command
+    /// that checks the program evaluates the same tests' compile-time work.
+    program_test_modules: []const CheckedArtifact.CheckedModuleArtifactKey = &.{},
     program_session: ?eval.CompileTimeFinalization.ProgramSession = null,
 
     /// Total modules remaining across all packages
@@ -2282,15 +2287,22 @@ pub const Coordinator = struct {
                     const runtime = self.runtime_lowering;
                     self.runtime_lowering = null;
                     defer self.runtime_lowering = runtime;
-                    try self.evaluatePreparedModules(false, platform.key, null);
+                    try self.evaluatePreparedModules(false, platform.key, null, null);
                     if (self.program_session) |*session| session.deinit();
                     self.program_session = null;
                 }
             }
             try self.prepareExecutableArtifacts();
-            try self.evaluatePreparedModules(true, null, platform);
+            try self.evaluatePreparedModules(true, null, platform, self.executableRootCheckedArtifact());
         } else {
-            try self.evaluatePreparedModules(true, null, null);
+            // Only a compilation that publishes executable artifacts has a
+            // program: `roc check`, `roc build` and `roc run` all do.
+            const program_root = if (mode == .executable_artifacts and
+                (self.findRootModule(.app) != null or self.findRootModule(.default_app) != null))
+                self.executableRootCheckedArtifact()
+            else
+                null;
+            try self.evaluatePreparedModules(true, null, null, program_root);
         }
     }
 
@@ -2813,7 +2825,17 @@ pub const Coordinator = struct {
     /// Run only after all frontend tasks have released the worker pool. Imported
     /// prepared metadata was sufficient for checking; values now finalize in
     /// the explicit checked-module dependency order before cache publication.
-    fn evaluatePreparedModules(self: *Coordinator, replay_cached_debug: bool, dependency_root: ?CheckedArtifact.CheckedModuleArtifactKey, extra_cached: ?*const CheckedArtifact.CheckedModuleArtifact) CoordinatorError!void {
+    /// Finalize the prepared modules. `program_root` is the checked root of
+    /// the program being compiled, when there is one: its entrypoint roots
+    /// join compile-time evaluation in every command, so every command
+    /// evaluates the same program.
+    fn evaluatePreparedModules(
+        self: *Coordinator,
+        replay_cached_debug: bool,
+        dependency_root: ?CheckedArtifact.CheckedModuleArtifactKey,
+        extra_cached: ?*const CheckedArtifact.CheckedModuleArtifact,
+        program_root: ?*const CheckedArtifact.CheckedModuleArtifact,
+    ) CoordinatorError!void {
         const Entry = struct {
             pkg: *PackageState,
             mod: *ModuleState,
@@ -2897,15 +2919,27 @@ pub const Coordinator = struct {
         if (extra_cached) |artifact| {
             if (artifact.compile_time_debug.entries.len != 0) try cached_debug_modules.append(self.gpa, artifact);
         }
-        if (ordered_modules.items.len == 0 and cached_debug_modules.items.len == 0 and self.runtime_lowering == null) return;
+        // An explicit runtime root set (a command that names its own roots,
+        // such as `roc test`) is its own program. Every other command
+        // evaluates the program its checked root declares.
+        const explicit_runtime = if (self.runtime_lowering) |config| config.explicit_roots != null else false;
+        // A compilation that pairs its app with the platform evaluates the
+        // program's tests with it; the pre-pairing pass evaluates the
+        // platform's own modules only.
+        const test_modules = if (dependency_root == null) self.program_test_modules else &.{};
+        if (ordered_modules.items.len == 0 and cached_debug_modules.items.len == 0 and program_root == null and test_modules.len == 0 and !explicit_runtime) return;
 
-        // With no runtime demand, the first module in the explicit evaluation
-        // order is the checked-program ownership anchor. Qualified requests
-        // retain each root's actual checked module identity independently.
-        const root = if (self.runtime_lowering) |config|
-            config.root_module orelse self.executableRootCheckedArtifact()
+        // With no program, the first module in the explicit evaluation order
+        // is the checked-program ownership anchor. Qualified requests retain
+        // each root's actual checked module identity independently.
+        const root = if (explicit_runtime)
+            self.runtime_lowering.?.root_module orelse program_root orelse self.executableRootCheckedArtifact()
+        else if (program_root) |program|
+            program
         else if (ordered_modules.items.len != 0)
             ordered_modules.items[0].module
+        else if (test_modules.len != 0)
+            self.checkedArtifactByKey(test_modules[0]) orelse coordinatorInvariant("program test module has no checked module data", .{})
         else
             cached_debug_modules.items[0];
         const relations = try self.collectRelationArtifactViews(self.gpa, root);
@@ -2924,34 +2958,176 @@ pub const Coordinator = struct {
                 return std.mem.lessThan(u8, &a.key.bytes, &b.key.bytes);
             }
         }.lessThan);
-        const selected_requests = if (self.runtime_lowering != null and self.runtime_lowering.?.explicit_roots == null)
+        // The program's entrypoint roots, with everything any runtime
+        // consumer of them materializes, whatever the command.
+        const entrypoint_requests = if (!explicit_runtime and program_root != null)
             try lir.CheckedPipeline.selectPlatformEntrypointRoots(self.gpa, root.root_requests.runtime_requests)
         else
             &.{};
-        defer if (self.runtime_lowering != null and self.runtime_lowering.?.explicit_roots == null) self.gpa.free(selected_requests);
+        defer if (!explicit_runtime and program_root != null) self.gpa.free(entrypoint_requests);
+        // Then the program's tests, each owned by the module declaring it.
+        var program_requests = std.ArrayList(CheckedArtifact.RootRequest).empty;
+        defer program_requests.deinit(self.gpa);
+        var program_sources = std.ArrayList(CheckedArtifact.CheckedModuleArtifactKey).empty;
+        defer program_sources.deinit(self.gpa);
+        if (!explicit_runtime) {
+            try program_requests.appendSlice(self.gpa, entrypoint_requests);
+            try program_sources.appendNTimes(self.gpa, root.key, entrypoint_requests.len);
+            for (test_modules) |key| {
+                const artifact = self.checkedArtifactByKey(key) orelse
+                    coordinatorInvariant("program test module has no checked module data", .{});
+                for (artifact.root_requests.requests) |request| {
+                    if (request.kind != .test_expect) continue;
+                    try program_requests.append(self.gpa, request);
+                    try program_sources.append(self.gpa, key);
+                }
+            }
+        }
+        const program_roots: lir.CheckedPipeline.RootRequestSet = if (explicit_runtime)
+            self.runtime_lowering.?.explicit_roots.?
+        else
+            .{
+                .requests = program_requests.items,
+                .source_modules = program_sources.items,
+                .include_provided_data_exports = true,
+                .include_internal_static_data = true,
+            };
         const runtime_roots: lir.CheckedPipeline.RootRequestSet = if (self.runtime_lowering) |config| config.explicit_roots orelse .{
-            .requests = selected_requests,
+            .requests = entrypoint_requests,
             .include_provided_data_exports = config.include_provided_data_exports,
             .include_internal_static_data = config.include_internal_static_data,
         } else .{};
         var options = compile_package.compileTimeFinalizationOptions(self.max_threads, &self.roc_ctx, &self.ctfe_timing);
         options.post_check_executor = self.postCheckExecutor();
+        options.object_cache = self.compile_time_object_cache;
         options.cached_debug_modules = cached_debug_modules.items;
         options.defer_debug_replay = !replay_cached_debug;
-        options.splice_source = if (self.runtime_lowering) |config| config.splice_source else null;
         var runtime_target: ?lir.CheckedPipeline.TargetConfig = if (self.runtime_lowering) |config| config.target else null;
         if (runtime_target) |*target| target.post_check_executor = self.postCheckExecutor();
+        var unfinalized = UnfinalizedReportDestinations{ .coordinator = self, .program_root = root.key };
+        defer unfinalized.deinit();
+        options.unfinalized_reports = .{ .context = &unfinalized, .module = UnfinalizedReportDestinations.module };
         std.debug.assert(self.program_session == null);
         self.program_session = try eval.CompileTimeFinalization.finalizeProgram(
             self.gpa,
             ordered_modules.items,
             .{ .root = CheckedArtifact.loweringViewWithRelations(root, relations), .imports = imports.items },
+            program_roots,
             runtime_roots,
             runtime_target,
             options,
         );
         for (entries.items) |entry| try self.commitPreparedModule(entry.mod);
+        try unfinalized.commit();
     }
+
+    /// Report destinations for checked modules whose finalization completed
+    /// in an earlier compilation. A literal such a module owns can still be
+    /// rejected by a specialization this program makes of it; the report
+    /// joins that module's reports without touching its cached result, since
+    /// every compilation that makes the specialization evaluates it again.
+    ///
+    /// The builtin module belongs to no package, so its reports render against
+    /// its own source and join the reports of the program's root module.
+    const UnfinalizedReportDestinations = struct {
+        coordinator: *Coordinator,
+        program_root: CheckedArtifact.ModuleId,
+        modules: std.ArrayList(*ModuleState) = .empty,
+        builtin_problems: ?*messages.PendingEvaluationState = null,
+
+        fn newState(coord: *Coordinator) Allocator.Error!*messages.PendingEvaluationState {
+            const state = try coord.gpa.create(messages.PendingEvaluationState);
+            state.* = .{
+                .allocator = coord.gpa,
+                .problems = check.problem.Store.initEmpty(coord.gpa),
+                .import_mapping = @import("types").import_mapping.ImportMapping.init(coord.gpa),
+                .imported_envs = &.{},
+                .reported_problem_count = 0,
+            };
+            return state;
+        }
+
+        fn moduleState(coord: *Coordinator, key: CheckedArtifact.ModuleId) *ModuleState {
+            const location = coord.checked_artifact_index.get(key.bytes) orelse
+                coordinatorInvariant("compile-time report named a checked module the coordinator does not hold", .{});
+            const pkg = coord.packages.get(location.pkg_name) orelse
+                coordinatorInvariant("checked artifact registry points at missing package {s}", .{location.pkg_name});
+            return pkg.getModule(location.module_id) orelse
+                coordinatorInvariant("checked artifact registry points at missing module {d}", .{location.module_id});
+        }
+
+        fn module(context: *anyopaque, key: CheckedArtifact.ModuleId) Allocator.Error!eval.CompileTimeFinalization.ReportDestination {
+            const self: *UnfinalizedReportDestinations = @ptrCast(@alignCast(context));
+            const coord = self.coordinator;
+            const builtin_artifact = &coord.builtin_modules.checked_artifact;
+            if (builtin_artifact.key.eql(key)) {
+                if (self.builtin_problems == null) self.builtin_problems = try newState(coord);
+                return .{ .module = builtin_artifact, .problem_store = &self.builtin_problems.?.problems };
+            }
+            const mod = moduleState(coord, key);
+            if (mod.pending_evaluation == null) {
+                const state = try newState(coord);
+                mod.pending_evaluation = state;
+                self.modules.append(coord.gpa, mod) catch |err| {
+                    state.deinit();
+                    mod.pending_evaluation = null;
+                    return err;
+                };
+            }
+            return .{ .module = mod.checkedArtifact().?, .problem_store = &mod.pending_evaluation.?.problems };
+        }
+
+        fn commit(self: *UnfinalizedReportDestinations) Allocator.Error!void {
+            const coord = self.coordinator;
+            if (self.builtin_problems) |state| {
+                defer {
+                    state.deinit();
+                    self.builtin_problems = null;
+                }
+                const root_mod = moduleState(coord, self.program_root);
+                var rb = try check.ReportBuilder.initEvaluation(
+                    coord.gpa,
+                    coord.builtin_modules.builtin_module.env,
+                    &state.problems,
+                    "Builtin.roc",
+                    &.{},
+                    &state.import_mapping,
+                );
+                defer rb.deinit();
+                for (state.problems.problems.items) |problem| {
+                    try root_mod.reports.append(coord.gpa, try rb.build(problem));
+                }
+            }
+            while (self.modules.pop()) |mod| {
+                const state = mod.pending_evaluation.?;
+                defer {
+                    state.deinit();
+                    mod.pending_evaluation = null;
+                }
+                var rb = try check.ReportBuilder.initEvaluation(
+                    coord.gpa,
+                    mod.moduleEnv().?,
+                    &state.problems,
+                    mod.path,
+                    state.imported_envs,
+                    &state.import_mapping,
+                );
+                defer rb.deinit();
+                for (state.problems.problems.items) |problem| {
+                    try mod.reports.append(coord.gpa, try rb.build(problem));
+                }
+            }
+        }
+
+        fn deinit(self: *UnfinalizedReportDestinations) void {
+            if (self.builtin_problems) |state| state.deinit();
+            for (self.modules.items) |mod| {
+                mod.pending_evaluation.?.deinit();
+                mod.pending_evaluation = null;
+            }
+            self.modules.deinit(self.coordinator.gpa);
+        }
+    };
 
     fn commitPreparedModule(self: *Coordinator, mod: *ModuleState) CoordinatorError!void {
         const state = mod.pending_evaluation.?;
@@ -6394,8 +6570,12 @@ const AppRootIdentity = struct {
     /// requirement solutions it carries must be a pure function of the artifacts
     /// they relate.
     app_root_bytes: []u8,
+    /// Everything the compile wrote to stderr, such as compile-time `dbg`
+    /// output, captured rather than written to the test process's stderr.
+    stderr_bytes: []u8,
 
     fn deinit(self: *AppRootIdentity, allocator: Allocator) void {
+        allocator.free(self.stderr_bytes);
         allocator.free(self.app_root_bytes);
         allocator.free(self.executable_root_bytes);
         self.* = undefined;
@@ -6453,6 +6633,17 @@ fn compileAppRootIdentityWithConstants(
     return compileAppRootIdentityExpecting(allocator, cache_dir, app_path, mode, expected_constants, &.{});
 }
 
+/// Collects a compile's stderr writes in memory.
+const StderrCapture = struct {
+    allocator: Allocator,
+    bytes: std.ArrayList(u8) = .empty,
+
+    fn write(raw: ?*anyopaque, _: std.Io, bytes: []const u8) CoreCtx.StdioError!void {
+        const self: *StderrCapture = @ptrCast(@alignCast(raw.?));
+        self.bytes.appendSlice(self.allocator, bytes) catch return error.IoError;
+    }
+};
+
 fn compileAppRootIdentityExpecting(
     allocator: Allocator,
     cache_dir: []const u8,
@@ -6461,7 +6652,11 @@ fn compileAppRootIdentityExpecting(
     expected_constants: []const ExpectedPairingConstant,
     expected_errors: []const []const u8,
 ) CheckedModuleCacheRunError!AppRootIdentity {
-    const roc_ctx = CoreCtx.os(allocator, allocator, std.testing.io);
+    var stderr_capture: StderrCapture = .{ .allocator = allocator };
+    defer stderr_capture.bytes.deinit(allocator);
+    var roc_ctx = CoreCtx.os(allocator, allocator, std.testing.io);
+    roc_ctx.ctx = &stderr_capture;
+    roc_ctx.vtable.writeStderr = StderrCapture.write;
     var cache_manager = CacheManager.init(allocator, .{
         .enabled = true,
         .cache_dir = cache_dir,
@@ -6519,6 +6714,8 @@ fn compileAppRootIdentityExpecting(
     errdefer allocator.free(executable_root_bytes);
     const app_root_bytes = try serializedCheckedArtifactBytes(allocator, coord.appRootCheckedArtifact());
     errdefer allocator.free(app_root_bytes);
+    const stderr_bytes = try stderr_capture.bytes.toOwnedSlice(allocator);
+    errdefer allocator.free(stderr_bytes);
     var where_method_scheme_use_count: usize = 0;
     for (root.moduleEnvConst().scheme_uses.items.items) |record| {
         if (record.slot_kind == @intFromEnum(can.ModuleEnv.SchemeUseRecord.Slot.where_method_use)) {
@@ -6546,6 +6743,7 @@ fn compileAppRootIdentityExpecting(
         .direct_required_call_count = direct_required_call_count,
         .executable_root_bytes = executable_root_bytes,
         .app_root_bytes = app_root_bytes,
+        .stderr_bytes = stderr_bytes,
     };
 }
 
@@ -7031,9 +7229,11 @@ test "issue 11389 pairing cache retains exported constants and debug observation
     var cold = try compileAppRootIdentityWithConstants(allocator, cache, app, .executable_artifacts, &.{.{ .name = "value", .value = 42 }});
     defer cold.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), cold.compile_time_debug_count);
+    try std.testing.expectEqualStrings("[dbg] 41\n", cold.stderr_bytes);
     var warm = try compileAppRootIdentityWithConstants(allocator, cache, app, .executable_artifacts, &.{.{ .name = "value", .value = 42 }});
     defer warm.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0), warm.platform_pairing_count);
+    try std.testing.expectEqualStrings("[dbg] 41\n", warm.stderr_bytes);
     try std.testing.expectEqualSlices(u8, cold.executable_root_bytes, warm.executable_root_bytes);
 }
 
@@ -7771,7 +7971,7 @@ fn collectPatternExtractionRegionStats(
     imports: []const check.CheckedArtifact.ImportedModuleView,
     relations: []const check.CheckedArtifact.ImportedModuleView,
 ) PatternExtractionRegionStatsError!PatternExtractionRegionStats {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var hasher = base.Sha256.init(.{});
     var count: usize = 0;
 
     try hashPatternExtractionRegionsForView(&hasher, &count, check.CheckedArtifact.importedView(root));
@@ -7791,7 +7991,7 @@ fn collectPatternExtractionRegionStats(
 }
 
 fn hashPatternExtractionRegionsForView(
-    hasher: *std.crypto.hash.sha2.Sha256,
+    hasher: *base.Sha256,
     count: *usize,
     view: check.CheckedArtifact.ImportedModuleView,
 ) PatternExtractionRegionStatsError!void {
@@ -7905,12 +8105,12 @@ fn checkedPatternForId(
     return view.checked_bodies.pattern(pattern);
 }
 
-fn hashRegionIntoSha256(hasher: *std.crypto.hash.sha2.Sha256, region: base.Region) void {
+fn hashRegionIntoSha256(hasher: *base.Sha256, region: base.Region) void {
     hashU32IntoSha256(hasher, region.start.offset);
     hashU32IntoSha256(hasher, region.end.offset);
 }
 
-fn hashU32IntoSha256(hasher: *std.crypto.hash.sha2.Sha256, value: u32) void {
+fn hashU32IntoSha256(hasher: *base.Sha256, value: u32) void {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .little);
     hasher.update(&bytes);
@@ -7921,7 +8121,7 @@ fn collectExhaustivenessSiteStats(
     imports: []const check.CheckedArtifact.ImportedModuleView,
     relations: []const check.CheckedArtifact.ImportedModuleView,
 ) ExhaustivenessSiteStats {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var hasher = base.Sha256.init(.{});
     var count: usize = 0;
 
     hashExhaustivenessSitesForView(&hasher, &count, check.CheckedArtifact.importedView(root));
@@ -7934,7 +8134,7 @@ fn collectExhaustivenessSiteStats(
 }
 
 fn hashExhaustivenessSitesForView(
-    hasher: *std.crypto.hash.sha2.Sha256,
+    hasher: *base.Sha256,
     count: *usize,
     view: check.CheckedArtifact.ImportedModuleView,
 ) void {
@@ -7954,7 +8154,7 @@ fn hashExhaustivenessSitesForView(
     }
 }
 
-fn hashOptionalU32IntoSha256(hasher: *std.crypto.hash.sha2.Sha256, value: ?u32) void {
+fn hashOptionalU32IntoSha256(hasher: *base.Sha256, value: ?u32) void {
     if (value) |payload| {
         hashU32IntoSha256(hasher, 1);
         hashU32IntoSha256(hasher, payload);
@@ -7964,7 +8164,7 @@ fn hashOptionalU32IntoSha256(hasher: *std.crypto.hash.sha2.Sha256, value: ?u32) 
 }
 
 fn hashExhaustivenessOwnerIntoSha256(
-    hasher: *std.crypto.hash.sha2.Sha256,
+    hasher: *base.Sha256,
     owner: ?check.CheckedArtifact.CheckedExhaustivenessSiteOwner,
 ) void {
     if (owner) |payload| switch (payload) {
@@ -7984,7 +8184,7 @@ fn hashExhaustivenessOwnerIntoSha256(
 }
 
 fn hashExhaustivenessPolicyIntoSha256(
-    hasher: *std.crypto.hash.sha2.Sha256,
+    hasher: *base.Sha256,
     policy: check.CheckedArtifact.ExhaustivenessResolutionPolicy,
 ) void {
     switch (policy) {
@@ -9989,7 +10189,6 @@ test "shared CTFE and runtime requests specialize once across workers and target
             .{ .target_usize = .native, .inline_expects = .omit },
         }) |consumer| {
             const width = consumer.target_usize;
-            const same_domain = width == base.target.TargetUsize.native and consumer.inline_expects == .run;
             var coord = try Coordinator.init(
                 allocator,
                 .multi_threaded,
@@ -10026,28 +10225,24 @@ test "shared CTFE and runtime requests specialize once across workers and target
             coord.runtime_lowering = .{ .target = target, .explicit_roots = requests, .root_module = app };
             try coord.finishCheckedProgram(.none);
             try std.testing.expect(!coord.hasUserErrors());
-            try std.testing.expect(coord.program_session.?.compile_time_root_count > 0);
-            try std.testing.expect(coord.program_session.?.native_artifacts != null);
-            try std.testing.expect(coord.program_session.?.runtimeNativeArtifacts() == null);
-            try std.testing.expectEqual(!same_domain, coord.program_session.?.runtime_prepared != null);
+            try std.testing.expect(coord.program_session.?.host != null);
+            try std.testing.expect(coord.program_session.?.runtime_prepared != null);
             try std.testing.expectEqual(@as(u32, 1), metrics.monotype_runs);
             try std.testing.expectEqual(@as(u32, 1), metrics.solved_runs);
             try std.testing.expectEqual(@as(u32, 1), metrics.lir_continuations);
             var runtime = try coord.program_session.?.takeRuntime(allocator, requests, target);
             defer runtime.deinit();
-            try std.testing.expectEqual(same_domain, coord.program_session.?.runtimeNativeArtifacts() != null);
             try std.testing.expectEqual(@as(u32, 1), metrics.monotype_runs);
             try std.testing.expectEqual(@as(u32, 1), metrics.solved_runs);
-            try std.testing.expectEqual(@as(u32, if (same_domain) 1 else 2), metrics.lir_continuations);
+            try std.testing.expectEqual(@as(u32, 2), metrics.lir_continuations);
             try std.testing.expectEqual(@as(usize, 1), runtime.lir_result.root_procs.items.len);
-            // The original host domain reuses the completed program, whose
-            // accessor now returns the completed scalar as a literal; a
-            // separate consumer lowers its own continuation, where the read is
-            // the literal. Either way no value slot survives.
-            const frozen = runtime.frozen_static_data orelse return error.TestUnexpectedResult;
+            // The runtime consumer lowers its own continuation, where the
+            // completed scalar is a literal, so no value slot survives.
             var value_exports: usize = 0;
-            for (frozen.exports) |item| {
-                if (item.value_id != null) value_exports += 1;
+            if (runtime.frozen_static_data) |frozen| {
+                for (frozen.exports) |item| {
+                    if (item.value_id != null) value_exports += 1;
+                }
             }
             var slot_reads: usize = 0;
             var literal_answers: usize = 0;

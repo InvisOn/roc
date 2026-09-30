@@ -1682,6 +1682,7 @@ fn parseAndCanonicalizeProgramWithRootModeReporting(
             .available_artifacts = available_artifacts,
             .explicit_roots = explicit_roots,
             .hoisted_roots = hoisted_roots,
+            .promoted_local_procedures = main_checked.checker.promotedLocalProcedures(),
             .compile_time_finalizer = if (ctfe_options) |options|
                 CompileTimeFinalization.finalizerWithOptions(options)
             else
@@ -2335,6 +2336,7 @@ fn publishImportArtifacts(
                     .module_env_storage = .{ .checked_source = extra_modules[extra_i].module_env },
                     .imports = published_keys.items,
                     .available_artifacts = available_artifacts,
+                    .promoted_local_procedures = extra_modules[extra_i].checker.promotedLocalProcedures(),
                     .compile_time_finalizer = CompileTimeFinalization.finalizer(),
                     .problem_store = switch (problem_reporting) {
                         .ignore_comptime_problems => null,
@@ -3109,6 +3111,7 @@ fn llvmCompileOptions(allocator: Allocator, target_usize: base.target.TargetUsiz
             .use_module_target_triple = true,
             .optimization = llvm_compile.bindings.IrOptimizationLevel.Oz,
             .target_ptr_width_bits = targetPtrWidthBits(target_usize),
+            .sha256_rounds = builtins.sha256.Rounds.forCpu(resolved_target.cpu),
             .cpu = cpu,
             .features = features,
         },
@@ -3117,6 +3120,7 @@ fn llvmCompileOptions(allocator: Allocator, target_usize: base.target.TargetUsiz
             .use_module_target_triple = true,
             .optimization = llvm_compile.bindings.IrOptimizationLevel.O3,
             .target_ptr_width_bits = targetPtrWidthBits(target_usize),
+            .sha256_rounds = builtins.sha256.Rounds.forCpu(resolved_target.cpu),
             .cpu = cpu,
             .features = features,
         },

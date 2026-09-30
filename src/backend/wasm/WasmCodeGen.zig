@@ -460,6 +460,12 @@ str_from_utf8_import: ?u32 = null,
 int_from_str_import: ?u32 = null,
 dec_from_str_import: ?u32 = null,
 float_from_str_import: ?u32 = null,
+int_from_str_prefix_import: ?u32 = null,
+int_from_utf8_prefix_import: ?u32 = null,
+dec_from_str_prefix_import: ?u32 = null,
+dec_from_utf8_prefix_import: ?u32 = null,
+float_from_str_prefix_import: ?u32 = null,
+float_from_utf8_prefix_import: ?u32 = null,
 list_append_unsafe_import: ?u32 = null,
 list_concat_import: ?u32 = null,
 list_append_range_within_import: ?u32 = null,
@@ -772,6 +778,12 @@ fn hostBuiltinImports(self: *const Self) HostBuiltinImports {
             .int_from_str => self.int_from_str_import,
             .dec_from_str => self.dec_from_str_import,
             .float_from_str => self.float_from_str_import,
+            .int_from_str_prefix => self.int_from_str_prefix_import,
+            .int_from_utf8_prefix => self.int_from_utf8_prefix_import,
+            .dec_from_str_prefix => self.dec_from_str_prefix_import,
+            .dec_from_utf8_prefix => self.dec_from_utf8_prefix_import,
+            .float_from_str_prefix => self.float_from_str_prefix_import,
+            .float_from_utf8_prefix => self.float_from_utf8_prefix_import,
             .str_equal => self.str_eq_import,
             .str_split_first => self.str_split_first_import,
             .str_split_last => self.str_split_last_import,
@@ -912,6 +924,18 @@ fn emitI64Const(self: *Self, value: i64) Allocator.Error!void {
 /// `.Immutable` (checked) otherwise.
 fn updateModeImmForArg(unique_args: u64, arg_index: u6) i32 {
     return @intFromEnum(if ((unique_args >> arg_index) & 1 != 0) builtins.utils.UpdateMode.InPlace else builtins.utils.UpdateMode.Immutable);
+}
+
+/// Push the width (and, for integers, signedness) args of a prefix-parse call.
+fn emitNumPrefixParseScalars(self: *Self, parse: numeric_conversion.NumericParseSpec) Allocator.Error!void {
+    switch (parse) {
+        .int => |int| {
+            try self.emitI32Const(int.width_bytes);
+            try self.emitI32Const(if (int.signed) 1 else 0);
+        },
+        .float => |float| try self.emitI32Const(float.width_bytes),
+        .dec => {},
+    }
 }
 
 fn loadRocListFields(self: *Self, list_ptr: u32) Allocator.Error!RocListFields {
@@ -2138,6 +2162,19 @@ fn registerHostImports(self: *Self) Allocator.Error!void {
 
     const float_from_str_type = try self.module.addFuncType(&.{ .i32, .i32, .i32, .i32 }, &.{});
     self.float_from_str_import = try self.module.addImport("env", "roc_float_from_str", float_from_str_type);
+
+    // Prefix parse host imports: (source_ptr, result_ptr, [width, [signed,]] err_off, rest_off, value_off) -> void
+    const int_from_prefix_type = try self.module.addFuncType(&.{ .i32, .i32, .i32, .i32, .i32, .i32, .i32 }, &.{});
+    self.int_from_str_prefix_import = try self.module.addImport("env", "roc_int_from_str_prefix", int_from_prefix_type);
+    self.int_from_utf8_prefix_import = try self.module.addImport("env", "roc_int_from_utf8_prefix", int_from_prefix_type);
+
+    const dec_from_prefix_type = try self.module.addFuncType(&.{ .i32, .i32, .i32, .i32, .i32 }, &.{});
+    self.dec_from_str_prefix_import = try self.module.addImport("env", "roc_dec_from_str_prefix", dec_from_prefix_type);
+    self.dec_from_utf8_prefix_import = try self.module.addImport("env", "roc_dec_from_utf8_prefix", dec_from_prefix_type);
+
+    const float_from_prefix_type = try self.module.addFuncType(&.{ .i32, .i32, .i32, .i32, .i32, .i32 }, &.{});
+    self.float_from_str_prefix_import = try self.module.addImport("env", "roc_float_from_str_prefix", float_from_prefix_type);
+    self.float_from_utf8_prefix_import = try self.module.addImport("env", "roc_float_from_utf8_prefix", float_from_prefix_type);
 
     const list_append_unsafe_type = try self.module.addFuncType(&.{ .i32, .i32, .i32, .i32, .i32 }, &.{});
     self.list_append_unsafe_import = try self.module.addImport("env", "roc_list_append_unsafe", list_append_unsafe_type);
@@ -8686,7 +8723,6 @@ pub fn registerBoxySymbolTargets(self: *Self) HostedSymbolError!void {
     try self.registerBoxySymbol("roc_boxy_unbox", &.{ .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32 }, &.{});
     try self.registerBoxySymbol("roc_boxy_adapt", &.{ .i32, .i32, .i32, .i32, .i32, .i32, .i32 }, &.{});
     try self.registerBoxySymbol("roc_boxy_inspect", &.{ .i32, .i32, .i32, .i32 }, &.{});
-    try self.registerBoxySymbol("roc_boxy_eq", &.{ .i32, .i32, .i32, .i32 }, &.{.i32});
     try self.registerBoxySymbol("roc_boxy_tag", &.{ .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32 }, &.{});
     try self.registerBoxySymbol("roc_boxy_tag_payload", &.{ .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32 }, &.{});
     try self.registerBoxySymbol("roc_boxy_tag_match", &.{ .i32, .i32, .i32, .i32 }, &.{.i32});
@@ -9002,14 +9038,6 @@ fn generateBoxyInspect(self: *Self, assign: anytype) Allocator.Error!void {
     try self.resolveBoxyDesc(assign.source_desc);
     try self.emitBoxyCall("roc_boxy_inspect");
     try self.emitBoxyOutValue(target_layout, out_ptr);
-}
-
-fn generateBoxyEq(self: *Self, assign: anytype) Allocator.Error!void {
-    try self.emitBoxyValuePtr(assign.lhs);
-    try self.emitBoxyValuePtr(assign.rhs);
-    try self.emitI32Const(@intCast(@intFromEnum(self.procLocalLayoutIdx(assign.lhs))));
-    try self.resolveBoxyDesc(assign.source_desc);
-    try self.emitBoxyCall("roc_boxy_eq");
 }
 
 fn generateBoxyTag(self: *Self, assign: anytype) Allocator.Error!void {
@@ -9810,11 +9838,6 @@ fn generateCFStmtNode(self: *Self, work: *std.ArrayList(StmtWork), wa: Allocator
         },
         .assign_boxy_inspect => |assign| {
             try self.generateBoxyInspect(assign);
-            try self.bindAssignedLocal(assign.target);
-            try work.append(wa, .{ .node = .{ .stmt_id = assign.next, .stop = stop } });
-        },
-        .assign_boxy_eq => |assign| {
-            try self.generateBoxyEq(assign);
             try self.bindAssignedLocal(assign.target);
             try work.append(wa, .{ .node = .{ .stmt_id = assign.next, .stop = stop } });
         },
@@ -12554,16 +12577,6 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
             };
             self.currentCode().append(self.allocator, wasm_op) catch return error.OutOfMemory;
         },
-        .num_round => {
-            try self.emitProcLocal(GuardedList.at(args, 0));
-            const vt = try self.resolveValType(ll.ret_layout);
-            const wasm_op: u8 = switch (vt) {
-                .f32 => Op.f32_nearest,
-                .f64 => Op.f64_nearest,
-                .i32, .i64, .v128 => unreachable,
-            };
-            self.currentCode().append(self.allocator, wasm_op) catch return error.OutOfMemory;
-        },
 
         // List operations
         .list_len => {
@@ -14104,6 +14117,96 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
                 },
             }
 
+            try self.emitFpOffset(result_offset);
+        },
+
+        .u8_from_str_prefix,
+        .u8_from_utf8_prefix,
+        .i8_from_str_prefix,
+        .i8_from_utf8_prefix,
+        .u16_from_str_prefix,
+        .u16_from_utf8_prefix,
+        .i16_from_str_prefix,
+        .i16_from_utf8_prefix,
+        .u32_from_str_prefix,
+        .u32_from_utf8_prefix,
+        .i32_from_str_prefix,
+        .i32_from_utf8_prefix,
+        .u64_from_str_prefix,
+        .u64_from_utf8_prefix,
+        .i64_from_str_prefix,
+        .i64_from_utf8_prefix,
+        .u128_from_str_prefix,
+        .u128_from_utf8_prefix,
+        .i128_from_str_prefix,
+        .i128_from_utf8_prefix,
+        .dec_from_str_prefix,
+        .dec_from_utf8_prefix,
+        .f32_from_str_prefix,
+        .f32_from_utf8_prefix,
+        .f64_from_str_prefix,
+        .f64_from_utf8_prefix,
+        => {
+            const spec = numeric_conversion.getNumericPrefixParseSpec(ll.op) orelse unreachable;
+            const ls = self.getLayoutStore();
+            const ret_layout_val = ls.getLayout(ll.ret_layout);
+            if (ret_layout_val.tag != .struct_) unreachable;
+            const record_idx = ret_layout_val.getStruct().idx;
+            const record_data = ls.getStructData(record_idx);
+            const fields = ls.struct_fields.sliceRange(record_data.getFields());
+            if (fields.len != 3 or ls.getStructFieldLayoutByOriginalIndex(record_idx, 0) != .u8) unreachable;
+
+            try self.emitProcLocal(GuardedList.at(args, 0));
+            const input = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
+            try self.emitLocalSet(input);
+
+            const result_size = try self.layoutStorageByteSize(ll.ret_layout);
+            const result_align = try self.layoutStorageByteAlign(ll.ret_layout);
+            const result_offset = try self.allocStackMemory(result_size, result_align);
+            const err_offset: u32 = @intCast(ls.getStructFieldOffsetByOriginalIndex(record_idx, 0));
+            const rest_offset: u32 = @intCast(ls.getStructFieldOffsetByOriginalIndex(record_idx, 1));
+            const value_offset: u32 = @intCast(ls.getStructFieldOffsetByOriginalIndex(record_idx, 2));
+
+            const class: LowLevelBuiltins.NumericClass = switch (spec.parse) {
+                .int => .int,
+                .float => .float,
+                .dec => .dec,
+            };
+            if (self.externalCallsUseRelocs()) {
+                const Layout = builtins.dev_wrappers.NumPrefixParseLayout;
+                const layout_offset = try self.allocStackMemory(@sizeOf(Layout), @alignOf(Layout));
+                try self.emitFpOffset(layout_offset);
+                try self.emitI32Const(@intCast(err_offset));
+                try self.emitStoreOp(.i32, @offsetOf(Layout, "err_offset"));
+                try self.emitFpOffset(layout_offset);
+                try self.emitI32Const(@intCast(rest_offset));
+                try self.emitStoreOp(.i32, @offsetOf(Layout, "rest_offset"));
+                try self.emitFpOffset(layout_offset);
+                try self.emitI32Const(@intCast(value_offset));
+                try self.emitStoreOp(.i32, @offsetOf(Layout, "value_offset"));
+                try self.emitFpOffset(result_offset);
+                switch (spec.source) {
+                    .str => try self.emitRocStrFields(try self.loadRocStrFields(input)),
+                    .utf8 => try self.emitRocListFields(try self.loadRocListFields(input)),
+                }
+                try self.emitNumPrefixParseScalars(spec.parse);
+                try self.emitFpOffset(layout_offset);
+            } else {
+                try self.emitLocalGet(input);
+                try self.emitFpOffset(result_offset);
+                try self.emitNumPrefixParseScalars(spec.parse);
+                try self.emitI32Const(@intCast(err_offset));
+                try self.emitI32Const(@intCast(rest_offset));
+                try self.emitI32Const(@intCast(value_offset));
+            }
+            switch (class) {
+                inline .int, .float, .dec => |c| switch (spec.source) {
+                    inline .str, .utf8 => |src| {
+                        const f = comptime LowLevelBuiltins.numFromStrPrefix(c, src);
+                        try self.emitBuiltinCall(BuiltinSignatures.kindOf(f), @field(self, @tagName(f) ++ "_import"));
+                    },
+                },
+            }
             try self.emitFpOffset(result_offset);
         },
 
@@ -15923,7 +16026,6 @@ fn numericOpFromLowLevel(op: LIR.LowLevel) NumericOp {
         .num_acos,
         .num_atan,
         .num_log,
-        .num_round,
         .num_floor,
         .num_ceiling,
         .num_to_str,
@@ -16002,6 +16104,32 @@ fn numericOpFromLowLevel(op: LIR.LowLevel) NumericOp {
         .dec_from_attos,
         .f32_from_str,
         .f64_from_str,
+        .u8_from_str_prefix,
+        .u8_from_utf8_prefix,
+        .i8_from_str_prefix,
+        .i8_from_utf8_prefix,
+        .u16_from_str_prefix,
+        .u16_from_utf8_prefix,
+        .i16_from_str_prefix,
+        .i16_from_utf8_prefix,
+        .u32_from_str_prefix,
+        .u32_from_utf8_prefix,
+        .i32_from_str_prefix,
+        .i32_from_utf8_prefix,
+        .u64_from_str_prefix,
+        .u64_from_utf8_prefix,
+        .i64_from_str_prefix,
+        .i64_from_utf8_prefix,
+        .u128_from_str_prefix,
+        .u128_from_utf8_prefix,
+        .i128_from_str_prefix,
+        .i128_from_utf8_prefix,
+        .dec_from_str_prefix,
+        .dec_from_utf8_prefix,
+        .f32_from_str_prefix,
+        .f32_from_utf8_prefix,
+        .f64_from_str_prefix,
+        .f64_from_utf8_prefix,
         .u8_to_i8_wrap,
         .u8_to_i8_try,
         .u8_to_i16,
@@ -21563,7 +21691,7 @@ test "wasm backend fuses overflow predicate with matching wrapping result" {
     const overflowed = try store.addLocal(.{ .layout_idx = .bool });
     const result = try store.addLocal(.{ .layout_idx = .u64 });
 
-    const ret_result = try store.addCFStmt(.{ .ret = .{ .value = result } });
+    const ret_result = try store.addCFStmt(.{ .ret = .{ .value = result } }, .test_fixture);
     const arithmetic_args = try store.addLocalSpan(&.{ lhs, rhs });
     const wrapping_result = try store.addCFStmt(.{ .assign_low_level = .{
         .target = result,
@@ -21571,38 +21699,38 @@ test "wasm backend fuses overflow predicate with matching wrapping result" {
         .rc_effect = LIR.LowLevel.num_int_add_wrap.rcEffect(),
         .args = arithmetic_args,
         .next = ret_result,
-    } });
-    const ret_overflow = try store.addCFStmt(.{ .ret = .{ .value = lhs } });
+    } }, .test_fixture);
+    const ret_overflow = try store.addCFStmt(.{ .ret = .{ .value = lhs } }, .test_fixture);
     const branches = try store.addCFSwitchBranches(&.{.{ .value = 1, .body = ret_overflow }});
     const choose = try store.addCFStmt(.{ .switch_stmt = .{
         .cond = overflowed,
         .branches = branches,
         .default_branch = wrapping_result,
-    } });
+    } }, .test_fixture);
     const predicate = try store.addCFStmt(.{ .assign_low_level = .{
         .target = overflowed,
         .op = .num_int_add_overflows,
         .rc_effect = LIR.LowLevel.num_int_add_overflows.rcEffect(),
         .args = arithmetic_args,
         .next = choose,
-    } });
+    } }, .test_fixture);
     const rhs_literal = try store.addCFStmt(.{ .assign_literal = .{
         .target = rhs,
         .value = .{ .i64_literal = .{ .value = 2, .layout_idx = .u64 } },
         .next = predicate,
-    } });
+    } }, .test_fixture);
     const lhs_literal = try store.addCFStmt(.{ .assign_literal = .{
         .target = lhs,
         .value = .{ .i64_literal = .{ .value = 40, .layout_idx = .u64 } },
         .next = rhs_literal,
-    } });
+    } }, .test_fixture);
     _ = try store.addProcSpec(.{
         .name = store.freshSyntheticSymbol(),
         .identity = LIR.ProcIdentity.forTest(1),
         .args = LIR.LocalSpan.empty(),
         .body = lhs_literal,
         .ret_layout = .u64,
-    });
+    }, .none);
 
     var codegen = Self.init(allocator, &store, &layouts, &.{}, &.{}, &.{}, .default);
     defer codegen.deinit();
@@ -21773,31 +21901,31 @@ fn timeProcCompileNs(allocator: Allocator, proc_count: usize) Allocator.Error!u6
         const lhs = try store.addLocal(.{ .layout_idx = .u64 });
         const rhs = try store.addLocal(.{ .layout_idx = .u64 });
         const sum = try store.addLocal(.{ .layout_idx = .u64 });
-        const ret = try store.addCFStmt(.{ .ret = .{ .value = sum } });
+        const ret = try store.addCFStmt(.{ .ret = .{ .value = sum } }, .test_fixture);
         const add = try store.addCFStmt(.{ .assign_low_level = .{
             .target = sum,
             .op = .num_int_add_wrap,
             .rc_effect = LIR.LowLevel.num_int_add_wrap.rcEffect(),
             .args = try store.addLocalSpan(&.{ lhs, rhs }),
             .next = ret,
-        } });
+        } }, .test_fixture);
         const rhs_literal = try store.addCFStmt(.{ .assign_literal = .{
             .target = rhs,
             .value = .{ .i64_literal = .{ .value = @intCast(i), .layout_idx = .u64 } },
             .next = add,
-        } });
+        } }, .test_fixture);
         const lhs_literal = try store.addCFStmt(.{ .assign_literal = .{
             .target = lhs,
             .value = .{ .i64_literal = .{ .value = 40, .layout_idx = .u64 } },
             .next = rhs_literal,
-        } });
+        } }, .test_fixture);
         _ = try store.addProcSpec(.{
             .name = store.freshSyntheticSymbol(),
             .identity = LIR.ProcIdentity.forTest(@intCast(i)),
             .args = LIR.LocalSpan.empty(),
             .body = lhs_literal,
             .ret_layout = .u64,
-        });
+        }, .none);
     }
     var codegen = Self.init(allocator, &store, &layouts, &.{}, &.{}, &.{}, .default);
     defer codegen.deinit();
@@ -21838,31 +21966,31 @@ fn procCompileBindingRowsVisited(allocator: Allocator, proc_count: usize) Alloca
         const lhs = try store.addLocal(.{ .layout_idx = .u64 });
         const rhs = try store.addLocal(.{ .layout_idx = .u64 });
         const sum = try store.addLocal(.{ .layout_idx = .u64 });
-        const ret = try store.addCFStmt(.{ .ret = .{ .value = sum } });
+        const ret = try store.addCFStmt(.{ .ret = .{ .value = sum } }, .test_fixture);
         const add = try store.addCFStmt(.{ .assign_low_level = .{
             .target = sum,
             .op = .num_int_add_wrap,
             .rc_effect = LIR.LowLevel.num_int_add_wrap.rcEffect(),
             .args = try store.addLocalSpan(&.{ lhs, rhs }),
             .next = ret,
-        } });
+        } }, .test_fixture);
         const rhs_literal = try store.addCFStmt(.{ .assign_literal = .{
             .target = rhs,
             .value = .{ .i64_literal = .{ .value = @intCast(i), .layout_idx = .u64 } },
             .next = add,
-        } });
+        } }, .test_fixture);
         const lhs_literal = try store.addCFStmt(.{ .assign_literal = .{
             .target = lhs,
             .value = .{ .i64_literal = .{ .value = 40, .layout_idx = .u64 } },
             .next = rhs_literal,
-        } });
+        } }, .test_fixture);
         _ = try store.addProcSpec(.{
             .name = store.freshSyntheticSymbol(),
             .identity = LIR.ProcIdentity.forTest(@intCast(i)),
             .args = LIR.LocalSpan.empty(),
             .body = lhs_literal,
             .ret_layout = .u64,
-        });
+        }, .none);
     }
 
     var codegen = Self.init(allocator, &store, &layouts, &.{}, &.{}, &.{}, .default);
@@ -21912,7 +22040,7 @@ const BodyScan = struct {
     }
 };
 
-const ScanError = error{ OutOfMemory, UnsupportedOpcode, TruncatedBody };
+const ScanError = error{ OutOfMemory, UnsupportedOpcode, TruncatedBody, OverlongImmediate };
 
 /// Decode one emitted function body.
 ///
@@ -21951,7 +22079,7 @@ fn scanBody(allocator: Allocator, body: []const u8, literal: i64) ScanError!Body
             .@"else", .end, .drop, .@"return", .i32_eqz => {},
             .br, .br_if => _ = try readUleb(body, &cursor),
             .local_get, .local_set, .local_tee => {
-                const idx: u32 = @intCast(try readUleb(body, &cursor));
+                const idx = try readUleb(body, &cursor);
                 const kind: LocalOpKind = if (op == .local_get)
                     .get
                 else if (op == .local_set)
@@ -21975,17 +22103,17 @@ fn scanBody(allocator: Allocator, body: []const u8, literal: i64) ScanError!Body
     return scan;
 }
 
-fn readUleb(bytes: []const u8, cursor: *usize) ScanError!usize {
-    var result: usize = 0;
-    var shift: std.math.Log2Int(usize) = 0;
-    while (true) {
-        if (cursor.* >= bytes.len) return error.TruncatedBody;
-        const byte = bytes[cursor.*];
-        cursor.* += 1;
-        result |= @as(usize, byte & 0x7f) << shift;
-        if (byte & 0x80 == 0) return result;
-        shift += 7;
-    }
+/// Every unsigned immediate these fixtures emit (lengths, counts, local
+/// indices, branch depths) is a wasm `u32`.
+fn readUleb(bytes: []const u8, cursor: *usize) ScanError!u32 {
+    var reader: std.Io.Reader = .fixed(bytes[cursor.*..]);
+    const value = reader.takeLeb128(u32) catch |err| switch (err) {
+        error.EndOfStream => return error.TruncatedBody,
+        error.Overflow => return error.OverlongImmediate,
+        error.ReadFailed => unreachable, // a fixed reader never fails a read
+    };
+    cursor.* += reader.seek;
+    return value;
 }
 
 fn readSleb(bytes: []const u8, cursor: *usize) ScanError!i64 {
@@ -22041,8 +22169,8 @@ fn compileJoinFixture(allocator: Allocator, shape: JoinFixtureShape) ScanError!B
     var next_join_point: u32 = 0;
     const join_id = freshJoinFixtureJoinPointId(&next_join_point);
 
-    const body_ret = try store.addCFStmt(.{ .ret = .{ .value = late } });
-    const jump_back = try store.addCFStmt(.{ .jump = .{ .target = join_id } });
+    const body_ret = try store.addCFStmt(.{ .ret = .{ .value = late } }, .test_fixture);
+    const jump_back = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
 
     const proc_body = switch (shape) {
         .assign_in_remainder => blk: {
@@ -22050,13 +22178,13 @@ fn compileJoinFixture(allocator: Allocator, shape: JoinFixtureShape) ScanError!B
                 .target = late,
                 .value = .{ .i64_literal = .{ .value = join_fixture_literal, .layout_idx = .u64 } },
                 .next = jump_back,
-            } });
+            } }, .test_fixture);
             break :blk try store.addCFStmt(.{ .join = .{
                 .id = join_id,
                 .params = LIR.LocalSpan.empty(),
                 .body = body_ret,
                 .remainder = assign,
-            } });
+            } }, .test_fixture);
         },
         .assign_before_join => blk: {
             const join_stmt = try store.addCFStmt(.{ .join = .{
@@ -22064,12 +22192,12 @@ fn compileJoinFixture(allocator: Allocator, shape: JoinFixtureShape) ScanError!B
                 .params = LIR.LocalSpan.empty(),
                 .body = body_ret,
                 .remainder = jump_back,
-            } });
+            } }, .test_fixture);
             break :blk try store.addCFStmt(.{ .assign_literal = .{
                 .target = late,
                 .value = .{ .i64_literal = .{ .value = join_fixture_literal, .layout_idx = .u64 } },
                 .next = join_stmt,
-            } });
+            } }, .test_fixture);
         },
     };
 
@@ -22079,7 +22207,7 @@ fn compileJoinFixture(allocator: Allocator, shape: JoinFixtureShape) ScanError!B
         .args = LIR.LocalSpan.empty(),
         .body = proc_body,
         .ret_layout = .u64,
-    });
+    }, .none);
 
     var codegen = Self.init(allocator, &store, &layouts, &.{}, &.{}, &.{}, .default);
     defer codegen.deinit();
@@ -22122,14 +22250,14 @@ test "procedure parameters keep their ABI local indices when the body reads them
 
     const first = try store.addLocal(.{ .layout_idx = .u64 });
     const second = try store.addLocal(.{ .layout_idx = .u64 });
-    const ret = try store.addCFStmt(.{ .ret = .{ .value = second } });
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = second } }, .test_fixture);
     _ = try store.addProcSpec(.{
         .name = store.freshSyntheticSymbol(),
         .identity = LIR.ProcIdentity.forTest(1),
         .args = try store.addLocalSpan(&.{ first, second }),
         .body = ret,
         .ret_layout = .u64,
-    });
+    }, .none);
 
     var codegen = Self.init(allocator, &store, &layouts, &.{}, &.{}, &.{}, .default);
     defer codegen.deinit();
@@ -22159,12 +22287,12 @@ test "sibling procedures that share LocalIds emit identical independent bodies" 
     defer layouts.deinit();
 
     const value = try store.addLocal(.{ .layout_idx = .u64 });
-    const ret = try store.addCFStmt(.{ .ret = .{ .value = value } });
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = value } }, .test_fixture);
     const assign = try store.addCFStmt(.{ .assign_literal = .{
         .target = value,
         .value = .{ .i64_literal = .{ .value = join_fixture_literal, .layout_idx = .u64 } },
         .next = ret,
-    } });
+    } }, .test_fixture);
     for (0..2) |i| {
         _ = try store.addProcSpec(.{
             .name = store.freshSyntheticSymbol(),
@@ -22172,7 +22300,7 @@ test "sibling procedures that share LocalIds emit identical independent bodies" 
             .args = LIR.LocalSpan.empty(),
             .body = assign,
             .ret_layout = .u64,
-        });
+        }, .none);
     }
 
     var codegen = Self.init(allocator, &store, &layouts, &.{}, &.{}, &.{}, .default);
@@ -22196,12 +22324,12 @@ fn frameInventoryDeclaredLocals(allocator: Allocator, obsolete_locals: usize) Sc
     defer layouts.deinit();
 
     const value = try store.addLocal(.{ .layout_idx = .u64 });
-    const ret = try store.addCFStmt(.{ .ret = .{ .value = value } });
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = value } }, .test_fixture);
     const assign = try store.addCFStmt(.{ .assign_literal = .{
         .target = value,
         .value = .{ .i64_literal = .{ .value = join_fixture_literal, .layout_idx = .u64 } },
         .next = ret,
-    } });
+    } }, .test_fixture);
 
     var inventory = std.ArrayList(LIR.LocalId).empty;
     defer inventory.deinit(allocator);
@@ -22218,7 +22346,7 @@ fn frameInventoryDeclaredLocals(allocator: Allocator, obsolete_locals: usize) Sc
         .frame_locals = try store.addLocalSpan(inventory.items),
         .body = assign,
         .ret_layout = .u64,
-    });
+    }, .none);
 
     var codegen = Self.init(allocator, &store, &layouts, &.{}, &.{}, &.{}, .default);
     defer codegen.deinit();

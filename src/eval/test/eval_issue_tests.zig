@@ -266,6 +266,186 @@ const issue11377GenericNominalCollectionSource =
 /// Public value `tests`.
 pub const tests = [_]TestCase{
     .{
+        .name = "issue 11737: independent calls select different nested method targets",
+        .source_kind = .module,
+        .source =
+        \\Runner :: {}.{
+        \\    run = |_, body| body({}).repeat(3)
+        \\}
+        \\demo = |runner| (runner.run(|{}| "a"), runner.run(|{}| [1.U64]))
+        \\main = demo(Runner.{})
+        ,
+        .expected = .{ .inspect_str = "(\"aaa\", [[1], [1], [1]])" },
+    },
+    .{
+        .name = "issue 11737: independent nominal calls preserve nested evidence and distinct results",
+        .source_kind = .module,
+        .source =
+        \\Db(deps) :: { deps : deps }.{
+        \\    run = |db, body| {
+        \\        fetch = db.deps.fetch
+        \\        repeated = fetch({}).repeat(3)
+        \\        (repeated, body({}))
+        \\    }
+        \\}
+        \\demo = |db| (db.run(|{}| "a"), db.run(|{}| 42.U64))
+        \\forward = |db| demo(db)
+        \\main = forward(Db.{ deps: { fetch: |{}| "x" } })
+        ,
+        .expected = .{ .inspect_str = "((\"xxx\", \"a\"), (\"xxx\", 42))" },
+    },
+    .{
+        .name = "issue 11737: stored generic function retains independent callable contracts",
+        .source_kind = .module,
+        .source =
+        \\Db(deps) :: { deps : deps }.{
+        \\    run = |db, body| {
+        \\        fetch = db.deps.fetch
+        \\        (fetch({}).concat("y"), body({}))
+        \\    }
+        \\}
+        \\demo = |db| (db.run(|{}| "a"), db.run(|{}| "b"))
+        \\saved = { invoke: demo }
+        \\main = {
+        \\    invoke = saved.invoke
+        \\    invoke(Db.{ deps: { fetch: |{}| "x" } })
+        \\}
+        ,
+        .expected = .{ .inspect_str = "((\"xy\", \"a\"), (\"xy\", \"b\"))" },
+    },
+    .{
+        .name = "issue 11661: closure relaxation preserves previous loop list",
+        .source_kind = .module,
+        .source =
+        \\answer : U64 -> Str
+        \\answer = |n| {
+        \\    edges = List.map_with_index(List.repeat(0, n - 1), |_, i| { from: n - 1 - i, to: n - 2 - i, cost: 1 })
+        \\    relax = |d| List.fold(edges, d, |acc, e| {
+        \\        via = (List.get(acc, e.to) ?? 1000) + e.cost
+        \\        if via < (List.get(acc, e.from) ?? 1000) {
+        \\            List.set(acc, e.from, via) ?? crash("relax: out of range")
+        \\        } else { acc }
+        \\    })
+        \\    start = List.set(List.repeat(1000, n), 0, 0) ?? crash("start")
+        \\    var $d = start
+        \\    var $next = relax(start)
+        \\    var $passes = 1
+        \\    while $next != $d {
+        \\        $d = $next
+        \\        $next = relax($d)
+        \\        $passes = $passes + 1
+        \\    }
+        \\    "passes ${U64.to_str($passes)}: ${Str.join_with(List.map($d, I64.to_str), " ")}"
+        \\}
+        \\main = answer(10)
+        ,
+        .expected = .{ .inspect_str = "\"passes 10: 0 1 2 3 4 5 6 7 8 9\"" },
+    },
+    .{
+        .name = "issue 11632: annotated Try parser keeps its listed tags",
+        .source_kind = .module,
+        .source =
+        \\parse : Str -> Try([A, B], _)
+        \\parse = |json| Json.parse(json)
+        \\main = match parse("\"C\"") {
+        \\    Ok(_) => False
+        \\    Err(_) => True
+        \\}
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11632: single inferred tag still derives",
+        .source_kind = .module,
+        .source =
+        \\main = Ok(Friendly) == Json.parse("\"Friendly\"")
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11632: nested inferred encoder row",
+        .source_kind = .module,
+        .source =
+        \\main = {
+        \\    value = { tags: [A] }
+        \\    encoded = Json.to_str(value)
+        \\    all_a = List.all(value.tags, |tag| match tag {
+        \\        A => True
+        \\        B => False
+        \\    })
+        \\    encoded == "{\"tags\":[\"A\"]}" and all_a
+        \\}
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11632: parser branch order A then B",
+        .source_kind = .module,
+        .source =
+        \\run = |json| {
+        \\    w = Json.parse(json)
+        \\    match w {
+        \\        Ok(A(s)) => s == ""
+        \\        Ok(B) => True
+        \\        Err(_) => False
+        \\    }
+        \\}
+        \\main = run("\"B\"") and run("{\"A\":\"\"}")
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11632: parser branch order B then A",
+        .source_kind = .module,
+        .source =
+        \\run = |json| {
+        \\    w = Json.parse(json)
+        \\    match w {
+        \\        Ok(B) => True
+        \\        Ok(A(s)) => s == ""
+        \\        Err(_) => False
+        \\    }
+        \\}
+        \\main = run("\"B\"") and run("{\"A\":\"\"}")
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11632: encoder before later match",
+        .source_kind = .module,
+        .source =
+        \\main = {
+        \\    v = if 1 == 1 A else B
+        \\    s = Json.to_str(v)
+        \\    extra = match v {
+        \\        A => 1
+        \\        B => 2
+        \\        C => 3
+        \\    }
+        \\    s == "\"A\"" and extra == 1
+        \\}
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11632: fresh caller openness remains inferred",
+        .source_kind = .module,
+        .source =
+        \\make : {} -> [A, B]
+        \\make = |_| A
+        \\main = {
+        \\    value = make({})
+        \\    encoded = Json.to_str(value)
+        \\    match value {
+        \\        A => encoded == "\"A\""
+        \\        B => False
+        \\        C => False
+        \\    }
+        \\}
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
         .name = "issue 11377: nested nominal alias applications retain outer parameters",
         .source_kind = .module,
         .source =
@@ -323,6 +503,46 @@ pub const tests = [_]TestCase{
         .source_kind = .module,
         .source = issue11377GenericNominalCollectionSource,
         .expected = .{ .inspect_str = "\"same\"" },
+    },
+    .{
+        .name = "issue 11626: different tags keep independent return rows",
+        .source_kind = .module,
+        .source = @import("issue_11626_source.zig").source ++ "\nmain = (stats_page(\"\"), lead_page(\"\"), stats_page(\"ok\"), lead_page(\"ok\"))\n",
+        .expected = .{ .inspect_str = "(Err(NotFound(IndexStats)), Err(NotFound(LeadMissing)), Ok(\"stats\"), Ok(\"lead\"))" },
+    },
+    .{
+        .name = "issue 11626: different base types keep independent return rows",
+        .source_kind = .module,
+        .source = @import("issue_11626_source.zig").source ++ "\nmain = (text_page(\"\"), number_page(\"\"), text_page(\"ok\"), number_page(\"ok\"))\n",
+        .expected = .{ .inspect_str = "(Err(NotFound(\"owned error payload longer than an inline string\")), Err(NotFound(7)), Ok(\"text\"), Ok(\"number\"))" },
+    },
+    .{
+        .name = "issue 11626: higher order calls keep independent return rows",
+        .source_kind = .module,
+        .source = @import("issue_11626_source.zig").source ++ "\nmain = (run(\"\", stats_page), run(\"\", lead_page), run(\"ok\", stats_page), run(\"ok\", lead_page))\n",
+        .expected = .{ .inspect_str = "(Err(NotFound(IndexStats)), Err(NotFound(LeadMissing)), Ok(\"stats\"), Ok(\"lead\"))" },
+    },
+    .{
+        .name = "issue 11626: composed returns carry captured callable payloads",
+        .source_kind = .module,
+        .source =
+        \\find = |text, what| if text == "" Err(NotFound(what)) else Ok(text)
+        \\respond = |text| Ok(|{}| text)
+        \\stats_page = |text| {
+        \\    _ = find(text, IndexStats)?
+        \\    respond(text)
+        \\}
+        \\lead_page = |text| {
+        \\    _ = find(text, LeadMissing)?
+        \\    respond(text)
+        \\}
+        \\call = |result| match result {
+        \\    Ok(f) => f({})
+        \\    Err(_) => "missing"
+        \\}
+        \\main = (call(stats_page("owned stats response longer than an inline string")), call(lead_page("owned lead response longer than an inline string")))
+        ,
+        .expected = .{ .inspect_str = "(\"owned stats response longer than an inline string\", \"owned lead response longer than an inline string\")" },
     },
     .{
         .name = "issue 11470: imported polymorphic error composition preserves shared tails",
@@ -450,6 +670,33 @@ pub const tests = [_]TestCase{
         \\main = xs
         ,
         .expected = .{ .inspect_str = "[{ a: 3, b: 287454020, c: (-7, 2.5) }, { a: 3, b: 287454020, c: (-7, 2.5) }]" },
+    },
+    .{
+        // A compile-time list of copies that an in-place write consumes is
+        // built fresh by a seed append and a range fill; every copy and the
+        // length must match the static table it replaces.
+        .name = "consumed compile-time list of copies is filled, not looped",
+        .source_kind = .module,
+        .source =
+        \\table : List(U16)
+        \\table = List.repeat(513, 100)
+        \\main = {
+        \\    written = table.set(99, 7) ?? []
+        \\    (written.len(), written.get(0), written.get(50), written.get(98), written.get(99), written.count_if(|x| x == 513))
+        \\}
+        ,
+        .expected = .{ .inspect_str = "(100, Ok(513), Ok(513), Ok(513), Ok(7), 99)" },
+    },
+    .{
+        // A single copy is the seed alone.
+        .name = "consumed compile-time list of one copy is the seed append alone",
+        .source_kind = .module,
+        .source =
+        \\table : List(U64)
+        \\table = List.repeat(9, 1)
+        \\main = table.set(0, 4) ?? []
+        ,
+        .expected = .{ .inspect_str = "[4]" },
     },
     .{
         .name = "issue 11376: packed nominal constants preserve copy-on-write sharing",
@@ -3195,6 +3442,167 @@ pub const tests = [_]TestCase{
         .expected = .{ .problem_and_crash = {} },
     },
     .{
+        // repro for https://github.com/roc-lang/roc/issues/11502
+        // A rejected relation poisons only the use it rejected. Lowering
+        // `check` instantiates every parameter's type, so the parameter read
+        // by the rejected use must keep its declared type; the use itself
+        // becomes the runtime error.
+        .name = "issue 11502: rejected equality leaves its operand parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    Ref :: { value : Str }.{
+        \\        is_eq : Ref, Ref -> Bool
+        \\        is_eq = |left, right| left.value == right.value
+        \\    }
+        \\
+        \\    check : Ref, Str -> Bool
+        \\    check = |a, b| a == b
+        \\}
+        \\
+        \\main = M.check({ value: "x" }, "x")
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected method call argument leaves its parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    Ref :: { value : Str }.{
+        \\        same : Ref, Ref -> Bool
+        \\        same = |left, right| left.value == right.value
+        \\    }
+        \\
+        \\    check : Ref, Str -> Bool
+        \\    check = |a, b| a.same(b)
+        \\}
+        \\
+        \\main = M.check({ value: "x" }, "x")
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected arithmetic operand leaves its parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    check : I64, Str -> I64
+        \\    check = |n, s| n + s
+        \\}
+        \\
+        \\main = M.check(1, "x")
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected if condition leaves its parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    check : Str, I64 -> I64
+        \\    check = |s, n| if s n else 2
+        \\}
+        \\
+        \\main = M.check("x", 1)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected match guard leaves its parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    check : Str, I64 -> I64
+        \\    check = |s, n| match n {
+        \\        _ if s => 1
+        \\        _ => 2
+        \\    }
+        \\}
+        \\
+        \\main = M.check("x", 1)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected list element leaves its parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    check : Str -> List(Bool)
+        \\    check = |s| [Bool.True, s]
+        \\}
+        \\
+        \\main = M.check("x").len()
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: body rejected by its annotation leaves the returned parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    check : Str -> Bool
+        \\    check = |s| s
+        \\}
+        \\
+        \\main = M.check("x")
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected derived equality argument leaves the captured parameter's type intact",
+        .source_kind = .module,
+        .source =
+        \\M :: [].{
+        \\    check : Str -> Bool
+        \\    check = |b| {
+        \\        f = |a| a.is_eq(b)
+        \\        f({ v: "x" })
+        \\    }
+        \\}
+        \\
+        \\main = M.check("x")
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected use of a top-level value leaves the value's type intact",
+        .source_kind = .module,
+        .source =
+        \\flag : Str
+        \\flag = "x"
+        \\
+        \\check : I64 -> I64
+        \\check = |n| if flag n else 2
+        \\
+        \\main = check(1)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11502: rejected use of an imported value becomes a runtime error",
+        .source_kind = .module,
+        .imports = &.{.{
+            .name = "Flag",
+            .source =
+            \\Flag := [].{
+            \\    flag : Str
+            \\    flag = "x"
+            \\}
+            ,
+        }},
+        .source =
+        \\import Flag
+        \\
+        \\check : I64 -> I64
+        \\check = |n| if Flag.flag n else 2
+        \\
+        \\main = check(1)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
         // repro for https://github.com/roc-lang/roc/issues/11489
         // An unannotated function whose local recursive helper appends a
         // freshly appended inner list to an outer accumulator in two match
@@ -3236,5 +3644,596 @@ pub const tests = [_]TestCase{
         \\main = split(["a", "b"]).map(|group| group.len())
         ,
         .expected = .{ .inspect_str = "[1, 1]" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11622
+        // `run` is unannotated, so its body reads `stmt.host` on an open
+        // record parameter. The call from `query` lifts the opaque `Stmt` into
+        // that record inside `Stmt`'s own module, which the checker permits,
+        // so the specialization at `Stmt` must read the field through the
+        // opaque backing. `prepare` and `step` share the `DbErr` tag, so the
+        // two `?` error rows must merge into one union.
+        .name = "issue 11622: unannotated opaque method reading its backing field, dispatched after ?",
+        .source_kind = .module,
+        .source =
+        \\Stmt :: { host : U64 }.{
+        \\    run = |stmt|
+        \\        match step(stmt.host)? {
+        \\            Done => Ok(stmt.host)
+        \\            Row => Err(TooManyRows)
+        \\        }
+        \\}
+        \\
+        \\prepare : Str -> Try(Stmt, [DbErr(Str)])
+        \\prepare = |_sql| Ok(Stmt.{ host: 0 })
+        \\
+        \\query = |sql| {
+        \\    stmt = prepare(sql)?
+        \\    stmt.run()
+        \\}
+        \\
+        \\step : U64 -> Try([Row, Done], [DbErr(Str)])
+        \\step = |_host| Ok(Done)
+        \\
+        \\main = query("select 1")
+        ,
+        .expected = .{ .inspect_str = "Ok(0)" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11622
+        // `inner_host` is an unannotated record-polymorphic helper. Both opaque
+        // types are lifted into its record parameter inside their own module,
+        // so each segment of `r.inner.host` must read through an opaque
+        // backing in the specialization at `Outer`.
+        .name = "issue 11622: record-polymorphic helper reads a field chain through nested opaque types",
+        .source_kind = .module,
+        .source =
+        \\Inner :: { host : U64 }
+        \\
+        \\Outer :: { inner : Inner, port : U64 }
+        \\
+        \\inner_host = |r| r.inner.host + r.port
+        \\
+        \\main = inner_host(Outer.{ inner: Inner.{ host: 40 }, port: 2 })
+        ,
+        .expected = .{ .inspect_str = "42" },
+    },
+    .{
+        // https://github.com/roc-lang/roc/issues/11668
+        // The literal's target `Sql(a)` gets `a` from the record argument, whose
+        // field kind is still open when the literal is lowered, so the
+        // `from_quote` call must lower at the open target instead of demanding
+        // its finished type.
+        .name = "issue 11668: from_quote literal argument whose type parameter comes from a record argument",
+        .source_kind = .module,
+        .source =
+        \\Sql(a) := { text : Str }.{
+        \\    from_quote : Str -> Try(Sql(a), [BadQuotedBytes(Str)])
+        \\    from_quote = |raw| Ok(Sql.{ text: raw })
+        \\}
+        \\
+        \\query : Sql(a), a -> Str
+        \\query = |sql, _| sql.text
+        \\
+        \\run : {} -> Str
+        \\run = |_| query("select 1", { id: 1.I32 })
+        \\
+        \\main = run({})
+        ,
+        .expected = .{ .inspect_str = "\"select 1\"" },
+    },
+    .{
+        // https://github.com/roc-lang/roc/issues/11668
+        // The numeral flavor of the same open-target literal conversion.
+        .name = "issue 11668: from_numeral literal argument whose type parameter comes from a record argument",
+        .source_kind = .module,
+        .source =
+        \\Tally(a) := { count : I64 }.{
+        \\    from_numeral : Numeral -> Try(Tally(a), [InvalidNumeral(Str)])
+        \\    from_numeral = |_| Ok(Tally.{ count: 7 })
+        \\}
+        \\
+        \\total : Tally(a), a -> I64
+        \\total = |tally, _| tally.count
+        \\
+        \\run : {} -> I64
+        \\run = |_| total(3, { id: 1.I32 })
+        \\
+        \\main = run({})
+        ,
+        .expected = .{ .inspect_str = "7" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11668
+        // The literal's target `Sql({ n : Str })` is fixed by a later field
+        // access in the same monomorphic body.
+        .name = "issue 11668: from_quote literal whose target record is fixed by a later use",
+        .source_kind = .module,
+        .source =
+        \\Sql(a) := { text : Str }.{
+        \\    from_quote : Str -> Try(Sql(a), [BadQuotedBytes(Str)])
+        \\    from_quote = |raw| Ok(Sql.{ text: raw })
+        \\}
+        \\
+        \\query : Sql(a) -> Try(a, [X])
+        \\query = |_| Err(X)
+        \\
+        \\run : {} -> Try(Str, [X])
+        \\run = |_| {
+        \\    row = query("select 1")?
+        \\    Ok(row.n)
+        \\}
+        \\
+        \\main = run({})
+        ,
+        .expected = .{ .inspect_str = "Err(X)" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11674
+        // `from_quote`'s `where` clause asks for a derived `I32.parser_for`;
+        // the literal inside `run` converts at `Sql(I32)`.
+        .name = "issue 11674: from_quote literal whose where clause needs a derived parser_for",
+        .source_kind = .module,
+        .source =
+        \\Sql(a) := { text : Str }.{
+        \\    from_quote : Str -> Try(Sql(a), [BadQuotedBytes(Str)])
+        \\        where [a.parser_for : Fmt -> (U8 -> Try({ value : a, rest : U8 }, [Bad]))]
+        \\    from_quote = |raw| Ok(Sql.{ text: raw })
+        \\}
+        \\
+        \\Fmt := [Default].{
+        \\    parse_i32 : Fmt, U8 -> Try({ value : I32, rest : U8 }, [Bad])
+        \\    parse_i32 = |_, state| Ok({ value: 0, rest: state })
+        \\}
+        \\
+        \\query : Sql(a) -> Try(List(a), [X])
+        \\query = |_| Ok([])
+        \\
+        \\run : {} -> Try(List(I32), [X])
+        \\run = |_| query("select 1")
+        \\
+        \\main = run({})
+        ,
+        .expected = .{ .inspect_str = "Ok([])" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11669
+        // `from_quote` calls a derived `I32.parser_for` whose error row is the
+        // `where` clause's open `err`, which includes the parser's `Bad`.
+        .name = "issue 11669: from_quote calling a derived parser_for with an open error row",
+        .source_kind = .module,
+        .source =
+        \\Sql(a) := { text : Str }.{
+        \\    from_quote : Str -> Try(Sql(a), [BadQuotedBytes(Str)])
+        \\        where [a.parser_for : Fmt -> (U8 -> Try({ value : a, rest : U8 }, err))]
+        \\    from_quote = |raw| {
+        \\        A : a
+        \\        _ = A.parser_for(Fmt.Default)
+        \\        Ok(Sql.{ text: raw })
+        \\    }
+        \\}
+        \\
+        \\Fmt := [Default].{
+        \\    parse_i32 : Fmt, U8 -> Try({ value : I32, rest : U8 }, [Bad])
+        \\    parse_i32 = |_, state| Ok({ value: 0, rest: state })
+        \\}
+        \\
+        \\sql : Sql(I32)
+        \\sql = "select 1"
+        \\
+        \\main = sql.text
+        ,
+        .expected = .{ .inspect_str = "\"select 1\"" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11725
+        // `from_quote`'s `where` clause asks for a derived `parser_for` of a
+        // record row that the caller returns inside a tag union
+        // (`[Nope, Yes(row)]`); `run` converts a `from_quote` literal there.
+        // Expected: the program checks cleanly and `main` evaluates to `Nope`.
+        .name = "issue 11725: from_quote where clause derived parser_for of record row returned in tag union",
+        .source_kind = .module,
+        .source =
+        \\Fmt := {}.{
+        \\    parse_record_start = |_, s| Ok(Uncounted(s))
+        \\    parse_record_field = |_, _, s| Ok(Done(s))
+        \\    parse_record_after_field = |_, s| Ok(Continue(s))
+        \\    skip_record_field = |_, s| Ok(s)
+        \\}
+        \\
+        \\Sql(row) := {}.{
+        \\    from_quote : Str -> Try(Sql(row), [BadQuotedBytes(Str)])
+        \\        where [row.parser_for : Fmt -> ({} -> Try({ value : row, rest : {} }, _))]
+        \\    from_quote = |_| Ok(Sql.({}))
+        \\}
+        \\
+        \\query : Sql(row) -> [Nope, Yes(row)]
+        \\query = |_| Nope
+        \\
+        \\run : {} -> [Nope, Yes({})]
+        \\run = |_| query("")
+        \\
+        \\main = run({})
+        ,
+        .expected = .{ .inspect_str = "Nope" },
+    },
+    .{
+        .name = "issue 11725: from_numeral retains nested parser_for evidence",
+        .source_kind = .module,
+        .source =
+        \\Fmt := {}.{
+        \\    parse_record_start = |_, s| Ok(Uncounted(s))
+        \\    parse_record_field = |_, _, s| Ok(Done(s))
+        \\    parse_record_after_field = |_, s| Ok(Continue(s))
+        \\    skip_record_field = |_, s| Ok(s)
+        \\}
+        \\
+        \\Sql(row) := {}.{
+        \\    from_numeral : Numeral -> Try(Sql(row), [InvalidNumeral(Str)])
+        \\        where [row.parser_for : Fmt -> ({} -> Try({ value : row, rest : {} }, _))]
+        \\    from_numeral = |_| Ok(Sql.({}))
+        \\}
+        \\
+        \\query : Sql(row) -> [Nope, Yes(row)]
+        \\query = |_| Nope
+        \\
+        \\run : {} -> [Nope, Yes({})]
+        \\run = |_| query(0)
+        \\
+        \\main = run({})
+        ,
+        .expected = .{ .inspect_str = "Nope" },
+    },
+    .{
+        .name = "issue 11725: dependent from_quote rejection in an untaken branch is eager",
+        .source_kind = .module,
+        .source =
+        \\Fmt := {}.{
+        \\    parse_record_start = |_, s| Ok(Uncounted(s))
+        \\    parse_record_field = |_, _, s| Ok(Done(s))
+        \\    parse_record_after_field = |_, s| Ok(Continue(s))
+        \\    skip_record_field = |_, s| Ok(s)
+        \\}
+        \\
+        \\Sql(row) := {}.{
+        \\    from_quote : Str -> Try(Sql(row), [BadQuotedBytes(Str)])
+        \\        where [row.parser_for : Fmt -> ({} -> Try({ value : row, rest : {} }, _))]
+        \\    from_quote = |_| Err(BadQuotedBytes("rejected"))
+        \\}
+        \\
+        \\query : Sql(row) -> [Nope, Yes(row)]
+        \\query = |_| Nope
+        \\
+        \\run : {} -> [Nope, Yes({})]
+        \\run = |_| if False query("") else Nope
+        \\
+        \\main = run({})
+        ,
+        .expected = .problem,
+    },
+    .{
+        .name = "issue 11725: uninstantiated from_quote evidence has no conversion root",
+        .source_kind = .module,
+        .source =
+        \\Fmt := {}.{
+        \\    parse_record_start = |_, s| Ok(Uncounted(s))
+        \\    parse_record_field = |_, _, s| Ok(Done(s))
+        \\    parse_record_after_field = |_, s| Ok(Continue(s))
+        \\    skip_record_field = |_, s| Ok(s)
+        \\}
+        \\
+        \\Sql(row) := {}.{
+        \\    from_quote : Str -> Try(Sql(row), [BadQuotedBytes(Str)])
+        \\        where [row.parser_for : Fmt -> ({} -> Try({ value : row, rest : {} }, _))]
+        \\    from_quote = |_| Err(BadQuotedBytes("rejected"))
+        \\}
+        \\
+        \\query : Sql(row) -> [Nope, Yes(row)]
+        \\query = |_| Nope
+        \\
+        \\run : {} -> [Nope, Yes({})]
+        \\run = |_| query("")
+        \\
+        \\main = 0.I64
+        ,
+        .expected = .{ .inspect_str = "0" },
+    },
+    .{
+        .name = "issue 11725: from_quote codec evidence follows distinct row specializations",
+        .source_kind = .module,
+        .source =
+        \\Fmt := {}.{
+        \\    parse_record_start = |_, s| Ok(Uncounted(s))
+        \\    parse_record_field = |_, _, s| Ok(Done(s))
+        \\    parse_record_after_field = |_, s| Ok(Continue(s))
+        \\    skip_record_field = |_, s| Ok(s)
+        \\}
+        \\
+        \\Sql(row) := {}.{
+        \\    from_quote : Str -> Try(Sql(row), [BadQuotedBytes(Str)])
+        \\        where [row.parser_for : Fmt -> ({} -> Try({ value : row, rest : {} }, _))]
+        \\    from_quote = |_| Ok(Sql.({}))
+        \\}
+        \\
+        \\query : Sql(row) -> [Nope, Yes(row)]
+        \\query = |_| Nope
+        \\
+        \\run : {} -> [Nope, Yes(row)]
+        \\    where [row.parser_for : Fmt -> ({} -> Try({ value : row, rest : {} }, _))]
+        \\run = |_| query("")
+        \\
+        \\Row := {}.{
+        \\    parser_for : Fmt -> ({} -> Try({ value : Row, rest : {} }, [Bad]))
+        \\    parser_for = |_| |s| Ok({ value: Row.({}), rest: s })
+        \\}
+        \\
+        \\as_record : [Nope, Yes({})]
+        \\as_record = run({})
+        \\as_nominal : [Nope, Yes(Row)]
+        \\as_nominal = run({})
+        \\main = (as_record, as_nominal)
+        ,
+        .expected = .{ .inspect_str = "(Nope, Nope)" },
+    },
+    .{
+        // A `?` whose closed error row the enclosing annotated result rejects
+        // is a checked error that crashes when reached. The function keeps its
+        // body's result type, so a caller that widens the error row still
+        // specializes it, and the rejected return never flows a value.
+        .name = "rejected try suffix on a nominal payload function crashes at runtime",
+        .source_kind = .module,
+        .source =
+        \\Holder := [H({} -> Try(I64, [WrongArity, TypeMismatch]))].{
+        \\    run : Holder -> Try(I64, _)
+        \\    run = |h|
+        \\        match h {
+        \\            H(fn) => {
+        \\                n = fn({})?
+        \\                if n > 0 Ok(n) else Err(NotAFunction)
+        \\            }
+        \\        }
+        \\}
+        \\
+        \\main = Holder.run(H(|_| Err(WrongArity))) == Err(WrongArity)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "rejected try suffix on a function parameter crashes at runtime",
+        .source_kind = .module,
+        .source =
+        \\run : ({} -> Try(I64, [WrongArity, TypeMismatch])) -> Try(I64, _)
+        \\run = |fn| {
+        \\    n = fn({})?
+        \\    if n > 0 Ok(n) else Err(NotAFunction)
+        \\}
+        \\
+        \\main = run(|_| Err(WrongArity)) == Err(WrongArity)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11769
+        // A custom encoder_for calls another type's derived `encoder_for : _`
+        // by name, so both values encode through Flag's derived encoder.
+        .name = "issue 11769: custom encoder_for calls a derived encoder_for by name",
+        .source_kind = .module,
+        .source =
+        \\Flag := [On, Off].{
+        \\    encoder_for : _
+        \\}
+        \\
+        \\Wrap := [W(Flag)].{
+        \\    encoder_for = |encoding| {
+        \\        encode_flag = Flag.encoder_for(encoding)
+        \\        |W(flag), state| encode_flag(flag, state)
+        \\    }
+        \\}
+        \\
+        \\main : Str
+        \\main = "${Json.to_str(Flag.On)} ${Json.to_str(Wrap.W(Flag.Off))}"
+        ,
+        .expected = .{ .inspect_str = "\"\\\"On\\\" \\\"Off\\\"\"" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11769
+        // A builtin type's derived encoder_for, called by name.
+        .name = "issue 11769: custom encoder_for calls a builtin derived encoder_for by name",
+        .source_kind = .module,
+        .source =
+        \\Wrap := [W(Bool)].{
+        \\    encoder_for = |encoding| {
+        \\        encode_bool = Bool.encoder_for(encoding)
+        \\        |W(b), state| encode_bool(b, state)
+        \\    }
+        \\}
+        \\
+        \\main : Str
+        \\main = Json.to_str(Wrap.W(Bool.True))
+        ,
+        .expected = .{ .inspect_str = "\"true\"" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11769
+        // A record-backed derived encoder_for reached through a type alias.
+        .name = "issue 11769: derived encoder_for of a record backing called through a type alias",
+        .source_kind = .module,
+        .source =
+        \\Point := { x : I64, y : I64 }.{
+        \\    encoder_for : _
+        \\}
+        \\
+        \\P : Point
+        \\
+        \\Wrap := [W(Point)].{
+        \\    encoder_for = |encoding| {
+        \\        encode_point = P.encoder_for(encoding)
+        \\        |W(point), state| encode_point(point, state)
+        \\    }
+        \\}
+        \\
+        \\main : Str
+        \\main = Json.to_str(Wrap.W(Point.({ x: 1, y: 2 })))
+        ,
+        .expected = .{ .inspect_str = "\"{\\\"x\\\":1,\\\"y\\\":2}\"" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11769
+        // A parameterized owner's derived encoder_for, called by name.
+        .name = "issue 11769: derived encoder_for of a parameterized nominal called by name",
+        .source_kind = .module,
+        .source =
+        \\Pair(a) := [Pair(a, a)].{
+        \\    encoder_for : _
+        \\}
+        \\
+        \\Wrap := [W(Pair(Str))].{
+        \\    encoder_for = |encoding| {
+        \\        encode_pair = Pair.encoder_for(encoding)
+        \\        |W(pair), state| encode_pair(pair, state)
+        \\    }
+        \\}
+        \\
+        \\main : Str
+        \\main = Json.to_str(Wrap.W(Pair.Pair("a", "b")))
+        ,
+        .expected = .{ .inspect_str = "\"{\\\"Pair\\\":[\\\"a\\\",\\\"b\\\"]}\"" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11769
+        // A custom parser_for calls another type's derived parser_for by name.
+        .name = "issue 11769: custom parser_for calls a derived parser_for by name",
+        .source_kind = .module,
+        .source =
+        \\Flag := [On, Off].{
+        \\    parser_for : _
+        \\}
+        \\
+        \\Wrap := [W(Flag)].{
+        \\    parser_for = |format| {
+        \\        parse_flag = Flag.parser_for(format)
+        \\        |state| {
+        \\            parsed = parse_flag(state)?
+        \\            Ok({ value: W(parsed.value), rest: parsed.rest })
+        \\        }
+        \\    }
+        \\}
+        \\
+        \\main : Str
+        \\main = {
+        \\    decoded : Try(Wrap, [InvalidJson(Str)])
+        \\    decoded = Json.parse("\"Off\"")
+        \\    match decoded {
+        \\        Ok(W(Off)) => "off"
+        \\        Ok(W(On)) => "on"
+        \\        Err(_) => "failed"
+        \\    }
+        \\}
+        ,
+        .expected = .{ .inspect_str = "\"off\"" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11769
+        // Derived is_eq and to_hash called by name.
+        .name = "issue 11769: derived is_eq called by name",
+        .source_kind = .module,
+        .source =
+        \\Flag := [On, Off].{
+        \\    is_eq : _
+        \\}
+        \\
+        \\main : Bool
+        \\main = Flag.is_eq(Flag.On, Flag.On) and !Flag.is_eq(Flag.On, Flag.Off)
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/11770
+        // A method annotated `_` whose body is erroneous has no declared
+        // callable type, so its declaration is rejected like an unannotated
+        // one instead of publishing a lambda whose checked type is not a
+        // function.
+        .name = "issue 11770: erroneous method annotated with a hole dispatched through a where clause",
+        .source_kind = .module,
+        .source =
+        \\T := [T].{
+        \\    show : _
+        \\    show = |t| nope(t)
+        \\}
+        \\
+        \\render : a -> Str where [a.show : a -> Str]
+        \\render = |value| value.show()
+        \\
+        \\main = render(T.T)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11770: erroneous method annotated with a hole called on a value",
+        .source_kind = .module,
+        .source =
+        \\T := [T].{
+        \\    show : _
+        \\    show = |t| nope(t)
+        \\}
+        \\
+        \\show_it = |value| value.show()
+        \\
+        \\main = show_it(T.T)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11770: erroneous method annotated with a hole called through a type parameter",
+        .source_kind = .module,
+        .source =
+        \\T := [T].{
+        \\    show : _
+        \\    show = |t| nope(t)
+        \\}
+        \\
+        \\render : a -> Str where [a.show : a -> Str]
+        \\render = |value| {
+        \\    A : a
+        \\    A.show(value)
+        \\}
+        \\
+        \\main = render(T.T)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11770: method annotated with a hole calling a declaration with no value",
+        .source_kind = .module,
+        .source =
+        \\missing : T -> Str
+        \\
+        \\T := [T].{
+        \\    show : _
+        \\    show = |t| missing(t)
+        \\}
+        \\
+        \\render : a -> Str where [a.show : a -> Str]
+        \\render = |value| value.show()
+        \\
+        \\main = render(T.T)
+        ,
+        .expected = .{ .problem_and_crash = {} },
+    },
+    .{
+        .name = "issue 11770: method annotated with a hole and a valid body dispatches through a where clause",
+        .source_kind = .module,
+        .source =
+        \\T := [T].{
+        \\    show : _
+        \\    show = |_t| "shown"
+        \\}
+        \\
+        \\render : a -> Str where [a.show : a -> Str]
+        \\render = |value| value.show()
+        \\
+        \\main = render(T.T)
+        ,
+        .expected = .{ .inspect_str = "\"shown\"" },
     },
 };
