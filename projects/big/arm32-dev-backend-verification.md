@@ -559,6 +559,20 @@ Done 2026-09-29, locally (nothing pushed).
   object emission (`emitMergedBitcodeModulesToObjectFile`). Upstream; the
   case came with `641d298ae1` ("Integrate stored ranges with iteration").
   Not reported upstream as of 2026-10-01.
+- 2026-10-02, catch-up merge `476d49e49b` of upstream `main` at
+  `a932c6541e` (18 commits, 6 PRs past `00cab95af8`; no conflicts; nothing
+  in the dev backend). No fix was needed; `0cb86e15ca` adds the hashes of
+  the two eval cases upstream added (#11952), with no existing hash changed.
+  All checks at `0cb86e15ca`:
+  - relative 64-bit oracle against `a932c6541e`: PASS, no eval case and no
+    64-bit snapshot line differs (the two snapshots listed as upstream-only
+    are the two removed on 2026-10-01).
+  - minici: 80/80 phases (upstream added one).
+  - arm32 (`roc/hw_checks.roc`): eval corpus under qemu 2383/2383, host
+    effects 104/104; `test/fx` 122/122 under qemu, on the Raspberry Pi 5 and
+    on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
+    x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/a932c6541e/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
