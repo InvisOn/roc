@@ -550,6 +550,15 @@ Done 2026-09-29, locally (nothing pushed).
   LLVM eval corpus was not separately rerun at upstream. Upstream issue
   #11909; the fix (PR #11915) is folded into the open PR #11885, so these
   jobs pass after the next catch-up that includes it.
+- `eval-llvm (macos-15)`'s two aborts ("inspect: inclusive/exclusive numeric
+  ranges all iterate", LLVM backend only): on the Raspberry Pi 5 (aarch64
+  Linux), a Debug eval runner cross-built from the merged tip and one from
+  upstream `00cab95af8` both abort the inclusive case the same way (the
+  exclusive one passes there); `.git/verify-tools/pi5_llvm_ranges.sh`. The
+  stack: Zig's libc `calloc` panics "incorrect alignment" inside LLVM's
+  object emission (`emitMergedBitcodeModulesToObjectFile`). Upstream; the
+  case came with `641d298ae1` ("Integrate stored ranges with iteration").
+  Not reported upstream as of 2026-10-01.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
