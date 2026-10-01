@@ -478,6 +478,18 @@ Done 2026-09-29, locally (nothing pushed).
     fixed pattern). Next: run the Debug and ReleaseFast snapshot tools at the
     base on these two files; the same difference there puts the cause
     upstream, otherwise bisect the branch.
+    **Cause found 2026-10-01** (CI run 36764332316 on the merge: the same
+    two snapshots, the same targets, on macOS-15 and Windows 2025, so not
+    uninitialized memory): the driver emits runtime validity checks for Box
+    and Str locals only when the compiler itself is built in Debug
+    (`emitDebugAssertValidBoxLocal` and `emitDebugAssertValidStrLocal`,
+    gated on `comptime builtin.mode != .Debug`, upstream code). These two
+    snapshots are the only ones with Str or Box locals, so their expected
+    hashes describe a Debug compiler's output and a ReleaseFast compiler's
+    differs. A0 added a test whose expectation depends on the compiler's
+    optimize mode; CI's ReleaseFast `run-test-zig` pass checks it. The eval
+    hash file has the same dependence but is only checked by a Debug runner.
+    Decision pending (see the morning of 2026-10-01).
 - Pull-request run 36534635511 on `fe779eee30`: every `zig-minici` shard
   passed except `windows-harness`, cancelled at its 2-hour limit.
   `run-check-dev-code-hashes` alone took 46 minutes there. The hash file is
