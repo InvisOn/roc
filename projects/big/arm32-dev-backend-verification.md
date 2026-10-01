@@ -324,6 +324,7 @@ Checklist for the upstream pull requests:
 | 2026-09-30, minici on the upstream merge (`run-test-zig-module-lir_core`) | `41eb92cfaa` (the merge) | the commit that adds this row | Upstream shortened the procedure-symbol prefix from `roc__proc_` to `roc__p`. `canonicalizeSymbolNames` reads the constant and kept working (the relative oracle passed); only A0's unit test spelled the old prefix, so nothing in its input was renamed. The test now builds its names from `ProcIdentity.symbol_name_prefix`. |
 | 2026-09-30, minici on the upstream merge (`run-test-cli`, "default platform builds for arm32musl with the dev backend") | `41eb92cfaa` (the merge) | the commit that adds this row | Upstream `f4a81572cd` declares all-zero static data as zero-fill: `.bss` on ELF, COFF and Mach-O, written by `write64`. A3's `write32` (arm32's ELF32) had no `.bss` and gave `.bss` symbols section index 0, so they were undefined and LLD failed (`undefined hidden symbol: roc__d1`). `write32` now declares `.bss` (SHT_NOBITS, section 14, after `.ARM.attributes`) and points those symbols at it; a new test pins it. The program links and prints the same line under qemu as on x64musl. Only the 32 `arm32*` lines of the `dev_object` snapshots change. |
 | 2026-10-01, arm32 eval corpus under qemu on the upstream merge | `41eb92cfaa` (the merge; upstream #11705 added the prefix parsers) | the commit that adds this row | Upstream's new `generateNumFromStrPrefix` passed a string's or list's length and capacity at offsets 8 and 16, which assume 8-byte words; on arm32 the builtin read the wrong words (every number `NotANumber`, `rest` padded with spaces, some children died). 36 `from_str_prefix`/`from_utf8_prefix` cases failed. The offsets now come from `strFieldOffset`/`listFieldOffset` (A2's width-generic helpers), the same values on 64-bit targets. All 42 prefix, Json-number and issue-11471 cases pass under qemu. The same run crashed once in "issue 11471: primitive alias list elements retain their parser" ("compilation/lowering did not complete"); it passes on rerun (open: watch for recurrence). |
+| 2026-09-30 and 2026-10-01, CI `zig-tests` ReleaseFast pass (macOS-15, Windows 2025) and local ReleaseFast run | `5ee8a07527` (#4, A0) | the commit that adds this row | A0's `dev_object_str_ops` and `dev_object_recursion_rc` hashed a Debug compiler's output, which includes Debug-only validity checks for Str and Box locals; a ReleaseFast compiler emits none, so `snapshot validation` failed in every ReleaseFast pass. Both snapshots are removed; the gating is upstream's code and stays. |
 | 2026-09-29, sweep | `506b0486f2` (#38, J1a) | `ac6b9ca982` (#39, J1b) | `zig build run-check-tidy`: the test helper `expectCode` in `arm32/CodeGen.zig` returned an inferred error set (`!void`); J1b made it `error{TestExpectedEqual}!void`. |
 
 ### Part 1: history cleanup
@@ -489,7 +490,10 @@ Done 2026-09-29, locally (nothing pushed).
     differs. A0 added a test whose expectation depends on the compiler's
     optimize mode; CI's ReleaseFast `run-test-zig` pass checks it. The eval
     hash file has the same dependence but is only checked by a Debug runner.
-    Decision pending (see the morning of 2026-10-01).
+    Resolved by removing the two snapshots (the gating is upstream's code;
+    the eval hashes cover strings and boxes); see the findings table and
+    DESIGN.md, "Snapshot hashes must not depend on the compiler's optimize
+    mode".
 - Pull-request run 36534635511 on `fe779eee30`: every `zig-minici` shard
   passed except `windows-harness`, cancelled at its 2-hour limit.
   `run-check-dev-code-hashes` alone took 46 minutes there. The hash file is
