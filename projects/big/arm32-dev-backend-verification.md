@@ -573,6 +573,14 @@ Done 2026-09-29, locally (nothing pushed).
     on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
     x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/a932c6541e/`.
+- 2026-10-02, catch-up merge `3c9f000401` of upstream `main` at
+  `e79b7f856b` (4 commits, 1 PR, #11921; type checker only; no conflicts).
+  No fix and no hash change was needed. All checks at `3c9f000401`:
+  relative 64-bit oracle PASS (nothing differs); minici 80/80; arm32 eval
+  corpus under qemu 2383/2383, host effects 104/104; `test/fx` 122/122
+  under qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as
+  arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/e79b7f856b/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
