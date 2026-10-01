@@ -263,6 +263,9 @@ change to their output is a bug. Two oracles catch it:
   forcing refcount helpers, eighteen mixed arguments that overflow both
   argument register files, and string operations beyond the small-string
   limit). They hash the object for every `RocTarget` from every host.
+  **Amended (2026-10-01):** the recursive boxed tree and the string snapshots
+  are removed, leaving four; see "Snapshot hashes must not depend on the
+  compiler's optimize mode" below. The eval-corpus hashes cover both areas.
 - **Eval-corpus object hashes.** `eval-test-runner
   --check-dev-code-hashes test/dev_code_hashes/eval.blake3` (the
   `run-check-dev-code-hashes` step, in minici) compiles every eval case that
@@ -639,6 +642,22 @@ tests anything:
   for `<runtime_error>` (or run through `roc check`) before its hashes are
   trusted. Recursive types, for example, must be nominal (`:=`); a recursive
   structural alias is rejected.
+
+### Snapshot hashes must not depend on the compiler's optimize mode
+
+The driver emits runtime validity checks for Box and Str locals only when the
+compiler itself is built in Debug (`emitDebugAssertValidBoxLocal`,
+`emitDebugAssertValidStrLocal`, gated on `builtin.mode`). A `dev_object`
+snapshot whose program has a Box or Str local therefore hashes differently
+under a Debug compiler and a ReleaseFast one, and CI runs the snapshot check
+in both (`zig-tests`' second, ReleaseFast `run-test-zig` pass). A0's
+`dev_object_str_ops` and `dev_object_recursion_rc` did, and failed that pass
+on every host. They are removed rather than the gating changed, since the
+gating is upstream's code. A new `dev_object` snapshot must avoid Box and Str
+locals, or be checked under a ReleaseFast compiler too. The eval-corpus hash
+file has the same dependence; it is only ever checked by a Debug runner
+(`run-check-dev-code-hashes`), and it covers strings (238 cases) and boxes
+(125).
 
 ### NEON on the ARMv7 floor: what the SIMD ops map to
 
