@@ -615,7 +615,7 @@ work follows Roc's current practice.** Decided by the owner 2026-09-29.
 
 #### Building the arm32 eval runners needs 18 GB, more than CI runners have
 
-**Status: resolved in `ac71600d8d`** (the arm32 eval runners build in
+**Status: resolved in `afff000594`** (the arm32 eval runners build in
 ReleaseSmall), proven on GitHub 2026-09-30 by probe run 36675742296 on
 a standard hosted runner (16 GB, 4 cores): the build peaked at 7.7 GB
 (GNU time's maximum RSS) and took 10 minutes, and under qemu cortex-a9
