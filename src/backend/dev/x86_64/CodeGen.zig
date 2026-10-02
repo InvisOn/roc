@@ -832,7 +832,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         }
 
         /// Store a discriminant value at the given offset
-        pub fn storeDiscriminant(self: *Self, offset: i32, value: u16, disc_size: u8) Allocator.Error!void {
+        pub fn storeDiscriminant(self: *Self, offset: i32, value: u32, disc_size: u8) Allocator.Error!void {
             if (disc_size == 0) return;
 
             const reg = self.allocTempGeneral();
