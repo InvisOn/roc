@@ -225,14 +225,15 @@ see the real result: `$(ls -t .zig-cache/o/*/backend | head -1)` ends with
 ```
 zig build build-snapshot-tool build-test-eval-runner
 for f in test/snapshots/dev_object_*.md; do ./zig-out/bin/snapshot --check-expected "$f"; done
-./zig-out/bin/eval-test-runner --check-dev-code-hashes test/dev_code_hashes/eval.blake3
+./zig-out/bin/eval-test-runner --write-dev-code-hashes /tmp/tip.blake3   # compare with a base build's file
 ```
 
-(`zig build run-check-snapshots` and `zig build run-check-dev-code-hashes` are
-the same checks as build steps; the second is in minici.) Any mismatch in a
-Track A change is a bug. For an intended codegen change, regenerate with
-`./zig-out/bin/snapshot --update-expected <file>` and `--write-dev-code-hashes`,
-and review the diff.
+(`zig build run-check-snapshots` is the snapshot check as a build step. The
+eval hashes have no committed file: both builds must be made as the same
+compiler version, see DESIGN.md, "A stored hash of generated code cannot
+outlive a compiler commit".) Any mismatch in a Track A change is a bug. For
+an intended codegen change, regenerate the snapshots with
+`./zig-out/bin/snapshot --update-expected <file>` and review the diff.
 
 The eval corpus barely reaches the SIMD kernels, so a change to SIMD lowering
 also needs the exhaustive SIMD corpus compared by its code bytes. Build it
