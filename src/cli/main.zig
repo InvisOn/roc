@@ -6305,7 +6305,7 @@ fn useDefaultAppSharedMemoryShim(args: cli_args.RunArgs) bool {
 /// Default apps run on the freestanding default platform: raw syscalls, its own
 /// `_start`, and a machine-code shim that reaches the kernel directly. Nothing
 /// in the executable calls libc, so every Linux host links the same static
-/// executable no matter which libc it ships -- matching what `llvmBuildLinkAbi`
+/// executable no matter which libc it ships -- matching what `buildLinkAbi`
 /// already does for `roc build`.
 fn defaultRunShimTarget(native: RocTarget) RocTarget {
     return switch (native) {
@@ -9749,11 +9749,8 @@ fn linkerOutputKind(output: roc_target.OutputKind) linker.OutputKind {
     };
 }
 
-/// The link ABI of a `roc build` executable. The default platform's runtime
-/// owns the process entry and uses no C library on Linux, FreeBSD or NetBSD,
-/// so it links statically (no program interpreter) whatever the target's C
-/// ABI; every other platform links with its target's ABI. Both backends use
-/// this.
+/// The ABI a `roc build` executable links with. The default platform makes no
+/// libc calls, so Linux default apps link statically for every libc target.
 fn buildLinkAbi(target: RocTarget, synthetic_default_platform: bool) linker.TargetAbi {
     if (synthetic_default_platform) {
         const os = target.toOsTag();
