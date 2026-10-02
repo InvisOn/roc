@@ -597,6 +597,26 @@ Done 2026-09-29, locally (nothing pushed).
   on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
   x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/d16a6598e4/`.
+- 2026-10-03, catch-up merge `f5acacb593` of upstream `main` at
+  `90d093540f` (#11885, the consolidation of 29 PRs: 332 commits, 785
+  files). Conflicts in `CallingConvention.zig`, `LirCodeGen.zig`,
+  `Check.zig` and `parallel_cli_runner.zig`, resolved by hand; the merge
+  commit's message lists them and the adaptations outside the conflicts.
+  Three follow-ups, each in the findings table: the committed eval hash
+  file retired (`71f2a07ea6`), `List.clear` on arm32 (`8954c13c95`), the
+  long-interpolation test on 32-bit hosts (`51a373365f`). One snapshot
+  followed upstream's output change (`269d401614`). All checks at
+  `51a373365f`:
+  - relative 64-bit oracle, both sides built as one compiler version: PASS,
+    no eval case and no 64-bit snapshot line differs.
+  - minici: 79/79 phases (one fewer: the hash-file phase is gone).
+  - arm32: eval corpus under qemu 2429 passed, 0 failed, 42 with a backend
+    skipped (2471 total); host effects 104/104; `test/fx` 124/124 under
+    qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as arm32musl
+    and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  The branch was pushed at `51a373365f` before minici and the arm32 checks
+  had finished, at the owner's request; they passed afterwards.
+  Logs: `.git/verify-tools/upstream-sync/90d093540f/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
