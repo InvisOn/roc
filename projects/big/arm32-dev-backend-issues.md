@@ -392,6 +392,25 @@ memory use, not arm32 code generation.
 
 Follow-up idea: see "Report peak memory per test" under follow-up ideas.
 
+#### A 32-bit compiler runs out of address space on upstream's long-interpolation test
+
+**Status: worked around in the test, found 2026-10-03.**
+
+- **Symptom:** upstream's eval case "issue 11698: long string interpolation"
+  (5,000 interpolated segments, added by #11885) fails with `OutOfMemory`
+  after about three minutes when the eval runner itself runs as an arm32
+  process under qemu. Both specialization variants fail the same way.
+- **Where:** the compiler's memory use for one long interpolation grows
+  faster than its length; a 32-bit process has at most 4 GiB of address
+  space. It is a limit of arm32 as a host (J3a), not of the dev backend's
+  output.
+- **What we did:** `src/eval/test/eval_deep_nesting_tests.zig` uses the
+  file's shallow depth (1,000) for this case when `usize` is under 8 bytes.
+  The case still nests far deeper than its small stack allows a per-segment
+  recursion, which is what it tests.
+- **Next:** if upstream cares about 32-bit hosts here, the superlinear
+  memory use is theirs to look at; measure it on a 64-bit host first.
+
 #### Zig 0.16 passes nested `extern struct` arguments off-ABI on arm
 
 **Status: open (a Zig bug), worked around in the fx test host.** Reported to
