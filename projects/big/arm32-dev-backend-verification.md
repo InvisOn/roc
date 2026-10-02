@@ -321,12 +321,12 @@ Checklist for the upstream pull requests:
 | 2026-09-29, CI (pull request #1, Spellcheck) | the notes, from part 1 on | the commit that adds this row | `typos` flags seven words in the arm32 notes. `zig build minici` does not run the spellcheck, so the local run passed; `typos` is now run locally too. |
 | 2026-09-29, CI (pull request #1, `zig-minici` macOS and Windows) | `a50e40a165` (#50, J1f) | the commit that adds this row | The J1f test "arm32: a proc compiles through LirCodeGen(.arm32musl)" compiled arm32 code in native-execution mode, which embeds this host's builtin addresses; `CallBuilder.call` narrowed them to 32 bits with `@intCast`, which panics where the test binary is loaded above 4 GiB (macOS, Windows) and passed on Linux only because the image is loaded low. The test now compiles in object-file mode, as cross-compilation does, and the arm32 absolute call reports the broken invariant (native arm32 code needs an arm32 host) instead of a bare cast. Backend tests pass on x86_64 (898/900) and for arm32 under qemu (895/900). |
 | 2026-09-30, CI (full suite, `zig-tests` Windows 2022 and 2025) | `6205c06435` (#88) | the commit that adds this row | The test "resolveCrossRunner keeps commands and absolute paths and anchors relative paths" expected `/` between the project root and a relative runner path, but `std.fs.path.join` uses the host separator, giving `/repo\ci/ssh_cross_runner.sh` on Windows. The code was right; the expected strings now use `std.fs.path.sep_str`. |
-| 2026-09-30, minici on the upstream merge (`run-test-zig-module-lir_core`) | `41eb92cfaa` (the merge) | the commit that adds this row | Upstream shortened the procedure-symbol prefix from `roc__proc_` to `roc__p`. `canonicalizeSymbolNames` reads the constant and kept working (the relative oracle passed); only A0's unit test spelled the old prefix, so nothing in its input was renamed. The test now builds its names from `ProcIdentity.symbol_name_prefix`. |
-| 2026-09-30, minici on the upstream merge (`run-test-cli`, "default platform builds for arm32musl with the dev backend") | `41eb92cfaa` (the merge) | the commit that adds this row | Upstream `f4a81572cd` declares all-zero static data as zero-fill: `.bss` on ELF, COFF and Mach-O, written by `write64`. A3's `write32` (arm32's ELF32) had no `.bss` and gave `.bss` symbols section index 0, so they were undefined and LLD failed (`undefined hidden symbol: roc__d1`). `write32` now declares `.bss` (SHT_NOBITS, section 14, after `.ARM.attributes`) and points those symbols at it; a new test pins it. The program links and prints the same line under qemu as on x64musl. Only the 32 `arm32*` lines of the `dev_object` snapshots change. |
-| 2026-10-01, arm32 eval corpus under qemu on the upstream merge | `41eb92cfaa` (the merge; upstream #11705 added the prefix parsers) | the commit that adds this row | Upstream's new `generateNumFromStrPrefix` passed a string's or list's length and capacity at offsets 8 and 16, which assume 8-byte words; on arm32 the builtin read the wrong words (every number `NotANumber`, `rest` padded with spaces, some children died). 36 `from_str_prefix`/`from_utf8_prefix` cases failed. The offsets now come from `strFieldOffset`/`listFieldOffset` (A2's width-generic helpers), the same values on 64-bit targets. All 42 prefix, Json-number and issue-11471 cases pass under qemu. The same run crashed once in "issue 11471: primitive alias list elements retain their parser" ("compilation/lowering did not complete"); it passes on rerun (open: watch for recurrence). |
+| 2026-09-30, minici on the upstream merge (`run-test-zig-module-lir_core`) | `a7cd08bda6` (the merge) | the commit that adds this row | Upstream shortened the procedure-symbol prefix from `roc__proc_` to `roc__p`. `canonicalizeSymbolNames` reads the constant and kept working (the relative oracle passed); only A0's unit test spelled the old prefix, so nothing in its input was renamed. The test now builds its names from `ProcIdentity.symbol_name_prefix`. |
+| 2026-09-30, minici on the upstream merge (`run-test-cli`, "default platform builds for arm32musl with the dev backend") | `a7cd08bda6` (the merge) | the commit that adds this row | Upstream `f4a81572cd` declares all-zero static data as zero-fill: `.bss` on ELF, COFF and Mach-O, written by `write64`. A3's `write32` (arm32's ELF32) had no `.bss` and gave `.bss` symbols section index 0, so they were undefined and LLD failed (`undefined hidden symbol: roc__d1`). `write32` now declares `.bss` (SHT_NOBITS, section 14, after `.ARM.attributes`) and points those symbols at it; a new test pins it. The program links and prints the same line under qemu as on x64musl. Only the 32 `arm32*` lines of the `dev_object` snapshots change. |
+| 2026-10-01, arm32 eval corpus under qemu on the upstream merge | `a7cd08bda6` (the merge; upstream #11705 added the prefix parsers) | the commit that adds this row | Upstream's new `generateNumFromStrPrefix` passed a string's or list's length and capacity at offsets 8 and 16, which assume 8-byte words; on arm32 the builtin read the wrong words (every number `NotANumber`, `rest` padded with spaces, some children died). 36 `from_str_prefix`/`from_utf8_prefix` cases failed. The offsets now come from `strFieldOffset`/`listFieldOffset` (A2's width-generic helpers), the same values on 64-bit targets. All 42 prefix, Json-number and issue-11471 cases pass under qemu. The same run crashed once in "issue 11471: primitive alias list elements retain their parser" ("compilation/lowering did not complete"); it passes on rerun (open: watch for recurrence). |
 | 2026-09-30 and 2026-10-01, CI `zig-tests` ReleaseFast pass (macOS-15, Windows 2025) and local ReleaseFast run | `5ee8a07527` (#4, A0) | the commit that adds this row | A0's `dev_object_str_ops` and `dev_object_recursion_rc` hashed a Debug compiler's output, which includes Debug-only validity checks for Str and Box locals; a ReleaseFast compiler emits none, so `snapshot validation` failed in every ReleaseFast pass. Both snapshots are removed; the gating is upstream's code and stays. |
 | 2026-10-03, relative oracle on the merge of upstream `90d093540f` (#11885) | `5ee8a07527` (#4, A0), made unworkable by upstream `842120f79f` | the commit that adds this row | Every one of 2,217 eval hashes differed from upstream's on both ISAs. Upstream's Debug checks now pass the proc identity as immediates, and the identity includes the compiler's git revision, so two builds at different commits never produce the same bytes; `canonicalizeSymbolNames` only renames symbols. A0's committed `test/dev_code_hashes/eval.blake3` would fail at every commit, so the file, `run-check-dev-code-hashes` and its minici phase are removed. The hash mode stays, and the relative oracle now builds both sides as one compiler version (a `git` shim); with it the merge matches upstream on all 2,219 cases. The four `dev_object` snapshots do not depend on the version (checked: pinned and unpinned builds give the same hashes). DESIGN.md, "A stored hash of generated code cannot outlive a compiler commit". |
-| 2026-10-03, arm32 eval corpus under qemu on the merge of upstream `90d093540f` | `f5acacb593` (the merge; upstream added `List.clear`) | the commit that adds this row | Upstream's new `callListClear` passed the list's length and capacity at offsets 8 and 16 and the sublist window's `U64` start and length as one word each, so on arm32 the builtin read the wrong words: "clear keeps a unique list's capacity" returned `(0, False)`. The offsets are now `wordOffset(1)` and `wordOffset(2)` and the window uses `addImm64Arg`; both are the same code on 64-bit targets. |
+| 2026-10-03, arm32 eval corpus under qemu on the merge of upstream `90d093540f` | `da28d4ab0e` (the merge; upstream added `List.clear`) | the commit that adds this row | Upstream's new `callListClear` passed the list's length and capacity at offsets 8 and 16 and the sublist window's `U64` start and length as one word each, so on arm32 the builtin read the wrong words: "clear keeps a unique list's capacity" returned `(0, False)`. The offsets are now `wordOffset(1)` and `wordOffset(2)` and the window uses `addImm64Arg`; both are the same code on 64-bit targets. |
 | 2026-10-03, the same run | upstream's test "issue 11698: long string interpolation" (new in #11885), on an arm32 host | the commit that adds this row | Compiling a 5,000-segment interpolation takes memory that grows faster than its length; the compiler, running as a 32-bit process under qemu, ran out of address space (`OutOfMemory` after three minutes, both specialization variants). A limit of arm32 as a host, not of generated code. On hosts with a word under 8 bytes the case now uses the file's shallow depth (1,000); 64-bit hosts are unchanged. It then passes under qemu. |
 | 2026-09-29, sweep | `506b0486f2` (#38, J1a) | `ac6b9ca982` (#39, J1b) | `zig build run-check-tidy`: the test helper `expectCode` in `arm32/CodeGen.zig` returned an inferred error set (`!void`); J1b made it `error{TestExpectedEqual}!void`. |
 
@@ -365,7 +365,7 @@ Done 2026-09-29, locally (nothing pushed).
     exactly what the x64musl build prints (54 lines, heap addresses masked)
     and exit 0.
 - 2b, the per-commit sweep, 2026-09-29, finished: all 114 commits up to
-  `fe779eee30` (82 with code; the rest change only Markdown), on the desktop,
+  `542226699a` (82 with code; the rest change only Markdown), on the desktop,
   with #82-#85, #92, #104 and #109 run on the Ubuntu laptop. Every build,
   format, lint, backend-test, encoding-oracle and 64-bit byte-identity check
   passed on every code commit, except three failures, each fixed by a later
@@ -455,12 +455,12 @@ Done 2026-09-29, locally (nothing pushed).
   without the LLVM build that gets the runner killed): passed on a 16 GB,
   4-core hosted runner. Build peak 7.7 GB, 10 minutes; eval 2171/2171 and
   host effects 86/86 under qemu cortex-a9. The 18 GB issue is resolved.
-- Full run 36615593810 on `56029eddf9`: `zig-tests` on Windows 2022 and
+- Full run 36615593810 on `a2b03ed513`: `zig-tests` on Windows 2022 and
   2025 failed one test of the branch's (see the findings table, fixed).
   `zig-tests (macos-15)` failed 11 tests, all in its ReleaseFast `-Dfuzz`
   `run-test-zig` pass (the Debug pass had no failures). Local attribution,
   2026-09-30, the same command on Linux under a 16 GB cap at `-j4`, at the
-  tip `5d8523a894` and at the base `58508d582b`: both runs reach the same
+  tip `f0bf11c0ee` and at the base `58508d582b`: both runs reach the same
   three failures and no others (the LIR proc-pass no-op worker test and two
   staged SpecConstr tests, one expecting `error.OutOfMemory`), so those
   three come from upstream. Both runs were then stopped by the cap
@@ -497,7 +497,7 @@ Done 2026-09-29, locally (nothing pushed).
     the eval hashes cover strings and boxes); see the findings table and
     DESIGN.md, "Snapshot hashes must not depend on the compiler's optimize
     mode".
-- Pull-request run 36534635511 on `fe779eee30`: every `zig-minici` shard
+- Pull-request run 36534635511 on `542226699a`: every `zig-minici` shard
   passed except `windows-harness`, cancelled at its 2-hour limit.
   `run-check-dev-code-hashes` alone took 46 minutes there. The hash file is
   host-independent, so minici now runs that check on Linux only and reports
@@ -517,7 +517,7 @@ Done 2026-09-29, locally (nothing pushed).
 
 - 2026-09-30, the real merge: `upstream/main` at `00cab95af8` (517 commits
   past the base, 43 past the trial) merged into `32-bit-backend` as
-  `41eb92cfaa`. rerere replayed the trial's resolutions for 17 files; one
+  `a7cd08bda6`. rerere replayed the trial's resolutions for 17 files; one
   new conflict (`src/cli/test/parallel_cli_runner.zig`, two independent CLI
   cases added at the same place) keeps both. The 16 `dev_object` snapshots
   (only their hash lines changed) and `test/dev_code_hashes/eval.blake3`
@@ -527,19 +527,19 @@ Done 2026-09-29, locally (nothing pushed).
   byte-identical to the oracle's merged side. `dev_object` snapshots: 16
   files, no 64-bit line differs.
 - Local checks on the merge, 2026-09-30 to 2026-10-01. Three fixes were
-  needed on top of the merge (findings table): `65458f0f9b` (two new upstream
-  tests adapted to the branch's interfaces), `b70e57798c` (A0's test spells
-  the new symbol prefix from its constant) and `b3199c8912` (arm32's ELF32
-  declares `.bss`), then `99a837b08b` (the prefix parsers' field offsets).
-  - minici at `b3199c8912`: 79/79 phases pass.
-  - arm32 at `b3199c8912`: host effects under qemu 104/104; all 122 `test/fx`
+  needed on top of the merge (findings table): `13f8975ab5` (two new upstream
+  tests adapted to the branch's interfaces), `f7baba5b4e` (A0's test spells
+  the new symbol prefix from its constant) and `76d831717b` (arm32's ELF32
+  declares `.bss`), then `5a2337c71a` (the prefix parsers' field offsets).
+  - minici at `76d831717b`: 79/79 phases pass.
+  - arm32 at `76d831717b`: host effects under qemu 104/104; all 122 `test/fx`
     programs cross-built with the dev backend pass under qemu and on the
     Raspberry Pi 5; the int app as arm32linux (glibc) on the Pi 3 prints
     x64musl's 54 lines.
-  - At `99a837b08b`: the arm32 eval corpus under qemu 2381/2381 (the issue
+  - At `5a2337c71a`: the arm32 eval corpus under qemu 2381/2381 (the issue
     11471 crash did not recur); `run-check-dev-code-hashes` 2,133/2,133;
     format, zig lints, tidy and git lints pass.
-- CI on the merge (`ac3e333001`, full run 36764332316):
+- CI on the merge (`70d614ff8f`, full run 36764332316):
   `roc-cross-compile (ubuntu-24.04, x64musl)` fails because two fx programs
   (`parallel_fusion.roc`, `inspect_dict_set.roc`) panic when cross-built for
   x64musl with the default (LLVM) backend: `std.debug.assert(size > 0)` in
@@ -562,11 +562,11 @@ Done 2026-09-29, locally (nothing pushed).
   object emission (`emitMergedBitcodeModulesToObjectFile`). Upstream; the
   case came with `641d298ae1` ("Integrate stored ranges with iteration").
   Not reported upstream as of 2026-10-01.
-- 2026-10-02, catch-up merge `476d49e49b` of upstream `main` at
+- 2026-10-02, catch-up merge `3ed5256712` of upstream `main` at
   `a932c6541e` (18 commits, 6 PRs past `00cab95af8`; no conflicts; nothing
-  in the dev backend). No fix was needed; `0cb86e15ca` adds the hashes of
+  in the dev backend). No fix was needed; `5d15137d25` adds the hashes of
   the two eval cases upstream added (#11952), with no existing hash changed.
-  All checks at `0cb86e15ca`:
+  All checks at `5d15137d25`:
   - relative 64-bit oracle against `a932c6541e`: PASS, no eval case and no
     64-bit snapshot line differs (the two snapshots listed as upstream-only
     are the two removed on 2026-10-01).
@@ -576,15 +576,15 @@ Done 2026-09-29, locally (nothing pushed).
     on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
     x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/a932c6541e/`.
-- 2026-10-02, catch-up merge `3c9f000401` of upstream `main` at
+- 2026-10-02, catch-up merge `c2707464ea` of upstream `main` at
   `e79b7f856b` (4 commits, 1 PR, #11921; type checker only; no conflicts).
-  No fix and no hash change was needed. All checks at `3c9f000401`:
+  No fix and no hash change was needed. All checks at `c2707464ea`:
   relative 64-bit oracle PASS (nothing differs); minici 80/80; arm32 eval
   corpus under qemu 2383/2383, host effects 104/104; `test/fx` 122/122
   under qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as
   arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/e79b7f856b/`.
-- 2026-10-03, catch-up merge `0184697563` of upstream `main` at
+- 2026-10-03, catch-up merge `76c3ec2869` of upstream `main` at
   `d16a6598e4` (4 commits, 1 PR, #11976 `List.prefetch`; no conflicts; in
   the dev backend only a no-op case for the new hint). No fix was needed.
   Upstream's PR changes the dev backend's 64-bit output, so the committed
@@ -597,16 +597,16 @@ Done 2026-09-29, locally (nothing pushed).
   on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
   x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/d16a6598e4/`.
-- 2026-10-03, catch-up merge `f5acacb593` of upstream `main` at
+- 2026-10-03, catch-up merge `da28d4ab0e` of upstream `main` at
   `90d093540f` (#11885, the consolidation of 29 PRs: 332 commits, 785
   files). Conflicts in `CallingConvention.zig`, `LirCodeGen.zig`,
   `Check.zig` and `parallel_cli_runner.zig`, resolved by hand; the merge
   commit's message lists them and the adaptations outside the conflicts.
   Three follow-ups, each in the findings table: the committed eval hash
-  file retired (`71f2a07ea6`), `List.clear` on arm32 (`8954c13c95`), the
-  long-interpolation test on 32-bit hosts (`51a373365f`). One snapshot
-  followed upstream's output change (`269d401614`). All checks at
-  `51a373365f`:
+  file retired (`37edfcf447`), `List.clear` on arm32 (`fb6855f1af`), the
+  long-interpolation test on 32-bit hosts (`934365af0a`). One snapshot
+  followed upstream's output change (`094664f6c7`). All checks at
+  `934365af0a`:
   - relative 64-bit oracle, both sides built as one compiler version: PASS,
     no eval case and no 64-bit snapshot line differs.
   - minici: 79/79 phases (one fewer: the hash-file phase is gone).
@@ -614,7 +614,7 @@ Done 2026-09-29, locally (nothing pushed).
     skipped (2471 total); host effects 104/104; `test/fx` 124/124 under
     qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as arm32musl
     and arm32linux on the Pi 3 prints x64musl's 54 lines.
-  The branch was pushed at `51a373365f` before minici and the arm32 checks
+  The branch was pushed at `934365af0a` before minici and the arm32 checks
   had finished, at the owner's request; they passed afterwards.
   Logs: `.git/verify-tools/upstream-sync/90d093540f/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
@@ -738,3 +738,66 @@ all map to the one commit that replaced them.
 | `c2095b72ca` | `73c1c2dcce` |
 | `da35674feb` | `6eeba018af` |
 | `8ff3b64374` | `aadf66a29b` |
+
+### Second rewrite, 2026-10-03: commit messages reworded
+
+The owner asked that commit messages carry no upstream pull request or
+issue numbers (GitHub turns `#NNNN` in a fork's commit into a
+cross-reference on upstream's pull request). Nine messages were reworded
+and the 49 first-parent commits from the first of them to the tip were
+recreated with the same trees, authors, dates and signatures
+(`.git/verify-tools/reword_history.py`); upstream's commits were not
+touched. Every check recorded above was run on a tree that is unchanged.
+The hashes cited in these notes were updated; old to new:
+
+| Before | After |
+|---|---|
+| `fe779eee30` | `542226699a` |
+| `28d4826484` | `ac84d07e61` |
+| `8a7178ecdb` | `22e6bacb49` |
+| `37f919abc8` | `3af76e39f7` |
+| `ca602550d5` | `34c7ae175d` |
+| `e4a36b4837` | `0c292eba67` |
+| `d842b2d5b8` | `c647709fb1` |
+| `ac71600d8d` | `afff000594` |
+| `fa806cdd65` | `9c776bffee` |
+| `5d694d98d7` | `09ff19ce95` |
+| `56029eddf9` | `a2b03ed513` |
+| `b7b3ba3116` | `e49db73c32` |
+| `5d8523a894` | `f0bf11c0ee` |
+| `505d70cabf` | `0594362d90` |
+| `b14a0adf69` | `3bec537eaa` |
+| `012dfedeb6` | `d3f30c57e1` |
+| `6bc8eb9065` | `34c69426a9` |
+| `d484b8ab1e` | `19c3d0b5c3` |
+| `41eb92cfaa` | `a7cd08bda6` |
+| `d3d519cc02` | `652c699580` |
+| `7ed9409209` | `f15b649dcb` |
+| `65458f0f9b` | `13f8975ab5` |
+| `b70e57798c` | `f7baba5b4e` |
+| `b3199c8912` | `76d831717b` |
+| `99a837b08b` | `5a2337c71a` |
+| `ac3e333001` | `70d614ff8f` |
+| `005a9a8c4c` | `e41f44298d` |
+| `1253166869` | `faa09824d3` |
+| `79cf8b262c` | `ee729af454` |
+| `6536fd9178` | `4f70051381` |
+| `88c38a0771` | `7528728733` |
+| `b495bf9c0e` | `cd28ff621a` |
+| `476d49e49b` | `3ed5256712` |
+| `0cb86e15ca` | `5d15137d25` |
+| `3eea06e7b8` | `22af835e08` |
+| `3c9f000401` | `c2707464ea` |
+| `fd9ebd343f` | `f1fc227423` |
+| `d6fc04d96a` | `21fc34953a` |
+| `86d8c0fced` | `d48001b55f` |
+| `0184697563` | `76c3ec2869` |
+| `2892159ae7` | `5f495cda3e` |
+| `38c5869970` | `40b63b52c7` |
+| `f5acacb593` | `da28d4ab0e` |
+| `71f2a07ea6` | `37edfcf447` |
+| `269d401614` | `094664f6c7` |
+| `8954c13c95` | `fb6855f1af` |
+| `51a373365f` | `934365af0a` |
+| `a594524278` | `020c8f82d4` |
+| `46a25c048e` | `c2e7586c23` |
