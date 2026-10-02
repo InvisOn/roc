@@ -168,7 +168,7 @@ explicit `abs32` kind.
 
 #### The branch compiler panics type-checking basic-cli 0.22.2
 
-**Status: open, found 2026-09-29; very likely fixed upstream already.**
+**Status: resolved 2026-10-02 (fixed upstream). Found 2026-09-29.** It was upstream issue #11640, fixed by PR #11671 (`45e0a87622`, 2026-09-25, a day after our old base). The compiler at the merged tip and the nightly `release-fast-a932c654` both check basic-cli 0.22.2 and 0.23.0 apps without a panic.
 
 - **Symptom:** `roc check` of any app using basic-cli 0.22.2 panics in the
   type checker: "trying to add var at rank 5, but current rank is 4". The
