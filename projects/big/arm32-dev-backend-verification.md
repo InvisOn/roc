@@ -581,6 +581,19 @@ Done 2026-09-29, locally (nothing pushed).
   under qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as
   arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/e79b7f856b/`.
+- 2026-10-03, catch-up merge `0184697563` of upstream `main` at
+  `d16a6598e4` (4 commits, 1 PR, #11976 `List.prefetch`; no conflicts; in
+  the dev backend only a no-op case for the new hint). No fix was needed.
+  Upstream's PR changes the dev backend's 64-bit output, so the committed
+  oracles follow it: 407 eval hash lines changed and 1 was added, and
+  `dev_object_list_ops` was regenerated (hash lines only). The relative
+  oracle shows the change is upstream's: the merged tip's x86_64 and
+  aarch64 output equals upstream's on all 2,138 cases and every snapshot.
+  Other checks: minici 80/80; arm32 eval corpus under qemu 2384/2384, host
+  effects 104/104; `test/fx` 122/122 under qemu, on the Raspberry Pi 5 and
+  on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
+  x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/d16a6598e4/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
