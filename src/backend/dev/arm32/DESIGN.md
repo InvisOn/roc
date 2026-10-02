@@ -266,9 +266,12 @@ change to their output is a bug. Two oracles catch it:
   **Amended (2026-10-01):** the recursive boxed tree and the string snapshots
   are removed, leaving four; see "Snapshot hashes must not depend on the
   compiler's optimize mode" below. The eval-corpus hashes cover both areas.
-- **Eval-corpus object hashes.** `eval-test-runner
-  --check-dev-code-hashes test/dev_code_hashes/eval.blake3` (the
-  `run-check-dev-code-hashes` step, in minici) compiles every eval case that
+- **Eval-corpus object hashes.** **Amended (2026-10-03):** the committed
+  file `test/dev_code_hashes/eval.blake3` and its minici step are gone; the
+  hashes are now compared between two builds pinned to one compiler
+  version. See "A stored hash of generated code cannot outlive a compiler
+  commit" below. What follows describes the hash mode itself, which stays.
+  `eval-test-runner --check-dev-code-hashes <file>` compiles every eval case that
   returns an inspected value, 1961 of them, through the dev backend's
   object-file path for `x64musl` and `arm64musl` and compares each object's
   Blake3. `--write-dev-code-hashes` regenerates the file. The work is sharded
@@ -658,6 +661,32 @@ locals, or be checked under a ReleaseFast compiler too. The eval-corpus hash
 file has the same dependence; it is only ever checked by a Debug runner
 (`run-check-dev-code-hashes`), and it covers strings (238 cases) and boxes
 (125).
+
+### A stored hash of generated code cannot outlive a compiler commit
+
+A procedure's identity (`ProcIdentity`, the digits of its `roc__p` symbol)
+is a content hash that includes the compiler's own build hash, which the
+build takes from `git rev-parse --short=8 HEAD`. While the identity only
+appeared in symbol names, the oracles could rename the symbols before
+hashing (`canonicalizeSymbolNames`) and a committed hash file stayed valid
+from commit to commit. Upstream `842120f79f` (in #11885) made a failed Debug
+check report the procedure by that identity, passed as two 64-bit
+immediates, so the identity is now inside the machine code of every
+procedure that has such a check. Every eval case has one (each returns a
+string). Two compilers built at different commits therefore never produce
+the same bytes, and a committed hash file would fail at every commit.
+
+So the committed file and `run-check-dev-code-hashes` were removed. The
+check that remains is relative: build two trees as the same compiler
+version and compare their hashes. `.git/verify-tools/relative_oracle.py`
+does that for an upstream merge, with a `git` shim that answers the build's
+one revision query with a fixed string; with it, the merge of `90d093540f`
+matched upstream on all 2,219 cases. Any refactor that must not change
+64-bit output is checked the same way: its base against its tip.
+
+The `dev_object` snapshots are not affected as long as their programs have
+no Str or Box locals (the Debug checks are for those), which is already
+the rule above.
 
 ### NEON on the ARMv7 floor: what the SIMD ops map to
 
