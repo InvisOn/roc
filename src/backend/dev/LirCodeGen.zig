@@ -10104,12 +10104,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 defer builder.deinit();
                 try builder.addLeaArg(frame_ptr, result_offset);
                 try builder.addMemArg(frame_ptr, list_off);
-                try builder.addMemArg(frame_ptr, list_off + 8);
-                try builder.addMemArg(frame_ptr, list_off + 16);
+                try builder.addMemArg(frame_ptr, list_off + wordOffset(1));
+                try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.alignment_bytes));
                 try builder.addImmArg(@intCast(list_abi.elem_size_align.size));
-                try builder.addImmArg(0);
-                try builder.addImmArg(0);
+                // The window's start and length are U64s.
+                try builder.addImm64Arg(0);
+                try builder.addImm64Arg(0);
                 try builder.addImmArg(@intFromEnum(boxy_elem.elem_layout));
                 try builder.addMemArg(frame_ptr, boxy_elem.desc_slot);
                 try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
@@ -10121,12 +10122,13 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 defer builder.deinit();
                 try builder.addLeaArg(frame_ptr, result_offset);
                 try builder.addMemArg(frame_ptr, list_off);
-                try builder.addMemArg(frame_ptr, list_off + 8);
-                try builder.addMemArg(frame_ptr, list_off + 16);
+                try builder.addMemArg(frame_ptr, list_off + wordOffset(1));
+                try builder.addMemArg(frame_ptr, list_off + wordOffset(2));
                 try builder.addImmArg(@intCast(list_abi.alignment_bytes));
                 try builder.addImmArg(@intCast(list_abi.elem_size_align.size));
-                try builder.addImmArg(0);
-                try builder.addImmArg(0);
+                // The window's start and length are U64s.
+                try builder.addImm64Arg(0);
+                try builder.addImm64Arg(0);
                 try builder.addImmArg(if (list_abi.elements_refcounted) 1 else 0);
                 if (elem_decref_reg) |reg| try builder.addRegArg(reg) else try builder.addImmArg(0);
                 try builder.addImmArg(updateModeImmForArg0(ll.unique_args));
