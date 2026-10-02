@@ -203,17 +203,21 @@ passes the expected-output spec (spaces and `|`) as a single argument.
 
 ## `eval-test-runner --write-dev-code-hashes` / `--check-dev-code-hashes`
 
-**Purpose:** the golden byte-identity oracle for Track A: every eval case that
-returns an inspected value (1961 today), compiled through the dev backend's
-object-file path for `x64musl` and `arm64musl`, one Blake3 per object.
+**Purpose:** the byte-identity oracle for 64-bit output: every eval case that
+returns an inspected value, compiled through the dev backend's object-file
+path for `x64musl` and `arm64musl`, one Blake3 per object.
+
+There is no committed hash file any more (DESIGN.md, "A stored hash of
+generated code cannot outlive a compiler commit"). Write the hashes with two
+builds made as the same compiler version (a base and a tip, or upstream and
+a merge) and compare the two files.
 
 **Usage:**
 
 ```
 zig build build-test-eval-runner
-./zig-out/bin/eval-test-runner --check-dev-code-hashes test/dev_code_hashes/eval.blake3
-./zig-out/bin/eval-test-runner --write-dev-code-hashes test/dev_code_hashes/eval.blake3
-zig build run-check-dev-code-hashes         # the check as a build step (in minici)
+./zig-out/bin/eval-test-runner --write-dev-code-hashes /tmp/tip.blake3
+./zig-out/bin/eval-test-runner --check-dev-code-hashes /tmp/base.blake3   # written by the other build
 ```
 
 `--filter` selects a subset (the file then only contains that subset, so write
@@ -251,4 +255,3 @@ arm32.
 | Step | Runs | In minici |
 |---|---|---|
 | `run-check-arm32-encoding-oracle` | `ci/arm32_encoding_oracle.py --check` | yes |
-| `run-check-dev-code-hashes` | `eval-test-runner --check-dev-code-hashes test/dev_code_hashes/eval.blake3` | yes |
