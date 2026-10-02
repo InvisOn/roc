@@ -7,6 +7,27 @@ promise was for, and the options, so the owner can decide, ideally with the
 maintainers. The open entry in `arm32-dev-backend-issues.md` ("The driver still
 names mnemonics and register literals") points here.
 
+## Decision (2026-10-02)
+
+The owner chose **(b)**, with the rule "match the maintainers' style as much
+as possible": arm32's cases stay in the shared driver next to x86_64's and
+aarch64's. What settled it, measured that day:
+
+- Upstream does nothing toward (a). Its driver has 583 direct instruction
+  calls and over 100 two-way `arch ==` tests; in six months the driver grew
+  from 12,563 to 28,740 lines and the per-ISA `CodeGen`s barely moved (60 to
+  66 and 65 to 85 public functions). None of the 21 open upstream PRs,
+  #11885 included, moves instruction selection out of the driver.
+- The driver is already about 97% ISA-neutral: about 720 of its 28,366
+  production lines name an instruction or a register or branch on the ISA,
+  concentrated in five families (SIMD, 64-bit values on a 32-bit target,
+  128-bit arithmetic, numeric operations, floats). The encoders already live
+  in the per-ISA directories (about 7,500 code lines).
+- Most of the arm32 work's driver change (+5,631 / -3,358) is word-size
+  awareness, which no facade removes.
+
+The rest of this note is kept as written, for the reasoning.
+
 ## What the plan promised
 
 A1 and the plan's correctness ideal: `rg 'codegen\.emit\.'
