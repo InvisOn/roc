@@ -110,7 +110,7 @@ outside its scope. Details and fix directions:
   (checked commit by commit), which is what lets a 7,700-line driver change
   be reviewed with confidence.
   Cost: about four minutes on sixteen cores (46 on the Windows runner, so
-  check on Linux only, `56029eddf9`). This is the arm32 plan's second pull
+  check on Linux only, `a2b03ed513`). This is the arm32 plan's second pull
   request anyway.
 - **The Zig 0.16 arm ABI bug (reported).** Zig passes a by-value
   `callconv(.c)` argument of nested `extern struct` type off-ABI on
