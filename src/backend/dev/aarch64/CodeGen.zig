@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const RocTarget = @import("roc_target").RocTarget;
+const CpuLevel = @import("roc_target").CpuLevel;
 
 const EmitMod = @import("Emit.zig");
 const Registers = @import("Registers.zig");
@@ -47,6 +48,15 @@ pub fn CodeGen(comptime target: RocTarget) type {
         pub const INITIAL_FREE_GENERAL: u32 = CC.CALLER_SAVED_GENERAL_MASK;
         pub const INITIAL_FREE_FLOAT: u32 = CC.CALLER_SAVED_FLOAT_MASK;
 
+        /// Most general registers that can be in use at once, pinned or
+        /// temporary: the whole allocatable pool (D10 of
+        /// projects/big/arm32-dev-backend.md). Instruction selection must fit
+        /// within it; there is no spill path.
+        pub const MAX_TEMP_GENERAL: u8 = @popCount(INITIAL_FREE_GENERAL | CALLEE_SAVED_GENERAL_MASK);
+
+        /// Most float registers that can be in use at once.
+        pub const MAX_TEMP_FLOAT: u8 = @popCount(INITIAL_FREE_FLOAT);
+
         /// Size of callee-saved area in bytes (5 pairs * 16 bytes = 80)
         /// Used by MonoExprCodeGen to reserve stack space for callee-saved registers
         pub const CALLEE_SAVED_AREA_SIZE: i32 = 80;
@@ -64,6 +74,23 @@ pub fn CodeGen(comptime target: RocTarget) type {
             (1 << @intFromEnum(GeneralReg.X26)) |
             (1 << @intFromEnum(GeneralReg.X27)) |
             (1 << @intFromEnum(GeneralReg.X28));
+
+        /// How old a CPU the emitted instructions must run on.
+        ///
+        /// This is a runtime field rather than part of the comptime `target`
+        /// so that a `v1` target compiles through its default twin's
+        /// instantiation. The OS, architecture, ABI, and calling convention are
+        /// identical between the two; only instruction selection differs.
+        cpu_level: CpuLevel,
+
+        /// The most general registers in use at once when a temporary was
+        /// allocated, over this code generator's lifetime. Pinned registers
+        /// count, since they shrink the budget too. Measures the D10 register
+        /// budget of instruction selection.
+        general_high_water: u8 = 0,
+
+        /// The float-register counterpart of `general_high_water`.
+        float_high_water: u8 = 0,
 
         emit: Emit,
         allocator: Allocator,
@@ -102,8 +129,9 @@ pub fn CodeGen(comptime target: RocTarget) type {
             page_relocation: usize,
         };
 
-        pub fn init(allocator: Allocator) Self {
+        pub fn init(allocator: Allocator, cpu_level: CpuLevel) Self {
             return Self{
+                .cpu_level = cpu_level,
                 .emit = Emit.init(allocator),
                 .allocator = allocator,
                 .stack_offset = 0,
@@ -162,6 +190,33 @@ pub fn CodeGen(comptime target: RocTarget) type {
         // Register allocation. LirCodeGen keeps every semantic local in its
         // authoritative stable-location table; these masks manage only bounded,
         // short-lived instruction-selection temporaries.
+
+        /// Allocate a short-lived general register used only during
+        /// instruction selection. Exhausting the bounded pool is an internal
+        /// lifetime-invariant failure (design.md, "Dev Backend Register
+        /// Lifetimes"), never a reason to spill.
+        pub fn allocTempGeneral(self: *Self) GeneralReg {
+            const reg = self.allocGeneral() orelse std.debug.panic(
+                "LirCodeGen invariant violated: bounded instruction selection exhausted the general-register pool",
+                .{},
+            );
+            const free = (self.free_general & INITIAL_FREE_GENERAL) | (self.callee_saved_available & CALLEE_SAVED_GENERAL_MASK);
+            const in_use: u8 = MAX_TEMP_GENERAL - @as(u8, @popCount(free));
+            self.general_high_water = @max(self.general_high_water, in_use);
+            return reg;
+        }
+
+        /// Allocate a short-lived floating-point register used only during
+        /// instruction selection; see `allocTempGeneral`.
+        pub fn allocTempFloat(self: *Self) FloatReg {
+            const reg = self.allocFloat() orelse std.debug.panic(
+                "LirCodeGen invariant violated: bounded instruction selection exhausted the float-register pool",
+                .{},
+            );
+            const in_use: u8 = MAX_TEMP_FLOAT - @as(u8, @popCount(self.free_float & INITIAL_FREE_FLOAT));
+            self.float_high_water = @max(self.float_high_water, in_use);
+            return reg;
+        }
 
         pub fn allocGeneral(self: *Self) ?GeneralReg {
             // Try caller-saved first
@@ -1175,6 +1230,397 @@ pub fn CodeGen(comptime target: RocTarget) type {
         pub fn emitCall(self: *Self, symbol: SymbolTable.Id) Allocator.Error!void {
             try self.emitExternCall(symbol);
         }
+
+        // ── Instruction selection used by LirCodeGen (per-ISA facade) ──
+
+        /// Float register holding piece `index` of a hosted call's C-ABI
+        /// float result: V0-V3 carry a homogeneous float or vector aggregate.
+        pub fn hostedFloatResultReg(index: usize) FloatReg {
+            return switch (index) {
+                0 => .V0,
+                1 => .V1,
+                2 => .V2,
+                3 => .V3,
+                else => unreachable,
+            };
+        }
+
+        /// Store piece `index` of a hosted call's float result to the frame.
+        pub fn emitHostedFloatResultStore(self: *Self, dst_off: i32, index: usize, size: u8) Allocator.Error!void {
+            const freg = hostedFloatResultReg(index);
+            switch (size) {
+                4 => try self.emitStoreStackF32(dst_off, freg),
+                8 => try self.emitStoreStackF64(dst_off, freg),
+                16 => try self.emitStoreStackV128(dst_off, freg),
+                else => unreachable,
+            }
+        }
+
+        /// Condition testing `lhs < rhs` after this ISA's float compare.
+        pub fn condFloatLess() Emit.Condition {
+            return .mi;
+        }
+
+        /// Condition testing `lhs <= rhs` after this ISA's float compare.
+        pub fn condFloatLessOrEqual() Emit.Condition {
+            return .ls;
+        }
+
+        /// Condition testing `lhs > rhs` after this ISA's float compare.
+        pub fn condFloatGreater() Emit.Condition {
+            return .gt;
+        }
+
+        /// Condition testing `lhs >= rhs` after this ISA's float compare.
+        pub fn condFloatGreaterOrEqual() Emit.Condition {
+            return .ge;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAddRegs`.
+        pub fn emitAddRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.addRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSubRegs`.
+        pub fn emitSubRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.subRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitMulRegs`.
+        pub fn emitMulRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.mulRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAndRegs`.
+        pub fn emitAndRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.andRegRegReg(width, dst, src1, src2);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitOrRegs`.
+        pub fn emitOrRegs(self: *Self, comptime width: anytype, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.emit.orrRegRegReg(width, dst, src1, src2);
+        }
+
+        /// dst = number of trailing zero bits of the full word `src`
+        /// (64 when `src` is zero).
+        pub fn emitCtzWord(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            // No native ctz: reverse the bits, then count leading zeros.
+            try self.emit.rbitRegReg(.w64, dst, src);
+            try self.emit.clzRegReg(.w64, dst, dst);
+            return;
+        }
+
+        /// Store a discriminant value at the given offset
+        pub fn storeDiscriminant(self: *Self, offset: i32, value: u32, disc_size: u8) Allocator.Error!void {
+            if (disc_size == 0) return;
+
+            const reg = self.allocTempGeneral();
+            try self.emitLoadImm(reg, value);
+
+            // Store appropriate size - architecture specific
+            // aarch64 only has .w32 and .w64 for emitStoreStack, use direct emit for smaller sizes.
+            switch (disc_size) {
+                1 => try self.emit.strbRegMemSoff(reg, .FP, offset),
+                2 => try self.emit.strhRegMemSoff(reg, .FP, offset),
+                4 => try self.emitStoreStack(.w32, offset, reg),
+                else => try self.emitStoreStack(.w64, offset, reg),
+            }
+
+            self.freeGeneral(reg);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.patchInternalCodeAddress`.
+        pub fn patchInternalCodeAddress(self: *Self, instr_offset: usize, target_offset: usize) void {
+            const buf = self.emit.buf.items;
+            // The emit reserves the 4-instruction PC-relative sequence (see
+            // Emit.pcRelAddrSequence) starting at instr_offset. The registers
+            // the emitter chose are read back out of the existing ADR and MOVZ
+            // words so the rewritten sequence targets the same ones.
+            const EmitT = Emit;
+            const adr_existing: u32 = @bitCast(buf[instr_offset..][0..4].*);
+            const movz_existing: u32 = @bitCast(buf[instr_offset + 4 ..][0..4].*);
+            const dst: GeneralReg = @enumFromInt(@as(u5, @truncate(adr_existing & 0x1F)));
+            const scratch: GeneralReg = @enumFromInt(@as(u5, @truncate(movz_existing & 0x1F)));
+            const parts = Self.pcRelParts(instr_offset, target_offset);
+            const words = [4]u32{
+                EmitT.encodeAdrZero(dst),
+                EmitT.encodeMovz64(scratch, parts.lo16, 0),
+                EmitT.encodeMovk64(scratch, parts.hi16, 1),
+                EmitT.encodeAddSubRegRegReg64(dst, dst, scratch, parts.subtract),
+            };
+            for (words, 0..) |word, i| {
+                @memcpy(buf[instr_offset + i * 4 ..][0..4], &@as([4]u8, @bitCast(word)));
+            }
+        }
+
+        /// Producer-authored placement metadata; never decode it from bytes.
+        pub fn codeRefVeneer(self: *const Self, site: usize) ?usize {
+            return self.callVeneer(site);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.registerAssembledRefVeneer`.
+        pub fn registerAssembledRefVeneer(self: *Self, site: usize, veneer: ?usize) Allocator.Error!void {
+            try self.registerAssembledCallVeneer(site, veneer);
+        }
+
+        /// Remove placement-specific stub displacements using producer records.
+        pub fn normalizeArtifactCode(self: *const Self, start: usize, bytes: []u8) void {
+            for (self.extern_stubs.items) |stub| {
+                if (stub.call < start or stub.call >= start + bytes.len) continue;
+                const stub_start = self.relocations.items[stub.page_relocation].linked_data.offset;
+                if (stub_start >= start and stub_start + 12 <= start + bytes.len) continue;
+                std.mem.writeInt(u32, bytes[stub.call - start ..][0..4], 0x94000000, .little);
+            }
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condEqual`.
+        pub fn condEqual() Emit.Condition {
+            return .eq;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condNotEqual`.
+        pub fn condNotEqual() Emit.Condition {
+            return .ne;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condLess`.
+        pub fn condLess() Emit.Condition {
+            return .lt;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condLessOrEqual`.
+        pub fn condLessOrEqual() Emit.Condition {
+            return .le;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condGreater`.
+        pub fn condGreater() Emit.Condition {
+            return .gt;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condGreaterOrEqual`.
+        pub fn condGreaterOrEqual() Emit.Condition {
+            return .ge;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condBelow`.
+        pub fn condBelow() Emit.Condition {
+            return .cc;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condBelowOrEqual`.
+        pub fn condBelowOrEqual() Emit.Condition {
+            return .ls;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condAbove`.
+        pub fn condAbove() Emit.Condition {
+            return .hi;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condAboveOrEqual`.
+        pub fn condAboveOrEqual() Emit.Condition {
+            return .cs;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condOverflow`.
+        pub fn condOverflow() Emit.Condition {
+            return .vs;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condUnsignedAddOverflow`.
+        pub fn condUnsignedAddOverflow() Emit.Condition {
+            return .cs;
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.condUnsignedSubOverflow`.
+        pub fn condUnsignedSubOverflow() Emit.Condition {
+            return .cc;
+        }
+
+        /// Get the register used for return values
+        pub fn getReturnRegister(_: *Self) GeneralReg {
+            return .X0;
+        }
+
+        /// Compare a general register against an immediate bit pattern.
+        pub fn emitCmpImm(self: *Self, reg: GeneralReg, value: i64) Allocator.Error!void {
+            if (value >= 0 and value <= std.math.maxInt(u12)) {
+                try self.emit.cmpRegImm12(.w64, reg, @intCast(value));
+            } else {
+                const temp = self.allocTempGeneral();
+                try self.emitLoadImm(temp, value);
+                try self.emit.cmpRegReg(.w64, reg, temp);
+                self.freeGeneral(temp);
+            }
+        }
+
+        /// Emit jump if not equal (after comparison)
+        ///
+        /// BRANCH PATCHING MECHANISM:
+        /// When generating switch dispatch, we don't know the jump target offset until
+        /// we've generated the code for the branch body. So we:
+        /// 1. Emit the architecture-specific branch placeholder
+        /// 2. Record the instruction's location (patch_loc)
+        /// 3. Generate the branch body code
+        /// 4. Calculate the actual offset: current_offset - patch_loc
+        /// 5. Patch the instruction at patch_loc with the real offset
+        ///
+        /// PLACEHOLDER SAFETY:
+        /// The architecture-specific emitters choose harmless placeholder bytes
+        /// and reserve whatever space their patching strategy requires. In normal
+        /// operation, codegen.patchJump() overwrites the placeholder before execution.
+        ///
+        /// RETURNS: The patch location (where the displacement bytes are) for later patching.
+        pub fn emitJumpIfNotEqual(self: *Self) Allocator.Error!usize {
+            return self.emitCondJump(.ne);
+        }
+
+        /// Emit a conditional jump for unsigned less than (for list length comparisons)
+        pub fn emitJumpIfEqual(self: *Self) Allocator.Error!usize {
+            return self.emitCondJump(.eq);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoad`.
+        pub fn emitLoad(self: *Self, comptime width: anytype, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.ldrRegMemSoff(width, dst, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStore`.
+        pub fn emitStore(self: *Self, comptime width: anytype, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emit.strRegMemSoff(width, src, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadW8`.
+        pub fn emitLoadW8(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.ldrbRegMemSoff(dst, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadW16`.
+        pub fn emitLoadW16(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emit.ldrhRegMemSoff(dst, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreW8`.
+        pub fn emitStoreW8(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emit.strbRegMemSoff(src, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreW16`.
+        pub fn emitStoreW16(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emit.strhRegMemSoff(src, base_reg, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadStackW8`.
+        pub fn emitLoadStackW8(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emitLoadStackByte(dst, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLoadStackW16`.
+        pub fn emitLoadStackW16(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.emitLoadStackHalfword(dst, offset);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitShlImm`.
+        pub fn emitShlImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
+            try self.emit.lslRegRegImm(width, dst, src, @intCast(amount));
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLsrImm`.
+        pub fn emitLsrImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
+            try self.emit.lsrRegRegImm(width, dst, src, @intCast(amount));
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAsrImm`.
+        pub fn emitAsrImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
+            try self.emit.asrRegRegImm(width, dst, src, @intCast(amount));
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSaturatingSub`.
+        pub fn emitSaturatingSub(self: *Self, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            try self.emit.cmpRegReg(.w64, a, b);
+            try self.emit.subRegRegReg(.w64, dst, a, b);
+            try self.emit.csel(.w64, dst, dst, .ZRSP, .cs);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAddImm`.
+        pub fn emitAddImm(self: *Self, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
+            try self.emit.addRegRegImm12(.w64, dst, src, @intCast(imm));
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSubImm`.
+        pub fn emitSubImm(self: *Self, comptime width: anytype, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
+            try self.emit.subRegRegImm12(width, dst, src, @intCast(imm));
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitSetCond`.
+        pub fn emitSetCond(self: *Self, dst: GeneralReg, cond: Emit.Condition) Allocator.Error!void {
+            try self.emit.cset(.w64, dst, cond);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitLeaStack`.
+        pub fn emitLeaStack(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
+            if (offset >= 0 and offset <= 4095) {
+                try self.emit.addRegRegImm12(.w64, dst, Emit.CC.BASE_PTR, @intCast(offset));
+            } else {
+                try self.emitLoadImm(dst, @intCast(offset));
+                try self.emit.addRegRegReg(.w64, dst, Emit.CC.BASE_PTR, dst);
+            }
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitAddStackPtr`.
+        pub fn emitAddStackPtr(self: *Self, imm: i32) Allocator.Error!void {
+            try self.emit.addRegRegImm12(.w64, Emit.CC.STACK_PTR, Emit.CC.STACK_PTR, @intCast(imm));
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreStackW8`.
+        pub fn emitStoreStackW8(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emitStoreStackByte(offset, src);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitStoreStackW16`.
+        pub fn emitStoreStackW16(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
+            try self.emitStoreStackHalfword(offset, src);
+        }
+
+        /// Store float register to memory at [ptr_reg] (architecture-specific)
+        pub fn emitStoreFloatToMem(self: *Self, ptr_reg: anytype, src_reg: FloatReg) Allocator.Error!void {
+            try self.emit.fstrRegMemUoff(.double, src_reg, ptr_reg, 0);
+        }
+
+        /// Per-ISA instruction selection for `LirCodeGen.emitTrap`.
+        pub fn emitTrap(self: *Self) Allocator.Error!void {
+            try self.emit.brk();
+        }
+
+        /// Store an incoming float argument register into the frame.
+        pub fn emitEntryFloatStore(self: *Self, dest_off: i32, freg: FloatReg, size: u8) Allocator.Error!void {
+            switch (size) {
+                4 => try self.emitStoreStackF32(dest_off, freg),
+                8 => try self.emitStoreStackF64(dest_off, freg),
+                16 => try self.emitStoreStackV128(dest_off, freg),
+                else => unreachable,
+            }
+        }
+
+        /// Load C-ABI float return piece `index` from the frame into the
+        /// float return register sequence (V0..V3 / XMM0..XMM1).
+        pub fn emitEntryFloatLoad(self: *Self, src_off: i32, index: usize, size: u8) Allocator.Error!void {
+            const fregs = [_]FloatReg{ .V0, .V1, .V2, .V3 };
+            const freg = fregs[index];
+            switch (size) {
+                4 => try self.emitLoadStackF32(freg, src_off),
+                8 => try self.emitLoadStackF64(freg, src_off),
+                16 => try self.emitLoadStackV128(freg, src_off),
+                else => unreachable,
+            }
+        }
+
+        /// Emit a jump placeholder (will be patched later).
+        /// Returns the patch location for use with patchJump.
+        pub fn emitJumpPlaceholder(self: *Self) Allocator.Error!usize {
+            return try self.emitJump();
+        }
     };
 }
 
@@ -1185,7 +1631,7 @@ const WinCodeGen = CodeGen(.arm64win);
 const MacCodeGen = CodeGen(.arm64mac);
 
 test "prologue and epilogue" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     try cg.emitPrologue();
@@ -1200,7 +1646,7 @@ test "prologue and epilogue" {
 }
 
 test "load immediate" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     try cg.emitLoadImm(.X0, 42);
@@ -1209,7 +1655,7 @@ test "load immediate" {
 }
 
 test "integer operations" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     try cg.emitAdd(.w64, .X0, .X1, .X2);
@@ -1220,7 +1666,7 @@ test "integer operations" {
 }
 
 test "float operations" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     try cg.emitAddF32(.V0, .V1, .V2);
@@ -1236,7 +1682,7 @@ test "float operations" {
 }
 
 test "float allocation never relocates an allocated register" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const count: usize = @popCount(LinuxCodeGen.INITIAL_FREE_FLOAT);
@@ -1255,7 +1701,7 @@ test "float allocation never relocates an allocated register" {
 }
 
 test "vector allocation excludes AAPCS64 partial-width callee-saved registers" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const count: usize = @popCount(LinuxCodeGen.INITIAL_FREE_FLOAT);
@@ -1268,7 +1714,7 @@ test "vector allocation excludes AAPCS64 partial-width callee-saved registers" {
 }
 
 test "general allocation reports exhaustion after all allocatable registers" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const count: usize = @popCount(LinuxCodeGen.INITIAL_FREE_GENERAL) +
@@ -1294,7 +1740,7 @@ test "CodeGen works for all aarch64 targets" {
 }
 
 test "patch conditional jump keeps near targets short" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const patch = try cg.emitCondJump(.ne);
@@ -1313,7 +1759,7 @@ test "patch conditional jump keeps near targets short" {
 }
 
 test "patch conditional jump expands far targets" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const patch = try cg.emitCondJump(.ne);
@@ -1372,7 +1818,7 @@ fn testPrependPrologue(cg: *LinuxCodeGen, body_start: usize, prologue_bytes: usi
 }
 
 test "far jump is routed through an on-demand veneer" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
 
@@ -1391,7 +1837,7 @@ test "far jump is routed through an on-demand veneer" {
 }
 
 test "far conditional jump reaches its target through a veneer" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
 
@@ -1409,7 +1855,7 @@ test "far conditional jump reaches its target through a veneer" {
 }
 
 test "far call placeholder is patched through a veneer" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
 
@@ -1424,7 +1870,7 @@ test "far call placeholder is patched through a veneer" {
 }
 
 test "direct call uses BL within reach and an address sequence beyond it" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
 
@@ -1453,7 +1899,7 @@ test "direct call uses BL within reach and an address sequence beyond it" {
 }
 
 test "island gives an aging open site a veneer and leaves direct encodings alone" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 65536;
 
@@ -1477,7 +1923,7 @@ test "island gives an aging open site a veneer and leaves direct encodings alone
 }
 
 test "island veneers only the sites that would otherwise leave reach" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 65536;
 
@@ -1495,7 +1941,7 @@ test "island veneers only the sites that would otherwise leave reach" {
 }
 
 test "shift re-encodes a veneered site whose veneer moved with the body" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
 
@@ -1519,7 +1965,7 @@ test "shift re-encodes a veneered site whose veneer moved with the body" {
 }
 
 test "shift rekeys the sites inside the moved body" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     const patch = try cg.emitJump();
@@ -1532,7 +1978,7 @@ test "shift rekeys the sites inside the moved body" {
 }
 
 test "independent fragment append reserves far calls but keeps near calls direct" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 65536;
     const call = try cg.emitCallPlaceholder();
@@ -1546,7 +1992,7 @@ test "independent fragment append reserves far calls but keeps near calls direct
     try cg.patchCall(call, target);
     try expectDirectBranch(0b100101, testInst(&cg, call), call, veneer);
 
-    var imported = LinuxCodeGen.init(std.testing.allocator);
+    var imported = LinuxCodeGen.init(std.testing.allocator, .default);
     defer imported.deinit();
     imported.branch_reach_limit = cg.branch_reach_limit;
     try imported.emit.buf.appendSlice(std.testing.allocator, cg.emit.buf.items);
@@ -1559,7 +2005,7 @@ test "independent fragment append reserves far calls but keeps near calls direct
 }
 
 test "compaction drops resolved sites and keeps open ones findable" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
 
     var i: usize = 0;
@@ -1577,7 +2023,7 @@ test "compaction drops resolved sites and keeps open ones findable" {
 }
 
 test "compaction preserves artifact call reservations in finished bodies" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
     const call = try cg.emitCallPlaceholder();
@@ -1616,7 +2062,7 @@ fn expectExternStub(cg: *LinuxCodeGen, call: usize, stub: usize, reloc_index: us
 }
 
 test "extern call sites get stubs once the image reaches the direct reach" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
 
@@ -1636,7 +2082,7 @@ test "extern call sites get stubs once the image reaches the direct reach" {
 }
 
 test "extern call sites stay direct in an image within reach" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 4096;
 
@@ -1655,7 +2101,7 @@ test "extern call sites stay direct in an image within reach" {
 }
 
 test "island gives an aging extern call site a stub" {
-    var cg = LinuxCodeGen.init(std.testing.allocator);
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     cg.branch_reach_limit = 65536;
 
@@ -1671,4 +2117,22 @@ test "island gives an aging extern call site a stub" {
     try expectDirectBranch(0b000101, testInst(&cg, island), island, stub + LinuxCodeGen.extern_stub_bytes);
     try expectExternStub(&cg, call, stub, 0);
     try std.testing.expectEqual(@as(usize, 0), cg.branch_open_unveneered);
+}
+
+test "temporary allocation records the register high-water mark" {
+    var cg = LinuxCodeGen.init(std.testing.allocator, .default);
+    defer cg.deinit();
+
+    const a = cg.allocTempGeneral();
+    const b = cg.allocTempGeneral();
+    cg.freeGeneral(a);
+    const c = cg.allocTempGeneral();
+    try std.testing.expectEqual(@as(u8, 2), cg.general_high_water);
+    cg.freeGeneral(b);
+    cg.freeGeneral(c);
+
+    const f = cg.allocTempFloat();
+    try std.testing.expectEqual(@as(u8, 1), cg.float_high_water);
+    cg.freeFloat(f);
+    try std.testing.expect(LinuxCodeGen.MAX_TEMP_GENERAL >= 13);
 }

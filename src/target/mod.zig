@@ -1247,3 +1247,24 @@ test "wasm32 host matching is distinct from build compatibility" {
     }
     try std.testing.expect(RocTarget.wasm32.isCompatibleWithHost());
 }
+
+test "arm32 targets' architecture baseline is the dev backend's CPU floor" {
+    // D2 of projects/big/arm32-dev-backend.md: generated arm32 code assumes
+    // ARMv7-A with NEON (VFPv3-D32) and no integer divide. The prebuilt
+    // runtime objects are compiled for Zig's architecture baseline, so that
+    // baseline must be exactly this floor: no weaker (or the objects could
+    // not share the ABI assumptions) and no stronger (or they would use
+    // instructions the floor lacks).
+    for ([_]RocTarget{ .arm32musl, .arm32linux }) |target| {
+        const query = target.llvmTargetQuery();
+        const resolved = try std.zig.system.resolveTargetQuery(std.testing.io, query);
+        const features = resolved.cpu.features;
+        const arm = std.Target.arm.Feature;
+        for ([_]arm{ .v7a, .neon, .vfp3, .d32, .thumb2 }) |required| {
+            try std.testing.expect(features.isEnabled(@intFromEnum(required)));
+        }
+        for ([_]arm{ .hwdiv, .hwdiv_arm, .vfp4 }) |excluded| {
+            try std.testing.expect(!features.isEnabled(@intFromEnum(excluded)));
+        }
+    }
+}

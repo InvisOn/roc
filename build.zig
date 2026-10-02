@@ -22,12 +22,16 @@ const CrossTarget = struct {
 const musl_cross_targets = [_]CrossTarget{
     .{ .name = "x64musl", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl } },
     .{ .name = "arm64musl", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
+    .{ .name = "arm32musl", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .musleabihf } },
 };
 
 /// Glibc cross-compile targets (dynamic linking)
 const glibc_cross_targets = [_]CrossTarget{
     .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
     .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
+    // Named for its RocTarget (arm32linux): test platforms key their
+    // `targets/<name>/` directories by target name.
+    .{ .name = "arm32linux", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
 };
 
 /// Windows cross-compile targets
@@ -804,13 +808,13 @@ const CheckTypeCheckerPatternsStep = struct {
         .{ .file = "cir_to_lir.zig", .start = 110, .end = 115 },
         // inspected.zig resolves a type module's import statement from the caller's
         // module name, which arrives as text from outside this module's ident store.
-        .{ .file = "inspected.zig", .start = 226, .end = 232 },
+        .{ .file = "inspected.zig", .start = 227, .end = 233 },
         // inspected.zig trims the trailing newline off a rendered report. This is
         // presentation text on its way out, not a type-checker comparison.
-        .{ .file = "inspected.zig", .start = 2474, .end = 2474 },
+        .{ .file = "inspected.zig", .start = 2475, .end = 2475 },
         // inspected.zig converts a NUL-terminated dylib path from the linker into a
         // slice. Path bytes, not identifiers.
-        .{ .file = "inspected.zig", .start = 3264, .end = 3275 },
+        .{ .file = "inspected.zig", .start = 3265, .end = 3276 },
         // inspected_run.zig dispatches on a hosted function's ABI symbol, which is
         // matched by name at the host boundary and has no Ident.Idx.
         .{ .file = "inspected_run.zig", .start = 109, .end = 109 },
@@ -3120,6 +3124,7 @@ pub fn build(b: *std.Build) void {
     const run_check_simd_codegen_step = b.step("run-check-simd-codegen", "Check that optimized integer SIMD kernels select native instructions");
     const run_check_match_extension_codegen_step = b.step("run-check-match-extension-codegen", "Check the pinned instruction counts for the match-extension loop");
     const run_check_baseline_codegen_step = b.step("run-check-baseline-codegen", "Check that v1 targets emit no instruction above the architecture baseline");
+    const run_check_arm32_encoding_oracle_step = b.step("run-check-arm32-encoding-oracle", "Check that the arm32 encoder tests match the assembler oracle");
     const run_check_str_eq_same_allocation_step = b.step("run-check-str-eq-same-allocation", "Check that comparing a string against itself does not read its bytes");
     const build_snapshot_tool_step = b.step("build-snapshot-tool", "Build the snapshot tool");
     const run_check_snapshots_step = b.step("run-check-snapshots", "Regenerate snapshots and fail if tracked snapshots changed");
@@ -3766,6 +3771,10 @@ pub fn build(b: *std.Build) void {
     run_baseline_codegen_check.addArtifactArg(roc_exe);
     run_baseline_codegen_check.step.dependOn(build_test_hosts_step);
     run_check_baseline_codegen_step.dependOn(&run_baseline_codegen_check.step);
+
+    const run_arm32_encoding_oracle_check = b.addSystemCommand(&.{ "python3", "ci/arm32_encoding_oracle.py", "--check" });
+    run_arm32_encoding_oracle_check.setEnvironmentVariable("ZIG", b.graph.zig_exe);
+    run_check_arm32_encoding_oracle_step.dependOn(&run_arm32_encoding_oracle_check.step);
 
     const run_match_extension_codegen_check = b.addSystemCommand(&.{ "bash", "ci/check_match_extension_codegen.sh" });
     run_match_extension_codegen_check.addArtifactArg(roc_exe);
@@ -7747,8 +7756,8 @@ fn addMainExe(
             b.getInstallStep().dependOn(copy_step);
         }
 
-        // Generate glibc stubs for gnu targets
-        if (cross_target.query.abi == .gnu) {
+        // Generate glibc stubs for gnu targets (including arm's gnueabihf)
+        if (cross_target.query.abi.?.isGnu()) {
             const glibc_stub = generateGlibcStub(b, cross_resolved_target, cross_target.name);
             if (glibc_stub) |stub| {
                 b.getInstallStep().dependOn(&stub.step);
@@ -8137,6 +8146,8 @@ fn addMainExe(
         .{ .name = "arm64musl", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
         .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
         .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
+        .{ .name = "arm32musl", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .musleabihf } },
+        .{ .name = "arm32glibc", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
         .{ .name = "wasm32", .query = .{ .cpu_arch = .wasm32, .os_tag = .freestanding, .abi = .none } },
         .{ .name = "x64win", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc } },
         .{ .name = "x64mingw", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },

@@ -235,6 +235,11 @@ pub const io_spec_tests = [_]TestSpec{
     // extern-struct byte layout (z@0, padding@4, a@8). The host reads the fields
     // at those offsets and returns "<z*100 + a>"; 11/22 -> "1122".
     .{
+        .roc_file = "test/fx/abi_call_shapes.roc",
+        .io_spec = "1>i32_i64: 35000000003 -35000000003|1>three_i32_i64: 4000000000321|1>two_i32_triple: 54321|1>f64_f32_f64: 336.5|1>nine_f64: 285|1>triple_from: 7 14 21|1>f64 round trip: -4613937818241073152 -1.5",
+        .description = "Hosted calls whose C signatures are the call shapes a native backend must place exactly (register pairs, stack spill, split records, float back-fill, hidden result pointer)",
+    },
+    .{
         .roc_file = "test/fx/host_interop_padding.roc",
         .io_spec = "1>1122",
         .description = "Nominal record declared-order + unnamed padding matches the host C struct layout",

@@ -8,7 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const stack_probe = @import("stack_probe.zig");
-const instruction_cache = @import("instruction_cache.zig");
+const instruction_cache = backend.dev.instruction_cache;
 const base_mod = @import("base");
 const backend = @import("backend");
 const builtins = @import("builtins");
@@ -366,7 +366,14 @@ fn loadDevProgram(
         .function_stubs = function_stubs.items,
         .code_base = @intFromPtr(view.code.ptr),
     };
+    const host_isa: backend.dev.isa.Isa = switch (comptime hostArch()) {
+        .x86_64 => .x86_64,
+        .aarch64 => .aarch64,
+        .arm32 => .arm32,
+        .x86, .other => return error.UnsupportedPlatform,
+    };
     try backend.applyRelocationsWithContext(
+        host_isa,
         view.code,
         @intFromPtr(view.code.ptr),
         relocation_records,
@@ -497,18 +504,18 @@ fn protectDataPages(
     try ipc.platform.protectMappedMemory(view.data.ptr, protected_len, protection);
 }
 
-const HostArch = enum { x86, x86_64, aarch64, other };
+const HostArch = enum { x86, x86_64, aarch64, arm32, other };
 
 fn hostArch() HostArch {
     return switch (builtin.cpu.arch) {
         .x86 => .x86,
         .x86_64 => .x86_64,
         .aarch64, .aarch64_be => .aarch64,
+        .arm => .arm32,
         .alpha,
         .amdgcn,
         .arc,
         .arceb,
-        .arm,
         .armeb,
         .avr,
         .bpfeb,
@@ -649,6 +656,9 @@ const x86_64_jump_stub_size = 13;
 /// Bytes emitted for one host jump stub on aarch64 (four `movk`/`movz x16`
 /// instructions followed by `br x16`).
 const aarch64_jump_stub_size = 20;
+/// Bytes emitted for one host jump stub on arm32 (`ldr pc, [pc, #-4]`
+/// followed by the target address).
+const arm32_jump_stub_size = 8;
 
 comptime {
     // `RunImage` reserves `max_jump_stub_size` bytes per stub in the shared image;
@@ -657,12 +667,14 @@ comptime {
     // (owned here) and the reservation (owned by `RunImage`).
     std.debug.assert(x86_64_jump_stub_size <= RunImage.max_jump_stub_size);
     std.debug.assert(aarch64_jump_stub_size <= RunImage.max_jump_stub_size);
+    std.debug.assert(arm32_jump_stub_size <= RunImage.max_jump_stub_size);
 }
 
 fn jumpStubSize() JumpStubError!usize {
     return switch (hostArch()) {
         .x86_64 => x86_64_jump_stub_size,
         .aarch64 => aarch64_jump_stub_size,
+        .arm32 => arm32_jump_stub_size,
         .x86, .other => error.UnsupportedPlatform,
     };
 }
@@ -686,6 +698,12 @@ fn writeJumpStub(buf: []u8, target_addr: usize) JumpStubError!void {
             std.mem.writeInt(u32, buf[8..][0..4], movkX16(@truncate(addr >> 32), 32), .little);
             std.mem.writeInt(u32, buf[12..][0..4], movkX16(@truncate(addr >> 48), 48), .little);
             std.mem.writeInt(u32, buf[16..][0..4], 0xD61F_0200, .little); // br x16
+        },
+        .arm32 => {
+            if (buf.len < arm32_jump_stub_size) return error.InvalidDevRunImage;
+            // PC reads as this instruction + 8, so the load takes the next word.
+            std.mem.writeInt(u32, buf[0..][0..4], 0xE51F_F004, .little); // ldr pc, [pc, #-4]
+            std.mem.writeInt(u32, buf[4..][0..4], @intCast(target_addr), .little);
         },
         .x86, .other => return error.UnsupportedPlatform,
     }
@@ -1017,6 +1035,7 @@ test "loaded dev program borrows direct shared image metadata" {
     const code: []const u8 = switch (hostArch()) {
         .x86_64 => &[_]u8{0xC3},
         .aarch64 => &[_]u8{ 0xC0, 0x03, 0x5F, 0xD6 },
+        .arm32 => &[_]u8{ 0x1E, 0xFF, 0x2F, 0xE1 }, // bx lr
         .x86, .other => return error.SkipZigTest,
     };
 

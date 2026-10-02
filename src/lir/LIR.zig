@@ -87,6 +87,40 @@ pub const ProcIdentity = struct {
         return self.writeSymbolName(name[0..symbol_name_len]);
     }
 
+    /// Rewrite every procedure symbol name in `bytes`, in place, to one naming
+    /// its first-appearance ordinal (`roc__proc_` then 32 decimal digits).
+    ///
+    /// Procedure identities digest the checked-module artifact keys, which
+    /// include the compiler build (`compiler_artifact_hash`), so an object's
+    /// bytes change with every compiler build even when code generation is
+    /// unchanged. Oracles that pin generated objects byte for byte hash the
+    /// canonicalized bytes instead. Names keep their length, so no offset in
+    /// the object moves.
+    pub fn canonicalizeSymbolNames(allocator: std.mem.Allocator, bytes: []u8) std.mem.Allocator.Error!void {
+        var ordinals = std.AutoHashMap([32]u8, u32).init(allocator);
+        defer ordinals.deinit();
+        var pos: usize = 0;
+        while (std.mem.findPos(u8, bytes, pos, symbol_name_prefix)) |start| {
+            const hex_start = start + symbol_name_prefix.len;
+            pos = hex_start;
+            if (hex_start + 32 > bytes.len) break;
+            const hex = bytes[hex_start..][0..32];
+            if (!isLowerHex(hex)) continue;
+            const entry = try ordinals.getOrPut(hex.*);
+            if (!entry.found_existing) entry.value_ptr.* = @intCast(ordinals.count() - 1);
+            _ = std.fmt.bufPrint(hex, "{d:0>32}", .{entry.value_ptr.*}) catch unreachable;
+            pos = hex_start + 32;
+        }
+    }
+
+    fn isLowerHex(bytes: []const u8) bool {
+        for (bytes) |c| switch (c) {
+            '0'...'9', 'a'...'f' => {},
+            else => return false,
+        };
+        return true;
+    }
+
     /// Identity of a procedure a pass derives from this one: the same role
     /// and key from the same origin yields the same identity.
     pub fn derived(self: ProcIdentity, role: []const u8, key: []const u8) ProcIdentity {
@@ -1726,6 +1760,18 @@ pub const LirPattern = union(enum) {
         inner: LirPatternId,
     },
 };
+
+test "canonicalizeSymbolNames renames procedures by first appearance" {
+    const p = ProcIdentity.symbol_name_prefix;
+    var bytes = ("x " ++ p ++ "00112233445566778899aabbccddeeff y " ++ p ++ "ffeeddccbbaa99887766554433221100 " ++
+        p ++ "00112233445566778899aabbccddeeff " ++ p ++ "short").*;
+    try ProcIdentity.canonicalizeSymbolNames(std.testing.allocator, &bytes);
+    try std.testing.expectEqualStrings(
+        "x " ++ p ++ "00000000000000000000000000000000 y " ++ p ++ "00000000000000000000000000000001 " ++
+            p ++ "00000000000000000000000000000000 " ++ p ++ "short",
+        &bytes,
+    );
+}
 
 test "Symbol size and alignment" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(Symbol));

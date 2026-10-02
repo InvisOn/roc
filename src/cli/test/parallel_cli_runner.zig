@@ -14,6 +14,12 @@
 //!   --include-llvm       Include size and speed LLVM backend jobs
 //!   --specialize=<yes|no> Override the runtime lowering strategy for platform jobs
 //!   --cross-target <name> Build platform cases for this target without running them
+//!   --cross-opt=<opt>    Build those cases with --opt=<opt> (dev, size or speed)
+//!   --cross-run          Also run each cross-built program, with the checks
+//!                        a native run gets
+//!   --cross-runner=<cmd> Run cross-built programs through <cmd> (for example
+//!                        qemu-arm-static) instead of directly; a relative
+//!                        path is taken from the directory the runner starts in
 //!   --glue-roc <path>    Roc binary to use for glue generation (default: <roc_binary>)
 //!   --glue-opt <opt>     Glue execution mode: default, dev, size, or speed
 //!   --verbose            Print PASS results and timing details
@@ -293,8 +299,20 @@ const PlatformCase = struct {
         native_run,
         /// Build natively, run with --test <spec>; check exit code 0
         io_spec: []const u8,
-        /// Build for the named cross-compilation target without running.
-        cross_compile: []const u8,
+        /// Build for a cross-compilation target, and with `--cross-run`
+        /// run the program as its native case would.
+        cross_compile: CrossCompile,
+    };
+
+    const CrossCompile = struct {
+        target: []const u8,
+        run: CrossRun,
+    };
+
+    /// How a cross-built program runs: bare, or with `--test <spec>`.
+    const CrossRun = union(enum) {
+        native_run,
+        io_spec: []const u8,
     };
 };
 
@@ -400,6 +418,7 @@ const CustomCase = enum {
     list_builtin_inlined,
     default_platform_linux_disassembly,
     default_platform_build_x64glibc,
+    default_platform_build_x64glibc_dev,
     default_platform_build_arm64glibc,
     default_platform_build_x64freebsd,
     default_platform_build_x64netbsd,
@@ -443,6 +462,7 @@ const CustomCase = enum {
     build_int_interpreter_output_runs,
     build_int_dev_output_runs,
     issue_10492_build_default_app_args,
+    issue_11995_build_default_app_glibc_dev,
     issue_11453_nested_alias_json_encode,
     issue_11355_boxy_built_platform_codec_root,
     issue_11355_boxy_built_try_low_levels,
@@ -850,7 +870,7 @@ fn appendCrossCompilePlatformSpecs(
     switch (platform.test_apps) {
         .single => |app_name| {
             const roc_file = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ platform.base_dir, app_name });
-            try appendCrossCompileCase(allocator, cases, platform.name, target, roc_file, &.{}, filters);
+            try appendCrossCompileCase(allocator, cases, platform.name, target, roc_file, .native_run, &.{}, filters);
         },
         .spec_list => |specs| {
             for (specs) |spec| {
@@ -860,6 +880,7 @@ fn appendCrossCompilePlatformSpecs(
                     platform.name,
                     target,
                     spec.roc_file,
+                    .{ .io_spec = spec.io_spec },
                     spec.expected_build_stderr_contains,
                     filters,
                 );
@@ -867,7 +888,7 @@ fn appendCrossCompilePlatformSpecs(
         },
         .simple_list => |specs| {
             for (specs) |spec| {
-                try appendCrossCompileCase(allocator, cases, platform.name, target, spec.roc_file, &.{}, filters);
+                try appendCrossCompileCase(allocator, cases, platform.name, target, spec.roc_file, .native_run, &.{}, filters);
             }
         },
     }
@@ -879,6 +900,7 @@ fn appendCrossCompileCase(
     platform: []const u8,
     target: []const u8,
     roc_file: []const u8,
+    run: PlatformCase.CrossRun,
     expected_build_stderr_contains: []const []const u8,
     filters: []const []const u8,
 ) CliRunnerError!void {
@@ -891,7 +913,7 @@ fn appendCrossCompileCase(
             .roc_file = roc_file,
             .platform = platform,
             .expected_build_stderr_contains = expected_build_stderr_contains,
-            .test_kind = .{ .cross_compile = target },
+            .test_kind = .{ .cross_compile = .{ .target = target, .run = run } },
         } },
     };
     if (matchesFilters(case, filters)) {
@@ -1798,6 +1820,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "I128/U128 to Dec conversion runs on dev backend", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Int128ToDecTry.roc", .exit = .success } } },
     .{ .id = 0, .suite = .subcommands, .name = "I128/U128 to Dec conversion runs on interpreter", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/Int128ToDecTry.roc", .exit = .success } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10022: deep tail recursion with a List runs on LLVM speed backend", .backend = .speed, .body = .{ .custom = .issue_10022_deep_tail_recursion } },
+    .{ .id = 0, .suite = .subcommands, .name = "default platform builds for arm32musl with the dev backend", .backend = .dev, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache", "--target=arm32musl" }, .roc_file = "test/cli/baseline_cpu_smoke.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "unsupported target" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 11784: Iter.sum and Iter.map over a range run within the perf guard", .backend = .speed, .timeout_ms = 10_000, .body = .{ .command = .{ .args = &.{ "run", "--opt=speed", "--no-cache" }, .roc_file = "test/fx-open/issue_11784_range_iter_sum_perf.roc", .exit = .success, .stdout_exact = "all sums correct\n" } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10529: open Try ? chain builds in dev within the perf guard", .backend = .dev, .timeout_ms = 30_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue10529OpenTryChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 11072: hooks chain interns its interchangeable closure layouts once and builds in dev within the perf guard", .backend = .dev, .timeout_ms = 60_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue11072HooksChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
@@ -2005,6 +2028,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "list builtins inline in native --opt=speed build", .body = .{ .custom = .list_builtin_inlined } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build default platform x64musl matches direct write assembly", .skip = .{ .always = "TODO: direct-write default-platform codegen" }, .body = .{ .custom = .default_platform_linux_disassembly } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build default platform x64glibc succeeds", .body = .{ .custom = .default_platform_build_x64glibc } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc build --opt=dev default platform x64glibc links statically and runs", .body = .{ .custom = .default_platform_build_x64glibc_dev } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build default platform arm64glibc succeeds", .body = .{ .custom = .default_platform_build_arm64glibc } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10598: roc build default platform x64freebsd succeeds", .body = .{ .custom = .default_platform_build_x64freebsd } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10598: roc build default platform x64netbsd succeeds", .body = .{ .custom = .default_platform_build_x64netbsd } },
@@ -2325,6 +2349,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc build executable runs correctly (interpreter)", .backend = .interpreter, .skip = .{ .windows = "test/int platform does not have Windows host libraries" }, .body = .{ .custom = .build_int_interpreter_output_runs } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build --opt=dev executable runs correctly for test/int/app.roc", .backend = .dev, .skip = .{ .windows = "test/int platform does not have Windows host libraries" }, .body = .{ .custom = .build_int_dev_output_runs } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10492: roc build default-platform executable receives args", .body = .{ .custom = .issue_10492_build_default_app_args } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11995: roc build --opt=dev default-platform executable for a glibc target runs", .body = .{ .custom = .issue_11995_build_default_app_glibc_dev } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build default-platform executable receives args (interpreter)", .backend = .interpreter, .body = .{ .custom = .build_default_app_interpreter_args } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build fails with file not found error", .body = .{ .command = .{ .args = &.{"build"}, .roc_file = "nonexistent_file.roc", .exit = .failure, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stderr, .text = "FileNotFound" }, .{ .stream = .stderr, .text = "not found" }, .{ .stream = .stderr, .text = "not found" }, .{ .stream = .stderr, .text = "Failed" } } }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build fails with invalid target error", .body = .{ .command = .{ .args = &.{ "build", "--target=invalid_target_name" }, .roc_file = "test/int/app.roc", .exit = .failure, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stderr, .text = "Invalid target" }, .{ .stream = .stderr, .text = "invalid" } } }} } } },
@@ -2879,6 +2904,36 @@ var roc_binary_path: []const u8 = "";
 var glue_roc_binary_path: []const u8 = "";
 var glue_execution_mode: GlueExecutionMode = .default;
 var platform_specialization_arg: ?[]const u8 = null;
+var cross_build_opt_arg: ?[]const u8 = null;
+/// Whether `--cross-run` asked to run cross-built programs.
+var cross_run: bool = false;
+/// The `--cross-runner` command cross-built programs run through, if any.
+var cross_runner: ?[]const u8 = null;
+
+/// The command `--cross-runner` names, made usable from a case's work
+/// directory: a bare command name is left for the `PATH` lookup, an absolute
+/// path is kept, and a relative path (one with a directory part, such as
+/// `ci/ssh_cross_runner.sh`) is resolved against `project_root`, the directory
+/// the runner was started in.
+fn resolveCrossRunner(allocator: std.mem.Allocator, project_root: []const u8, runner: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (std.fs.path.isAbsolute(runner)) return runner;
+    if (std.mem.findAny(u8, runner, "/" ++ std.fs.path.sep_str) == null) return runner;
+    return std.fs.path.join(allocator, &.{ project_root, runner });
+}
+
+test "resolveCrossRunner keeps commands and absolute paths and anchors relative paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("qemu-arm-static", try resolveCrossRunner(a, "/repo", "qemu-arm-static"));
+    try std.testing.expectEqualStrings("/opt/run.sh", try resolveCrossRunner(a, "/repo", "/opt/run.sh"));
+    // Joined with the host's separator: `/repo\ci/ssh_cross_runner.sh` on Windows.
+    const sep = std.fs.path.sep_str;
+    try std.testing.expectEqualStrings("/repo" ++ sep ++ "ci/ssh_cross_runner.sh", try resolveCrossRunner(a, "/repo", "ci/ssh_cross_runner.sh"));
+    try std.testing.expectEqualStrings("/repo" ++ sep ++ "./run.sh", try resolveCrossRunner(a, "/repo", "./run.sh"));
+}
+/// The backend `--cross-opt` selects; `roc build`'s default (speed) when absent.
+var cross_build_opt: OptMode = .speed;
 var project_root_path: []const u8 = "";
 
 const CaseEnv = struct {
@@ -3096,7 +3151,7 @@ fn runPlatformCase(io: std.Io, allocator: Allocator, spec: CliCase, timeout_ms: 
         return .{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "failed to set isolated temp dir" };
 
     const result = switch (platform.test_kind) {
-        .cross_compile => |target| runCrossCompileTest(io, allocator, target, platform, roc_file, output_name, &env_map, dirs.work_dir, &timer, timeout_ms),
+        .cross_compile => |cross| runCrossCompileTest(io, allocator, cross, platform, roc_file, output_name, &env_map, dirs.work_dir, &timer, timeout_ms),
         .native_run, .io_spec => blk: {
             const backend = spec.backend orelse
                 break :blk TestResult{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "platform case missing backend" };
@@ -3276,7 +3331,7 @@ fn runCompiledTest(
 fn runCrossCompileTest(
     io: std.Io,
     allocator: Allocator,
-    target: []const u8,
+    cross: PlatformCase.CrossCompile,
     platform: PlatformCase,
     roc_file: []const u8,
     output_name: []const u8,
@@ -3285,13 +3340,25 @@ fn runCrossCompileTest(
     timer: *harness.Timer,
     timeout_ms: u64,
 ) TestResult {
-    const target_arg = std.fmt.allocPrint(allocator, "--target={s}", .{target}) catch
+    const target_arg = std.fmt.allocPrint(allocator, "--target={s}", .{cross.target}) catch
         return .{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "failed to allocate target arg" };
     defer allocator.free(target_arg);
     const output_arg = std.fmt.allocPrint(allocator, "--output={s}", .{output_name}) catch
         return .{ .status = .infra_error, .phase = .setup, .duration_ns = timer.read(), .message = "failed to allocate output arg" };
     defer allocator.free(output_arg);
-    const build_argv = &[_][]const u8{ roc_binary_path, "build", target_arg, output_arg, roc_file };
+    var build_argv_buf: [6][]const u8 = undefined;
+    var build_argc: usize = 0;
+    for ([_][]const u8{ roc_binary_path, "build", target_arg, output_arg }) |arg| {
+        build_argv_buf[build_argc] = arg;
+        build_argc += 1;
+    }
+    if (cross_build_opt_arg) |opt_arg| {
+        build_argv_buf[build_argc] = opt_arg;
+        build_argc += 1;
+    }
+    build_argv_buf[build_argc] = roc_file;
+    build_argc += 1;
+    const build_argv = build_argv_buf[0..build_argc];
 
     var build_timer = harness.Timer.start() catch
         return .{ .status = .infra_error, .phase = .build, .duration_ns = timer.read(), .message = "no clock" };
@@ -3307,7 +3374,7 @@ fn runCrossCompileTest(
         return .{ .status = .infra_error, .phase = .build, .duration_ns = timer.read(), .build_ns = build_timer.read(), .message = msg };
     };
     const build_ns = build_timer.read();
-    const expected_stderr = platform.expected_build_stderr_contains;
+    const expected_stderr = expectedBuildStderrForBackend(cross_build_opt, platform.expected_build_stderr_contains);
     if (processTimedOut(build_result.stderr) or hasMemoryErrors(build_result.stderr) != null or
         !buildSucceededOrExpectedDiagnostics(build_result, expected_stderr))
     {
@@ -3329,7 +3396,39 @@ fn runCrossCompileTest(
     if (!builtOutputExists(io, allocator, output_name)) {
         return .{ .status = .build_failed, .phase = .build, .duration_ns = timer.read(), .build_ns = build_ns, .message = "cross-build succeeded but output file was not created" };
     }
-    return .{ .status = .pass, .phase = .build, .duration_ns = timer.read(), .build_ns = build_ns };
+    if (!cross_run) return .{ .status = .pass, .phase = .build, .duration_ns = timer.read(), .build_ns = build_ns };
+
+    // Run the program as its native case would, through the runner when one
+    // is given.
+    var run_argv_buf: [4][]const u8 = undefined;
+    var argc: usize = 0;
+    if (cross_runner) |runner| {
+        run_argv_buf[argc] = runner;
+        argc += 1;
+    }
+    run_argv_buf[argc] = output_name;
+    argc += 1;
+    switch (cross.run) {
+        .native_run => {},
+        .io_spec => |io_spec| {
+            run_argv_buf[argc] = "--test";
+            argc += 1;
+            run_argv_buf[argc] = io_spec;
+            argc += 1;
+        },
+    }
+    var run_timer = harness.Timer.start() catch return .{ .status = .infra_error, .phase = .run, .duration_ns = timer.read(), .build_ns = build_ns, .message = "no clock" };
+    const run_timeout_ms = childCommandTimeoutMs(timer, timeout_ms) orelse
+        return timeoutFailure(allocator, timer, .run, "case timeout exhausted before cross-built output started");
+    const run_result = util.runChildWithTimeout(io, allocator, run_argv_buf[0..argc], .{
+        .cwd = work_dir,
+        .max_output_bytes = 10 * 1024 * 1024,
+        .timeout_ms = run_timeout_ms,
+    }) catch |err| {
+        const msg = std.fmt.allocPrint(allocator, "cross-run spawn error: {}", .{err}) catch "cross-run spawn error";
+        return .{ .status = .infra_error, .phase = .run, .duration_ns = timer.read(), .build_ns = build_ns, .run_ns = run_timer.read(), .message = msg };
+    };
+    return resultFromProcess(run_result, timer, .run, build_ns, run_timer.read(), "cross-run failed");
 }
 
 fn builtOutputExists(io: std.Io, allocator: Allocator, output_name: []const u8) bool {
@@ -3801,12 +3900,13 @@ fn runCustomCase(
         .issue_11133_llvm_emit_scaling => customIssue11133LlvmEmitScaling(io, allocator, &env, &timer, timeout_ms),
         .list_builtin_inlined => customListBuiltinInlined(io, allocator, &env, &timer, timeout_ms),
         .default_platform_linux_disassembly => customDefaultPlatformLinuxDisassembly(io, allocator, &env, &timer, timeout_ms),
-        .default_platform_build_x64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .x64glibc),
-        .default_platform_build_arm64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .arm64glibc),
-        .default_platform_build_x64freebsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .x64freebsd),
-        .default_platform_build_x64netbsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .x64netbsd),
+        .default_platform_build_x64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .x64glibc),
+        .default_platform_build_x64glibc_dev => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .dev, .x64glibc),
+        .default_platform_build_arm64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .arm64glibc),
+        .default_platform_build_x64freebsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .x64freebsd),
+        .default_platform_build_x64netbsd => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .x64netbsd),
         .default_platform_build_x64openbsd_rejected => customDefaultPlatformOpenBsdRejected(io, allocator, &env, &timer, timeout_ms),
-        .default_platform_build_wasm32 => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .wasm32),
+        .default_platform_build_wasm32 => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .speed, .wasm32),
         .default_platform_wasm32_archive_reproducible => customDefaultPlatformWasm32ArchiveReproducible(io, allocator, &env, &timer, timeout_ms),
         .native_build_thread_count_reproducible => customNativeBuildThreadCountReproducible(io, allocator, &env, &timer, timeout_ms),
         .native_build_artifact_round_trip => customNativeBuildArtifactRoundTrip(io, allocator, &env, &timer, timeout_ms),
@@ -3844,7 +3944,8 @@ fn runCustomCase(
         .build_int_dev_creates_output => customBuildIntCreatesOutput(io, allocator, &env, &timer, timeout_ms, .dev),
         .build_int_interpreter_output_runs => customBuildIntOutputRuns(io, allocator, &env, &timer, timeout_ms, .interpreter),
         .build_int_dev_output_runs => customBuildIntOutputRuns(io, allocator, &env, &timer, timeout_ms, .dev),
-        .issue_10492_build_default_app_args => customBuildDefaultAppArgs(io, allocator, &env, &timer, timeout_ms, .dev),
+        .issue_10492_build_default_app_args => customBuildDefaultAppArgs(io, allocator, &env, &timer, timeout_ms, .dev, null),
+        .issue_11995_build_default_app_glibc_dev => customBuildDefaultAppGlibcDev(io, allocator, &env, &timer, timeout_ms),
         .issue_11453_nested_alias_json_encode => customIssue11453NestedAliasJsonEncode(io, allocator, &env, &timer, timeout_ms),
         .issue_11355_boxy_built_platform_codec_root => customBoxyBuiltEchoApp(io, allocator, &env, &timer, timeout_ms, .{
             .roc_file = "test/echo/issue_11355_platform_codec_root.roc",
@@ -3858,7 +3959,7 @@ fn runCustomCase(
             .exit = .success,
             .stdout_exact = boxy_try_low_levels_built_expected_stdout,
         }),
-        .build_default_app_interpreter_args => customBuildDefaultAppArgs(io, allocator, &env, &timer, timeout_ms, .interpreter),
+        .build_default_app_interpreter_args => customBuildDefaultAppArgs(io, allocator, &env, &timer, timeout_ms, .interpreter, null),
         .build_glibc_target_non_linux_error => customGlibcTargetNonLinux(io, allocator, &env, &timer, timeout_ms),
         .build_windows_shared_library => customWindowsSharedLibrary(io, allocator, &env, &timer, timeout_ms),
         .cache_passing_results => customCachePassingResults(io, allocator, &env, &timer, timeout_ms, spec.backend orelse .interpreter),
@@ -6340,6 +6441,7 @@ fn customDefaultPlatformBuild(
     env: *const CaseEnv,
     timer: *harness.Timer,
     timeout_ms: u64,
+    backend: OptMode,
     target: DefaultPlatformTarget,
 ) ?TestResult {
     if (!target.canBuildOnHost()) {
@@ -6361,12 +6463,14 @@ fn customDefaultPlatformBuild(
         return customInfraFailure(allocator, timer, "failed to allocate target arg: {}", .{err});
     const out_arg = outputArg(allocator, output_path) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate output arg: {}", .{err});
+    const opt_arg = std.fmt.allocPrint(allocator, "--opt={s}", .{backend.cliName()}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate opt arg: {}", .{err});
 
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = app_path, .data = default_platform_echo_app }) catch |err|
         return customInfraFailure(allocator, timer, "failed to write default platform app: {}", .{err});
 
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
-        .args = &.{ "build", "--opt=speed", "--no-cache", target_arg, out_arg },
+        .args = &.{ "build", opt_arg, "--no-cache", target_arg, out_arg },
         .roc_file = app_path,
         .contains = &.{.{ .stream = .stdout, .text = "successfully building" }},
     })) |failure| return failure;
@@ -8317,6 +8421,7 @@ fn customBuildDefaultAppArgs(
     timer: *harness.Timer,
     timeout_ms: u64,
     backend: OptMode,
+    target: ?[]const u8,
 ) ?TestResult {
     const output_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "issue_10492_args" }) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate output path: {}", .{err});
@@ -8326,8 +8431,18 @@ fn customBuildDefaultAppArgs(
     const opt_arg = backendOptArg(allocator, backend) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate opt arg: {}", .{err});
 
+    const target_arg: ?[]const u8 = if (target) |name|
+        std.fmt.allocPrint(allocator, "--target={s}", .{name}) catch |err|
+            return customInfraFailure(allocator, timer, "failed to allocate target arg: {}", .{err})
+    else
+        null;
+    const build_args: []const []const u8 = if (target_arg) |arg|
+        &.{ "build", opt_arg, "--no-cache", arg, out_arg }
+    else
+        &.{ "build", opt_arg, "--no-cache", out_arg };
+
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
-        .args = &.{ "build", opt_arg, "--no-cache", out_arg },
+        .args = build_args,
         .roc_file = "test/echo/issue_10492_build_args.roc",
         .contains = &.{.{ .stream = .stdout, .text = "successfully building" }},
     })) |failure| return failure;
@@ -8342,6 +8457,26 @@ fn customBuildDefaultAppArgs(
     })) |failure| return failure;
 
     return null;
+}
+
+/// The default platform makes no libc calls, so a default app built for a
+/// glibc target must be a static executable that runs on any Linux host of
+/// that architecture, whichever libc the host ships.
+fn customBuildDefaultAppGlibcDev(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    if (builtin.os.tag != .linux) return null;
+    const target: []const u8 = if (builtin.cpu.arch == .x86_64)
+        "x64glibc"
+    else if (builtin.cpu.arch == .aarch64)
+        "arm64glibc"
+    else
+        return null;
+    return customBuildDefaultAppArgs(io, allocator, env, timer, timeout_ms, .dev, target);
 }
 
 const BoxyBuiltEchoApp = struct {
@@ -13646,6 +13781,7 @@ fn printUsage() void {
         \\  --include-llvm       Include size and speed LLVM backend jobs
         \\  --specialize=<yes|no> Override the runtime lowering strategy for platform jobs
         \\  --cross-target <name> Build platform cases for this target without running them
+        \\  --cross-opt=<opt>    Build cross-target cases with --opt=<opt> (dev, size, speed)
         \\  --glue-roc <path>    Roc binary to use for glue generation (default: <roc_binary>)
         \\  --glue-opt <opt>     Glue execution mode: default, dev, size, or speed
         \\  --verbose            Show PASS results with timing
@@ -13660,6 +13796,15 @@ const ParsedRunnerArgs = struct {
     glue_roc: ?[]const u8 = null,
     specialization_arg: ?[]const u8 = null,
     cross_target: ?[]const u8 = null,
+    /// `--opt=<mode>` for cross-target builds, or null for `roc build`'s
+    /// default.
+    cross_opt_arg: ?[]const u8 = null,
+    /// The backend `cross_opt_arg` selects.
+    cross_opt: OptMode = .speed,
+    /// Run cross-built programs after building them.
+    cross_run: bool = false,
+    /// Command to run cross-built programs through.
+    cross_runner: ?[]const u8 = null,
 };
 
 fn parseSuiteName(value: []const u8) ?Suite {
@@ -13696,6 +13841,10 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
     var glue_roc: ?[]const u8 = null;
     var specialization_arg: ?[]const u8 = null;
     var cross_target: ?[]const u8 = null;
+    var cross_opt_arg: ?[]const u8 = null;
+    var cross_opt: OptMode = .speed;
+    var parsed_cross_run = false;
+    var parsed_cross_runner: ?[]const u8 = null;
     var saw_suite = false;
     var i: usize = 1;
     while (i < raw_args.len) : (i += 1) {
@@ -13750,6 +13899,25 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
             cross_target = value;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--cross-run")) {
+            parsed_cross_run = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--cross-runner=")) {
+            parsed_cross_runner = arg["--cross-runner=".len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--cross-opt=")) {
+            const value = arg["--cross-opt=".len..];
+            const known = std.mem.eql(u8, value, "dev") or std.mem.eql(u8, value, "size") or std.mem.eql(u8, value, "speed");
+            if (!known) {
+                std.debug.print("unknown cross opt: {s}\n", .{value});
+                return error.InvalidArgs;
+            }
+            cross_opt = std.meta.stringToEnum(OptMode, value).?;
+            cross_opt_arg = try std.fmt.allocPrint(allocator, "--opt={s}", .{value});
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--glue-roc=")) {
             glue_roc = arg["--glue-roc=".len..];
             continue;
@@ -13794,6 +13962,18 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
             suites.addAll();
         }
     }
+    if (cross_opt_arg != null and cross_target == null) {
+        std.debug.print("--cross-opt requires --cross-target\n", .{});
+        return error.InvalidArgs;
+    }
+    if ((parsed_cross_run or parsed_cross_runner != null) and cross_target == null) {
+        std.debug.print("--cross-run and --cross-runner require --cross-target\n", .{});
+        return error.InvalidArgs;
+    }
+    if (parsed_cross_runner != null and !parsed_cross_run) {
+        std.debug.print("--cross-runner requires --cross-run\n", .{});
+        return error.InvalidArgs;
+    }
     if (cross_target != null and !suites.includesOnly(.platforms)) {
         std.debug.print("--cross-target can only be used with the platforms suite\n", .{});
         return error.InvalidArgs;
@@ -13812,6 +13992,10 @@ fn parseRunnerArgs(allocator: Allocator, process_args: std.process.Args) CliRunn
         .glue_roc = glue_roc,
         .specialization_arg = specialization_arg,
         .cross_target = cross_target,
+        .cross_opt_arg = cross_opt_arg,
+        .cross_opt = cross_opt,
+        .cross_run = parsed_cross_run,
+        .cross_runner = parsed_cross_runner,
     };
 }
 
@@ -13904,7 +14088,7 @@ test "cross target builds one build-only case per matching platform spec" {
         try std.testing.expectEqual(@as(?OptMode, null), case.backend);
         try std.testing.expect(std.mem.startsWith(u8, case.body.platform.roc_file, "test/fx/"));
         if (std.meta.activeTag(case.body.platform.test_kind) != .cross_compile) return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings("x64musl", case.body.platform.test_kind.cross_compile);
+        try std.testing.expectEqualStrings("x64musl", case.body.platform.test_kind.cross_compile.target);
     }
 }
 
@@ -13947,9 +14131,21 @@ pub fn main(init: std.process.Init) CliRunnerError!void {
         roc_binary_path;
     glue_execution_mode = parsed.glue_options.execution_mode;
     platform_specialization_arg = parsed.specialization_arg;
+    cross_build_opt_arg = parsed.cross_opt_arg;
+    cross_build_opt = parsed.cross_opt;
+    cross_run = parsed.cross_run;
+    cross_runner = if (parsed.cross_runner) |runner| try resolveCrossRunner(spec_arena.allocator(), project_root_path, runner) else null;
 
     const tests = try buildCases(init.io, spec_arena.allocator(), args.filters, args.include_llvm, parsed.suites, parsed.glue_options, parsed.cross_target);
-    if (tests.len == 0) return;
+    if (tests.len == 0) {
+        // A cross target that selects nothing means the requested lane is not
+        // being tested at all; that must not read as a pass.
+        if (parsed.cross_target) |cross_target| {
+            std.debug.print("error: --cross-target={s} selected no test cases\n", .{cross_target});
+            std.process.exit(1);
+        }
+        return;
+    }
     const timeout_ms = effectiveTimeoutMs(args, parsed.suites);
 
     // Worker modes: on Windows the harness pool spawned this process with

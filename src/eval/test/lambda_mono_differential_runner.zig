@@ -66,6 +66,7 @@ fn classifyTestHelperError(err: helpers.TestHelperError) TestHelperErrorKind {
     return switch (err) {
         error.OutOfMemory => .out_of_memory,
         error.Crash => .crash,
+        error.FlushInstructionCacheFailed,
         error.InvalidUtf8,
         error.FileNotFound,
         error.AccessDenied,

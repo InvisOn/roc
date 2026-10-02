@@ -21,6 +21,14 @@ const stack_bytes = 4 * 1024 * 1024;
 /// recursion cost.
 const shallow_depth = 1000;
 const shallow_depth_str = std.fmt.comptimePrint("{d}", .{shallow_depth});
+
+/// Compiling the long interpolation takes memory that grows faster than its
+/// length: at `depth` segments a compiler running as a 32-bit process
+/// exhausts its address space (seen on arm32 under qemu). There it uses the
+/// shallow depth, which is still far deeper than the stack allows a
+/// per-segment recursion.
+const interpolation_depth = if (@sizeOf(usize) >= 8) depth else shallow_depth;
+const interpolation_depth_str = std.fmt.comptimePrint("{d}", .{interpolation_depth});
 const shallow_stack_bytes = 2 * 1024 * 1024;
 
 /// A deep equality's case fusion, a curried lambda chain's instantiated
@@ -351,8 +359,8 @@ const cases = [_]TestCase{
     .{
         .name = "issue 11698: long string interpolation",
         .source_kind = .module,
-        .source = "render = |s| \"" ++ repeat("${s}", depth) ++ "\"\nmain = Str.count_utf8_bytes(render(\"a\"))\n",
-        .expected = .{ .inspect_str = depth_str },
+        .source = "render = |s| \"" ++ repeat("${s}", interpolation_depth) ++ "\"\nmain = Str.count_utf8_bytes(render(\"a\"))\n",
+        .expected = .{ .inspect_str = interpolation_depth_str },
         .stack_bytes = stack_bytes,
     },
     .{

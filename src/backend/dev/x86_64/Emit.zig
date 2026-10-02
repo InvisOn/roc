@@ -59,6 +59,25 @@ pub fn Emit(comptime target: RocTarget) type {
             pub const STACK_PTR = Registers.GeneralReg.RSP;
             pub const STACK_ALIGNMENT: u32 = 16;
 
+            /// Register width of a usize-typed value (pointers, lengths).
+            pub const WORD: Registers.RegisterWidth = .w64;
+
+            /// Roc-internal return registers for RocStr/RocList results of
+            /// compiled-proc calls.
+            pub const ROC_RET_REGS = [3]Registers.GeneralReg{ .RAX, .RDX, .RCX };
+            /// Callee-saved register that holds an entrypoint's result pointer.
+            pub const RESULT_PTR_SAVE_REG = Registers.GeneralReg.RBX;
+            /// Callee-saved register that holds an entrypoint's RocOps pointer.
+            pub const ROC_OPS_SAVE_REG = Registers.GeneralReg.R12;
+            /// Register that addresses the caller's stack arguments. The frame
+            /// pointer does, since incoming arguments sit at a fixed offset
+            /// above it.
+            pub const CALLER_STACK_ARG_BASE_REG = BASE_PTR;
+            /// Offset of the first incoming stack argument from
+            /// `CALLER_STACK_ARG_BASE_REG`: the saved frame pointer and return
+            /// address, then the shadow space.
+            pub const INCOMING_STACK_ARG_BASE_OFFSET: i32 = 16 + @as(i32, SHADOW_SPACE);
+
             /// Check if a struct of the given size can be passed by value in a register.
             /// Windows x64 ABI: Only structs of size 1, 2, 4, or 8 bytes can be passed by value.
             pub fn canPassStructByValue(size: usize) bool {

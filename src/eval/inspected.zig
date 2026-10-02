@@ -42,6 +42,7 @@ const GuardedList = lir.LirStore.GuardedList;
 
 /// Failures while compiling or executing an inspected root.
 pub const Error = Allocator.Error || lir.CheckedPipeline.LowerResourceError || std.Thread.SpawnError || std.DynLib.Error || std.Io.File.OpenError || std.Io.File.Reader.Error || std.Io.File.Writer.Error || std.Io.File.StatError || std.Io.File.ReadPositionalError || std.Io.Writer.Error || check.CheckedArtifact.CompileTimeFinalizer.Error || error{
+    FlushInstructionCacheFailed,
     InvalidUtf8,
     LlvmBackendUnavailable,
     DevBackendUnavailable,
@@ -1993,24 +1994,7 @@ fn lowerCheckedRootWithViews(
     const shm_allocator = shm.allocator();
     const image_header = try shm_allocator.create(LirImage.Header);
 
-    var lowered = try lir.CheckedPipeline.lowerCheckedModulesToLir(
-        allocator,
-        .{
-            .root = check.CheckedArtifact.loweringView(root_module),
-            .imports = import_views,
-        },
-        .{ .requests = root_module.root_requests.runtime_requests },
-        .{
-            .target_usize = target_usize,
-            .specialization_strategy = options.specialization_strategy,
-            .inline_mode = options.inline_mode,
-            .list_in_place_map = options.list_in_place_map,
-            .inline_expects = options.inline_expects,
-            .tag_reachability = options.tag_reachability,
-            .prove_ranges = options.prove_ranges,
-            .debug_materialized_out = options.debug_materialized_out,
-        },
-    );
+    var lowered = try lowerCheckedRootLive(allocator, root_module, import_views, target_usize, options);
     defer lowered.deinit();
 
     const image_data = try @import("static_data").buildStaticDataForWidth(allocator, .{
@@ -2036,6 +2020,117 @@ fn lowerCheckedRootWithViews(
         .image_header = image_header,
         .view = view,
     };
+}
+
+fn lowerCheckedRootLive(
+    allocator: Allocator,
+    root_module: *check.CheckedArtifact.CheckedModuleArtifact,
+    import_views: []const check.CheckedArtifact.ImportedModuleView,
+    target_usize: base.target.TargetUsize,
+    options: LowerToLirOptions,
+) Error!lir.CheckedPipeline.LoweredProgram {
+    return lir.CheckedPipeline.lowerCheckedModulesToLir(
+        allocator,
+        .{
+            .root = check.CheckedArtifact.loweringView(root_module),
+            .imports = import_views,
+        },
+        .{ .requests = root_module.root_requests.runtime_requests },
+        .{
+            .target_usize = target_usize,
+            .specialization_strategy = options.specialization_strategy,
+            .inline_mode = options.inline_mode,
+            .list_in_place_map = options.list_in_place_map,
+            .inline_expects = options.inline_expects,
+            .tag_reachability = options.tag_reachability,
+            .prove_ranges = options.prove_ranges,
+            .debug_materialized_out = options.debug_materialized_out,
+        },
+    );
+}
+
+/// The Blake3 of one dev-backend object file, or the error compiling it
+/// returned.
+pub const DevObjectHash = union(enum) {
+    hash: [32]u8,
+    err: backend.CompilationError,
+};
+
+/// Lower an inspect-wrapped program for a 64-bit word and compile it through
+/// the dev backend's object-file path for each of `targets` (all 64-bit),
+/// writing the Blake3 of each object, with procedure symbol names
+/// canonicalized (`ProcIdentity.canonicalizeSymbolNames`) so the hash does not
+/// change with the compiler build, to `out`. This consumes the live lowering, not
+/// a LIR image: an image's layout store does not carry the recursive-graph
+/// keys that the object path's layout digests require.
+pub fn devObjectHashes(
+    allocator: Allocator,
+    source_kind: SourceKind,
+    source: []const u8,
+    imports: []const ModuleSource,
+    targets: []const roc_target.RocTarget,
+    out: []DevObjectHash,
+) Error!void {
+    std.debug.assert(targets.len == out.len);
+    var resources = try parseInspectedProgramImpl(allocator, source_kind, source, imports, null, null);
+    defer cleanupParseAndCanonical(allocator, resources);
+
+    const import_views = try allocator.alloc(check.CheckedArtifact.ImportedModuleView, resources.import_artifacts.len);
+    defer allocator.free(import_views);
+    for (resources.import_artifacts, 0..) |*module, i| {
+        import_views[i] = check.CheckedArtifact.importedView(module);
+    }
+
+    var lowered = try lowerCheckedRootLive(allocator, &resources.checked_artifact, import_views, .u64, .{});
+    defer lowered.deinit();
+
+    const static_data = try @import("static_data").buildStaticDataForWidth(allocator, .{
+        .root = check.CheckedArtifact.loweringView(&resources.checked_artifact),
+        .imports = import_views,
+    }, &lowered, .u64, .{});
+    defer @import("static_data").deinitStaticData(allocator, static_data);
+
+    const store = &lowered.lir_result.store;
+    const main_proc = lowered.lir_result.root_procs.items[0];
+    const main_spec = store.getProcSpec(main_proc);
+    const arg_locals = store.getLocalSpan(main_spec.args);
+    const arg_layouts = try allocator.alloc(LayoutIdx, arg_locals.len);
+    defer allocator.free(arg_layouts);
+    for (0..arg_locals.len) |i| {
+        arg_layouts[i] = store.getLocal(GuardedList.at(arg_locals, i)).layout_idx;
+    }
+    const entrypoints = [_]backend.Entrypoint{.{
+        .symbol_name = "roc_eval_main",
+        .proc = main_proc,
+        .arg_layouts = arg_layouts,
+        .ret_layout = main_spec.ret_layout,
+    }};
+
+    var object_compiler = backend.ObjectFileCompiler.init(allocator);
+    for (targets, out) |target, *slot| {
+        std.debug.assert(target.ptrBitWidth() == 64);
+        if (object_compiler.compileToObjectFile(
+            store,
+            &lowered.lir_result.layouts,
+            &entrypoints,
+            static_data,
+            store.getProcSpecs(),
+            lowered.lir_result.boxy_erased_arg_desc_offsets.items,
+            lowered.lir_result.boxy_erased_arg_desc_params.items,
+            lowered.lir_result.boxy_worker_procs.items,
+            target,
+        )) |result| {
+            defer result.allocator.free(result.object_bytes);
+            const canonical = try allocator.dupe(u8, result.object_bytes);
+            defer allocator.free(canonical);
+            try lir.LIR.ProcIdentity.canonicalizeSymbolNames(allocator, canonical);
+            var hash: [32]u8 = undefined;
+            std.crypto.hash.Blake3.hash(canonical, &hash, .{});
+            slot.* = .{ .hash = hash };
+        } else |err| {
+            slot.* = .{ .err = err };
+        }
+    }
 }
 
 fn evalRootName(source_kind: SourceKind, inspect_wrap: bool) []const u8 {

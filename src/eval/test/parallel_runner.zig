@@ -321,7 +321,7 @@ const FORKED_BACKEND_KILL_GRACE_MS: i64 = 5_000;
 const FORKED_BACKEND_KILL_POLL_NS: u64 = 10 * std.time.ns_per_ms;
 const LLVM_EVAL_LOCK_POLL_NS: u64 = 10 * std.time.ns_per_ms;
 const DEV_BACKEND_IMPLEMENTED = eval.backendAvailable(.dev);
-const WASM_BACKEND_IMPLEMENTED = true;
+const WASM_BACKEND_IMPLEMENTED = eval.backendAvailable(.wasm);
 const LLVM_BACKEND_IMPLEMENTED = eval.backendAvailable(.llvm);
 
 /// Set from `cli.verbose` in `main` after arg parsing. Read by `onTestStarted`,
@@ -2185,6 +2185,234 @@ fn collectTests() []const TestCase {
 }
 
 //
+// Dev-backend code hashes
+//
+
+// The byte-identity oracle for refactors of the dev backend driver
+// (projects/big/arm32-dev-backend.md, A0): every eval case that returns an
+// inspected string is compiled through the dev backend's object-file path for
+// each 64-bit native ISA, and the Blake3 of each object is recorded. Object-file
+// mode references builtins, static data and procedures through relocations,
+// unlike JIT mode, which embeds absolute host addresses, so the hashes are the
+// same on every host and one golden file covers both ISAs.
+
+const dev_code_hash_targets = [_]roc_target.RocTarget{ .x64musl, .arm64musl };
+
+const DevCodeHashMode = enum { write, check };
+
+const DevCodeHashRequest = struct {
+    mode: DevCodeHashMode,
+    path: []const u8,
+};
+
+/// Find `--write-dev-code-hashes <file>` or `--check-dev-code-hashes <file>`.
+/// The standard harness parser skips unknown `--` flags, so the runner reads
+/// these itself.
+fn parseDevCodeHashRequest(raw_args: []const []const u8) ?DevCodeHashRequest {
+    var i: usize = 1;
+    while (i < raw_args.len) : (i += 1) {
+        const mode: DevCodeHashMode = if (std.mem.eql(u8, raw_args[i], "--write-dev-code-hashes"))
+            .write
+        else if (std.mem.eql(u8, raw_args[i], "--check-dev-code-hashes"))
+            .check
+        else
+            continue;
+        if (i + 1 >= raw_args.len) {
+            std.debug.print("error: {s} requires a file path\n", .{raw_args[i]});
+            std.process.exit(2);
+        }
+        return .{ .mode = mode, .path = raw_args[i + 1] };
+    }
+    return null;
+}
+
+fn devCodeHashApplies(tc: TestCase) bool {
+    if (tc.skip.dev) return false;
+    return switch (tc.expected) {
+        .inspect_str, .allocations_at_most => true,
+        .comptime_f32_bits,
+        .comptime_f64_bits,
+        .comptime_f32_list_bits,
+        .comptime_f64_list_bits,
+        .problem,
+        .crash,
+        .problem_and_crash,
+        => false,
+    };
+}
+
+/// Append one line: `<name>\t<target>=<hash or error.Name>...`.
+fn appendDevCodeHashLine(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    name: []const u8,
+    tc: TestCase,
+) RunnerError!void {
+    try out.appendSlice(allocator, name);
+    var hashes: [dev_code_hash_targets.len]helpers.DevObjectHash = undefined;
+    helpers.devObjectHashes(allocator, tc.source_kind, tc.source, tc.imports, &dev_code_hash_targets, &hashes) catch |err| {
+        try out.print(allocator, "\tcompile={s}\n", .{@errorName(err)});
+        return;
+    };
+    for (dev_code_hash_targets, hashes) |target, result| {
+        try out.print(allocator, "\t{s}=", .{@tagName(target)});
+        switch (result) {
+            .hash => |hash| try out.appendSlice(allocator, &std.fmt.bytesToHex(hash, .lower)),
+            .err => |err| try out.print(allocator, "error.{s}", .{@errorName(err)}),
+        }
+    }
+    try out.append(allocator, '\n');
+}
+
+const DevCodeHashCase = struct {
+    tc: TestCase,
+    /// The test name, suffixed ` #N` for the Nth case sharing it.
+    name: []const u8,
+};
+
+/// Hash lines for `cases`, in order.
+fn devCodeHashLines(gpa: std.mem.Allocator, cases: []const DevCodeHashCase, out: *std.ArrayListUnmanaged(u8)) RunnerError!void {
+    var arena = collections.SingleThreadArena.init(gpa);
+    defer arena.deinit();
+    for (cases) |case| {
+        _ = arena.reset(.retain_capacity);
+        var line: std.ArrayListUnmanaged(u8) = .empty;
+        try appendDevCodeHashLine(arena.allocator(), &line, case.name, case.tc);
+        try out.appendSlice(gpa, line.items);
+    }
+}
+
+/// Hash lines for `cases`, split into contiguous shards computed by forked
+/// children and concatenated in shard order, so the output is identical to a
+/// sequential run.
+fn devCodeHashLinesSharded(gpa: std.mem.Allocator, cases: []const DevCodeHashCase, shard_count: usize, out: *std.ArrayListUnmanaged(u8)) RunnerError!void {
+    if (comptime !has_fork or coverage_mode or eval_no_fork) {
+        return devCodeHashLines(gpa, cases, out);
+    }
+
+    const Shard = struct { pid: posix.pid_t, read_fd: posix.fd_t, first: usize, end: usize };
+    const shards = try gpa.alloc(Shard, shard_count);
+    defer gpa.free(shards);
+
+    for (shards, 0..) |*shard, k| {
+        const first = cases.len * k / shard_count;
+        const end = cases.len * (k + 1) / shard_count;
+        const fds = harness.pipe() catch {
+            std.debug.print("error: pipe failed for dev code hash shard {d}\n", .{k});
+            std.process.exit(1);
+        };
+        const pid = harness.fork() catch {
+            std.debug.print("error: fork failed for dev code hash shard {d}\n", .{k});
+            std.process.exit(1);
+        };
+        if (pid == 0) {
+            harness.closeFd(fds[0]);
+            var lines: std.ArrayListUnmanaged(u8) = .empty;
+            devCodeHashLines(base.defaultGpa(), cases[first..end], &lines) catch |err| {
+                std.debug.print("error: dev code hash shard {d}: {s}\n", .{ k, @errorName(err) });
+                std.c._exit(2);
+            };
+            harness.writeAll(fds[1], lines.items);
+            harness.closeFd(fds[1]);
+            std.c._exit(0);
+        }
+        harness.closeFd(fds[1]);
+        shard.* = .{ .pid = pid, .read_fd = fds[0], .first = first, .end = end };
+    }
+
+    // Each child only writes, so draining the shards in order cannot deadlock:
+    // a later child blocked on a full pipe waits for its turn here.
+    var failed = false;
+    for (shards, 0..) |shard, k| {
+        var buf: [16 * 1024]u8 = undefined;
+        while (true) {
+            const n = harness.posixRead(shard.read_fd, &buf) catch {
+                failed = true;
+                break;
+            };
+            if (n == 0) break;
+            try out.appendSlice(gpa, buf[0..n]);
+        }
+        harness.closeFd(shard.read_fd);
+        const wait = harness.waitpid(shard.pid, 0);
+        if (!posix.W.IFEXITED(wait.status) or posix.W.EXITSTATUS(wait.status) != 0) {
+            std.debug.print("error: dev code hash shard {d} (cases {d}..{d}) did not exit cleanly; first case: {s}\n", .{
+                k, shard.first, shard.end, if (shard.first < shard.end) cases[shard.first].name else "<none>",
+            });
+            failed = true;
+        }
+    }
+    if (failed) std.process.exit(1);
+}
+
+/// Compute the hash file for `tests` and write it or compare it with `path`.
+/// It compiles, never executes.
+fn runDevCodeHashes(io: std.Io, gpa: std.mem.Allocator, tests: []const TestCase, request: DevCodeHashRequest, max_threads: ?usize) RunnerError!void {
+    var names_arena = collections.SingleThreadArena.init(gpa);
+    defer names_arena.deinit();
+
+    var cases: std.ArrayListUnmanaged(DevCodeHashCase) = .empty;
+    defer cases.deinit(gpa);
+    var seen = std.StringHashMap(u32).init(gpa);
+    defer seen.deinit();
+    for (tests) |tc| {
+        if (!devCodeHashApplies(tc)) continue;
+        const entry = try seen.getOrPut(tc.name);
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += 1;
+        const name = if (entry.value_ptr.* == 1)
+            tc.name
+        else
+            try std.fmt.allocPrint(names_arena.allocator(), "{s} #{d}", .{ tc.name, entry.value_ptr.* });
+        try cases.append(gpa, .{ .tc = tc, .name = name });
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try out.appendSlice(gpa, "# Blake3 of the dev-backend object for each eval case. Generated by\n" ++
+        "# `eval-test-runner --write-dev-code-hashes`; any change is a codegen change.\n");
+
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const shard_count = @max(1, @min(max_threads orelse cpu_count, cases.items.len));
+    std.debug.print("computing {d} dev code hashes in {d} shards\n", .{ cases.items.len, shard_count });
+    try devCodeHashLinesSharded(gpa, cases.items, shard_count, &out);
+    const count = cases.items.len;
+
+    switch (request.mode) {
+        .write => {
+            try harness.writeWholeFile(io, request.path, out.items);
+            std.debug.print("wrote {d} dev code hashes to {s}\n", .{ count, request.path });
+        },
+        .check => {
+            const expected = harness.readWholeFile(io, gpa, request.path) catch |err| {
+                std.debug.print("error: cannot read {s}: {s}\n", .{ request.path, @errorName(err) });
+                std.process.exit(1);
+            };
+            defer gpa.free(expected);
+            if (std.mem.eql(u8, expected, out.items)) {
+                std.debug.print("{d} dev code hashes match {s}\n", .{ count, request.path });
+                return;
+            }
+            var expected_lines = std.mem.splitScalar(u8, expected, '\n');
+            var actual_lines = std.mem.splitScalar(u8, out.items, '\n');
+            var mismatches: usize = 0;
+            while (true) {
+                const e = expected_lines.next();
+                const a = actual_lines.next();
+                if (e == null and a == null) break;
+                if (e != null and a != null and std.mem.eql(u8, e.?, a.?)) continue;
+                mismatches += 1;
+                if (mismatches <= 20) {
+                    std.debug.print("- {s}\n+ {s}\n", .{ e orelse "<missing>", a orelse "<missing>" });
+                }
+            }
+            std.debug.print("error: {d} dev code hash lines differ from {s}\n", .{ mismatches, request.path });
+            std.process.exit(1);
+        },
+    }
+}
+
+//
 // CLI parsing
 //
 
@@ -2213,6 +2441,12 @@ fn printHelp() void {
         \\  --filter <PATTERN>    Run only tests whose name or source contains PATTERN.
         \\  --threads <N>         Max concurrent child processes (default: number of CPU cores).
         \\  --verbose             Print PASS and SKIP results (default: only FAIL/CRASH).
+        \\  --write-dev-code-hashes <FILE>
+        \\                        Compile every inspect case through the dev backend's
+        \\                        object-file path for x64musl and arm64musl and write
+        \\                        each object's Blake3 to FILE. Nothing is executed.
+        \\  --check-dev-code-hashes <FILE>
+        \\                        Like --write-dev-code-hashes, but fail if FILE differs.
         \\  --timeout <MS>        Hang timeout in ms for parse/interp/dev/wasm.
         \\                        Default: 240000.
         \\                        LLVM uses a separate 420000ms backend budget.
@@ -2711,6 +2945,9 @@ pub fn main(init: std.process.Init) RunnerError!void {
     trace_worker.stamp("filter pass");
 
     const tests = filtered_buf.items;
+    if (parseDevCodeHashRequest(@ptrCast(try init.minimal.args.toSlice(args_arena.allocator())))) |request| {
+        return runDevCodeHashes(io, gpa, tests, request, cli.max_threads);
+    }
     if (tests.len == 0) {
         if (cli.filters.len == 0) {
             std.debug.print("No eval tests found.\n", .{});

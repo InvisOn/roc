@@ -39,6 +39,8 @@ zig-pkg
 *.s
 # Hand-written assembly source (the interpreter's hosted-call trampoline), not a build artifact.
 !src/eval/host_trampoline.S
+# The arm32 encoding oracle's input: A32 assembly paired with arm32 Emit calls.
+!ci/arm32_encoding_oracle.s
 *.so
 *.so.*
 *.obj
@@ -63,6 +65,9 @@ zig-pkg
 !test/fx/platform/targets/x64musl/libc.a
 !test/fx/platform/targets/arm64musl/crt1.o
 !test/fx/platform/targets/arm64musl/libc.a
+!test/fx/platform/targets/arm32musl/crt1.o
+!test/fx/platform/targets/arm32musl/libc.a
+!test/int/platform/targets/arm32linux/Scrt1.o
 
 # Force-include the MinGW C runtime files that are checked into the repo
 # (see ci/vendor_mingw_runtime.py). A `*mingw` target links only

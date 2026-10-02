@@ -504,6 +504,41 @@ jobs:
           command: zig build -Dtarget=${{ matrix.target }}
           retry_count: 3
 
+      # J3a of projects/big/arm32-dev-backend.md: the eval corpus run by a
+      # compiler built for arm32 under qemu on the dev backend's CPU floor
+      # (cortex-a9: ARMv7-A, NEON, VFPv3-D32, no integer divide).
+      - name: Install qemu (arm32)
+        if: matrix.target == 'arm-linux-musleabihf'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          qemu-arm-static -cpu help | grep -E '^ *cortex-a9$'
+
+      # Detects when Zig fixes the arm nested-struct ABI bug that
+      # test/fx/platform/host.zig works around: the probe expects the bug and
+      # fails, saying to remove the workaround, once it is gone.
+      - name: Check the Zig arm nested-struct ABI workaround is still needed
+        if: matrix.target == 'arm-linux-musleabihf'
+        run: zig test -target arm-linux-musleabihf --test-cmd qemu-arm-static --test-cmd-bin test/fx/platform/zig_arm_nested_struct_abi_probe.zig
+
+      # ReleaseSmall, not ReleaseFast: compiling the arm32 eval runner in
+      # ReleaseFast peaks at about 18 GB (17 GB even built alone), more than a
+      # hosted runner's 16 GB; ReleaseSmall peaks at 8 GB (the host-effects
+      # runner at 5 GB) and runs the corpus about 27% slower under qemu.
+      - name: Build the eval runner for arm32
+        if: matrix.target == 'arm-linux-musleabihf'
+        uses: ./.github/actions/flaky-retry
+        with:
+          command: zig build build-test-eval-runner build-test-eval-host-effects-runner -Dtarget=arm-linux-musleabihf -Doptimize=ReleaseSmall
+          retry_count: 3
+
+      - name: Run the eval corpus on arm32 under qemu
+        if: matrix.target == 'arm-linux-musleabihf'
+        run: qemu-arm-static -cpu cortex-a9 zig-out/bin/eval-test-runner --timeout 300000
+
+      - name: Run the host-effects corpus on arm32 under qemu
+        if: matrix.target == 'arm-linux-musleabihf'
+        run: qemu-arm-static -cpu cortex-a9 zig-out/bin/eval-host-effects-runner
   # aarch64 Linux smoke test of the shipped binary shape (moved here from PR
   # CI, where it cost ~23 min per push and only ever failed alongside the other
   # legs' build failures). Deliberately a single release binary plus one host
@@ -560,7 +595,7 @@ jobs:
           retry_count: 3
 
       - name: Test native instruction-cache publication
-        run: zig test src/machine_code_shim/instruction_cache.zig -O ReleaseSafe
+        run: zig test src/backend/dev/instruction_cache.zig -O ReleaseSafe
 
       - name: run hello_world.roc
         run: |

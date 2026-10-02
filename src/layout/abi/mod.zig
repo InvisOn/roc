@@ -15,6 +15,7 @@ const Store = store_mod.Store;
 const Idx = layout.Idx;
 
 pub const aarch64 = @import("aarch64.zig");
+pub const arm32 = @import("arm32.zig");
 pub const x86_64 = @import("x86_64.zig");
 pub const wasm = @import("wasm.zig");
 
@@ -33,6 +34,7 @@ pub const AssignedRegPiece = call.AssignedRegPiece;
 pub const StackValue = call.StackValue;
 pub const PointerLocation = call.PointerLocation;
 pub const PhysicalArg = call.PhysicalArg;
+pub const Split = call.Split;
 pub const PhysicalCall = call.PhysicalCall;
 pub const assignPhysicalArgs = call.assignPhysicalArgs;
 
@@ -56,6 +58,7 @@ pub fn needsRocOps(store: *const Store, arg_idxs: []const Idx, ret_idx: Idx) boo
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(aarch64);
+    std.testing.refAllDecls(arm32);
     std.testing.refAllDecls(x86_64);
     std.testing.refAllDecls(wasm);
     std.testing.refAllDecls(call);
