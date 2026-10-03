@@ -158,7 +158,6 @@ fn classifyTestHelperError(err: helpers.TestHelperError) TestHelperErrorKind {
         error.LlvmObjectEmitFailed,
         error.BitcodeParseError,
         error.ModuleLinkFailed,
-        error.TempFileError,
         error.LinkFailed,
         error.UnsupportedLowLevel,
         error.UnsupportedHostedFunction,
