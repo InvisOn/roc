@@ -1,10 +1,12 @@
 //! Shared driver for the build fuzzers: generate a typed module and its
-//! platform/app wrapper, check it the way `roc build` does, and lower every
-//! platform entrypoint to LIR.
+//! platform/app wrapper, check it the way `roc build` does, lower every
+//! platform entrypoint to LIR, and compile that LIR with the dev backend for
+//! the selected target when the dev backend supports it.
 
 const std = @import("std");
 const build_options = @import("build_options");
 const builtin = @import("builtin");
+const backend = @import("backend");
 const base = @import("base");
 const check = @import("check");
 const compile = @import("compile");
@@ -142,6 +144,60 @@ pub fn run(buf: [*]u8, len: isize, debug: bool, mode: Mode) void {
         error.HostedFunctionNotBound => @panic("generated app declared a hosted function its platform header did not bind"),
     };
     defer lowered.deinit();
+
+    compileWithDevBackend(gpa, root_checked, imported, relations, &lowered, selected_target, debug);
+}
+
+/// The compile oracle: every program that lowers must compile with the dev
+/// backend for any target it supports (x86_64, aarch64 and arm32). The
+/// procedures are compiled the way a module pack is, every one as a global
+/// symbol with no host entrypoint, so the whole program reaches the code
+/// generator. Any error other than running out of memory is a failure.
+fn compileWithDevBackend(
+    gpa: std.mem.Allocator,
+    root_checked: *const check.CheckedArtifact.CheckedModuleArtifact,
+    imported: []const check.CheckedArtifact.ImportedModuleView,
+    relations: []const check.CheckedArtifact.ImportedModuleView,
+    lowered: *const lir.CheckedPipeline.LoweredProgram,
+    selected_target: roc_target.RocTarget,
+    debug: bool,
+) void {
+    if (!backend.dev.supportsTarget(selected_target)) return;
+    const static_data = compile.static_data_exports.buildStaticData(
+        gpa,
+        .{
+            .root = check.CheckedArtifact.loweringViewWithRelations(root_checked, relations),
+            .imports = imported,
+        },
+        lowered,
+        selected_target,
+        .{},
+    ) catch |err| switch (err) {
+        error.OutOfMemory => @panic("OOM while building static data for the dev backend"),
+        error.UnsupportedTarget => std.debug.panic("static data refused a target the dev backend supports: {s}", .{@tagName(selected_target)}),
+    };
+    defer compile.static_data_exports.deinitStaticData(gpa, static_data);
+
+    var object_compiler = backend.ObjectFileCompiler.initForPack(gpa);
+    var result = object_compiler.compileToObjectFile(
+        &lowered.lir_result.store,
+        &lowered.lir_result.layouts,
+        &.{},
+        static_data,
+        lowered.lir_result.store.getProcSpecs(),
+        lowered.lir_result.boxy_erased_arg_desc_offsets.items,
+        lowered.lir_result.boxy_erased_arg_desc_params.items,
+        lowered.lir_result.boxy_worker_procs.items,
+        selected_target,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => @panic("OOM during dev backend object compilation"),
+        error.NoEntrypoints, error.CodeGenerationFailed, error.ObjectGenerationFailed, error.UnsupportedTarget => std.debug.panic(
+            "dev backend failed to compile the generated program for {s}: {s}",
+            .{ @tagName(selected_target), @errorName(err) },
+        ),
+    };
+    defer result.deinit();
+    if (debug) std.debug.print("dev backend object for {s}: {d} bytes\n", .{ @tagName(selected_target), result.object_bytes.len });
 }
 
 fn targetUsize(target: roc_target.RocTarget) base.target.TargetUsize {
