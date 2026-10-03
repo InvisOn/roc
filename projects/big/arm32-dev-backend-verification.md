@@ -617,6 +617,17 @@ Done 2026-09-29, locally (nothing pushed).
   The branch was pushed at `934365af0a` before minici and the arm32 checks
   had finished, at the owner's request; they passed afterwards.
   Logs: `.git/verify-tools/upstream-sync/90d093540f/`.
+- 2026-10-04, catch-up merge `e15080eab2` of upstream `main` at
+  `c50792641a` (45 commits, 9 PRs since `7f442d5453`, whose merge
+  `c2e7586c23` is in it). One conflict, two CLI cases added at the same
+  line; both kept. No fix needed. All checks at `e15080eab2`:
+  relative 64-bit oracle (pinned builds) PASS, nothing differs; minici
+  79/79; arm32 eval corpus under qemu 2431 passed, 0 failed, 42 with a
+  backend skipped; host effects 104/104; `test/fx` 124/124 under qemu, on
+  the Raspberry Pi 5 and on the Pi 3; the int app as arm32musl and
+  arm32linux on the Pi 3 prints x64musl's 54 lines. This also completes
+  the arm32 checks the 2026-10-03 merge `c2e7586c23` did not finish.
+  Logs: `.git/verify-tools/upstream-sync/c50792641a/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
