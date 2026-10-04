@@ -328,6 +328,7 @@ Checklist for the upstream pull requests:
 | 2026-10-03, relative oracle on the merge of upstream `90d093540f` (#11885) | `5ee8a07527` (#4, A0), made unworkable by upstream `842120f79f` | the commit that adds this row | Every one of 2,217 eval hashes differed from upstream's on both ISAs. Upstream's Debug checks now pass the proc identity as immediates, and the identity includes the compiler's git revision, so two builds at different commits never produce the same bytes; `canonicalizeSymbolNames` only renames symbols. A0's committed `test/dev_code_hashes/eval.blake3` would fail at every commit, so the file, `run-check-dev-code-hashes` and its minici phase are removed. The hash mode stays, and the relative oracle now builds both sides as one compiler version (a `git` shim); with it the merge matches upstream on all 2,219 cases. The four `dev_object` snapshots do not depend on the version (checked: pinned and unpinned builds give the same hashes). DESIGN.md, "A stored hash of generated code cannot outlive a compiler commit". |
 | 2026-10-03, arm32 eval corpus under qemu on the merge of upstream `90d093540f` | `da28d4ab0e` (the merge; upstream added `List.clear`) | the commit that adds this row | Upstream's new `callListClear` passed the list's length and capacity at offsets 8 and 16 and the sublist window's `U64` start and length as one word each, so on arm32 the builtin read the wrong words: "clear keeps a unique list's capacity" returned `(0, False)`. The offsets are now `wordOffset(1)` and `wordOffset(2)` and the window uses `addImm64Arg`; both are the same code on 64-bit targets. |
 | 2026-10-03, the same run | upstream's test "issue 11698: long string interpolation" (new in #11885), on an arm32 host | the commit that adds this row | Compiling a 5,000-segment interpolation takes memory that grows faster than its length; the compiler, running as a 32-bit process under qemu, ran out of address space (`OutOfMemory` after three minutes, both specialization variants). A limit of arm32 as a host, not of generated code. On hosts with a word under 8 bytes the case now uses the file's shallow depth (1,000); 64-bit hosts are unchanged. It then passes under qemu. |
+| 2026-10-05, arm32 eval corpus under qemu on the merge of upstream `130536d915` | `ab40715790` (the merge; upstream raised the case from 1,000 to 5,000 levels and dropped `shallow_depth`) | `5780b595c6` | "issue 11698: lambdas nested as method arguments", both specialization variants, ran out of memory: compiling it 5,000 deep peaks at 4.6 GB on x86_64, past a 32-bit process. The same limit of arm32 as a host as the long interpolation above. Both cases now share one constant, `address_bound_depth` (1,000 on hosts with a word under 8 bytes, `depth` otherwise); 64-bit hosts are unchanged. Both pass under qemu. |
 | 2026-09-29, sweep | `506b0486f2` (#38, J1a) | `ac6b9ca982` (#39, J1b) | `zig build run-check-tidy`: the test helper `expectCode` in `arm32/CodeGen.zig` returned an inferred error set (`!void`); J1b made it `error{TestExpectedEqual}!void`. |
 
 ### Part 1: history cleanup
@@ -628,6 +629,23 @@ Done 2026-09-29, locally (nothing pushed).
   arm32linux on the Pi 3 prints x64musl's 54 lines. This also completes
   the arm32 checks the 2026-10-03 merge `c2e7586c23` did not finish.
   Logs: `.git/verify-tools/upstream-sync/c50792641a/`.
+- 2026-10-05, merge `ab40715790` of upstream `main` at `130536d915` (5 PRs
+  since `c50792641a`). Two conflicts in test code: upstream dropped
+  `shallow_depth` (the interpolation keeps a 32-bit depth of its own), and
+  upstream orders the eval tests for stable worker indices (the dev-code
+  hash request runs on that list). One fix, `5780b595c6` (findings table).
+  Checks: relative 64-bit oracle (pinned builds) PASS, nothing differs, one
+  snapshot follows upstream's stack-plan change (`991b539c6b`); minici
+  79/79, after one phase traced to the machine: the LSP test "parse errors
+  are reported as diagnostics" reads `/tmp`, where a file of the owner's
+  has a type error; it fails the same on clean upstream and passes with an
+  empty `/tmp` (issue draft 29). arm32 eval corpus under qemu 2430 passed,
+  2 failed before the fix, both fixed cases then pass under qemu; host
+  effects 104/104; `test/fx` 124/124 under qemu, on the Raspberry Pi 5 and
+  on the Pi 3; the int app on the Pi 3 prints x64musl's 54 lines. The
+  eval corpus under qemu now takes about 3 hours: upstream runs the 33
+  deep-nesting cases one at a time, at full depth.
+  Logs: `.git/verify-tools/upstream-sync/130536d915/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
