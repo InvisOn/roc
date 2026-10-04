@@ -643,9 +643,18 @@ Done 2026-09-29, locally (nothing pushed).
   2 failed before the fix, both fixed cases then pass under qemu; host
   effects 104/104; `test/fx` 124/124 under qemu, on the Raspberry Pi 5 and
   on the Pi 3; the int app on the Pi 3 prints x64musl's 54 lines. The
-  eval corpus under qemu now takes about 3 hours: upstream runs the 33
-  deep-nesting cases one at a time, at full depth.
+  eval corpus under qemu took 3 hours on that run, most of it spent on the
+  two cases running out of memory; with the fix it takes 46 minutes.
   Logs: `.git/verify-tools/upstream-sync/130536d915/`.
+- 2026-10-05, merge `bb37da3d49` of upstream `main` at `728b911a9f` (2 PRs
+  since `130536d915`). No conflicts, no fix. Checks: relative 64-bit
+  oracle (pinned builds) PASS, nothing differs, no snapshot change; minici
+  79/79 (the LSP `/tmp` phase again, passed with an empty `/tmp`); arm32
+  eval corpus under qemu 2434 passed, 0 failed, 42 with a backend skipped;
+  host effects 104/104; `test/fx` 124/124 under qemu, on the Raspberry
+  Pi 5 and on the Pi 3; the int app as arm32musl and arm32linux on the
+  Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/728b911a9f/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
