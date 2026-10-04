@@ -16,13 +16,14 @@ const depth = 5000;
 const depth_str = std.fmt.comptimePrint("{d}", .{depth});
 const stack_bytes = 4 * 1024 * 1024;
 
-/// Compiling the long interpolation takes memory that grows faster than its
-/// length: at `depth` segments a compiler running as a 32-bit process
-/// exhausts its address space (seen on arm32 under qemu). There it nests
-/// 1000 segments, which is still far deeper than the stack allows a
-/// per-segment recursion.
-const interpolation_depth = if (@sizeOf(usize) >= 8) depth else 1000;
-const interpolation_depth_str = std.fmt.comptimePrint("{d}", .{interpolation_depth});
+/// Compiling a few shapes takes memory that grows faster than their depth:
+/// at `depth`, the long interpolation and the lambdas nested as method
+/// arguments (4.6 GB on x86_64) exhaust the address space of a compiler
+/// running as a 32-bit process (seen on arm32 under qemu). There they nest
+/// 1000 levels, which is still far deeper than the stack allows a per-level
+/// recursion.
+const address_bound_depth = if (@sizeOf(usize) >= 8) depth else 1000;
+const address_bound_depth_str = std.fmt.comptimePrint("{d}", .{address_bound_depth});
 
 /// Shapes whose compilation still does work superlinear in their depth nest
 /// less deeply, on a stack still far smaller than that depth times any
@@ -381,8 +382,8 @@ const cases = [_]TestCase{
     .{
         .name = "issue 11698: long string interpolation",
         .source_kind = .module,
-        .source = "render = |s| \"" ++ repeat("${s}", interpolation_depth) ++ "\"\nmain = Str.count_utf8_bytes(render(\"a\"))\n",
-        .expected = .{ .inspect_str = interpolation_depth_str },
+        .source = "render = |s| \"" ++ repeat("${s}", address_bound_depth) ++ "\"\nmain = Str.count_utf8_bytes(render(\"a\"))\n",
+        .expected = .{ .inspect_str = address_bound_depth_str },
         .stack_bytes = stack_bytes,
     },
     .{
@@ -423,7 +424,7 @@ const cases = [_]TestCase{
     .{
         .name = "issue 11698: lambdas nested as method arguments",
         .source_kind = .module,
-        .source = "main = " ++ repeat("[1.U64].map(|_| ", depth) ++ "1.U64" ++ repeat(").len()", depth) ++ "\n",
+        .source = "main = " ++ repeat("[1.U64].map(|_| ", address_bound_depth) ++ "1.U64" ++ repeat(").len()", address_bound_depth) ++ "\n",
         .expected = .{ .inspect_str = "1" },
         .stack_bytes = stack_bytes,
     },
