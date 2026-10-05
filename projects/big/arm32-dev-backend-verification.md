@@ -665,6 +665,21 @@ Done 2026-09-29, locally (nothing pushed).
   124/124 under qemu, on the Raspberry Pi 5 and on the Pi 3; the int app
   as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/ce7b298cac/`.
+- 2026-10-06, merge `61138eb334` of upstream `main` at `ccfa817819` (6 PRs
+  since `ce7b298cac`, among them UTF-16 and UTF-32 string builtins). One
+  conflict, `layout/abi/call.zig`: upstream added a `wasm32v1` target in
+  the switch arms that hold `arm32`; both kept. One adaptation in the
+  merge: upstream's new index scaling in `generateSimdLoad` shifted at
+  `.w64` through a driver helper our branch keeps in each ISA's code
+  generator; it now calls `self.codegen.emitShlImm` at the target word
+  (same code on 64-bit targets). Checks: relative 64-bit oracle (pinned
+  builds) PASS, nothing differs, one snapshot follows upstream on every
+  target (`0dce8ab814`); minici 79/79; arm32 eval corpus under qemu 2537
+  passed, 0 failed, 42 with a backend skipped; host effects 106/106;
+  `test/fx` 124/124 under qemu, on the Raspberry Pi 5 and on the Pi 3;
+  the int app as arm32musl and arm32linux on the Pi 3 prints x64musl's
+  54 lines.
+  Logs: `.git/verify-tools/upstream-sync/ccfa817819/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
