@@ -495,6 +495,53 @@ A genuinely 64-bit memory field written from an immediate
 (`StrFromUtf8Layout`'s tags) goes through `emitStoreImm64`, which is already
 width-generic: one store on a 64-bit target, two word stores on a 32-bit one.
 
+### Tests follow upstream's practice; where they deviate
+
+New tests follow upstream's practice. A dev backend change gets an eval case
+in the shared eval files (`eval_low_level_tests.zig`, `eval_tests.zig`,
+`eval_simd_tests.zig`, `rc_conformance_tests.zig`), which every backend runs
+and whose results the runner compares; a backend is left out only through the
+case's `skip` field. A change visible only through a whole program gets a
+program under `test/cli/`, `test/echo/` or `test/fx/` and an entry in the CLI
+runner. Code that runs only on values unknown at compile time (an eval case's
+constants are folded before the backends see them) is tested by a
+`test/fx/runtime_*.roc` program that reads a number from stdin, with its
+expected output in `src/cli/test/fx_test_specs.zig`. Unit tests sit in the file they test. There are no per-backend or
+arm32-only eval files.
+
+Where arm32 testing deviates from that practice, and why:
+
+- **Encodings are checked against an assembler**
+  (`ci/arm32_encoding_oracle.*`, the generated `encoding_oracle_tests.zig`,
+  322 tests), where upstream's x86_64 and aarch64 encoders have hand-written
+  tests in `Emit.zig`. A new encoder written from the manual has no other
+  independent source of truth; see "Encodings" above.
+- **Byte-identity oracles for the 64-bit targets** (the dev-code-hash request
+  in the eval runner, the relative oracle in `.git/verify-tools/`, the
+  `dev_object` snapshot hashes). Upstream has no oracle that its x86_64 and
+  aarch64 output stays the same; the driver refactor for arm32 needed one.
+- **Test parameters that depend on the host's word size.** The deep-nesting
+  eval cases whose compilation takes more memory than a 32-bit process can
+  address nest 1,000 levels on such a host (`address_bound_depth`), and the
+  eval runner reports the wasm evaluator unavailable in a 32-bit process
+  (`src/eval/mod.zig`). Upstream's tests never run in a 32-bit process.
+- **Generated programs run on arm32**, under qemu and on Raspberry Pis: the
+  eval corpus with the runner built for arm32, the host-effects corpus,
+  `test/fx` through the CLI runner's `--cross-run`/`--cross-runner` (added
+  for arm32), and the int app. Upstream's CI only builds for targets it does
+  not run on. These runs are local (`.git/verify-tools/roc/hw_checks.roc`),
+  not in CI.
+- **The build fuzzer also compiles each program with the dev backend**
+  (`test/fuzzing/BuildFuzzDriver.zig`), for every target the dev backend
+  supports; upstream's build fuzzer stops after lowering.
+- **Line coverage is measured with a tool of our own**
+  (`.git/verify-tools/cov/`: Zig's bitcode instrumented by Zig's clang with
+  SanitizerCoverage, block pruning off), where upstream uses its kcov fork on
+  arm64 hosts. Local only. The target is every line of our code (the arm32
+  files and the driver lines this branch added or changed, by `git diff`
+  against upstream) that the arm32 build compiles; gaps in upstream's shared
+  driver code are listed, not chased.
+
 ## Learnings
 
 ### Is 32-bit support too tightly coupled to wasm32?
