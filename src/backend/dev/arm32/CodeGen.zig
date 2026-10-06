@@ -262,11 +262,6 @@ pub fn CodeGen(comptime target: RocTarget) type {
             return self.allocStack(size);
         }
 
-        pub fn getStackSize(self: *Self) u32 {
-            const size: u32 = @intCast(-self.stack_offset);
-            return Emit.CC.alignStackSize(size);
-        }
-
         // Function prologue/epilogue
 
         /// Deferred frame builder type for this architecture.
@@ -692,14 +687,6 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
         pub fn emitStoreStackW16(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
             try self.emitStoreW16(fp, offset, src);
-        }
-
-        pub fn emitLoadStackByte(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
-            try self.emitLoadW8(dst, fp, offset);
-        }
-
-        pub fn emitLoadStackHalfword(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
-            try self.emitLoadW16(dst, fp, offset);
         }
 
         /// dst = fp + offset
