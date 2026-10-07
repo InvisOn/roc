@@ -166,6 +166,11 @@ pub const io_spec_tests = [_]TestSpec{
         .description = "Float-to-integer conversions discard the fractional part toward zero",
     },
     .{
+        .roc_file = "test/fx/runtime_float_arith_widths.roc",
+        .io_spec = "0<3|1>f64: 1.75 -3.5 3.5|1>f32: 5.5 1.5 7 1.75 -3.5|1>lte: yes no yes no yes no",
+        .description = "Float arithmetic at both widths and signed and float comparisons on runtime values",
+    },
+    .{
         .roc_file = "test/fx/runtime_conversion_to_str_widths.roc",
         .io_spec = "0<3|1>unsigned: 3 3 3 3 3|1>signed: -3 -3 -3 -3 -3|1>frac: 3 3 3.0",
         .description = "Every number type renders as text the same way on every backend",
