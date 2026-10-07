@@ -545,6 +545,9 @@ pub fn Emit(comptime target: RocTarget) type {
             /// callee-saved registers, so incoming stack arguments start at
             /// [fp, #8].
             pub const INCOMING_STACK_ARG_BASE_OFFSET: u32 = 8;
+            /// Register that addresses the caller's stack arguments: the frame
+            /// pointer, since they sit at a fixed offset above it (as on x86_64).
+            pub const CALLER_STACK_ARG_BASE_REG = BASE_PTR;
 
             /// Align a stack size to the platform's required alignment.
             pub fn alignStackSize(size: u32) u32 {
