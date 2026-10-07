@@ -106,18 +106,6 @@ pub const wasm_runner = if (builtin.target.os.tag == .freestanding) struct {
         output: []u8,
         allocation_count: u32,
     };
-
-    pub fn runWasmStr(_: std.mem.Allocator, _: []const u8, _: u32, _: bool) EvalError![]u8 {
-        return error.WasmExecFailed;
-    }
-
-    pub fn runWasmStrWithStats(_: std.mem.Allocator, _: []const u8, _: u32, _: bool) EvalError!RunWasmStrResult {
-        return error.WasmExecFailed;
-    }
-
-    pub fn runWasmStrWithStatsAtHeapBase(_: std.mem.Allocator, _: []const u8, _: bool, _: u32) EvalError!RunWasmStrResult {
-        return error.WasmExecFailed;
-    }
 } else @import("wasm_runner.zig");
 /// Checked-module compilation and inspected evaluation support.
 pub const Inspected = @import("inspected.zig");
@@ -148,9 +136,7 @@ test "eval tests" {
     std.testing.refAllDecls(@import("frozen_root_transcode.zig"));
     std.testing.refAllDecls(@import("inspected_run.zig"));
     std.testing.refAllDecls(@import("rc_conformance.zig"));
-    std.testing.refAllDecls(@import("stack.zig"));
     std.testing.refAllDecls(@import("inspected.zig"));
     std.testing.refAllDecls(@import("test/host_trampoline_assembly_test.zig"));
     std.testing.refAllDecls(@import("runtime_host.zig"));
-    std.testing.refAllDecls(@import("test/stack_test.zig"));
 }
