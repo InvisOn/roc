@@ -329,6 +329,9 @@ Checklist for the upstream pull requests:
 | 2026-10-03, arm32 eval corpus under qemu on the merge of upstream `90d093540f` | `da28d4ab0e` (the merge; upstream added `List.clear`) | the commit that adds this row | Upstream's new `callListClear` passed the list's length and capacity at offsets 8 and 16 and the sublist window's `U64` start and length as one word each, so on arm32 the builtin read the wrong words: "clear keeps a unique list's capacity" returned `(0, False)`. The offsets are now `wordOffset(1)` and `wordOffset(2)` and the window uses `addImm64Arg`; both are the same code on 64-bit targets. |
 | 2026-10-03, the same run | upstream's test "issue 11698: long string interpolation" (new in #11885), on an arm32 host | the commit that adds this row | Compiling a 5,000-segment interpolation takes memory that grows faster than its length; the compiler, running as a 32-bit process under qemu, ran out of address space (`OutOfMemory` after three minutes, both specialization variants). A limit of arm32 as a host, not of generated code. On hosts with a word under 8 bytes the case now uses the file's shallow depth (1,000); 64-bit hosts are unchanged. It then passes under qemu. |
 | 2026-10-05, arm32 eval corpus under qemu on the merge of upstream `130536d915` | `ab40715790` (the merge; upstream raised the case from 1,000 to 5,000 levels and dropped `shallow_depth`) | `5780b595c6` | "issue 11698: lambdas nested as method arguments", both specialization variants, ran out of memory: compiling it 5,000 deep peaks at 4.6 GB on x86_64, past a 32-bit process. The same limit of arm32 as a host as the long interpolation above. Both cases now share one constant, `address_bound_depth` (1,000 on hosts with a word under 8 bytes, `depth` otherwise); 64-bit hosts are unchanged. Both pass under qemu. |
+| 2026-10-08, building the merge of upstream `af14b38403` | the merge: upstream's callee-owned argument blocks and frame-replacing tail calls exist for x86_64 and aarch64 only | `a35404fb46` | arm32 did not compile. The arm32 side was written in the merge: the epilogue pops the block (`pop {fp, lr}; add sp; bx lr`), and a frame-replacing call restores the callee-saved registers through the shared routine after the body, keeps the saved fp and return address in r4 and r5 while it moves the staged block top down through r12, sets sp from fp with immediates only, and jumps through r12. |
+| 2026-10-08, arm32 under qemu on the merge of `af14b38403` | upstream's new `addThreeWordMemArg` and `addStrBytesLenCapMemArgs` | `a35404fb46` | They added the second and third RocStr/RocList words at offsets 8 and 16, so on arm32 every builtin taking a string or list read the wrong words (a program that reads stdin died with SIGILL). They now use the target word; same code on 64-bit targets. |
+| 2026-10-08, the regression test of `64cc97dcbe` under qemu | upstream's frame-replacing call staging | `a35404fb46` | The staged argument block advanced 8 bytes per word, so a tail call into a function with stack-passed arguments read a null pointer when the block grew. It advances one word. |
 | 2026-09-29, sweep | `506b0486f2` (#38, J1a) | `ac6b9ca982` (#39, J1b) | `zig build run-check-tidy`: the test helper `expectCode` in `arm32/CodeGen.zig` returned an inferred error set (`!void`); J1b made it `error{TestExpectedEqual}!void`. |
 
 ### Part 1: history cleanup
@@ -702,6 +705,21 @@ Done 2026-09-29, locally (nothing pushed).
   `runtime_float_arith_widths.roc`); the int app as arm32musl and arm32linux
   on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/d866f7cf6a/`.
+- 2026-10-08, merge `a35404fb46` of upstream `main` at `af14b38403` (an
+  omnibus PR: 323 commits, 904 files). It gives every Roc-ABI procedure
+  ownership of its argument block and adds frame-replacing tail calls, for
+  x86_64 and aarch64 only; the merge adds the arm32 side (callee-popped
+  blocks in the frame builder, a frame-replacing exit through a shared
+  callee-saved restore, word-sized argument blocks, staging and helpers).
+  Sixteen files conflicted. New regression test `64cc97dcbe` (tail calls
+  between functions with argument blocks of different sizes). Checks:
+  relative 64-bit oracle (pinned builds) PASS, nothing differs, four
+  snapshots follow upstream's convention on every target (`c956ebfe0d`);
+  minici 80/80; arm32 eval corpus under qemu 2565 passed, 0 failed, 44
+  with a backend skipped; host effects 106/106; `test/fx` 131/131 under
+  qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as arm32musl
+  and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/af14b38403/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
