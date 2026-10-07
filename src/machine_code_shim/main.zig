@@ -6,6 +6,7 @@
 //! entrypoint wrapper directly from the shared mapping.
 
 const std = @import("std");
+const invariant = @import("base").invariant;
 const builtin = @import("builtin");
 const stack_probe = @import("stack_probe.zig");
 const instruction_cache = backend.dev.instruction_cache;
@@ -733,7 +734,7 @@ fn executeDevEntrypoint(
 ) void {
     const entrypoint = devEntrypointForOrdinal(program.entrypoints, entry_idx) orelse {
         if (builtin.mode == .Debug) {
-            std.debug.panic("machine-code shim invariant violated: missing dev entrypoint ordinal {d}", .{entry_idx});
+            invariant("machine-code shim invariant violated: missing dev entrypoint ordinal {d}", .{entry_idx});
         }
         unreachable;
     };
@@ -778,14 +779,14 @@ fn acquireDevProgramRef(program: *DevProgram) void {
         return;
     } else if (program.descriptor_offset != hot_reload.invalid_descriptor_offset) {
         if (builtin.mode == .Debug) {
-            std.debug.panic("machine-code shim invariant violated: hot reload program has no descriptor", .{});
+            invariant("machine-code shim invariant violated: hot reload program has no descriptor", .{});
         }
         unreachable;
     }
 
     const previous = program.local_refs.fetchAdd(1, .acquire);
     if (builtin.mode == .Debug and previous == 0) {
-        std.debug.panic("machine-code shim invariant violated: acquired unreferenced dev program", .{});
+        invariant("machine-code shim invariant violated: acquired unreferenced dev program", .{});
     }
 }
 
@@ -794,13 +795,13 @@ fn releaseDevProgramRefLocked(state: *RuntimeState, program: *DevProgram) void {
         hot_reload.releaseDescriptor(descriptor);
     } else if (program.descriptor_offset != hot_reload.invalid_descriptor_offset) {
         if (builtin.mode == .Debug) {
-            std.debug.panic("machine-code shim invariant violated: hot reload program has no descriptor", .{});
+            invariant("machine-code shim invariant violated: hot reload program has no descriptor", .{});
         }
         unreachable;
     } else {
         const previous = program.local_refs.fetchSub(1, .acq_rel);
         if (builtin.mode == .Debug and previous == 0) {
-            std.debug.panic("machine-code shim invariant violated: released unreferenced dev program", .{});
+            invariant("machine-code shim invariant violated: released unreferenced dev program", .{});
         }
     }
     reclaimRetiredProgramsLocked(state);
@@ -814,13 +815,13 @@ fn releaseDevProgramRef(program: *DevProgram) void {
         hot_reload.releaseDescriptor(descriptor);
     } else if (program.descriptor_offset != hot_reload.invalid_descriptor_offset) {
         if (builtin.mode == .Debug) {
-            std.debug.panic("machine-code shim invariant violated: hot reload program has no descriptor", .{});
+            invariant("machine-code shim invariant violated: hot reload program has no descriptor", .{});
         }
         unreachable;
     } else {
         const previous = program.local_refs.fetchSub(1, .acq_rel);
         if (builtin.mode == .Debug and previous == 0) {
-            std.debug.panic("machine-code shim invariant violated: released unreferenced dev program", .{});
+            invariant("machine-code shim invariant violated: released unreferenced dev program", .{});
         }
     }
 
