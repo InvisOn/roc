@@ -690,6 +690,18 @@ Done 2026-09-29, locally (nothing pushed).
   them to the Pi; none ran wrong); the int app as arm32musl and arm32linux
   on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/c34079d4cd/`.
+- 2026-10-07, merge `f22f27ab8d` of upstream `main` at `233bb124dc` (one PR,
+  `src/flake.nix` only). The tree differs from the verified `91eb57a75c`
+  only in that file, which no build or test reads, so its checks stand.
+- 2026-10-08, merge `4b22510855` of upstream `main` at `d866f7cf6a` (one PR:
+  `build.zig`, the wasm archive, the echo platform). No conflicts, no fix.
+  Checks: relative 64-bit oracle (pinned builds) PASS, nothing differs, no
+  snapshot change; minici 79/79; arm32 eval corpus under qemu 2539 passed,
+  0 failed, 42 with a backend skipped; host effects 106/106; `test/fx`
+  125/125 under qemu, on the Raspberry Pi 5 and on the Pi 3 (now with
+  `runtime_float_arith_widths.roc`); the int app as arm32musl and arm32linux
+  on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/d866f7cf6a/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
