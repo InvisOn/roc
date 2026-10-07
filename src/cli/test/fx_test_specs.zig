@@ -171,6 +171,11 @@ pub const io_spec_tests = [_]TestSpec{
         .description = "Float arithmetic at both widths and signed and float comparisons on runtime values",
     },
     .{
+        .roc_file = "test/fx/runtime_tail_call_arg_blocks.roc",
+        .io_spec = "0<1000000|1>ping first: 1500015|1>pong first: 1500000",
+        .description = "Tail calls between functions with argument blocks of different sizes run in constant stack",
+    },
+    .{
         .roc_file = "test/fx/runtime_conversion_to_str_widths.roc",
         .io_spec = "0<3|1>unsigned: 3 3 3 3 3|1>signed: -3 -3 -3 -3 -3|1>frac: 3 3 3.0",
         .description = "Every number type renders as text the same way on every backend",
