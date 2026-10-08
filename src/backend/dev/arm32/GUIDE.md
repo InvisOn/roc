@@ -21,7 +21,7 @@ and its reason is in `projects/big/arm32-dev-backend-existing-code-changes.md`.
   `roc build --opt=dev --target=arm32musl` builds real programs (J2): the
   `int` platform's eleven checks pass under qemu and on a Raspberry Pi 3
   (armv7l), and all 121 `test/fx` programs build and run correctly under
-  qemu. The fx host works around a Zig 0.16 arm ABI bug for one hosted
+  qemu. The fx host works around a Zig arm ABI bug (present in 0.16 and 0.17) for one hosted
   function (`work_around_zig_arm_nested_struct_bug` in
   `test/fx/platform/host.zig`; issues note). After a Zig upgrade the arm host
   stops compiling until you run the probe it names:

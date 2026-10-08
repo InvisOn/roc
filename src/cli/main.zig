@@ -215,7 +215,8 @@ fn initCliBuildEnv(ctx: *CliCtx, opts: CliBuildEnvOptions) InitCliBuildEnvError!
     var build_env = try BuildEnv.init(ctx.gpa, mode, thread_count, roc_target.host_cpu.nativeTarget(), cwd, ctx.io.std_io);
     errdefer build_env.deinit();
 
-    build_env.compiler_version = build_options.compiler_version;
+    build_env.compiler_version = build_options.compiler_compatibility_id;
+    build_env.source_pin_version = @import("compiler_version").compiler_version;
     build_env.detailed_monotype_diagnostics = opts.timings;
     build_env.resolution_config = opts.resolution_config;
     build_env.setWatchInputTracking(opts.track_watch_inputs);
@@ -472,16 +473,16 @@ const ShimLibraries = struct {
     const interpreter_native = if (builtin.is_test)
         &[_]u8{}
     else if (builtin.target.os.tag == .windows)
-        @embedFile("roc_interpreter_shim.lib")
+        @import("embedded_assets").file("roc_interpreter_shim.lib")
     else
-        @embedFile("libroc_interpreter_shim.a");
+        @import("embedded_assets").file("libroc_interpreter_shim.a");
 
     const machine_code_native = if (builtin.is_test)
         &[_]u8{}
     else if (builtin.target.os.tag == .windows)
-        @embedFile("roc_machine_code_shim.lib")
+        @import("embedded_assets").file("roc_machine_code_shim.lib")
     else
-        @embedFile("libroc_machine_code_shim.a");
+        @import("embedded_assets").file("libroc_machine_code_shim.a");
 
     pub fn forTarget(kind: ShimLibraryKind, _: RocTarget) []const u8 {
         return switch (kind) {
@@ -550,65 +551,65 @@ const BuiltinsObjects = struct {
     const native = if (builtin.is_test)
         &[_]u8{}
     else if (builtin.os.tag == .windows)
-        @embedFile("roc_builtins.obj")
+        @import("embedded_assets").file("roc_builtins.obj")
     else
-        @embedFile("roc_builtins.o");
+        @import("embedded_assets").file("roc_builtins.o");
 
     /// Cross-compilation target builtins (Linux musl targets)
-    const x64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64musl/roc_builtins.o");
-    const arm64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/roc_builtins.o");
+    const x64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64musl/roc_builtins.o");
+    const arm64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64musl/roc_builtins.o");
 
     /// Cross-compilation target builtins (Linux glibc targets)
-    const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_builtins.o");
-    const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_builtins.o");
+    const x64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64glibc/roc_builtins.o");
+    const arm64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64glibc/roc_builtins.o");
 
     /// Cross-compilation target builtins (32-bit ARM Linux targets)
-    const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_builtins.o");
-    const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_builtins.o");
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_builtins.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_builtins.o");
 
     /// WebAssembly target builtins (wasm32-freestanding)
-    const wasm32 = if (builtin.is_test) &[_]u8{} else @embedFile("targets/wasm32/roc_builtins.o");
+    const wasm32 = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/wasm32/roc_builtins.o");
 
     /// Cross-compilation target builtins (Windows targets)
-    const x64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64win/roc_builtins.obj");
-    const x64mingw = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mingw/roc_builtins.obj");
-    const arm64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64win/roc_builtins.obj");
-    const arm64mingw = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mingw/roc_builtins.obj");
+    const x64win = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64win/roc_builtins.obj");
+    const x64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mingw/roc_builtins.obj");
+    const arm64win = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64win/roc_builtins.obj");
+    const arm64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mingw/roc_builtins.obj");
 
     /// Cross-compilation target builtins (macOS targets)
-    const x64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mac/roc_builtins.o");
-    const arm64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mac/roc_builtins.o");
+    const x64mac = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mac/roc_builtins.o");
+    const arm64mac = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mac/roc_builtins.o");
 
     /// Cross-compilation target builtins (BSD targets)
-    const x64freebsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64freebsd/roc_builtins.o");
-    const x64openbsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64openbsd/roc_builtins.o");
-    const x64netbsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64netbsd/roc_builtins.o");
+    const x64freebsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/roc_builtins.o");
+    const x64openbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64openbsd/roc_builtins.o");
+    const x64netbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/roc_builtins.o");
 
     /// Extern-symbol-mode builtins: host operations are linker-resolved
     /// symbols (the symbol ABI) instead of RocOps vtable calls.
     const native_extern = if (builtin.is_test)
         &[_]u8{}
     else if (builtin.os.tag == .windows)
-        @embedFile("roc_builtins_extern.obj")
+        @import("embedded_assets").file("roc_builtins_extern.obj")
     else
-        @embedFile("roc_builtins_extern.o");
+        @import("embedded_assets").file("roc_builtins_extern.o");
 
-    const x64musl_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64musl/roc_builtins_extern.o");
-    const arm64musl_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/roc_builtins_extern.o");
-    const x64glibc_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_builtins_extern.o");
-    const arm64glibc_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_builtins_extern.o");
-    const arm32musl_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_builtins_extern.o");
-    const arm32glibc_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_builtins_extern.o");
-    const wasm32_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/wasm32/roc_builtins_extern.o");
-    const x64win_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64win/roc_builtins_extern.obj");
-    const x64mingw_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mingw/roc_builtins_extern.obj");
-    const arm64win_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64win/roc_builtins_extern.obj");
-    const arm64mingw_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mingw/roc_builtins_extern.obj");
-    const x64mac_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mac/roc_builtins_extern.o");
-    const arm64mac_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mac/roc_builtins_extern.o");
-    const x64freebsd_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64freebsd/roc_builtins_extern.o");
-    const x64openbsd_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64openbsd/roc_builtins_extern.o");
-    const x64netbsd_extern = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64netbsd/roc_builtins_extern.o");
+    const x64musl_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64musl/roc_builtins_extern.o");
+    const arm64musl_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64musl/roc_builtins_extern.o");
+    const x64glibc_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64glibc/roc_builtins_extern.o");
+    const arm64glibc_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64glibc/roc_builtins_extern.o");
+    const wasm32_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/wasm32/roc_builtins_extern.o");
+    const x64win_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64win/roc_builtins_extern.obj");
+    const x64mingw_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mingw/roc_builtins_extern.obj");
+    const arm64win_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64win/roc_builtins_extern.obj");
+    const arm64mingw_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mingw/roc_builtins_extern.obj");
+    const x64mac_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mac/roc_builtins_extern.o");
+    const arm64mac_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mac/roc_builtins_extern.o");
+    const x64freebsd_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/roc_builtins_extern.o");
+    const x64openbsd_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64openbsd/roc_builtins_extern.o");
+    const x64netbsd_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/roc_builtins_extern.o");
+    const arm32musl_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_builtins_extern.o");
+    const arm32glibc_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_builtins_extern.o");
 
     /// Get the appropriate builtins object bytes for the given target
     ///
@@ -706,7 +707,7 @@ const BuiltinsObjects = struct {
     pub fn filename(target: RocTarget) []const u8 {
         return switch (target.toOsTag()) {
             .windows => "roc_builtins.obj",
-            .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => "roc_builtins.o",
+            .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .wiiu, .@"switch", .gba, .psx, .tios, .ashetos, .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => "roc_builtins.o",
         };
     }
 
@@ -714,7 +715,7 @@ const BuiltinsObjects = struct {
     pub fn filenameExtern(target: RocTarget) []const u8 {
         return switch (target.toOsTag()) {
             .windows => "roc_builtins_extern.obj",
-            .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => "roc_builtins_extern.o",
+            .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .wiiu, .@"switch", .gba, .psx, .tios, .ashetos, .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => "roc_builtins_extern.o",
         };
     }
 };
@@ -723,26 +724,26 @@ const BuiltinsObjects = struct {
 /// the Roc-owned object and localized before any platform input participates
 /// in symbol resolution; it is never linked as a public archive member.
 const WasmCompilerRtObject = struct {
-    const bytes = if (builtin.is_test) &[_]u8{} else @embedFile("targets/wasm32/roc_compiler_rt.o");
+    const bytes = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/wasm32/roc_compiler_rt.o");
 };
 
 fn DefaultPlatformObjects(comptime base_name: []const u8) type {
     return struct {
-        const x64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64musl/" ++ base_name ++ ".o");
-        const arm64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/" ++ base_name ++ ".o");
-        const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/" ++ base_name ++ ".o");
-        const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/" ++ base_name ++ ".o");
-        const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/" ++ base_name ++ ".o");
-        const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/" ++ base_name ++ ".o");
-        const x64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mac/" ++ base_name ++ ".o");
-        const arm64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mac/" ++ base_name ++ ".o");
-        const x64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64win/" ++ base_name ++ ".obj");
-        const x64mingw = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mingw/" ++ base_name ++ ".obj");
-        const arm64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64win/" ++ base_name ++ ".obj");
-        const arm64mingw = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mingw/" ++ base_name ++ ".obj");
-        const x64freebsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64freebsd/" ++ base_name ++ ".o");
-        const x64openbsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64openbsd/" ++ base_name ++ ".o");
-        const x64netbsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64netbsd/" ++ base_name ++ ".o");
+        const x64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64musl/" ++ base_name ++ ".o");
+        const arm64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64musl/" ++ base_name ++ ".o");
+        const x64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64glibc/" ++ base_name ++ ".o");
+        const arm64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64glibc/" ++ base_name ++ ".o");
+        const x64mac = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mac/" ++ base_name ++ ".o");
+        const arm64mac = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mac/" ++ base_name ++ ".o");
+        const x64win = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64win/" ++ base_name ++ ".obj");
+        const x64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mingw/" ++ base_name ++ ".obj");
+        const arm64win = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64win/" ++ base_name ++ ".obj");
+        const arm64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mingw/" ++ base_name ++ ".obj");
+        const x64freebsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/" ++ base_name ++ ".o");
+        const x64openbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64openbsd/" ++ base_name ++ ".o");
+        const x64netbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/" ++ base_name ++ ".o");
+        const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/" ++ base_name ++ ".o");
+        const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/" ++ base_name ++ ".o");
 
         pub fn forTarget(requested: RocTarget) ?[]const u8 {
             const target = requested.defaultCpuTarget();
@@ -885,14 +886,14 @@ fn defaultCompilerRtDigest(requested: RocTarget) ?[32]u8 {
 /// them. Every other default platform links its target's C runtime, which
 /// does, and has no carrier.
 const DefaultPlatformCompilerRtObjects = struct {
-    const x64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64musl/roc_default_compiler_rt.o");
-    const arm64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/roc_default_compiler_rt.o");
-    const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_default_compiler_rt.o");
-    const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_default_compiler_rt.o");
-    const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_default_compiler_rt.o");
-    const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_default_compiler_rt.o");
-    const x64freebsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64freebsd/roc_default_compiler_rt.o");
-    const x64netbsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64netbsd/roc_default_compiler_rt.o");
+    const x64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64musl/roc_default_compiler_rt.o");
+    const arm64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64musl/roc_default_compiler_rt.o");
+    const x64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64glibc/roc_default_compiler_rt.o");
+    const arm64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64glibc/roc_default_compiler_rt.o");
+    const x64freebsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/roc_default_compiler_rt.o");
+    const x64netbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/roc_default_compiler_rt.o");
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_default_compiler_rt.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_default_compiler_rt.o");
 
     pub fn forTarget(requested: RocTarget) ?[]const u8 {
         return switch (requested.defaultCpuTarget()) {
@@ -940,22 +941,22 @@ const DefaultPlatformCompilerRtObjects = struct {
 /// object, so a standalone dev build of a generic program works wherever a
 /// standalone dev build works at all.
 const BoxyRuntimeObjects = struct {
-    const x64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64musl/roc_boxy_runtime.o");
-    const arm64musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64musl/roc_boxy_runtime.o");
-    const x64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64glibc/roc_boxy_runtime.o");
-    const arm64glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64glibc/roc_boxy_runtime.o");
-    const arm32musl = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32musl/roc_boxy_runtime.o");
-    const arm32glibc = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm32glibc/roc_boxy_runtime.o");
-    const x64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mac/roc_boxy_runtime.o");
-    const arm64mac = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mac/roc_boxy_runtime.o");
-    const x64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64win/roc_boxy_runtime.obj");
-    const arm64win = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64win/roc_boxy_runtime.obj");
-    const x64freebsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64freebsd/roc_boxy_runtime.o");
-    const x64openbsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64openbsd/roc_boxy_runtime.o");
-    const x64netbsd = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64netbsd/roc_boxy_runtime.o");
-    const x64mingw = if (builtin.is_test) &[_]u8{} else @embedFile("targets/x64mingw/roc_boxy_runtime.obj");
-    const arm64mingw = if (builtin.is_test) &[_]u8{} else @embedFile("targets/arm64mingw/roc_boxy_runtime.obj");
-    const wasm32 = if (builtin.is_test) &[_]u8{} else @embedFile("targets/wasm32/roc_boxy_runtime.o");
+    const x64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64musl/roc_boxy_runtime.o");
+    const arm64musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64musl/roc_boxy_runtime.o");
+    const x64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64glibc/roc_boxy_runtime.o");
+    const arm64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64glibc/roc_boxy_runtime.o");
+    const x64mac = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mac/roc_boxy_runtime.o");
+    const arm64mac = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mac/roc_boxy_runtime.o");
+    const x64win = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64win/roc_boxy_runtime.obj");
+    const arm64win = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64win/roc_boxy_runtime.obj");
+    const x64freebsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/roc_boxy_runtime.o");
+    const x64openbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64openbsd/roc_boxy_runtime.o");
+    const x64netbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/roc_boxy_runtime.o");
+    const x64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mingw/roc_boxy_runtime.obj");
+    const arm64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mingw/roc_boxy_runtime.obj");
+    const wasm32 = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/wasm32/roc_boxy_runtime.o");
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_boxy_runtime.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_boxy_runtime.o");
 
     /// The boxy runtime object bytes for `target`, or null when the target has
     /// no runtime and boxy programs cannot be built standalone for it.
@@ -1246,8 +1247,8 @@ fn createHardlink(ctx: *CliCtx, source: []const u8, dest: []const u8) (Allocator
         }
     } else {
         // On POSIX systems, use the link system call
-        const source_c = try ctx.arena.dupeZ(u8, source);
-        const dest_c = try ctx.arena.dupeZ(u8, dest);
+        const source_c = try ctx.arena.dupeSentinel(u8, source, 0);
+        const dest_c = try ctx.arena.dupeSentinel(u8, dest, 0);
 
         const result = c.link(source_c, dest_c);
         if (result != 0) {
@@ -1399,7 +1400,7 @@ pub fn main(init: std.process.Init) Allocator.Error!void {
     // This gives us a helpful error message instead of a generic segfault
     // if the compiler blows the stack (e.g., due to infinite recursion in type translation).
     const stack_overflow_installed = base.stack_overflow.installForCurrentThread();
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         std.debug.assert(stack_overflow_installed);
     } else if (!stack_overflow_installed) {
         unreachable;
@@ -1411,7 +1412,7 @@ pub fn main(init: std.process.Init) Allocator.Error!void {
         // in release builds too (e.g. to leak-check a ReleaseSafe binary). Everything
         // else uses the fast target allocator—see base.defaultGpa.
         const use_debug_allocator = builtin.os.tag != .freestanding and
-            (builtin.mode == .Debug or build_options.debug_gpa);
+            (builtin.mode == .debug or build_options.debug_gpa);
         if (use_debug_allocator) {
             // Under Valgrind, use libc's malloc instead: Valgrind can't see the
             // debug allocator's sub-allocations (it carves them out of mmap'd
@@ -1604,7 +1605,7 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8, std_io: 
         .test_cmd => |test_args| try rocTest(&ctx, test_args, args[0]),
         .repl => |repl_args| rocRepl(&ctx, repl_args),
         .glue => |glue_args| rocGlue(&ctx, glue_args),
-        .version => ctx.io.stdout().print("Roc compiler version {s}\n", .{build_options.compiler_version}),
+        .version => ctx.io.stdout().print("Roc compiler version {s}\n", .{@import("compiler_version").compiler_version}),
         .docs => |docs_args| rocDocs(&ctx, docs_args),
         .deps => |deps_args| rocDeps(&ctx, deps_args),
         .bump => |bump_args| rocBump(&ctx, bump_args),
@@ -2075,7 +2076,7 @@ fn appendHostedCacheEntriesFromView(
             .module_key = view.key.bytes,
             .order_key = proc.orderKey(view.hosted_procs),
             .external_symbol_name = view.canonical_names.externalSymbolNameText(proc.external_symbol_name),
-            .def_idx = @intFromEnum(proc.def_idx),
+            .def_idx = @backingInt(proc.def_idx),
             .deterministic_index = proc.deterministic_index,
         });
     }
@@ -2132,9 +2133,9 @@ fn applyHostedBindings(
     for (bindings, 0..) |binding, dispatch_index| {
         const entry_index = declared_by_target.get(.{
             .module_key = binding.target_checked_module.bytes,
-            .def_idx = @intFromEnum(binding.target_def),
+            .def_idx = @backingInt(binding.target_def),
         }) orelse {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("default roc command invariant violated: the hosted section names a function with no hosted declaration in scope", .{});
             }
             unreachable;
@@ -2256,7 +2257,7 @@ const LayoutHashContext = struct {
         const size_align = self.layouts.layoutSizeAlign(layout_val);
         updateHashBytes(hasher, "layout-node");
         updateHashU32(hasher, seen_index);
-        updateHashU32(hasher, @intCast(@intFromEnum(layout_val.tag)));
+        updateHashU32(hasher, @intCast(@backingInt(layout_val.tag)));
         updateHashU32(hasher, @intCast(size_align.size));
         updateHashU32(hasher, @intCast(size_align.alignment.toByteUnits()));
         updateHashBool(hasher, self.layouts.layoutContainsRefcounted(layout_val));
@@ -2264,11 +2265,11 @@ const LayoutHashContext = struct {
         switch (layout_val.tag) {
             .scalar => {
                 const scalar = layout_val.getScalar();
-                updateHashU32(hasher, @intCast(@intFromEnum(scalar.tag)));
+                updateHashU32(hasher, @intCast(@backingInt(scalar.tag)));
                 switch (scalar.tag) {
-                    .int => updateHashU32(hasher, @intCast(@intFromEnum(scalar.getInt()))),
-                    .frac => updateHashU32(hasher, @intCast(@intFromEnum(scalar.getFrac()))),
-                    .vector => updateHashU32(hasher, @intCast(@intFromEnum(scalar.getVector()))),
+                    .int => updateHashU32(hasher, @intCast(@backingInt(scalar.getInt()))),
+                    .frac => updateHashU32(hasher, @intCast(@backingInt(scalar.getFrac()))),
+                    .vector => updateHashU32(hasher, @intCast(@backingInt(scalar.getVector()))),
                     .str, .opaque_ptr => {},
                 }
             },
@@ -2330,18 +2331,18 @@ fn updatePlatformAppRelationIdentity(
     const relations = root_artifact.platform_requirement_relations.relations;
     updateHashU32(hasher, @intCast(relations.len));
     for (relations) |relation| {
-        updateHashU32(hasher, @intFromEnum(relation.declaration));
+        updateHashU32(hasher, @backingInt(relation.declaration));
         updateHashU32(hasher, relation.requires_idx);
-        updateHashU32(hasher, @intFromEnum(relation.value_kind));
+        updateHashU32(hasher, @backingInt(relation.value_kind));
     }
 
     const bindings = root_artifact.platform_required_bindings.bindings;
     updateHashU32(hasher, @intCast(bindings.len));
     for (bindings) |binding| {
-        updateHashU32(hasher, @intFromEnum(binding.declaration));
+        updateHashU32(hasher, @backingInt(binding.declaration));
         updateHashU32(hasher, binding.requires_idx);
-        updateHashU32(hasher, @intFromEnum(binding.checked_relation));
-        updateHashU32(hasher, @intFromEnum(std.meta.activeTag(binding.value_use)));
+        updateHashU32(hasher, @backingInt(binding.checked_relation));
+        updateHashU32(hasher, @backingInt(std.meta.activeTag(binding.value_use)));
     }
 
     const checked_error_requires = root_artifact.platform_required_bindings.checked_error_requires;
@@ -2383,7 +2384,7 @@ fn checkedInterpreterHostIdentity(
 ) Allocator.Error![32]u8 {
     var hasher = base.Sha256.init(.{});
     updateHashBytes(&hasher, "roc-run-checked-host-interface-v2");
-    updateHashU32(&hasher, @intFromEnum(target_usize));
+    updateHashU32(&hasher, @backingInt(target_usize));
 
     const declarations_hash = root_artifact.platform_required_declarations.identityHash(&root_artifact.canonical_names);
     hasher.update(&declarations_hash);
@@ -2469,17 +2470,17 @@ fn entrypointAbiDigestFromLirData(
                 .indirect => updateHashU32(h, 1),
                 .registers => |registers| {
                     updateHashU32(h, 2);
-                    updateHashU32(h, @intFromEnum(std.meta.activeTag(registers.carrier)));
+                    updateHashU32(h, @backingInt(std.meta.activeTag(registers.carrier)));
                     switch (registers.carrier) {
                         .array => |alignment| updateHashU32(h, alignment orelse 0),
                         .piecewise, .structure, .integer => {},
                     }
                     updateHashU32(h, @intCast(registers.pieces.len));
                     for (registers.pieces) |piece| {
-                        updateHashU32(h, @intFromEnum(piece.class));
+                        updateHashU32(h, @backingInt(piece.class));
                         updateHashU32(h, piece.offset);
                         updateHashU32(h, piece.size);
-                        updateHashU32(h, if (piece.vector_kind) |kind| @intFromEnum(kind) + 1 else 0);
+                        updateHashU32(h, if (piece.vector_kind) |kind| @backingInt(kind) + 1 else 0);
                     }
                 },
             }
@@ -2591,7 +2592,7 @@ const ShimHostExeCacheInputs = struct {
 fn shimHostExeCacheDigest(inputs: ShimHostExeCacheInputs) [32]u8 {
     var hasher = base.Sha256.init(.{});
     updateHashBytes(&hasher, "roc-run-shim-host-cache-v3");
-    updateHashBytes(&hasher, build_options.compiler_version);
+    updateHashBytes(&hasher, build_options.compiler_compatibility_id);
     updateHashBytes(&hasher, @tagName(inputs.shim_kind));
     updateHashBytes(&hasher, @tagName(inputs.target));
     updateHashBool(&hasher, inputs.debug);
@@ -2614,7 +2615,7 @@ fn shimHostExeCacheName(
 }
 
 fn testDigest(byte: u8) [32]u8 {
-    return [_]u8{byte} ** 32;
+    return @as([32]u8, @splat(byte));
 }
 
 fn testCacheDigest(checked_host_identity: [32]u8, link_inputs_identity: [32]u8) [32]u8 {
@@ -3114,14 +3115,14 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
     reporter.finish();
 
     if (entrypoint_names.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("default roc command invariant violated: no platform entrypoints in checked LIR root metadata", .{});
         }
         unreachable;
     }
 
     const selected_target = validated_link_spec.target;
-    const enable_debug = builtin.mode == .Debug;
+    const enable_debug = builtin.mode == .debug;
     const shim_kind: ShimLibraryKind = switch (args.opt) {
         .dev => .machine_code,
         .interpreter => .lir,
@@ -3230,7 +3231,7 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
             },
             .interpreter => blk: {
                 const shm_handle = shm_handle_opt orelse {
-                    if (builtin.mode == .Debug) {
+                    if (builtin.mode == .debug) {
                         base.invariant("interpreter run invariant violated: missing LIR shared-memory handle", .{});
                     }
                     unreachable;
@@ -3337,7 +3338,7 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
                 },
                 .interpreter => blk: {
                     const shm_handle = shm_handle_opt orelse {
-                        if (builtin.mode == .Debug) {
+                        if (builtin.mode == .debug) {
                             base.invariant("interpreter run invariant violated: missing LIR shared-memory handle", .{});
                         }
                         unreachable;
@@ -3399,7 +3400,7 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
     }
 
     const shm_handle = shm_handle_opt orelse {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("default roc command invariant violated: missing shared-memory handle before launching shim", .{});
         }
         unreachable;
@@ -3408,7 +3409,7 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
     std.log.debug("Launching shim executable: {s}", .{exe_path});
     if (args.watch) {
         const result = if (lowered_result) |*value| value else {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("hot reload invariant violated: missing lowered result for dev shim watch run", .{});
             }
             unreachable;
@@ -3578,11 +3579,11 @@ fn spawnExecutableWithArgv0(
             ) c_int;
         };
 
-        const exe_path_z = try ctx.arena.dupeZ(u8, exe_path);
+        const exe_path_z = try ctx.arena.dupeSentinel(u8, exe_path, 0);
         const argv = try ctx.arena.allocSentinel(?[*:0]const u8, 1 + app_args.len, null);
-        argv[0] = (try ctx.arena.dupeZ(u8, argv0)).ptr;
+        argv[0] = (try ctx.arena.dupeSentinel(u8, argv0, 0)).ptr;
         for (app_args, 0..) |arg, i| {
-            argv[1 + i] = (try ctx.arena.dupeZ(u8, arg)).ptr;
+            argv[1 + i] = (try ctx.arena.dupeSentinel(u8, arg, 0)).ptr;
         }
 
         var pid: std.c.pid_t = undefined;
@@ -3645,7 +3646,7 @@ fn finishRunTermination(
             std.process.exit(code);
         },
         .signal => |signal| {
-            const sig_num = @intFromEnum(signal);
+            const sig_num = @backingInt(signal);
             std.log.debug("Child process {s} killed by signal: {}", .{ exe_path, sig_num });
             const result = platform_validation.targets_validator.ValidationResult{
                 .process_signaled = .{ .signal = sig_num },
@@ -3659,7 +3660,7 @@ fn finishRunTermination(
             try failOnCheckErrors(diagnostics);
             return ctx.fail(.{ .child_process_signaled = .{
                 .command = exe_path,
-                .signal = @intFromEnum(signal),
+                .signal = @backingInt(signal),
             } });
         },
         .unknown => |status| {
@@ -3911,14 +3912,14 @@ fn rocRunDefaultAppSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, staged
 
     const entrypoint_names = lowered_result.entrypoint_names;
     if (entrypoint_names.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("default app run invariant violated: no platform entrypoints", .{});
         }
         unreachable;
     }
 
     const lowered = &lowered_result.lowered;
-    const enable_debug = builtin.mode == .Debug;
+    const enable_debug = builtin.mode == .debug;
     const exe_checked_host_identity = defaultRunCheckedHostIdentity(selected_target, entrypoint_names, lowered_result.hosted_symbols);
     const link_inputs_identity = defaultRunLinkInputsIdentity(selected_target) orelse {
         return rejectRunTargetNotExecutable(ctx, selected_target);
@@ -4281,7 +4282,7 @@ fn runWithPosixFdInheritance(
     }
 
     // Debug-only verification that fd flags were actually cleared
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         const verify_flags = std.c.fcntl(shm_handle.fd, std.c.F.GETFD);
         if (verify_flags == -1) {
             return ctx.fail(.{ .shared_memory_failed = .{
@@ -4364,10 +4365,10 @@ const HotShimChild = struct {
         const pid = self.child.id orelse return;
         switch (builtin.os.tag) {
             .windows => {
-                _ = std.os.windows.ntdll.NtTerminateProcess(pid, @enumFromInt(1));
+                _ = std.os.windows.ntdll.NtTerminateProcess(pid, @fromBackingInt(@intCast(1)));
             },
             .wasi => {},
-            .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => std.posix.kill(pid, .KILL) catch {},
+            .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .wiiu, .@"switch", .gba, .psx, .tios, .ashetos, .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => std.posix.kill(pid, .KILL) catch {},
         }
     }
 };
@@ -4643,6 +4644,7 @@ fn finishHotReloadRebuild(
             error.Canceled,
             error.CurrentDirUnlinked,
             error.NameTooLong,
+            error.PathExceedsLimit,
             error.OutOfMemory,
             error.Unexpected,
             => |e| return e,
@@ -5918,6 +5920,12 @@ test "diagnostic summaries support colored and plain output" {
 }
 
 test "diagnostic summary header has exact colors and bounded width" {
+    const rule = repeated: {
+        const pattern = "─";
+        var result: [pattern.len * 43]u8 = undefined;
+        for (0..43) |i| @memcpy(result[i * pattern.len ..][0..pattern.len], pattern);
+        break :repeated result;
+    };
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
 
@@ -5926,7 +5934,7 @@ test "diagnostic summary header has exact colors and bounded width" {
     plain_config.max_line_width = 80;
     try renderSummaryHeaderLine(&output.writer, 1, 1, "example.roc", plain_config);
     try std.testing.expectEqualStrings(
-        "── 1 error and 1 warning " ++ ("─" ** 43) ++ " example.roc\n\n",
+        "── 1 error and 1 warning " ++ rule ++ " example.roc\n\n",
         output.written(),
     );
 
@@ -5938,7 +5946,7 @@ test "diagnostic summary header has exact colors and bounded width" {
         ansi_term.bright_black ++ "── " ++
             ansi_term.red ++ "1 error" ++ ansi_term.reset ++ " and " ++
             ansi_term.yellow ++ "1 warning" ++ ansi_term.bright_black ++ " " ++
-            ("─" ** 43) ++ " " ++ ansi_term.cyan ++ "example.roc" ++ ansi_term.reset ++ "\n\n",
+            rule ++ " " ++ ansi_term.cyan ++ "example.roc" ++ ansi_term.reset ++ "\n\n",
         output.written(),
     );
 
@@ -5977,7 +5985,7 @@ const LoweredCoordinatorResult = struct {
 
 fn successfulInternalStaticData(result: *const LoweredCoordinatorResult, label: []const u8) []const backend.StaticDataExport {
     return result.internal_static_data orelse {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("{s} invariant violated: dev RunImage lowering produced no internal static data bundle", .{label});
         }
         unreachable;
@@ -6452,9 +6460,9 @@ fn writeDevRunImageToSharedMemory(
         }
         for (proc_specs, 0..) |proc, i| {
             if (proc.is_static_initializer) continue;
-            const proc_id: lir.LIR.LirProcSpecId = @enumFromInt(@as(u32, @intCast(i)));
+            const proc_id: lir.LIR.LirProcSpecId = @fromBackingInt(@intCast(@as(u32, @intCast(i))));
             const compiled = codegen.compiledProcSymbol(proc_id) orelse {
-                if (builtin.mode == .Debug) {
+                if (builtin.mode == .debug) {
                     base.invariant("dev run invariant violated: LIR proc {d} was not compiled before image symbol publication", .{i});
                 }
                 unreachable;
@@ -6467,7 +6475,7 @@ fn writeDevRunImageToSharedMemory(
         }
         for (static_rc_helpers) |helper_key| {
             const code_offset = codegen.compiledStaticDataRcHelperOffset(helper_key) orelse {
-                if (builtin.mode == .Debug) {
+                if (builtin.mode == .debug) {
                     base.invariant(
                         "dev run invariant violated: static RC helper {x} was not compiled before image symbol publication",
                         .{helper_key.encode()},
@@ -6491,7 +6499,7 @@ fn writeDevRunImageToSharedMemory(
         for (platform_entrypoints, 0..) |platform_entrypoint, i| {
             const ordinal: usize = @intCast(platform_entrypoint.ordinal);
             if (ordinal >= entrypoint_names.len) {
-                if (builtin.mode == .Debug) {
+                if (builtin.mode == .debug) {
                     base.invariant("dev run invariant violated: platform entrypoint ordinal {d} exceeds name table length {d}", .{ ordinal, entrypoint_names.len });
                 }
                 unreachable;
@@ -6718,7 +6726,7 @@ fn evaluateLirImageEntrypoint(
 
     _ = interpreter.runEntrypoint(view, ordinal, arg_ptr, ret_ptr) catch |err| switch (err) {
         error.EntrypointNotFound => {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("CLI LIR image invariant violated: missing platform entrypoint ordinal {d}", .{ordinal});
             }
             unreachable;
@@ -7189,7 +7197,7 @@ fn getRocCacheDir(allocator: std.mem.Allocator) (Allocator.Error || error{NoCach
 /// Cross-platform helper to get environment variable.
 /// Returns null if the variable is not set. Caller must free the returned slice.
 fn getEnvVar(allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!?[]const u8 {
-    const key_z = try allocator.dupeZ(u8, key);
+    const key_z = try allocator.dupeSentinel(u8, key, 0);
     defer allocator.free(key_z);
     const value = std.c.getenv(key_z) orelse return null;
     const len = std.mem.len(value);
@@ -7676,7 +7684,7 @@ fn rocInstall(ctx: *CliCtx, args: cli_args.InstallArgs) CliMainError!void {
         .kind = @tagName(install_kind),
         .url = args.url,
         .hash = parsed_url.hash,
-        .compiler_version = build_options.compiler_version,
+        .compiler_version = @import("compiler_version").compiler_version,
     });
     std.Io.Dir.cwd().writeFile(ctx.io.std_io, .{ .sub_path = staging.manifest_path, .data = manifest_json }) catch |err| {
         return ctx.fail(.{ .file_write_failed = .{ .path = staging.manifest_path, .err = err } });
@@ -8415,10 +8423,10 @@ fn writeDefaultMingwRuntime(ctx: *CliCtx, platform_dir: []const u8, args: cli_ar
     try std.Io.Dir.cwd().createDirPath(ctx.io.std_io, target_dir);
     inline for (echo_platform.mingw_runtime.files) |filename| {
         const bytes = if (builtin.is_test) "" else if (target.toCpuArch() == .x86_64)
-            @embedFile("targets/x64mingw/" ++ filename)
+            @import("embedded_assets").file("targets/x64mingw/" ++ filename)
         else blk: {
             std.debug.assert(target.toCpuArch() == .aarch64);
-            break :blk @embedFile("targets/arm64mingw/" ++ filename);
+            break :blk @import("embedded_assets").file("targets/arm64mingw/" ++ filename);
         };
         const path = try std.fs.path.join(ctx.arena, &.{ target_dir, filename });
         try std.Io.Dir.cwd().writeFile(ctx.io.std_io, .{ .sub_path = path, .data = bytes });
@@ -8476,7 +8484,7 @@ fn defaultBuildPlatformSource(args: cli_args.BuildArgs) []const u8 {
 
     return switch (RocTarget.detectNative().toOsTag()) {
         .macos, .windows, .openbsd => echo_platform.build_c_platform_main_source,
-        .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .driverkit, .ios, .maccatalyst, .tvos, .visionos, .watchos, .uefi, .@"3ds", .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => echo_platform.build_platform_main_source,
+        .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .driverkit, .ios, .maccatalyst, .tvos, .visionos, .watchos, .uefi, .@"3ds", .wiiu, .@"switch", .gba, .psx, .tios, .ashetos, .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => echo_platform.build_platform_main_source,
     };
 }
 
@@ -8676,7 +8684,7 @@ fn writePacksToStore(
         const program_store = &app_lowered.lir_result.store;
         for (program_store.getProcSpecs(), 0..) |proc, index| {
             if (proc.body == null) continue;
-            const proc_id: lir.LIR.LirProcSpecId = @enumFromInt(@as(u32, @intCast(index)));
+            const proc_id: lir.LIR.LirProcSpecId = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
             const fingerprint = try procFingerprint(ctx.gpa, app_lowered, proc_id);
             std.debug.print("lowered {s} {x:0>16} {s}\n", .{ &proc.identity.symbolHex(), fingerprint, program_store.procDebugName(proc_id) orelse "" });
         }
@@ -8764,7 +8772,7 @@ fn packFileBytes(
     var closure = try SpliceClosure.init(allocator, set);
     defer closure.deinit();
     for (lowered.lir_result.spec_procs.items) |spec_proc| {
-        const proc = procs[@intFromEnum(spec_proc.proc)];
+        const proc = procs[@backingInt(spec_proc.proc)];
         const artifact = artifact_by_identity.get(proc.identity) orelse continue;
         // A linking program calls an entry at its base signature and cannot
         // emit the ownership variants its callers would demand from the
@@ -8965,7 +8973,7 @@ test "pack withholds an entry whose stable references reach a constant holding a
             .relocations = &.{.{ .offset = 0, .name = "roc__d0", .scope = .program, .kind = .{ .data = .rel32 } }},
             .data = &.{.{
                 .name = "roc__d0",
-                .bytes = "\x00" ** 8,
+                .bytes = &@as([8]u8, @splat('\x00')),
                 .alignment = 8,
                 .symbol_offset = 0,
                 .relocations = &.{.{ .offset = 0, .name = "roc__pcallback", .addend = 0, .function = true }},
@@ -9018,7 +9026,7 @@ test "pack offers an entry that carries its program data and withholds one that 
             },
             .data = &.{.{
                 .name = "roc__d0",
-                .bytes = "\x00" ** 8,
+                .bytes = &@as([8]u8, @splat('\x00')),
                 .alignment = 8,
                 .symbol_offset = 0,
                 .program_local_name = true,
@@ -9047,7 +9055,7 @@ fn nativeBuildEntrypoints(
     const root_procs = lowered.lir_result.root_procs.items;
     const root_metadata = lowered.lir_result.root_metadata.items;
     if (root_procs.len != root_metadata.len) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant(
                 "native build invariant violated: root metadata mismatch roots={d} metadata={d}",
                 .{ root_procs.len, root_metadata.len },
@@ -9063,7 +9071,7 @@ fn nativeBuildEntrypoints(
         std.debug.assert(metadata.kind == .provided_export);
         std.debug.assert(metadata.abi == .platform and metadata.exposure == .exported);
         const root = root_artifact.lookupRootRequestByOrder(metadata.order) orelse {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("native build invariant violated: missing root request order {d}", .{metadata.order});
             }
             unreachable;
@@ -9094,7 +9102,7 @@ fn nativeEntrypointSymbolName(
     root: check.CheckedArtifact.RootRequest,
 ) []const u8 {
     const entrypoint_name = root_artifact.providedEntrypointName(root) orelse {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant(
                 "platform entrypoint invariant violated: exported platform root has no published FFI symbol",
                 .{},
@@ -9725,13 +9733,13 @@ fn wasmOptimizeMode(opt: cli_args.OptLevel) linker.WasmOptimizeMode {
 
 fn requiredWasmPlatformExports(link_inputs: PlatformLinkInputs) []const []const u8 {
     const wasm = link_inputs.wasm orelse {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("linked wasm target reached the linker without an exports declaration", .{});
         }
         unreachable;
     };
     return wasm.exports orelse {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("linked wasm target reached the linker without an exports declaration", .{});
         }
         unreachable;
@@ -9765,7 +9773,7 @@ fn writeDevWasmObject(
     cpu_level: roc_target.CpuLevel,
 ) CliMainError![]const u8 {
     if (entrypoints.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("wasm object invariant violated: no exported platform entrypoints", .{});
         }
         unreachable;
@@ -9865,7 +9873,7 @@ fn rocBuildWasm(
     static_data_exports: []const backend.StaticDataExport,
 ) CliMainError!void {
     if (entrypoints.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("wasm build invariant violated: no exported platform entrypoints", .{});
         }
         unreachable;
@@ -10032,7 +10040,7 @@ fn llvmOptimizationLevel(opt: cli_args.OptLevel) builder.OptimizationLevel {
         .size => .size,
         .speed => .speed,
         .dev, .interpreter => {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("LLVM build invariant violated: non-LLVM opt level {s}", .{@tagName(opt)});
             }
             unreachable;
@@ -10045,7 +10053,7 @@ fn devBackendPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
     if (target_arch == .aarch64) return "arm64 Backend";
     if (target_arch == .arm) return "arm32 Backend";
     if (target_arch == .wasm32) return "wasm32 Bytecode Generation";
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         std.debug.panic(
             "dev code-generation timing requested for unsupported architecture {s}",
             .{@tagName(target_arch)},
@@ -10094,11 +10102,11 @@ fn nativeEmissionCounters(metrics: backend.dev.NativeProcCompiler.Metrics) [12]p
 
 test "native artifact counters preserve every measured field" {
     var metrics: backend.dev.NativeProcCompiler.Metrics = .{};
-    inline for (std.meta.fields(@TypeOf(metrics)), 1..) |field, value| {
-        @field(metrics, field.name) = value;
+    inline for (@typeInfo(@TypeOf(metrics)).@"struct".field_names, 1..) |field_name, value| {
+        @field(metrics, field_name) = value;
     }
     const counters = nativeEmissionCounters(metrics);
-    try std.testing.expectEqual(std.meta.fields(@TypeOf(metrics)).len, counters.len);
+    try std.testing.expectEqual(@typeInfo(@TypeOf(metrics)).@"struct".field_names.len, counters.len);
     for (counters, 1..) |counter, value| {
         try std.testing.expectEqual(@as(u64, @intCast(value)), counter.count);
     }
@@ -10117,7 +10125,7 @@ test "dev backend timing labels name the backend and emitted instruction format"
 fn noTargetLibcallsForLlvmBuild(target: RocTarget) bool {
     return switch (target.toOsTag()) {
         .macos, .windows => false,
-        .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .tvos, .visionos, .watchos, .uefi, .@"3ds", .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => true,
+        .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .tvos, .visionos, .watchos, .uefi, .@"3ds", .wiiu, .@"switch", .gba, .psx, .tios, .ashetos, .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .wasi, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => true,
     };
 }
 
@@ -10216,7 +10224,7 @@ fn compileLlvmAppObject(
         codegen.enable_default_platform_runtime = enable_default_platform_runtime;
         codegen.enable_default_platform_hosted_calls = enable_default_platform_hosted_calls;
         codegen.enable_default_platform_diagnostics = enable_default_platform_hosted_calls and emit_debug_info;
-        codegen.debug_producer = "roc " ++ build_options.compiler_version;
+        codegen.debug_producer = "roc " ++ @import("compiler_version").compiler_version;
         defer codegen.deinit();
 
         const static_rc_helpers = try backend.collectRequiredRcHelpers(ctx.gpa, static_data_exports);
@@ -10390,7 +10398,7 @@ fn rocBuildWasmLlvm(
     reporter: *progress.Reporter,
 ) CliMainError!void {
     if (entrypoints.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("LLVM wasm build invariant violated: no exported platform entrypoints", .{});
         }
         unreachable;
@@ -10650,7 +10658,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
     defer compile.static_data_exports.deinitStaticData(ctx.gpa, static_data_exports);
 
     if (entrypoints.len == 0 and static_data_exports.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("LLVM build invariant violated: no exported platform entrypoints or data symbols", .{});
         }
         unreachable;
@@ -11086,7 +11094,7 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
 
     reporter.begin(code_generation_phase_name);
     if (entrypoints.len == 0 and static_data_exports.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("native build invariant violated: no exported platform entrypoints or data symbols", .{});
         }
         unreachable;
@@ -11428,7 +11436,7 @@ fn rocBuildEmbedded(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildRe
     const lir_image = try shm.dupeDetachedImage(ctx.arena);
     const entrypoint_names = try lowered.platformEntrypointNames(ctx.arena, root_artifact);
     if (entrypoint_names.len == 0) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("embedded build invariant violated: no platform entrypoints", .{});
         }
         unreachable;
@@ -11463,7 +11471,7 @@ fn rocBuildEmbedded(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildRe
         return ctx.fail(.{ .shim_generation_failed = .{ .err = err } });
     };
 
-    const enable_debug = args.debug or (builtin.mode == .Debug);
+    const enable_debug = args.debug or (builtin.mode == .debug);
     const platform_shim_path = try generatePlatformHostShim(
         ctx,
         build_scratch_dir,
@@ -11736,7 +11744,7 @@ const CliTestPlanModule = struct {
 
     fn releaseCachedResults(self: *CliTestPlanModule) []CliTestResultItem {
         const results = self.cached_results orelse {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("CLI test invariant violated: cached results were released from an uncached plan module", .{});
             }
             unreachable;
@@ -11902,7 +11910,7 @@ fn cliTestCacheKey(
 ) [32]u8 {
     var hasher = base.Sha256.init(.{});
     hasher.update(cli_test_cache_magic);
-    hasher.update(build_options.compiler_version);
+    hasher.update(build_options.compiler_compatibility_id);
     hasher.update(@tagName(specialization_strategy));
     // A result records what one execution mode did with the tests, including
     // how long they ran and whether they exhausted its resources.
@@ -11915,7 +11923,7 @@ fn cliTestCacheKey(
 
 test "CLI test cache key includes specialization strategy" {
     const artifact_key: check.CheckedArtifact.CheckedModuleArtifactKey = .{
-        .bytes = [_]u8{0x5a} ** 32,
+        .bytes = @as([32]u8, @splat(0x5a)),
     };
     const lss_key = cliTestCacheKey(artifact_key, .lss, .dev);
     const boxy_key = cliTestCacheKey(artifact_key, .boxy, .dev);
@@ -11924,7 +11932,7 @@ test "CLI test cache key includes specialization strategy" {
 
 test "CLI test cache key includes execution mode" {
     const artifact_key: check.CheckedArtifact.CheckedModuleArtifactKey = .{
-        .bytes = [_]u8{0x5a} ** 32,
+        .bytes = @as([32]u8, @splat(0x5a)),
     };
     const dev_key = cliTestCacheKey(artifact_key, .lss, .dev);
     inline for (.{ cli_args.OptLevel.interpreter, cli_args.OptLevel.size, cli_args.OptLevel.speed }) |opt| {
@@ -11988,15 +11996,15 @@ fn storeCliTestResultsInCache(
         });
         try appendU32(&bytes, ctx.gpa, @intCast(result.transcript.len));
         for (result.transcript) |event| {
-            try bytes.append(ctx.gpa, @intFromEnum(event.kind));
-            try bytes.append(ctx.gpa, @intFromEnum(event.stream));
+            try bytes.append(ctx.gpa, @backingInt(event.kind));
+            try bytes.append(ctx.gpa, @backingInt(event.stream));
             const payload = cliTestTranscriptEventPayload(event);
             try appendU32(&bytes, ctx.gpa, @intCast(payload.len));
             try bytes.appendSlice(ctx.gpa, payload);
         }
         if (result.failure_detail) |message| {
             try bytes.append(ctx.gpa, 1);
-            try bytes.append(ctx.gpa, @intFromEnum(result.failure_detail_visibility));
+            try bytes.append(ctx.gpa, @backingInt(result.failure_detail_visibility));
             try appendU32(&bytes, ctx.gpa, @intCast(message.len));
             try bytes.appendSlice(ctx.gpa, message);
         } else {
@@ -12257,7 +12265,7 @@ fn buildCliTestPlan(
             std.debug.assert(artifact.checked_bodies.exprContainsDiagnosticError(root.expr));
             try checking_results.append(ctx.gpa, .{
                 .result = .compiler_error,
-                .order = @intFromEnum(root.id),
+                .order = @backingInt(root.id),
                 .region = testRootRegion(module.semantic.env, root.source),
                 .failure_detail = null,
             });
@@ -12331,7 +12339,7 @@ fn testRootRegion(
     return switch (source) {
         .statement => |statement| env.store.getStatementRegion(statement),
         .def, .expr, .required_binding, .hoisted => {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("CLI test invariant violated: test root was not published from an expect statement", .{});
             }
             unreachable;
@@ -12903,7 +12911,7 @@ fn collectCliTestRootRuns(
     const root_procs = lowered.lir_result.root_procs.items;
     const root_metadata = lowered.lir_result.root_metadata.items;
     if (root_procs.len != root_metadata.len) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant("CLI test invariant violated: root proc count differs from root metadata count", .{});
         }
         unreachable;
@@ -12912,7 +12920,7 @@ fn collectCliTestRootRuns(
     for (root_procs, root_metadata) |root_proc, metadata| {
         if (metadata.kind != .test_expect) continue;
         const test_plan = metadata.test_plan orelse {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant("CLI test invariant violated: lowered test root metadata is missing its explicit test-plan slot", .{});
             }
             unreachable;
@@ -12920,7 +12928,7 @@ fn collectCliTestRootRuns(
         if (test_plan.result_index < planned.first_entry_index or
             test_plan.result_index >= planned.first_entry_index + planned.entry_count) continue;
         if (test_plan.root_index >= planned.test_roots.len or test_plan.result_index >= plan_entries.len) {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 base.invariant(
                     "CLI test invariant violated: lowered test-plan slot root/result ({d}/{d}) is outside module roots/results ({d}/{d})",
                     .{ test_plan.root_index, test_plan.result_index, planned.test_roots.len, plan_entries.len },
@@ -12931,7 +12939,7 @@ fn collectCliTestRootRuns(
         const root_index: usize = @intCast(test_plan.root_index);
         const root = planned.test_roots[root_index];
         const plan_entry = plan_entries[@intCast(test_plan.result_index)];
-        if (builtin.mode == .Debug and
+        if (builtin.mode == .debug and
             (metadata.order != root.order or
                 plan_entry.result_index != test_plan.result_index or
                 plan_entry.module_index != test_plan.module_index or
@@ -12969,7 +12977,7 @@ fn collectCliTestRootRuns(
     }
 
     if (runs.items.len != planned.test_roots.len) {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             base.invariant(
                 "CLI test invariant violated: lowered {d} test roots for {d} checked test roots",
                 .{ runs.items.len, planned.test_roots.len },
@@ -13234,9 +13242,9 @@ fn runInterpreterTestRoots(
         fn observe(context: *anyopaque, site: lir.LIR.ExpectSiteId, passed: bool) void {
             const counts: [*]eval.Inspected.ExpectCounts = @ptrCast(@alignCast(context));
             if (passed) {
-                counts[@intFromEnum(site)].passed +|= 1;
+                counts[@backingInt(site)].passed +|= 1;
             } else {
-                counts[@intFromEnum(site)].failed +|= 1;
+                counts[@backingInt(site)].failed +|= 1;
             }
         }
     };
@@ -14612,6 +14620,7 @@ fn readWatchInputsFileAfterChild(ctx: *CliCtx, file_path: []const u8, extra_path
             error.Unexpected,
             error.Canceled,
             error.NameTooLong,
+            error.PathExceedsLimit,
             error.CurrentDirUnlinked,
             => try ctx.io.stderr().print("Error: failed to resolve an explicit watch path while reading source input state from {s}: {}\n", .{ file_path, err }),
         }
@@ -14985,10 +14994,10 @@ fn spawnWatchChild(ctx: *CliCtx, argv: []const []const u8) WatchSpawnChildError!
 fn terminateWatchChild(child: *WatchChild) void {
     switch (builtin.os.tag) {
         .windows => {
-            _ = std.os.windows.ntdll.NtTerminateProcess(child.id, @enumFromInt(1));
+            _ = std.os.windows.ntdll.NtTerminateProcess(child.id, @fromBackingInt(@intCast(1)));
         },
         .wasi => {},
-        .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => {
+        .freestanding, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .uefi, .@"3ds", .wiiu, .@"switch", .gba, .psx, .tios, .ashetos, .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => {
             std.posix.kill(child.id, .KILL) catch {};
         },
     }
@@ -15489,8 +15498,8 @@ fn appendCliTestTranscriptEventRecord(
     allocator: Allocator,
     event: CliTestTranscriptEvent,
 ) Allocator.Error!void {
-    try bytes.append(allocator, @intFromEnum(event.kind));
-    try bytes.append(allocator, @intFromEnum(event.stream));
+    try bytes.append(allocator, @backingInt(event.kind));
+    try bytes.append(allocator, @backingInt(event.stream));
     try appendU32(bytes, allocator, @intCast(event.payload.len));
     try bytes.appendSlice(allocator, event.payload);
 }
@@ -15774,7 +15783,7 @@ const CliTestTranscriptCoordinator = struct {
         result_index: usize,
         event: CliTestTranscriptEvent,
     ) ReportRenderError!void {
-        if (builtin.mode == .Debug and result_index >= self.entries.len) {
+        if (builtin.mode == .debug and result_index >= self.entries.len) {
             base.invariant("CLI test transcript coordinator received out-of-range event index {d} for {d} entries", .{ result_index, self.entries.len });
         }
         if (result_index < self.next_to_print) return;
@@ -15799,7 +15808,7 @@ const CliTestTranscriptCoordinator = struct {
         result_index: usize,
         entry: CliTestRenderEntry,
     ) ReportRenderError!void {
-        if (builtin.mode == .Debug and result_index >= self.entries.len) {
+        if (builtin.mode == .debug and result_index >= self.entries.len) {
             base.invariant("CLI test transcript coordinator received out-of-range result index {d} for {d} entries", .{ result_index, self.entries.len });
         }
         self.entries[result_index] = entry;
@@ -15905,10 +15914,10 @@ const CliOptimizedLiveTestOutput = struct {
         defer self.unlock();
 
         if (self.err != null) return;
-        if (builtin.mode == .Debug and result_index >= self.owned_results.len) {
+        if (builtin.mode == .debug and result_index >= self.owned_results.len) {
             base.invariant("CLI optimized live output received out-of-range result index {d} for {d} entries", .{ result_index, self.owned_results.len });
         }
-        if (builtin.mode == .Debug and self.owned_results[result_index] != null) {
+        if (builtin.mode == .debug and self.owned_results[result_index] != null) {
             base.invariant("CLI optimized live output received duplicate result index {d}", .{result_index});
         }
 
@@ -15931,7 +15940,7 @@ const CliOptimizedLiveTestOutput = struct {
         call_index: usize,
         eval_result: eval.Inspected.BoolRootEvalResult,
     ) void {
-        if (builtin.mode == .Debug and call_index >= self.runs.len) {
+        if (builtin.mode == .debug and call_index >= self.runs.len) {
             base.invariant("CLI optimized live output received out-of-range call index {d} for {d} roots", .{ call_index, self.runs.len });
         }
         const run = self.runs[call_index];
@@ -15950,10 +15959,10 @@ const CliOptimizedLiveTestOutput = struct {
             return;
         }
         const result_index: usize = @intCast(run.result_index);
-        if (builtin.mode == .Debug and result_index >= self.owned_results.len) {
+        if (builtin.mode == .debug and result_index >= self.owned_results.len) {
             base.invariant("CLI optimized live output received out-of-range result index {d} for {d} entries", .{ result_index, self.owned_results.len });
         }
-        if (builtin.mode == .Debug and self.owned_results[result_index] != null) {
+        if (builtin.mode == .debug and self.owned_results[result_index] != null) {
             base.invariant("CLI optimized live output received duplicate result index {d}", .{result_index});
         }
 
@@ -15972,7 +15981,7 @@ const CliOptimizedLiveTestOutput = struct {
         call_index: usize,
         event_view: eval.Inspected.BoolRootEventView,
     ) void {
-        if (builtin.mode == .Debug and call_index >= self.runs.len) {
+        if (builtin.mode == .debug and call_index >= self.runs.len) {
             base.invariant("CLI optimized live output received out-of-range event call index {d} for {d} roots", .{ call_index, self.runs.len });
         }
         const run = self.runs[call_index];
@@ -16136,7 +16145,7 @@ fn renderCliTestResultEntry(
     report_config: reporting.ReportingConfig,
     transcript_events_already_rendered: usize,
 ) ReportRenderError!void {
-    if (builtin.mode == .Debug and transcript_events_already_rendered > entry.result.transcript.len) {
+    if (builtin.mode == .debug and transcript_events_already_rendered > entry.result.transcript.len) {
         base.invariant(
             "CLI test transcript coordinator rendered {d} events before finished result with {d} events",
             .{ transcript_events_already_rendered, entry.result.transcript.len },
@@ -16606,7 +16615,7 @@ fn rocFormat(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
     // compiler is a newer nightly than the one it names.
     var builtin_facts = fmt.BuiltinFacts{ .allocator = ctx.gpa };
     defer builtin_facts.deinit();
-    const format_options: fmt.Options = .{ .compiler_version = build_options.compiler_version, .builtin_facts = &builtin_facts };
+    const format_options: fmt.Options = .{ .compiler_version = @import("compiler_version").compiler_version, .builtin_facts = &builtin_facts };
     if (args.stdin) {
         fmt.formatStdin(ctx.gpa, format_options, ctx.io.std_io, std.Io.File.stdin(), std.Io.File.stdout(), stderr) catch |err| return err;
         return;
@@ -16988,7 +16997,7 @@ fn solvedLirParallelCounters(parallel: lir.CheckedPipeline.SolvedLirParallelMetr
     };
 }
 
-const spec_constr_counter_count = 7 + 2 * std.meta.fields(lir.CheckedPipeline.SpecConstrPhase).len;
+const spec_constr_counter_count = 7 + 2 * @typeInfo(lir.CheckedPipeline.SpecConstrPhase).@"enum".field_names.len;
 
 fn specConstrParallelCounters(parallel: lir.CheckedPipeline.SpecConstrParallelMetrics) [spec_constr_counter_count]progress.Counter {
     var rows: [spec_constr_counter_count]progress.Counter = undefined;
@@ -17101,8 +17110,8 @@ test "post-check diagnostics preserve labeled ARC counts" {
         "Uniqueness statement rows",
         "Uniqueness local rows",
     };
-    try std.testing.expectEqual(std.meta.fields(lir.CheckedPipeline.ArcParallelMetrics).len - 1 +
-        std.meta.fields(@FieldType(lir.CheckedPipeline.ArcParallelMetrics, "uniqueness")).len, rows.len);
+    try std.testing.expectEqual(@typeInfo(lir.CheckedPipeline.ArcParallelMetrics).@"struct".field_names.len - 1 +
+        @typeInfo(@FieldType(lir.CheckedPipeline.ArcParallelMetrics, "uniqueness")).@"struct".field_names.len, rows.len);
     for (rows, names, 0..) |row, name, index| {
         try std.testing.expectEqualStrings(name, row.name);
         try std.testing.expectEqual(@as(u64, index + 1), row.count);
@@ -17110,7 +17119,7 @@ test "post-check diagnostics preserve labeled ARC counts" {
     for (arcParallelCounters(.{})) |row| try std.testing.expectEqual(@as(u64, 0), row.count);
 }
 
-const lir_pass_counter_count = 5 + 2 * std.meta.fields(lir.CheckedPipeline.LirPassPhase).len;
+const lir_pass_counter_count = 5 + 2 * @typeInfo(lir.CheckedPipeline.LirPassPhase).@"enum".field_names.len;
 
 fn lirPassParallelCounters(parallel: lir.CheckedPipeline.LirPassParallelMetrics) [lir_pass_counter_count]progress.Counter {
     var rows: [lir_pass_counter_count]progress.Counter = undefined;
@@ -17269,7 +17278,7 @@ test "post-check diagnostics preserve labeled Solved-LIR counts" {
         "Worker literal tasks committed",
         "Worker loop tasks committed",
     };
-    try std.testing.expectEqual(std.meta.fields(lir.CheckedPipeline.SolvedLirParallelMetrics).len, rows.len);
+    try std.testing.expectEqual(@typeInfo(lir.CheckedPipeline.SolvedLirParallelMetrics).@"struct".field_names.len, rows.len);
     for (rows, names, 1..) |row, name, count| {
         try std.testing.expectEqualStrings(name, row.name);
         try std.testing.expectEqual(@as(u64, @intCast(count)), row.count);
@@ -17304,7 +17313,7 @@ test "post-check diagnostics preserve labeled LIR pass counts" {
         "Range proving",
         "Box reuse",
     };
-    try std.testing.expectEqual(std.meta.fields(lir.CheckedPipeline.LirPassPhase).len, phase_names.len);
+    try std.testing.expectEqual(@typeInfo(lir.CheckedPipeline.LirPassPhase).@"enum".field_names.len, phase_names.len);
     inline for (phase_names, 0..) |name, index| {
         try std.testing.expectEqualStrings(name ++ " tasks", rows[5 + 2 * index].name);
         try std.testing.expectEqualStrings(name ++ " rewrites", rows[6 + 2 * index].name);
@@ -17480,8 +17489,8 @@ test "shared lowering reporting preserves counters for runtime reuse and continu
         var shared_input = shared;
         if (case.counters_only) {
             shared_input.total_ns = 0;
-            inline for (std.meta.fields(lir.CheckedPipeline.TimingSnapshot)) |field| {
-                if (field.type == u64) @field(shared_input.lowering, field.name) = 0;
+            inline for (@typeInfo(lir.CheckedPipeline.TimingSnapshot).@"struct".field_names) |field_name| {
+                if (@FieldType(lir.CheckedPipeline.TimingSnapshot, field_name) == u64) @field(shared_input.lowering, field_name) = 0;
             }
             shared_input.static_data_ns = 0;
             shared_input.code_generation_ns = 0;
@@ -17687,6 +17696,7 @@ fn handleProcessFileError(err: ProcessFileError, stderr: anytype, path: []const 
         error.MmapFailed,
         error.MprotectFailed,
         error.NameTooLong,
+        error.PathExceedsLimit,
         error.NetworkNotFound,
         error.NoCacheDir,
         error.NoDevice,
@@ -18974,7 +18984,7 @@ fn rocBump(ctx: *CliCtx, args_in: cli_args.BumpArgs) CliMainError!void {
                 .message = try std.fmt.allocPrint(ctx.arena, "The expected version {f} does not move forward from {f}.", .{ expected, old_version_value }),
             } });
         };
-        if (@intFromEnum(declared) < @intFromEnum(result.magnitude)) {
+        if (@backingInt(declared) < @backingInt(result.magnitude)) {
             return ctx.fail(.{ .bump_failed = .{
                 .title = "Insufficient Version Bump",
                 .message = try std.fmt.allocPrint(
@@ -20094,10 +20104,10 @@ test "classifyNativeRunTermination preserves successful exit" {
 test "classifyNativeRunTermination preserves signal termination" {
     const testing = std.testing;
 
-    const result = classifyNativeRunTermination(.{ .signal = @enumFromInt(11) });
+    const result = classifyNativeRunTermination(.{ .signal = @fromBackingInt(@intCast(11)) });
 
     try testing.expect(result == .signal);
-    try testing.expectEqual(@as(std.posix.SIG, @enumFromInt(11)), result.signal);
+    try testing.expectEqual(@as(std.posix.SIG, @fromBackingInt(@intCast(11))), result.signal);
 }
 
 test "check errors determine command failure after work completes" {

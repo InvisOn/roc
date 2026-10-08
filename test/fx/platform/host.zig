@@ -742,7 +742,7 @@ fn hostedBuilderPrintValue(builder: BuilderArgs) callconv(.c) void {
 /// Takes Host { name: Str } as first argument, returns Str
 const HostRecord = extern struct { name: RocStr };
 
-// ZIG BUG WORKAROUND (Zig 0.16, arm32): Zig passes a by-value `extern struct`
+// ZIG BUG WORKAROUND (Zig 0.16 and 0.17, arm32): Zig passes a by-value `extern struct`
 // that *contains another struct* at an even core register, as if it were
 // 8-byte aligned, while AAPCS32 (and clang) start it at the next register. For
 // this function the result pointer takes r0, so Zig reads `HostRecord` from r2,
@@ -768,7 +768,7 @@ const HostRecord = extern struct { name: RocStr };
 const work_around_zig_arm_nested_struct_bug = builtin.cpu.arch == .arm;
 
 comptime {
-    const confirmed_on = std.SemanticVersion{ .major = 0, .minor = 16, .patch = 0 };
+    const confirmed_on = std.SemanticVersion{ .major = 0, .minor = 17, .patch = 0 };
     if (work_around_zig_arm_nested_struct_bug and builtin.zig_version.order(confirmed_on) != .eq) {
         @compileError(std.fmt.comptimePrint(
             \\Zig is {f}, but the arm nested-struct ABI workaround was confirmed on Zig {f}.
@@ -1102,7 +1102,7 @@ fn hostTreeClonePayload(tree: *const HostTree, ops: *builtins.host_abi.RocOps) H
         0 => .{
             .payload = .{ .leaf = tree.payload.leaf },
             .discriminant = 0,
-            .padding = [_]u8{0} ** 7,
+            .padding = @as([7]u8, @splat(0)),
         },
         1 => .{
             .payload = .{ .node = .{
@@ -1110,7 +1110,7 @@ fn hostTreeClonePayload(tree: *const HostTree, ops: *builtins.host_abi.RocOps) H
                 .right = hostTreeCloneBox(capturePtrAs(HostTree, tree.payload.node.right), ops),
             } },
             .discriminant = 1,
-            .padding = [_]u8{0} ** 7,
+            .padding = @as([7]u8, @splat(0)),
         },
         else => ops.crash("host boxed recursive tree capture had invalid discriminant"),
     };

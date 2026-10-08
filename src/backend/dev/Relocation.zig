@@ -699,7 +699,7 @@ test "arm32 movw/movt PC-relative relocations resolve the address sequence" {
 }
 
 test "arm32 abs32 relocation writes a 32-bit address" {
-    var code = [_]u8{0} ** 4;
+    var code: [4]u8 = @splat(0);
     try patchLinkedDataRelocation(&code, 0, 0, 0x89ABCDEF, .abs32);
     try std.testing.expectEqual(@as(u32, 0x89ABCDEF), std.mem.readInt(u32, &code, .little));
 }

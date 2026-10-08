@@ -95,7 +95,7 @@ prompts) and deletes it; qemu is not needed then.
 ## `ci/vendor_musl_runtime.py`
 
 **Purpose:** produces the musl `crt1.o` and `libc.a` that a `*musl` test
-platform links, from the pinned Zig (0.16.0), so they are not copied from an
+platform links, from the pinned Zig (0.17.0), so they are not copied from an
 arbitrary cache.
 
 **Usage:**
@@ -116,7 +116,7 @@ the Zig version changes.
 ## `ci/vendor_glibc_crt.py`
 
 **Purpose:** produces the glibc `Scrt1.o` that a `*linux` (glibc) test platform
-links, from the pinned Zig (0.16.0). The C library itself is the stub
+links, from the pinned Zig (0.17.0). The C library itself is the stub
 `libc.so` that `build.zig` generates for every GNU target.
 
 **Usage:**
@@ -133,11 +133,11 @@ Zig version changes.
 ## `test/fx/platform/zig_arm_nested_struct_abi_probe.zig`
 
 **Purpose:** detects whether Zig still has the arm bug that `test/fx/platform/host.zig` works
-around (`work_around_zig_arm_nested_struct_bug`): Zig 0.16 passes a by-value
+around (`work_around_zig_arm_nested_struct_bug`): Zig 0.16 and 0.17 pass a by-value
 `extern struct` that contains a struct at an even register. The test expects
 the bug and fails with `error.ZigNestedStructAbiBugFixed` once Zig is fixed.
 `host.zig` also has a comptime version gate that stops the fx host from
-building on any Zig other than 0.16.0, and it names this probe.
+building on any Zig other than 0.17.0, and it names this probe.
 
 **Usage:**
 

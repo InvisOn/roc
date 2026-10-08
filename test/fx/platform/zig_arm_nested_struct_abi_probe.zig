@@ -1,7 +1,7 @@
 //! Detector for the Zig bug that `host.zig` works around (search it for
 //! `work_around_zig_arm_nested_struct_bug`).
 //!
-//! Zig 0.16 passes a by-value `extern struct` that contains another struct at
+//! Zig 0.16 and 0.17 pass a by-value `extern struct` that contains another struct at
 //! an even core register on arm, as if it were 8-byte aligned. AAPCS32 (and
 //! clang) start it at the next free register. Zig issue:
 //! https://codeberg.org/ziglang/zig/issues/37018. See also "Zig 0.16 passes nested

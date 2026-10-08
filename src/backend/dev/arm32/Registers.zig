@@ -50,7 +50,7 @@ pub const GeneralReg = enum(u4) {
 
     /// Get the 4-bit register encoding
     pub fn enc(self: GeneralReg) u4 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// Get the assembler register name
@@ -59,7 +59,7 @@ pub const GeneralReg = enum(u4) {
             "r0", "r1", "r2",  "r3",  "r4",  "r5", "r6", "r7",
             "r8", "r9", "r10", "r11", "r12", "sp", "lr", "pc",
         };
-        return names[@intFromEnum(self)];
+        return names[@backingInt(self)];
     }
 
     /// Bit for this register in an LDM/STM/PUSH/POP register list.
@@ -104,12 +104,12 @@ pub const SReg = enum(u5) {
     s31 = 31,
 
     pub fn enc(self: SReg) u5 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// The D register this S register is a half of.
     pub fn containingD(self: SReg) DReg {
-        return @enumFromInt(self.enc() >> 1);
+        return @fromBackingInt(self.enc() >> 1);
     }
 };
 
@@ -149,7 +149,7 @@ pub const DReg = enum(u5) {
     d31 = 31,
 
     pub fn enc(self: DReg) u5 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// Whether this D register has S-register halves (d0-d15 only).
@@ -160,18 +160,18 @@ pub const DReg = enum(u5) {
     /// The low S half s[2n]. Only d0-d15 have S views.
     pub fn sLow(self: DReg) SReg {
         std.debug.assert(self.hasSViews());
-        return @enumFromInt(@as(u5, self.enc()) * 2);
+        return @fromBackingInt(@as(u5, self.enc()) * 2);
     }
 
     /// The high S half s[2n+1]. Only d0-d15 have S views.
     pub fn sHigh(self: DReg) SReg {
         std.debug.assert(self.hasSViews());
-        return @enumFromInt(@as(u5, self.enc()) * 2 + 1);
+        return @fromBackingInt(@as(u5, self.enc()) * 2 + 1);
     }
 
     /// The Q register this D register is a half of.
     pub fn containingQ(self: DReg) QReg {
-        return @enumFromInt(self.enc() >> 1);
+        return @fromBackingInt(@intCast(self.enc() >> 1));
     }
 };
 
@@ -195,17 +195,17 @@ pub const QReg = enum(u4) {
     q15 = 15,
 
     pub fn enc(self: QReg) u4 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// The low D half d[2n].
     pub fn dLow(self: QReg) DReg {
-        return @enumFromInt(@as(u5, self.enc()) * 2);
+        return @fromBackingInt(@as(u5, self.enc()) * 2);
     }
 
     /// The high D half d[2n+1].
     pub fn dHigh(self: QReg) DReg {
-        return @enumFromInt(@as(u5, self.enc()) * 2 + 1);
+        return @fromBackingInt(@as(u5, self.enc()) * 2 + 1);
     }
 };
 

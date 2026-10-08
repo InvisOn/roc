@@ -44,7 +44,7 @@ pub const Condition = enum(u4) {
     /// inverse.
     pub fn invert(self: Condition) Condition {
         std.debug.assert(self != .al);
-        return @enumFromInt(@intFromEnum(self) ^ 1);
+        return @fromBackingInt(@backingInt(self) ^ 1);
     }
 };
 
@@ -57,7 +57,7 @@ pub const NeonSize = enum(u2) {
 
     /// Lane width in bits.
     pub fn bits(self: NeonSize) u7 {
-        return @as(u7, 8) << @intFromEnum(self);
+        return @as(u7, 8) << @backingInt(self);
     }
 };
 
@@ -580,7 +580,7 @@ pub fn Emit(comptime target: RocTarget) type {
         }
 
         fn condBits(cond: Condition) u32 {
-            return @as(u32, @intFromEnum(cond)) << 28;
+            return @as(u32, @backingInt(cond)) << 28;
         }
 
         // Data processing
@@ -605,11 +605,11 @@ pub fn Emit(comptime target: RocTarget) type {
                             break :inner s.amount;
                         },
                     };
-                    break :blk (imm5 << 7) | (@as(u32, @intFromEnum(s.kind)) << 5) | s.rm.enc();
+                    break :blk (imm5 << 7) | (@as(u32, @backingInt(s.kind)) << 5) | s.rm.enc();
                 },
                 .shift_reg => |s| blk: {
                     std.debug.assert(s.rm != .r15 and s.rs != .r15);
-                    break :blk (@as(u32, s.rs.enc()) << 8) | (@as(u32, @intFromEnum(s.kind)) << 5) | (1 << 4) | s.rm.enc();
+                    break :blk (@as(u32, s.rs.enc()) << 8) | (@as(u32, @backingInt(s.kind)) << 5) | (1 << 4) | s.rm.enc();
                 },
             };
         }
@@ -620,7 +620,7 @@ pub fn Emit(comptime target: RocTarget) type {
             if (op.isCompare()) std.debug.assert(set_flags and rd == .r0);
             if (op.isMove()) std.debug.assert(rn == .r0);
             const inst: u32 = condBits(cond) |
-                (@as(u32, @intFromEnum(op)) << 21) |
+                (@as(u32, @backingInt(op)) << 21) |
                 (@as(u32, @intFromBool(set_flags)) << 20) |
                 (@as(u32, rn.enc()) << 16) |
                 (@as(u32, rd.enc()) << 12) |
@@ -1270,7 +1270,7 @@ pub fn Emit(comptime target: RocTarget) type {
                 (@as(u32, vn.four) << 16) |
                 (@as(u32, vd.four) << 12) |
                 (0b101 << 9) |
-                (@as(u32, @intFromEnum(sz)) << 8) |
+                (@as(u32, @backingInt(sz)) << 8) |
                 (@as(u32, vn.one) << 7) |
                 (@as(u32, vm.one) << 5) |
                 vm.four;
@@ -1530,7 +1530,7 @@ pub fn Emit(comptime target: RocTarget) type {
                 (@as(u32, @intFromBool(load)) << 20) |
                 (@as(u32, rn.enc()) << 16) |
                 (@as(u32, vd.four) << 12) |
-                (@as(u32, @intFromEnum(sz)) << 8) |
+                (@as(u32, @backingInt(sz)) << 8) |
                 (@as(u32, @abs(offset)) >> 2);
             try self.emit32(inst);
         }
@@ -1615,14 +1615,14 @@ pub fn Emit(comptime target: RocTarget) type {
         pub fn neonThreeSameQ(self: *Self, op: NeonThreeSame, size: NeonSize, dst: QReg, n: QReg, m: QReg) Allocator.Error!void {
             std.debug.assert(op.allows(size) and !op.pairwise());
             const f = op.fields();
-            try self.neonThreeSameFields(f.u, @intFromEnum(size), f.opc, f.o1, true, .q(dst), .q(n), .q(m));
+            try self.neonThreeSameFields(f.u, @backingInt(size), f.opc, f.o1, true, .q(dst), .q(n), .q(m));
         }
 
         /// <op>.<size> Dd, Dn, Dm
         pub fn neonThreeSameD(self: *Self, op: NeonThreeSame, size: NeonSize, dst: DReg, n: DReg, m: DReg) Allocator.Error!void {
             std.debug.assert(op.allows(size));
             const f = op.fields();
-            try self.neonThreeSameFields(f.u, @intFromEnum(size), f.opc, f.o1, false, .d(dst), .d(n), .d(m));
+            try self.neonThreeSameFields(f.u, @backingInt(size), f.opc, f.o1, false, .d(dst), .d(n), .d(m));
         }
 
         /// <op> Qd, Qn, Qm (bitwise; VORR Qd, Qm, Qm is a register move)
@@ -1647,7 +1647,7 @@ pub fn Emit(comptime target: RocTarget) type {
             const inst: u32 = 0xF2800000 |
                 (@as(u32, f.u) << 24) |
                 (@as(u32, vd.one) << 22) |
-                (@as(u32, @intFromEnum(size)) << 20) |
+                (@as(u32, @backingInt(size)) << 20) |
                 (@as(u32, vn.four) << 16) |
                 (@as(u32, vd.four) << 12) |
                 (@as(u32, f.opc) << 8) |
@@ -1674,20 +1674,20 @@ pub fn Emit(comptime target: RocTarget) type {
         /// <op>.<size> Qd, Qm
         pub fn neonTwoMiscQ(self: *Self, op: NeonTwoMisc, size: NeonSize, dst: QReg, src: QReg) Allocator.Error!void {
             const f = op.fields();
-            try self.neonTwoMiscFields(@intFromEnum(size), f.a, f.b, 1, .q(dst), .q(src));
+            try self.neonTwoMiscFields(@backingInt(size), f.a, f.b, 1, .q(dst), .q(src));
         }
 
         /// <op>.<size> Dd, Dm
         pub fn neonTwoMiscD(self: *Self, op: NeonTwoMisc, size: NeonSize, dst: DReg, src: DReg) Allocator.Error!void {
             const f = op.fields();
-            try self.neonTwoMiscFields(@intFromEnum(size), f.a, f.b, 0, .d(dst), .d(src));
+            try self.neonTwoMiscFields(@backingInt(size), f.a, f.b, 0, .d(dst), .d(src));
         }
 
         /// <op> Dd, Qm narrowing to `size` lanes
         pub fn neonNarrow(self: *Self, op: NeonNarrow, size: NeonSize, dst: DReg, src: QReg) Allocator.Error!void {
             std.debug.assert(size != .i64);
             const code = op.op();
-            try self.neonTwoMiscFields(@intFromEnum(size), 2, @as(u4, 0x4) | (code >> 1), @intCast(code & 1), .d(dst), .q(src));
+            try self.neonTwoMiscFields(@backingInt(size), 2, @as(u4, 0x4) | (code >> 1), @intCast(code & 1), .d(dst), .q(src));
         }
 
         /// 1111 001U 1 D imm6 Vd opc L Q M 1 Vm
