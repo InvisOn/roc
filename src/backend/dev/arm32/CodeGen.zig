@@ -70,10 +70,10 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// registers are the high halves of those Q registers and are never
         /// allocated alone.
         pub const SCALAR_FLOAT_MASK: u32 =
-            (1 << @intFromEnum(DReg.d0)) |
-            (1 << @intFromEnum(DReg.d2)) |
-            (1 << @intFromEnum(DReg.d4)) |
-            (1 << @intFromEnum(DReg.d6));
+            (1 << @backingInt(DReg.d0)) |
+            (1 << @backingInt(DReg.d2)) |
+            (1 << @backingInt(DReg.d4)) |
+            (1 << @backingInt(DReg.d6));
 
         /// Vector-only temporaries: d16, d18, ..., d30 (q8-q15). They have no
         /// S view, so an f32 never lives there.
@@ -190,10 +190,10 @@ pub fn CodeGen(comptime target: RocTarget) type {
         }
 
         pub fn allocGeneral(self: *Self) ?GeneralReg {
-            if (takeLowest(&self.free_general)) |bit| return @enumFromInt(bit);
+            if (takeLowest(&self.free_general)) |bit| return @fromBackingInt(@intCast(bit));
             if (takeLowest(&self.callee_saved_available)) |bit| {
                 self.callee_saved_used |= @as(u32, 1) << bit;
-                return @enumFromInt(bit);
+                return @fromBackingInt(@intCast(bit));
             }
             return null;
         }
@@ -237,7 +237,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
             var available = self.free_float & pool;
             const bit = takeLowest(&available) orelse return null;
             self.free_float &= ~(@as(u32, 1) << bit);
-            return @enumFromInt(bit);
+            return @fromBackingInt(bit);
         }
 
         pub fn freeFloat(self: *Self, reg: FloatReg) void {
@@ -348,7 +348,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
         /// The Rd field of a data-processing or MOVW/MOVT instruction.
         fn regAt(inst: u32) GeneralReg {
-            return @enumFromInt(@as(u4, @truncate(inst >> 12)));
+            return @fromBackingInt(@as(u4, @truncate(inst >> 12)));
         }
 
         fn readInst(self: *Self, at: usize) u32 {
@@ -790,10 +790,10 @@ pub fn CodeGen(comptime target: RocTarget) type {
             switch (size) {
                 4 => {
                     const at = try self.reachable(.vfp, fp, dest_off);
-                    try self.emit.vstrF32(@enumFromInt(@as(u5, @intCast(s_index))), at.base, at.offset);
+                    try self.emit.vstrF32(@fromBackingInt(@as(u5, @intCast(s_index))), at.base, at.offset);
                 },
-                8 => try self.emitStoreStackF64(dest_off, @enumFromInt(@as(u5, @intCast(s_index / 2)))),
-                16 => try self.emitStoreStackV128(dest_off, @enumFromInt(@as(u5, @intCast(s_index / 2)))),
+                8 => try self.emitStoreStackF64(dest_off, @fromBackingInt(@as(u5, @intCast(s_index / 2)))),
+                16 => try self.emitStoreStackV128(dest_off, @fromBackingInt(@as(u5, @intCast(s_index / 2)))),
                 else => unreachable,
             }
         }
@@ -804,10 +804,10 @@ pub fn CodeGen(comptime target: RocTarget) type {
             switch (size) {
                 4 => {
                     const at = try self.reachable(.vfp, fp, src_off);
-                    try self.emit.vldrF32(@enumFromInt(@as(u5, @intCast(index))), at.base, at.offset);
+                    try self.emit.vldrF32(@fromBackingInt(@as(u5, @intCast(index))), at.base, at.offset);
                 },
-                8 => try self.emitLoadStackF64(@enumFromInt(@as(u5, @intCast(index))), src_off),
-                16 => try self.emitLoadStackV128(@enumFromInt(@as(u5, @intCast(index * 2))), src_off),
+                8 => try self.emitLoadStackF64(@fromBackingInt(@as(u5, @intCast(index))), src_off),
+                16 => try self.emitLoadStackV128(@fromBackingInt(@as(u5, @intCast(index * 2))), src_off),
                 else => unreachable,
             }
         }
@@ -816,10 +816,10 @@ pub fn CodeGen(comptime target: RocTarget) type {
             switch (size) {
                 4 => {
                     const at = try self.reachable(.vfp, fp, dst_off);
-                    try self.emit.vstrF32(@enumFromInt(@as(u5, @intCast(index))), at.base, at.offset);
+                    try self.emit.vstrF32(@fromBackingInt(@as(u5, @intCast(index))), at.base, at.offset);
                 },
-                8 => try self.emitStoreStackF64(dst_off, @enumFromInt(@as(u5, @intCast(index)))),
-                16 => try self.emitStoreStackV128(dst_off, @enumFromInt(@as(u5, @intCast(index * 2)))),
+                8 => try self.emitStoreStackF64(dst_off, @fromBackingInt(@as(u5, @intCast(index)))),
+                16 => try self.emitStoreStackV128(dst_off, @fromBackingInt(@as(u5, @intCast(index * 2)))),
                 else => unreachable,
             }
         }
@@ -863,7 +863,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         fn retargetBranch(self: *Self, loc: usize, target_loc: usize) void {
             const inst = self.readInst(loc);
             std.debug.assert((inst >> 25) & 7 == 0b101);
-            const cond: Condition = @enumFromInt(@as(u4, @truncate(inst >> 28)));
+            const cond: Condition = @fromBackingInt(@as(u4, @truncate(inst >> 28)));
             const link = (inst >> 24) & 1 == 1;
             const offset: i32 = @intCast(@as(i64, @intCast(target_loc)) - @as(i64, @intCast(loc)));
             self.writeInst(loc, Emit.encodeBranch(cond, link, offset));
@@ -978,7 +978,7 @@ test "vectors take q8-q15 first, then the scalar pool; scalars never get q8-q15"
     var index: u6 = 16;
     while (index <= 30) : (index += 2) {
         const got = cg.allocVector().?;
-        try std.testing.expectEqual(@as(FloatReg, @enumFromInt(@as(u5, @intCast(index)))), got);
+        try std.testing.expectEqual(@as(FloatReg, @fromBackingInt(@as(u5, @intCast(index)))), got);
         try std.testing.expect(!got.hasSViews());
     }
     // The vector-only pool is empty: vectors fall back to d0.
@@ -1081,7 +1081,7 @@ test "data addresses carry the movw/movt relocation pair" {
     var cg = MuslCodeGen.init(std.testing.allocator, .default);
     defer cg.deinit();
     try cg.emit.nop();
-    try cg.emitLoadDataAddress(.r3, @enumFromInt(7));
+    try cg.emitLoadDataAddress(.r3, @fromBackingInt(7));
     try std.testing.expectEqual(@as(usize, 2), cg.relocations.items.len);
     const lo = cg.relocations.items[0].linked_data;
     const hi = cg.relocations.items[1].linked_data;
