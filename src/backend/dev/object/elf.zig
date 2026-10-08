@@ -557,7 +557,7 @@ pub const ElfWriter = struct {
         ehdr.e_ident[4] = ELF.CLASS_64;
         ehdr.e_ident[5] = ELF.DATA_LSB;
         ehdr.e_ident[6] = ELF.VERSION_CURRENT;
-        ehdr.e_ident[7] = @intFromEnum(self.osabi);
+        ehdr.e_ident[7] = @backingInt(self.osabi);
         @memset(ehdr.e_ident[8..16], 0);
 
         output.appendSliceAssumeCapacity(std.mem.asBytes(&ehdr));
@@ -824,7 +824,7 @@ pub const ElfWriter = struct {
         ehdr.e_ident[4] = ELF.CLASS_32;
         ehdr.e_ident[5] = ELF.DATA_LSB;
         ehdr.e_ident[6] = ELF.VERSION_CURRENT;
-        ehdr.e_ident[7] = @intFromEnum(self.osabi);
+        ehdr.e_ident[7] = @backingInt(self.osabi);
         @memset(ehdr.e_ident[8..16], 0);
         output.appendSliceAssumeCapacity(std.mem.asBytes(&ehdr));
 
@@ -1196,7 +1196,7 @@ test "arm32 object is ELF32, EM_ARM, hard-float, with REL relocations and in-pla
         0x1E, 0xFF, 0x2F, 0xE1,
     };
     writer.setCode(&code);
-    const rodata = [_]u8{0} ** 8;
+    const rodata: [8]u8 = @splat(0);
     writer.setRodata(&rodata);
 
     _ = try writer.addSymbol(.{ .name = "f", .section = .text, .offset = 0, .size = code.len, .is_global = true, .is_function = true });

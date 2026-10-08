@@ -59,7 +59,7 @@ pub fn buildObject(gpa: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     // .rodata: the message, then a word-aligned table holding its address.
     const message_z = message ++ "\x00";
     const table_offset = comptime std.mem.alignForward(usize, message_z.len, 4);
-    var rodata = [_]u8{0} ** (table_offset + 4);
+    var rodata: [table_offset + 4]u8 = @splat(0);
     @memcpy(rodata[0..message_z.len], message_z);
 
     var w = try elf.ElfWriter.init(gpa, .arm, .none);

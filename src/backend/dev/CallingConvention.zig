@@ -435,10 +435,10 @@ pub fn CallBuilder(comptime EmitType: type) type {
             if (comptime isa == .arm32) {
                 const s_index = self.allocVfp(if (is_f64) 8 else 4);
                 if (is_f64) {
-                    const dst: arm32.DReg = @enumFromInt(s_index / 2);
+                    const dst: arm32.DReg = @fromBackingInt(s_index / 2);
                     if (dst != src_reg) try self.emit.vmovF64(dst, src_reg);
                 } else {
-                    try self.emit.vmovF32(@enumFromInt(s_index), src_reg.sLow());
+                    try self.emit.vmovF32(@fromBackingInt(s_index), src_reg.sLow());
                 }
                 return;
             }
@@ -565,11 +565,11 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
         fn emitVfpLoadAt(self: *Self, s_index: u5, base_reg: GeneralReg, offset: i32, size: u8) Allocator.Error!void {
             switch (size) {
-                4 => try self.emit.vldrF32(@enumFromInt(s_index), base_reg, offset),
-                8 => try self.emit.vldrF64(@enumFromInt(s_index / 2), base_reg, offset),
+                4 => try self.emit.vldrF32(@fromBackingInt(s_index), base_reg, offset),
+                8 => try self.emit.vldrF64(@fromBackingInt(s_index / 2), base_reg, offset),
                 16 => {
                     std.debug.assert(base_reg != CC_EMIT.SCRATCH_REG);
-                    const q: arm32.QReg = @enumFromInt(s_index / 4);
+                    const q: arm32.QReg = @fromBackingInt(@intCast(s_index / 4));
                     try self.emit.vldrF64(q.dLow(), base_reg, offset);
                     try self.emit.vldrF64(q.dHigh(), base_reg, offset + 8);
                 },
@@ -945,15 +945,15 @@ pub fn CallBuilder(comptime EmitType: type) type {
         fn stabilizeDeferredMemorySources(self: *Self) Allocator.Error!void {
             if (self.reg_arg_count == 0) return;
 
-            var has_dst_reg = [_]bool{false} ** 32;
+            var has_dst_reg = @as([32]bool, @splat(false));
             for (self.reg_args[0..self.reg_arg_count]) |ra| {
-                has_dst_reg[@intFromEnum(CC_EMIT.PARAM_REGS[ra.dst_index])] = true;
+                has_dst_reg[@backingInt(CC_EMIT.PARAM_REGS[ra.dst_index])] = true;
             }
 
             for (self.reg_args[0..self.reg_arg_count]) |*ra| {
                 switch (ra.src) {
                     .from_mem => |mem| {
-                        if (!has_dst_reg[@intFromEnum(mem.base)]) continue;
+                        if (!has_dst_reg[@backingInt(mem.base)]) continue;
 
                         const save_offset = self.allocCallerTempSlot();
                         if (comptime isa == .arm32) {
@@ -975,7 +975,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                         } };
                     },
                     .from_lea => |lea| {
-                        if (!has_dst_reg[@intFromEnum(lea.base)]) continue;
+                        if (!has_dst_reg[@backingInt(lea.base)]) continue;
 
                         const save_offset = self.allocCallerTempSlot();
                         if (comptime isa == .arm32) {
@@ -1040,7 +1040,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
         fn emitDeferredRegArgs(self: *Self) Allocator.Error!void {
             if (self.reg_arg_count == 0) return;
 
-            var statuses = [_]MoveStatus{.to_move} ** CC_EMIT.PARAM_REGS.len;
+            var statuses = @as([CC_EMIT.PARAM_REGS.len]MoveStatus, @splat(.to_move));
             // Mutable copy of sources—cycle breaking redirects sources to SCRATCH_REG
             var sources: [CC_EMIT.PARAM_REGS.len]ArgSource = undefined;
             for (self.reg_args[0..self.reg_arg_count], 0..) |arg, i| {
@@ -2883,7 +2883,7 @@ test "arm32: a relocatable call stores stack arguments, moves registers, BLs and
     try builder.addMemArg(.r11, -8);
     try builder.addImmArg(7);
     try builder.addImmArg(0x12345678); // fifth argument: [sp, #0]
-    try builder.callRelocatable(@enumFromInt(3), &cg);
+    try builder.callRelocatable(@fromBackingInt(3), &cg);
 
     var e = Arm32Emit.init(std.testing.allocator);
     defer e.deinit();
