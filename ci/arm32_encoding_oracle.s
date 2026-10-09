@@ -65,12 +65,12 @@ tst r2, #1                              | tstRegModImm(.r2, ModImm.of(1))
 teq r3, r4                              | teqRegReg(.r3, .r4)
 
 @ Data processing: the generic form (condition, flags, shifted operands)
-orr r1, r1, r0, lsr r12                 | dataProc(.al, .orr, false, .r1, .r1, .{ .shift_reg = .{ .rm = .r0, .kind = .lsr, .rs = .r12 } })
-subgt r0, r1, r2, lsl #3                | dataProc(.gt, .sub, false, .r0, .r1, .{ .shift_imm = .{ .rm = .r2, .kind = .lsl, .amount = 3 } })
-addsne r4, r5, r6, asr #32              | dataProc(.ne, .add, true, .r4, .r5, .{ .shift_imm = .{ .rm = .r6, .kind = .asr, .amount = 32 } })
-lslpl r1, r0, r3                        | dataProc(.pl, .mov, false, .r1, .r0, .{ .shift_reg = .{ .rm = .r0, .kind = .lsl, .rs = .r3 } })
-cmp r1, r3, ror #7                      | dataProc(.al, .cmp, true, .r0, .r1, .{ .shift_imm = .{ .rm = .r3, .kind = .ror, .amount = 7 } })
-bichi r2, r2, #3                        | dataProc(.hi, .bic, false, .r2, .r2, .{ .imm = ModImm.of(3) })
+orr r1, r1, r0, lsr r12                 | dataProc(.al, .orr, false, .r1, .r1, Operand2{ .shift_reg = .{ .rm = .r0, .kind = .lsr, .rs = .r12 } })
+subgt r0, r1, r2, lsl #3                | dataProc(.gt, .sub, false, .r0, .r1, Operand2{ .shift_imm = .{ .rm = .r2, .kind = .lsl, .amount = 3 } })
+addsne r4, r5, r6, asr #32              | dataProc(.ne, .add, true, .r4, .r5, Operand2{ .shift_imm = .{ .rm = .r6, .kind = .asr, .amount = 32 } })
+lslpl r1, r0, r3                        | dataProc(.pl, .mov, false, .r1, .r0, Operand2{ .shift_reg = .{ .rm = .r0, .kind = .lsl, .rs = .r3 } })
+cmp r1, r3, ror #7                      | dataProc(.al, .cmp, true, .r0, .r1, Operand2{ .shift_imm = .{ .rm = .r3, .kind = .ror, .amount = 7 } })
+bichi r2, r2, #3                        | dataProc(.hi, .bic, false, .r2, .r2, Operand2{ .imm = ModImm.of(3) })
 
 @ Shifts
 lsl r0, r1, #31                         | lslRegRegImm(.r0, .r1, 31)
@@ -127,7 +127,7 @@ udf #0                                  | udf(0)
 udf #0xbeef                             | udf(0xbeef)
 bkpt #0x1234                            | bkpt(0x1234)
 nop                                     | nop()
-movw r4, #0xfff0; movt r4, #0xfff4; add r4, pc, r4 | =pcRelAddress(.r4)
+movw r4, #0xfff0; movt r4, #0xfff4; add r4, pc, r4 | pcRelAddress(.r4)
 
 @ Loads and stores
 ldr r0, [r1]                            | ldrRegMem(.r0, .r1, 0)

@@ -16,12 +16,14 @@ external tool.
 ```
 add r0, r1, r2                          | addRegRegReg(.r0, .r1, .r2)
 movw r3, #0x5678; movt r3, #0x1234      | movRegImm32(.r3, 0x12345678)
-movw r4, #0xfff0; movt r4, #0xfff4; add r4, pc, r4 | =pcRelAddress(.r4)
+movw r4, #0xfff0; movt r4, #0xfff4; add r4, pc, r4 | pcRelAddress(.r4)
 ```
 
-`;` separates the instructions of one entry, a leading `=` discards the call's
-return value, and `@` starts a comment line. The Zig side is written as it
-appears after `try e.`; `ModImm` and `GeneralReg` are in scope.
+`;` separates the instructions of one entry and `@` starts a comment line.
+The Zig side is an `Emit` method and its arguments; each becomes
+`expectEncoding(E.method, .{ args }, words)`, so a struct or union argument
+names its type (`Operand2{ ... }`). `ModImm`, `GeneralReg` and `Operand2` are
+in scope.
 
 **Usage:**
 
