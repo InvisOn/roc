@@ -30,10 +30,6 @@ const address_bound_depth_str = std.fmt.comptimePrint("{d}", .{address_bound_dep
 /// per-level recursion cost.
 const shallow_stack_bytes = 2 * 1024 * 1024;
 
-/// A curried lambda chain instantiates each level's whole remaining function
-/// type, so it costs the square of its depth.
-const shallower_depth = 500;
-
 /// Each loop of a loop nest keeps a set of every enclosing loop's iteration
 /// state, so its ownership facts cost the square of its depth.
 const loop_depth = 300;
@@ -275,9 +271,9 @@ const cases = [_]TestCase{
     .{
         .name = "issue 11698: curried lambdas",
         .source_kind = .module,
-        .source = "f = " ++ repeat("|_| ", shallower_depth) ++ "1.U64\nmain = f" ++ repeat("(0)", shallower_depth) ++ "\n",
+        .source = "f = " ++ repeat("|_| ", depth) ++ "1.U64\nmain = f" ++ repeat("(0)", depth) ++ "\n",
         .expected = .{ .inspect_str = "1" },
-        .stack_bytes = shallow_stack_bytes,
+        .stack_bytes = stack_bytes,
     },
     .{
         .name = "issue 11698: deep equality",
