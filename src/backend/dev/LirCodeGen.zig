@@ -12892,11 +12892,6 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             return lhs_not_min;
         }
 
-        /// Call a decomposed i128/Dec builtin wrapper `(out_low: *u64,
-        /// out_high: *u64, a_low: u64, a_high: u64, ...)` on a 32-bit target:
-        /// the result goes to the 16-byte `result_slot`, each operand's `u64`
-        /// halves come from its slot as register or stack pairs
-        /// (`addMem64Arg`), and a shift count follows the operands.
         /// The low 128 bits of the product of the four-word values at `lhs`
         /// and `rhs`, stored at `result_slot` (a fresh slot): schoolbook
         /// multiplication over 32-bit words, one UMAAL per partial product
@@ -12930,6 +12925,11 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
         }
 
+        /// Call a decomposed i128/Dec builtin wrapper `(out_low: *u64,
+        /// out_high: *u64, a_low: u64, a_high: u64, ...)` on a 32-bit target:
+        /// the result goes to the 16-byte `result_slot`, each operand's `u64`
+        /// halves come from its slot as register or stack pairs
+        /// (`addMem64Arg`), and a shift count follows the operands.
         fn callI128WrapperWords(self: *Self, builtin_fn: BuiltinFn, result_slot: i32, operands: []const i32, count: ?GeneralReg) Allocator.Error!void {
             var builder = try Builder.init(&self.codegen.emit, &self.codegen.stack_offset);
             defer builder.deinit();
