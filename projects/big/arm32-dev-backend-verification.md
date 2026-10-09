@@ -728,6 +728,23 @@ Done 2026-09-29, locally (nothing pushed).
   the Raspberry Pi 5 and on the Pi 3; the int app as arm32musl and
   arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/258ab27f79/`.
+- 2026-10-10, merge `83acdd92ff` of upstream `main` at `5e44ba38ae`, which
+  moves Roc to Zig 0.17. Six files conflicted. Fixes in the merge: the arm32
+  code moves to Zig 0.17's builtins as upstream's does (`@backingInt`,
+  `@fromBackingInt` with `@intCast` where the argument is not the backing
+  type, `@Int`, `field_names`, `@splat`, `.debug`); embedded target objects
+  come through `embedded_assets`; the host dev-backend check classifies the
+  CPU through `classifyCpuArch`; two loops in the snapshot tool use the new
+  enum field lists. The arm nested-struct ABI probe still passes on Zig
+  0.17, so the fx host keeps its workaround, now confirmed on 0.17.0.
+  Checks: relative 64-bit oracle PASS, nothing differs, no snapshot change;
+  since upstream `ee048d9adb` the compiler identity is a content hash of the
+  sources, so the oracle now gives both builds one fixed identity module.
+  minici 80/80; arm32 eval corpus under qemu 2572 passed, 0 failed, 44 with
+  a backend skipped; host effects 106/106; `test/fx` 131/131 under qemu, on
+  the Raspberry Pi 5 and on the Pi 3; the int app as arm32musl and
+  arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/5e44ba38ae/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
