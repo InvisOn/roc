@@ -242,8 +242,8 @@ concrete or amended them.
 call that must produce the same bytes. `ci/arm32_encoding_oracle.py`
 assembles the file with `zig cc -target arm-linux-musleabihf` (LLVM's
 integrated assembler, so every host with the pinned Zig can run it), reads the
-object with `ci/elf32_reader.py`, and writes one `expectEqualSlices` test per
-entry to `encoding_oracle_tests.zig`. `zig build test` therefore needs no
+object with `ci/elf32_reader.py`, and writes one test per entry to
+`encoding_oracle_tests.zig`, each a call to its `expectEncoding` helper. `zig build test` therefore needs no
 external tool, and `zig build run-check-arm32-encoding-oracle` (in minici)
 fails when the generated file is stale or when an emitter has no entry.
 
