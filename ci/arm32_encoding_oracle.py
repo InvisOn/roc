@@ -160,7 +160,7 @@ def render(entries):
         "",
         "/// Call `method` with `args` on a fresh emitter and expect exactly the",
         "/// little-endian `words`.",
-        "fn expectEncoding(comptime method: anytype, args: anytype, words: []const u32) !void {",
+        "fn expectEncoding(comptime method: anytype, args: anytype, words: []const u32) (std.mem.Allocator.Error || error{TestExpectedEqual})!void {",
         "    var e = E.init(std.testing.allocator);",
         "    defer e.deinit();",
         "    _ = try @call(.auto, method, .{&e} ++ args);",
