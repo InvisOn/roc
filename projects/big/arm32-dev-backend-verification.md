@@ -756,6 +756,22 @@ Done 2026-09-29, locally (nothing pushed).
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
   lines.
   Logs: `.git/verify-tools/upstream-sync/3ee70f0c9f/`.
+- 2026-10-11, merge `4bf8414679` of upstream `main` at `faecf66d88`, then
+  `12ab0cef94`. One conflict, in `src/build/minici.zig`: upstream runs two
+  codegen checks on the primary host only, next to the arm32
+  encoding-oracle phase; the resolution keeps upstream's lines and lists
+  the encoding-oracle phase after them. Fix after the merge: the encoding
+  test helper `expectEncoding` (from `58efcbaf88`) had an inferred error
+  set, which `run-check-tidy` rejects; `12ab0cef94` names it. Checks:
+  relative 64-bit oracle PASS, nothing differs, no snapshot change; minici
+  85/85 (the full run on `12ab0cef94` passed 84; `run-check-tidy` and
+  `run-test-repl-wasm` passed when rerun alone, the latter with Node.js 22,
+  since upstream's `cells.test.mjs` cannot load `cells.js` on Node 18);
+  arm32 eval corpus under qemu 2572 passed, 0 failed, 44 with a backend
+  skipped; host effects 106/106; `test/fx` 131/131 under qemu, on the
+  Raspberry Pi 5 and on the Pi 3; the int app as arm32musl and arm32linux
+  on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/faecf66d88/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
