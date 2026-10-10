@@ -18,6 +18,7 @@
 //! - CC: Calling convention constants
 
 const std = @import("std");
+const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
 const isaOf = @import("isa.zig").isaOf;
 
@@ -560,7 +561,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
             }
             // Float arguments beyond the VFP registers go on the stack; no
             // builtin the dev backend calls takes that many.
-            std.debug.panic("arm32 CallBuilder: more float arguments than VFP argument registers", .{});
+            invariant("arm32 CallBuilder invariant violated: more float arguments than VFP argument registers", .{});
         }
 
         fn emitVfpLoadAt(self: *Self, s_index: u5, base_reg: GeneralReg, offset: i32, size: u8) Allocator.Error!void {
@@ -657,7 +658,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// register as a signed or an unsigned word.
         fn arm32Word(value: i64) u32 {
             if (value < std.math.minInt(i32) or value > std.math.maxInt(u32)) {
-                std.debug.panic("arm32 CallBuilder: immediate argument {d} does not fit a register", .{value});
+                invariant("arm32 CallBuilder invariant violated: immediate argument {d} does not fit a register", .{value});
             }
             return @truncate(@as(u64, @bitCast(value)));
         }
@@ -1182,8 +1183,8 @@ pub fn CallBuilder(comptime EmitType: type) type {
                     // that generated it: on an arm32 host, where every address
                     // is 32 bits. Code for another host goes through
                     // `callRelocatable`.
-                    const addr = std.math.cast(u32, fn_addr) orelse std.debug.panic(
-                        "arm32: native call target 0x{x} is not a 32-bit address; native execution of arm32 code needs an arm32 host",
+                    const addr = std.math.cast(u32, fn_addr) orelse invariant(
+                        "arm32 invariant violated: native call target 0x{x} is not a 32-bit address; native execution of arm32 code needs an arm32 host",
                         .{fn_addr},
                     );
                     try self.emit.movRegImm32(CC_EMIT.SCRATCH_REG, addr);

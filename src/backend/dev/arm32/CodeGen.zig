@@ -19,6 +19,7 @@
 //! `__aeabi_*` helpers (D7), which the driver models as calls.
 
 const std = @import("std");
+const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
 const RocTarget = @import("roc_target").RocTarget;
 const CpuLevel = @import("roc_target").CpuLevel;
@@ -168,7 +169,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// Allocate a short-lived general register. Exhausting the bounded
         /// pool is a lifetime-invariant failure, never a reason to spill.
         pub fn allocTempGeneral(self: *Self) GeneralReg {
-            const reg = self.allocGeneral() orelse std.debug.panic(
+            const reg = self.allocGeneral() orelse invariant(
                 "LirCodeGen invariant violated: bounded instruction selection exhausted the general-register pool",
                 .{},
             );
@@ -180,7 +181,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
         /// Allocate a short-lived float register; see `allocTempGeneral`.
         pub fn allocTempFloat(self: *Self) FloatReg {
-            const reg = self.allocFloat() orelse std.debug.panic(
+            const reg = self.allocFloat() orelse invariant(
                 "LirCodeGen invariant violated: bounded instruction selection exhausted the float-register pool",
                 .{},
             );
@@ -297,7 +298,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// The 32-bit pattern of an immediate that fits a word.
         fn wordBits(value: i64) u32 {
             if (value < std.math.minInt(i32) or value > std.math.maxInt(u32)) {
-                std.debug.panic("arm32 invariant violated: immediate {d} does not fit a 32-bit register", .{value});
+                invariant("arm32 invariant violated: immediate {d} does not fit a 32-bit register", .{value});
             }
             return @truncate(@as(u64, @bitCast(value)));
         }

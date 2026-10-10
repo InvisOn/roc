@@ -8,6 +8,7 @@
 //! Reference: https://refspecs.linuxfoundation.org/elf/elf.pdf
 
 const std = @import("std");
+const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
 const DataRelocationKind = @import("../Relocation.zig").DataRelocationKind;
 const object = @import("mod.zig");
@@ -1026,9 +1027,8 @@ const ArmReloc = enum(u32) {
 /// defines the addend of each relocation type.
 fn storeRelAddend(field: []u8, reloc_type: u32, addend: i64) void {
     const a: i32 = @intCast(addend);
-    const reloc = std.enums.fromInt(ArmReloc, reloc_type) orelse {
-        std.debug.panic("ELF32 invariant violated: relocation type {d} is not an arm32 type the writer emits", .{reloc_type});
-    };
+    const reloc = std.enums.fromInt(ArmReloc, reloc_type) orelse
+        invariant("ELF32 invariant violated: relocation type {d} is not an arm32 type the writer emits", .{reloc_type});
     switch (reloc) {
         .abs32 => std.mem.writeInt(i32, field[0..4], a, .little),
         .call => {

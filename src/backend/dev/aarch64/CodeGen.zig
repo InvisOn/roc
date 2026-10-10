@@ -197,7 +197,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// lifetime-invariant failure (design.md, "Dev Backend Register
         /// Lifetimes"), never a reason to spill.
         pub fn allocTempGeneral(self: *Self) GeneralReg {
-            const reg = self.allocGeneral() orelse std.debug.panic(
+            const reg = self.allocGeneral() orelse invariant(
                 "LirCodeGen invariant violated: bounded instruction selection exhausted the general-register pool",
                 .{},
             );
@@ -210,7 +210,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// Allocate a short-lived floating-point register used only during
         /// instruction selection; see `allocTempGeneral`.
         pub fn allocTempFloat(self: *Self) FloatReg {
-            const reg = self.allocFloat() orelse std.debug.panic(
+            const reg = self.allocFloat() orelse invariant(
                 "LirCodeGen invariant violated: bounded instruction selection exhausted the float-register pool",
                 .{},
             );
