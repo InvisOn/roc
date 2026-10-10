@@ -563,6 +563,10 @@ const BuiltinsObjects = struct {
     const x64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64glibc/roc_builtins.o");
     const arm64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64glibc/roc_builtins.o");
 
+    /// Cross-compilation target builtins (32-bit ARM Linux targets)
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_builtins.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_builtins.o");
+
     /// WebAssembly target builtins (wasm32-freestanding)
     const wasm32 = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/wasm32/roc_builtins.o");
 
@@ -604,6 +608,8 @@ const BuiltinsObjects = struct {
     const x64freebsd_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/roc_builtins_extern.o");
     const x64openbsd_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64openbsd/roc_builtins_extern.o");
     const x64netbsd_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/roc_builtins_extern.o");
+    const arm32musl_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_builtins_extern.o");
+    const arm32glibc_extern = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_builtins_extern.o");
 
     /// Get the appropriate builtins object bytes for the given target
     ///
@@ -618,6 +624,8 @@ const BuiltinsObjects = struct {
             .arm64musl => arm64musl,
             .x64glibc => x64glibc,
             .arm64glibc => arm64glibc,
+            .arm32musl => arm32musl,
+            .arm32linux => arm32glibc,
             .wasm32 => wasm32,
             .x64win => x64win,
             .x64mingw => x64mingw,
@@ -646,8 +654,6 @@ const BuiltinsObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32v1,
             => native,
         };
@@ -662,6 +668,8 @@ const BuiltinsObjects = struct {
             .arm64musl => arm64musl_extern,
             .x64glibc => x64glibc_extern,
             .arm64glibc => arm64glibc_extern,
+            .arm32musl => arm32musl_extern,
+            .arm32linux => arm32glibc_extern,
             .wasm32 => wasm32_extern,
             .x64win => x64win_extern,
             .x64mingw => x64mingw_extern,
@@ -690,8 +698,6 @@ const BuiltinsObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32v1,
             => native_extern,
         };
@@ -736,6 +742,8 @@ fn DefaultPlatformObjects(comptime base_name: []const u8) type {
         const x64freebsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/" ++ base_name ++ ".o");
         const x64openbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64openbsd/" ++ base_name ++ ".o");
         const x64netbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/" ++ base_name ++ ".o");
+        const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/" ++ base_name ++ ".o");
+        const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/" ++ base_name ++ ".o");
 
         pub fn forTarget(requested: RocTarget) ?[]const u8 {
             const target = requested.defaultCpuTarget();
@@ -744,6 +752,8 @@ fn DefaultPlatformObjects(comptime base_name: []const u8) type {
                 .arm64musl => arm64musl,
                 .x64glibc, .x64linux => x64glibc,
                 .arm64glibc, .arm64linux => arm64glibc,
+                .arm32musl => arm32musl,
+                .arm32linux => arm32glibc,
                 .x64mac => x64mac,
                 .arm64mac => arm64mac,
                 .x64win => x64win,
@@ -769,8 +779,6 @@ fn DefaultPlatformObjects(comptime base_name: []const u8) type {
                 .arm64v1linux,
                 .arm64v1musl,
                 .arm64v1glibc,
-                .arm32linux,
-                .arm32musl,
                 .wasm32,
                 .wasm32v1,
                 => null,
@@ -884,6 +892,8 @@ const DefaultPlatformCompilerRtObjects = struct {
     const arm64glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64glibc/roc_default_compiler_rt.o");
     const x64freebsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64freebsd/roc_default_compiler_rt.o");
     const x64netbsd = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64netbsd/roc_default_compiler_rt.o");
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_default_compiler_rt.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_default_compiler_rt.o");
 
     pub fn forTarget(requested: RocTarget) ?[]const u8 {
         return switch (requested.defaultCpuTarget()) {
@@ -891,6 +901,8 @@ const DefaultPlatformCompilerRtObjects = struct {
             .arm64musl => arm64musl,
             .x64glibc, .x64linux => x64glibc,
             .arm64glibc, .arm64linux => arm64glibc,
+            .arm32musl => arm32musl,
+            .arm32linux => arm32glibc,
             .x64freebsd => x64freebsd,
             .x64netbsd => x64netbsd,
             .x64mac,
@@ -916,8 +928,6 @@ const DefaultPlatformCompilerRtObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32,
             .wasm32v1,
             => null,
@@ -945,6 +955,8 @@ const BoxyRuntimeObjects = struct {
     const x64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/x64mingw/roc_boxy_runtime.obj");
     const arm64mingw = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm64mingw/roc_boxy_runtime.obj");
     const wasm32 = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/wasm32/roc_boxy_runtime.o");
+    const arm32musl = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32musl/roc_boxy_runtime.o");
+    const arm32glibc = if (builtin.is_test) &[_]u8{} else @import("embedded_assets").file("targets/arm32glibc/roc_boxy_runtime.o");
 
     /// The boxy runtime object bytes for `target`, or null when the target has
     /// no runtime and boxy programs cannot be built standalone for it.
@@ -955,6 +967,8 @@ const BoxyRuntimeObjects = struct {
             .arm64musl => arm64musl,
             .x64glibc, .x64linux => x64glibc,
             .arm64glibc, .arm64linux => arm64glibc,
+            .arm32musl => arm32musl,
+            .arm32linux => arm32glibc,
             .x64mac => x64mac,
             .arm64mac => arm64mac,
             .x64win => x64win,
@@ -981,8 +995,6 @@ const BoxyRuntimeObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32v1,
             => null,
         };
@@ -2441,6 +2453,8 @@ fn entrypointAbiDigestFromLirData(
         layout.abi.aarch64Target(target.toOsTag())
     else if (cpu_arch == .x86_64)
         if (target.toOsTag() == .windows) .x86_64_windows else .x86_64_sysv
+    else if (cpu_arch == .arm)
+        .arm32
     else if (cpu_arch == .wasm32)
         .wasm32
     else
@@ -10037,6 +10051,7 @@ fn llvmOptimizationLevel(opt: cli_args.OptLevel) builder.OptimizationLevel {
 fn devBackendPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
     if (target_arch == .x86_64) return "x64 Backend";
     if (target_arch == .aarch64) return "arm64 Backend";
+    if (target_arch == .arm) return "arm32 Backend";
     if (target_arch == .wasm32) return "wasm32 Bytecode Generation";
     if (builtin.mode == .debug) {
         std.debug.panic(
@@ -10050,6 +10065,7 @@ fn devBackendPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
 fn devInstructionGenerationPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
     if (target_arch == .x86_64) return "x64 Instruction Generation";
     if (target_arch == .aarch64) return "arm64 Instruction Generation";
+    if (target_arch == .arm) return "arm32 Instruction Generation";
     if (target_arch == .wasm32) return "wasm32 Bytecode Generation";
     return devBackendPhaseName(target_arch);
 }
@@ -10102,6 +10118,8 @@ test "dev backend timing labels name the backend and emitted instruction format"
     try std.testing.expectEqualStrings("wasm32 Bytecode Generation", devBackendPhaseName(.wasm32));
     try std.testing.expectEqualStrings("x64 Instruction Generation", devInstructionGenerationPhaseName(.x86_64));
     try std.testing.expectEqualStrings("arm64 Instruction Generation", devInstructionGenerationPhaseName(.aarch64));
+    try std.testing.expectEqualStrings("arm32 Backend", devBackendPhaseName(.arm));
+    try std.testing.expectEqualStrings("arm32 Instruction Generation", devInstructionGenerationPhaseName(.arm));
 }
 
 fn noTargetLibcallsForLlvmBuild(target: RocTarget) bool {
@@ -10892,7 +10910,7 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
         return error.UnsupportedCrossCompilation;
     }
 
-    if (target_arch != .x86_64 and target_arch != .aarch64 and target_arch != .wasm32) {
+    if (target_arch != .wasm32 and !backend.devSupportsTarget(target)) {
         try ctx.io.stderr().print(
             "Error: The native object backend does not support the '{s}' architecture.\n",
             .{@tagName(target_arch)},
@@ -11093,10 +11111,15 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
     const build_scratch_dir = createUniqueTempDir(ctx) catch |err| {
         return ctx.fail(.{ .temp_dir_failed = .{ .err = err } });
     };
-    const cleanup_build_scratch_dir = true;
-    defer if (cleanup_build_scratch_dir) {
-        compile.CacheCleanup.deleteTempDir(ctx.io.std_io, build_scratch_dir);
-    };
+    if (args.keep_temp) {
+        const palette = reporting.ColorUtils.getPaletteForConfig(reporting.ReportingConfig.initColorTerminal());
+        const config = reporting.ReportingConfig.initColorTerminal();
+        const headline = try std.fmt.allocPrint(ctx.arena, "Kept temporary directory: {s}.", .{build_scratch_dir});
+        var report = try reporting.Report.init(ctx.arena, "Kept Temporary Directory", headline, .warning);
+        defer report.deinit();
+        reporting.renderReportToTerminal(&report, ctx.io.stderr(), palette, config) catch {};
+    }
+    defer if (!args.keep_temp) compile.CacheCleanup.deleteTempDir(ctx.io.std_io, build_scratch_dir);
 
     const obj_filename = try std.fmt.allocPrint(ctx.arena, "roc_app_{s}.o", .{@tagName(target)});
     const obj_path = try std.fs.path.join(ctx.arena, &.{ build_scratch_dir, obj_filename });
@@ -17652,6 +17675,7 @@ fn handleProcessFileError(err: ProcessFileError, stderr: anytype, path: []const 
         error.FileNotFound,
         error.FileSystem,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.InputOutput,
         error.InvalidBatchScriptArg,
         error.InvalidExe,
@@ -17954,6 +17978,7 @@ fn requireReportableCheckFailure(err: CheckFileWithBuildEnvPreservedError) error
         error.FileNotFound,
         error.FileSystem,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.InputOutput,
         error.Internal,
         error.InvalidDependency,

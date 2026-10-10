@@ -141,13 +141,13 @@ const CheckTypeCheckerPatternsStep = struct {
         .{ .file = "cir_to_lir.zig", .start = 110, .end = 115 },
         // inspected.zig resolves a type module's import statement from the caller's
         // module name, which arrives as text from outside this module's ident store.
-        .{ .file = "inspected.zig", .start = 226, .end = 232 },
+        .{ .file = "inspected.zig", .start = 227, .end = 233 },
         // inspected.zig trims the trailing newline off a rendered report. This is
         // presentation text on its way out, not a type-checker comparison.
-        .{ .file = "inspected.zig", .start = 2474, .end = 2474 },
+        .{ .file = "inspected.zig", .start = 2475, .end = 2475 },
         // inspected.zig converts a NUL-terminated dylib path from the linker into a
         // slice. Path bytes, not identifiers.
-        .{ .file = "inspected.zig", .start = 3264, .end = 3275 },
+        .{ .file = "inspected.zig", .start = 3265, .end = 3276 },
         // inspected_run.zig dispatches on a hosted function's ABI symbol, which is
         // matched by name at the host boundary and has no Ident.Idx.
         .{ .file = "inspected_run.zig", .start = 109, .end = 109 },
@@ -300,11 +300,11 @@ const CheckEnumFromIntZeroStep = struct {
         if (violations.items.len > 0) {
             std.debug.print("\n", .{});
             std.debug.print(@as([80]u8, @splat('=')) ++ "\n", .{});
-            std.debug.print("FORBIDDEN PATTERN: @fromBackingInt(0) or @enumFromInt(0)\n", .{});
+            std.debug.print("FORBIDDEN PATTERN: @fromBackingInt(0) or @fromBackingInt(0)\n", .{});
             std.debug.print(@as([80]u8, @splat('=')) ++ "\n\n", .{});
 
             std.debug.print(
-                \\Using @fromBackingInt(0) or its legacy spelling @enumFromInt(0) is forbidden.
+                \\Using @fromBackingInt(0) or its legacy spelling @fromBackingInt(0) is forbidden.
                 \\
                 \\WHY THIS RULE EXISTS:
                 \\  Converting zero into an enum hides bugs and makes them harder to debug. It creates
@@ -341,7 +341,7 @@ const CheckEnumFromIntZeroStep = struct {
 
             return fail(
                 "Found {d} zero integer to enum conversions. Using placeholder values like this has consistently led to bugs in this code base. " ++
-                    "Do not use @fromBackingInt(0) or @enumFromInt(0), and do not uncritically replace it with another placeholder like .first. " ++
+                    "Do not use @fromBackingInt(0) or @fromBackingInt(0), and do not uncritically replace it with another placeholder like .first. " ++
                     "If you want it to be uninitialized and are very confident it will be overwritten before it is ever read, then use `undefined`. " ++
                     "Otherwise, take a step back and rethink how this code works; there should be a way to implement this in a way that does not use hardcoded placeholder indices like 0! " ++
                     "See above for details.",
@@ -376,7 +376,7 @@ const CheckEnumFromIntZeroStep = struct {
             defer allocator.free(content);
 
             // Vendored Zig-compiler files use upstream idioms this check would
-            // flag (e.g. zero-valued enum constants like `AddrSpace = @enumFromInt(0)`);
+            // flag (e.g. zero-valued enum constants like `AddrSpace = @fromBackingInt(0)`);
             // exempt them, mirroring how ci/tidy.zig skips crates/.
             if (std.mem.find(u8, content, vendored_zig_marker) != null) continue;
 
@@ -398,8 +398,8 @@ const CheckEnumFromIntZeroStep = struct {
                     // Zig 0.17's formatter renames the legacy builtin spelling.
                     if (std.mem.find(u8, line, "@fromBackingInt(0)") != null or
                         std.mem.find(u8, line, "@fromBackingInt(@intCast(0))") != null or
-                        std.mem.find(u8, line, "@enumFromInt(0)") != null or
-                        std.mem.find(u8, line, "@enumFromInt(@intCast(0))") != null)
+                        std.mem.find(u8, line, "@fromBackingInt(0)") != null or
+                        std.mem.find(u8, line, "@fromBackingInt(@intCast(0))") != null)
                     {
                         try violations.append(allocator, .{
                             .file_path = full_path,

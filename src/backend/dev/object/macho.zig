@@ -383,6 +383,8 @@ pub const MachOWriter = struct {
                     .aarch64 => MachO.ARM64_RELOC_PAGEOFF12,
                 },
             },
+            // arm32 relocation kinds are produced only for arm32 ELF objects.
+            .abs32, .arm_movw_prel, .arm_movt_prel => unreachable,
         };
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,

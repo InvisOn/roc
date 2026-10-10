@@ -1745,8 +1745,11 @@ pub fn generateModule(
 
     var merge_result = self.module.mergeModule(&builtins_module) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.FunctionTypeMismatch => {
+            const conflict = self.module.merge_type_conflict.?;
+            wasmInvariantFmt("WASM/codegen invariant violated: eval builtin merge failed: '{s}' has type {d} here and type {d} in the builtins", .{ conflict.name, conflict.existing_type, conflict.incoming_type });
+        },
         error.DuplicateSymbol,
-        error.FunctionTypeMismatch,
         error.InvalidSection,
         => wasmInvariantFmt("WASM/codegen invariant violated: eval builtin merge failed: {s}", .{@errorName(err)}),
     };

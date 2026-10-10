@@ -2,10 +2,18 @@ platform ""
     requires {
         main! : () => {}
     }
-    exposes [Stdout, Stderr, Stdin, Builder, Host, NodeA, NodeB, Element, Padded, Rb]
+    exposes [Stdout, Stderr, Stdin, Builder, Host, NodeA, NodeB, Element, Padded, Rb, Abi]
     packages {}
     provides { "roc_main": main_for_host! }
     hosted {
+        "roc_abi_f64_bits": Abi.f64_bits!,
+        "roc_abi_f64_f32_f64": Abi.f64_f32_f64!,
+        "roc_abi_f64_from_bits": Abi.f64_from_bits!,
+        "roc_abi_i32_i64": Abi.i32_i64!,
+        "roc_abi_nine_f64": Abi.nine_f64!,
+        "roc_abi_three_i32_i64": Abi.three_i32_i64!,
+        "roc_abi_triple_from": Abi.triple_from!,
+        "roc_abi_two_i32_triple": Abi.two_i32_triple!,
         "roc_builder_print_value": Builder.print_value!,
         "roc_host_boxed_add": Host.boxed_add!,
         "roc_host_boxed_drop_report": Host.boxed_drop_report!,
@@ -37,6 +45,7 @@ platform ""
         x64v1musl: { inputs: ["crt1.o", "libhost.a", app, "libc.a"] },
         arm64musl: { inputs: ["crt1.o", "libhost.a", app, "libc.a"] },
         arm64v1musl: { inputs: ["crt1.o", "libhost.a", app, "libc.a"] },
+        arm32musl: { inputs: ["crt1.o", "libhost.a", app, "libc.a"] },
         x64win: { inputs: ["host.lib", app] },
         arm64win: { inputs: ["host.lib", app] },
         x64mingw: { inputs: ["crt2.obj", "host.lib", app, "libmingw32.lib", "zigc.lib", "compiler_rt.lib", "api-ms-win-crt-conio-l1-1-0.lib", "api-ms-win-crt-convert-l1-1-0.lib", "api-ms-win-crt-environment-l1-1-0.lib", "api-ms-win-crt-filesystem-l1-1-0.lib", "api-ms-win-crt-heap-l1-1-0.lib", "api-ms-win-crt-locale-l1-1-0.lib", "api-ms-win-crt-math-l1-1-0.lib", "api-ms-win-crt-multibyte-l1-1-0.lib", "api-ms-win-crt-private-l1-1-0.lib", "api-ms-win-crt-process-l1-1-0.lib", "api-ms-win-crt-runtime-l1-1-0.lib", "api-ms-win-crt-stdio-l1-1-0.lib", "api-ms-win-crt-string-l1-1-0.lib", "api-ms-win-crt-time-l1-1-0.lib", "api-ms-win-crt-utility-l1-1-0.lib", "advapi32.lib", "kernel32.lib", "ntdll.lib", "shell32.lib", "user32.lib"] },
@@ -52,6 +61,7 @@ import NodeA
 import NodeB
 import Element
 import Padded
+import Abi
 import Rb
 
 main_for_host! : () => {}

@@ -90,6 +90,10 @@ comptime {
                 @export(&linuxStartAarch64, .{ .name = "_start" });
                 @export(&linuxStartMain, .{ .name = "roc_default_linux_start_main", .visibility = .hidden });
             },
+            .arm => {
+                @export(&linuxStartArm, .{ .name = "_start" });
+                @export(&linuxStartMain, .{ .name = "roc_default_linux_start_main", .visibility = .hidden });
+            },
             .unsupported => @compileError("unsupported default-platform Linux architecture"),
         }
     }
@@ -101,16 +105,16 @@ comptime {
 var inline_expect_failed: bool = false;
 
 /// The architectures this runtime has process-entry and backtrace code for.
-const LinuxArch = enum { x86_64, aarch64, unsupported };
+const LinuxArch = enum { x86_64, aarch64, arm, unsupported };
 
 const linux_arch: LinuxArch = switch (builtin.cpu.arch) {
     .x86_64 => .x86_64,
     .aarch64 => .aarch64,
+    .arm => .arm,
     .alpha,
     .amdgcn,
     .arc,
     .arceb,
-    .arm,
     .armeb,
     .aarch64_be,
     .avr,
@@ -197,6 +201,19 @@ fn linuxStartAarch64() callconv(.naked) noreturn {
         \\add x1, x19, #8
         \\bl roc_default_linux_start_main
         \\brk #0
+    );
+}
+
+/// A32 process entry: argc is at [sp] and argv follows one word later. SP is
+/// aligned down to the 8 bytes AAPCS32 requires at a public interface.
+fn linuxStartArm() callconv(.naked) noreturn {
+    asm volatile (
+        \\mov r4, sp
+        \\bic sp, sp, #7
+        \\ldr r0, [r4]
+        \\add r1, r4, #4
+        \\bl roc_default_linux_start_main
+        \\udf #0
     );
 }
 
@@ -405,6 +422,16 @@ fn interruptedRegisters(ctx: ?*anyopaque) ?InterruptedRegisters {
                 .stack_pointer = @intCast(context.mcontext.sp),
             };
         },
+        .arm => {
+            // `r` is arm_r0 through arm_lr: r11 is the frame pointer, r13 the
+            // stack pointer.
+            const context: *const ArmUContext = @ptrCast(@alignCast(context_ptr));
+            return .{
+                .instruction_pointer = context.mcontext.pc,
+                .frame_pointer = context.mcontext.r[11],
+                .stack_pointer = context.mcontext.r[13],
+            };
+        },
         .unsupported => return null,
     }
 }
@@ -442,6 +469,26 @@ const Aarch64UContext = extern struct {
     sigmask: linux.sigset_t,
     unused: [120]u8,
     mcontext: Aarch64MContext,
+};
+
+/// `struct sigcontext` from Linux's arch/arm/include/uapi/asm/sigcontext.h:
+/// r[11] is the frame pointer.
+const ArmMContext = extern struct {
+    trap_no: u32,
+    error_code: u32,
+    oldmask: u32,
+    r: [15]u32,
+    pc: u32,
+    cpsr: u32,
+    fault_address: u32,
+};
+
+/// `struct ucontext` from Linux's arch/arm/include/asm/ucontext.h.
+const ArmUContext = extern struct {
+    flags: u32,
+    link: ?*anyopaque,
+    stack: linux.stack_t,
+    mcontext: ArmMContext,
 };
 
 const Frame = extern struct {

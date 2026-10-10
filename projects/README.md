@@ -305,6 +305,30 @@ Single-source builtin registration has landed: the seven hand-typed
 (src/builtins/builtin_registry.zig), and the LowLevel-to-builtin member
 choice is shared across backends via `base.LowLevelBuiltins`.
 
+The arm32 dev backend (2026-09) is a standalone project:
+
+- [big/arm32-dev-backend.md](big/arm32-dev-backend.md)—
+  a third native dev backend for 32-bit ARM (A32, ARMv7-A with NEON,
+  AAPCS32 hard-float, Linux musl and glibc): the shared driver made
+  ISA- and width-generic, then arm32 code generation, cross-compilation,
+  execution oracles under qemu and on hardware, and the snapshot lock-in.
+  Its notes: [big/arm32-dev-backend-issues.md](big/arm32-dev-backend-issues.md)
+  (issues and annoyances found along the way) and
+  [big/arm32-dev-backend-existing-code-changes.md](big/arm32-dev-backend-existing-code-changes.md)
+  (every change it made outside the arm32 backend), and
+  [big/arm32-dev-backend-verification.md](big/arm32-dev-backend-verification.md)
+  (how each commit and unit is verified before catching up with upstream),
+  and [big/arm32-dev-backend-facade-decision.md](big/arm32-dev-backend-facade-decision.md)
+  (whether ISA-specific code may stay in the shared driver), and
+  [big/arm32-dev-backend-fuzzing.md](big/arm32-dev-backend-fuzzing.md)
+  (fuzzing the arm32 code generator: compile and differential oracles), and
+  [big/arm32-dev-backend-walkthroughs.md](big/arm32-dev-backend-walkthroughs.md)
+  (guided tours of the work, phase by phase), and
+  [big/arm32-dev-backend-upstream-now.md](big/arm32-dev-backend-upstream-now.md)
+  (fixes, defects and lessons upstream can use before arm32 lands).
+  The implementation's own
+  record is `src/backend/dev/arm32/DESIGN.md`.
+
 ### Suggested overall sequence
 
 If one person or agent works through everything serially, this order

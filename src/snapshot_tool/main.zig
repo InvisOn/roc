@@ -3988,8 +3988,7 @@ fn processDevObjectSnapshot(
         hash_results[i].target_name = field_name;
 
         target_snapshot: {
-            const arch = target.toCpuArch();
-            if (arch != .x86_64 and arch != .aarch64 and arch != .aarch64_be) {
+            if (comptime !backend.devSupportsTarget(target)) {
                 hash_results[i].hash_hex = undefined;
                 hash_results[i].supported = false;
                 break :target_snapshot;
@@ -4052,16 +4051,24 @@ fn processDevObjectSnapshot(
                 lowered.lir_result.boxy_worker_procs.items,
                 target,
             )) |result| {
+                // Procedure symbol names digest the compiler build; hash the
+                // object with them canonicalized so the pin tracks code
+                // generation, not the compiler's git revision.
+                const canonical = try allocator.dupe(u8, result.object_bytes);
+                defer allocator.free(canonical);
+                try lir.LIR.ProcIdentity.canonicalizeSymbolNames(allocator, canonical);
                 var hasher = Blake3.init(.{});
-                hasher.update(result.object_bytes);
+                hasher.update(canonical);
                 var hash: [32]u8 = undefined;
                 hasher.final(&hash);
                 hash_results[i].hash_hex = std.fmt.bytesToHex(hash, .lower);
                 hash_results[i].supported = true;
                 result.allocator.free(result.object_bytes);
-            } else |_| {
-                hash_results[i].hash_hex = undefined;
-                hash_results[i].supported = false;
+            } else |err| {
+                // The architecture check above admits only targets the dev
+                // backend serves, so every error here is a real failure.
+                std.log.err("Dev object compilation failed for {s}: {}", .{ field_name, err });
+                return error.CompilationFailed;
             }
         }
     }
@@ -4597,6 +4604,7 @@ fn isTypeCheckError(err: SnapshotError) bool {
         error.FileNotFound,
         error.FileSystem,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.FtruncateFailed,
         error.HostedFunctionNotBound,
         error.InputOutput,
@@ -5348,6 +5356,45 @@ test "snapshot tool formats optional record fields" {
     const formatted = try getDefaultedTypeString(allocator, &module_env, record_var);
     defer allocator.free(formatted);
     try std.testing.expectEqualStrings("{ required : {}, optional ?: {} }", formatted);
+}
+
+test "dev_object snapshots hash exactly the targets the dev backend supports" {
+    // The gate-consistency check of projects/big/arm32-dev-backend.md: a
+    // `<target>=<hash>` line for every target `devSupportsTarget` accepts and a
+    // `<target>=NOT_IMPLEMENTED` line for every other, in every dev_object
+    // snapshot, so the committed hashes and the gate cannot drift apart.
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var snapshots_dir = try std.Io.Dir.cwd().openDir(io, "test/snapshots", .{ .iterate = true });
+    defer snapshots_dir.close(io);
+
+    const target_info = @typeInfo(roc_target.RocTarget).@"enum";
+    var checked: usize = 0;
+    var it = snapshots_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, "dev_object_") or !std.mem.endsWith(u8, entry.name, ".md")) continue;
+        const text = try snapshots_dir.readFileAlloc(io, entry.name, allocator, .limited(1024 * 1024));
+        defer allocator.free(text);
+
+        inline for (target_info.field_names, target_info.field_values) |field_name, field_value| {
+            const target: roc_target.RocTarget = @fromBackingInt(@intCast(field_value));
+            const prefix = "\n" ++ field_name ++ "=";
+            const at = std.mem.find(u8, text, prefix) orelse {
+                std.debug.print("{s} has no line for {s}\n", .{ entry.name, field_name });
+                return error.TestUnexpectedResult;
+            };
+            const value_start = at + prefix.len;
+            const value_end = std.mem.findScalarPos(u8, text, value_start, '\n') orelse text.len;
+            const hashed = !std.mem.eql(u8, text[value_start..value_end], "NOT_IMPLEMENTED");
+            if (hashed != backend.devSupportsTarget(target)) {
+                std.debug.print("{s}: {s} is {s} but devSupportsTarget says {}\n", .{ entry.name, field_name, text[value_start..value_end], backend.devSupportsTarget(target) });
+                return error.TestUnexpectedResult;
+            }
+        }
+        checked += 1;
+    }
+    try std.testing.expect(checked > 0);
 }
 
 test "no Builtin module leaks in snapshots" {

@@ -38,6 +38,7 @@ pub const atomicRcHelperSymbolName = dev.atomicRcHelperSymbolName;
 pub const collectRequiredRcHelpers = dev.collectRequiredRcHelpers;
 pub const collectReferencedProcs = dev.collectReferencedProcs;
 pub const ObjectFileCompiler = dev.ObjectFileCompiler;
+pub const devSupportsTarget = dev.supportsTarget;
 pub const CompilationError = dev.CompilationError;
 pub const writeFileWindowsAvSafe = dev.writeFileWindowsAvSafe;
 

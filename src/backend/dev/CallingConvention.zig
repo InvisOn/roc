@@ -4,6 +4,7 @@
 //! - x86_64 System V (Linux, macOS, BSD)
 //! - x86_64 Windows Fastcall
 //! - aarch64 AAPCS64
+//! - arm32 AAPCS32, VFP (hard-float) variant
 //!
 //! Key features:
 //! - Target-aware calling conventions (supports cross-compilation)
@@ -17,12 +18,15 @@
 //! - CC: Calling convention constants
 
 const std = @import("std");
+const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
+const isaOf = @import("isa.zig").isaOf;
 
 const layout = @import("layout");
 
 const x86_64 = @import("x86_64/mod.zig");
 const aarch64 = @import("aarch64/mod.zig");
+const arm32 = @import("arm32/mod.zig");
 
 const Relocation = @import("Relocation.zig").IndexedRelocation;
 const SymbolTable = @import("SymbolTable.zig");
@@ -87,14 +91,22 @@ pub fn CallBuilder(comptime EmitType: type) type {
     const GeneralReg = EmitType.GeneralReg;
     const FloatReg = EmitType.FloatReg;
     const roc_target = EmitType.roc_target;
-    const is_x86_64 = roc_target.toCpuArch() == .x86_64;
-    const is_aarch64 = roc_target.toCpuArch() == .aarch64 or roc_target.toCpuArch() == .aarch64_be;
+    const isa = comptime isaOf(roc_target);
     const is_windows = roc_target.isWindows();
-    const uses_position_based_float_args = is_x86_64 and is_windows;
+    const uses_position_based_float_args = switch (isa) {
+        .x86_64 => is_windows,
+        .aarch64, .arm32 => false,
+    };
     // Apple's arm64 ABI packs overflow arguments on the stack at their natural
     // size and alignment; AAPCS64 elsewhere and both x86_64 conventions give
     // each one a full eightbyte slot.
-    const target_packs_stack_args = is_aarch64 and roc_target.isMacOS();
+    const target_packs_stack_args = switch (isa) {
+        .aarch64 => roc_target.isMacOS(),
+        .x86_64, .arm32 => false,
+    };
+    // Bytes in a general register: the size of an implicit stack slot and of
+    // the largest piece an aggregate is copied in.
+    const word_bytes: u8 = @intCast(roc_target.ptrBitWidth() / 8);
 
     // Represents a deferred argument source (used for both stack and register args)
     const ArgSource = union(enum) {
@@ -154,6 +166,10 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// Deferred register arguments, resolved via parallel move before call
         reg_args: [CC_EMIT.PARAM_REGS.len]DeferredRegArg = undefined,
         reg_arg_count: u8 = 0,
+        /// arm32 only: the S registers s0-s15 holding float arguments. AAPCS32
+        /// VFP allocates with back-filling (an f32 takes the lowest free S
+        /// register even below a used D register).
+        vfp_used: u16 = 0,
 
         /// Initialize CallBuilder with automatic R12 handling for C function calls.
         ///
@@ -165,7 +181,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// This method will allocate space by decrementing the stack offset on Windows.
         pub fn init(emit: *EmitType, stack_offset: *i32) Allocator.Error!Self {
             var self = Self{ .emit = emit, .stack_offset = stack_offset };
-            if (comptime is_x86_64 and is_windows) {
+            if (comptime isa == .x86_64 and is_windows) {
                 // Allocate 16-byte slot for R12 save to maintain 16-byte alignment
                 // for subsequent allocations (important for i128/RocDec which need
                 // 16-byte aligned addresses when passed by pointer)
@@ -225,16 +241,16 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// as three consecutive integer-class memory arguments.
         pub inline fn addThreeWordMemArg(self: *Self, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
             try self.addMemArg(base_reg, offset);
-            try self.addMemArg(base_reg, offset + 8);
-            try self.addMemArg(base_reg, offset + 16);
+            try self.addMemArg(base_reg, offset + word_bytes);
+            try self.addMemArg(base_reg, offset + 2 * @as(i32, word_bytes));
         }
 
         /// Add the RocStr stored at `offset` as three consecutive integer-class
         /// memory arguments in bytes, length, capacity order.
         pub inline fn addStrBytesLenCapMemArgs(self: *Self, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
             try self.addMemArg(base_reg, offset);
-            try self.addMemArg(base_reg, offset + 16);
-            try self.addMemArg(base_reg, offset + 8);
+            try self.addMemArg(base_reg, offset + 2 * @as(i32, word_bytes));
+            try self.addMemArg(base_reg, offset + word_bytes);
         }
 
         /// Add an integer-class memory argument at its ABI-assigned register.
@@ -300,7 +316,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
             var copied: usize = 0;
             while (copied < size) {
                 const remaining = size - copied;
-                const piece_size: u8 = if (remaining >= 8) 8 else if (remaining >= 4) 4 else if (remaining >= 2) 2 else 1;
+                const piece_size: u8 = if (remaining >= word_bytes) word_bytes else if (remaining >= 4) 4 else if (remaining >= 2) 2 else 1;
                 try self.addStackArg(
                     stack_byte_offset + @as(u32, @intCast(copied)),
                     piece_size,
@@ -317,9 +333,44 @@ pub fn CallBuilder(comptime EmitType: type) type {
         }
 
         fn addImplicitStackArg(self: *Self, src: ArgSource) Allocator.Error!void {
-            const byte_offset = std.mem.alignForward(u32, self.stack_arg_size, 8);
-            try self.addStackArg(byte_offset, 8, src);
+            const byte_offset = std.mem.alignForward(u32, self.stack_arg_size, word_bytes);
+            try self.addStackArg(byte_offset, word_bytes, src);
             self.implicit_stack_arg_count += 1;
+        }
+
+        /// Add a 64-bit argument (I64/U64 or F64 bits, D6's `Wide64`) loaded
+        /// from memory. On a 64-bit target this is `addMemArg`. On arm32
+        /// (AAPCS32 C.3/C.5) it takes the next even core-register pair, or,
+        /// when no pair is left, an 8-aligned stack slot, and no later
+        /// argument goes in a core register.
+        pub fn addMem64Arg(self: *Self, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
+            if (comptime word_bytes == 8) return self.addMemArg(base_reg, offset);
+            try self.addPairArg(.{ .from_mem = .{ .base = base_reg, .offset = offset } }, .{ .from_mem = .{ .base = base_reg, .offset = offset + 4 } });
+        }
+
+        /// Add a 64-bit immediate argument; see `addMem64Arg`.
+        pub fn addImm64Arg(self: *Self, value: i64) Allocator.Error!void {
+            if (comptime word_bytes == 8) return self.addImmArg(value);
+            const bits: u64 = @bitCast(value);
+            try self.addPairArg(
+                .{ .from_imm = @as(i32, @bitCast(@as(u32, @truncate(bits)))) },
+                .{ .from_imm = @as(i32, @bitCast(@as(u32, @truncate(bits >> 32)))) },
+            );
+        }
+
+        fn addPairArg(self: *Self, low: ArgSource, high: ArgSource) Allocator.Error!void {
+            const first = std.mem.alignForward(usize, self.int_arg_index, 2);
+            if (first + 2 <= CC_EMIT.PARAM_REGS.len) {
+                self.addDeferredRegArg(first, low);
+                self.addDeferredRegArg(first + 1, high);
+                return;
+            }
+            // C.5: the pair goes on the stack, and the core registers close.
+            self.int_arg_index = CC_EMIT.PARAM_REGS.len;
+            const byte_offset = std.mem.alignForward(u32, self.stack_arg_size, 8);
+            try self.addStackArg(byte_offset, 4, low);
+            try self.addStackArg(byte_offset + 4, 4, high);
+            self.implicit_stack_arg_count += 2;
         }
 
         /// Re-place the overflow arguments for a C callee whose parameter ABI
@@ -382,6 +433,16 @@ pub fn CallBuilder(comptime EmitType: type) type {
         ///              A float arg at position 1 goes in XMM1, consuming both int and float slots.
         /// System V / AAPCS64: Uses a separate float register pool.
         pub fn addFloatRegArg(self: *Self, src_reg: FloatReg, is_f64: bool) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                const s_index = self.allocVfp(if (is_f64) 8 else 4);
+                if (is_f64) {
+                    const dst: arm32.DReg = @fromBackingInt(s_index / 2);
+                    if (dst != src_reg) try self.emit.vmovF64(dst, src_reg);
+                } else {
+                    try self.emit.vmovF32(@fromBackingInt(s_index), src_reg.sLow());
+                }
+                return;
+            }
             if (comptime uses_position_based_float_args) {
                 // Windows x64: float args use same position as int args
                 // XMM0 for arg 0, XMM1 for arg 1, etc.
@@ -440,6 +501,10 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// Windows x64: Uses position-based registers (XMM0-3 mirror arg positions 0-3).
         /// System V / AAPCS64: Uses a separate float register pool.
         pub fn addFloatMemArg(self: *Self, base_reg: GeneralReg, offset: i32, size: u8) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                try self.emitVfpLoadAt(self.allocVfp(size), base_reg, offset, size);
+                return;
+            }
             if (comptime uses_position_based_float_args) {
                 // Windows x64: float args use same position as int args
                 if (self.int_arg_index < CC_EMIT.FLOAT_PARAM_REGS.len) {
@@ -463,13 +528,53 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
         /// Load a float/vector argument into the exact register selected by
         /// the physical ABI assignment.
+        /// On arm32 `register_index` is the first S register (s0-s15) of the
+        /// value: an f64 starts at an even one, a vector at a multiple of 4.
         pub fn addFloatMemArgAt(self: *Self, register_index: u16, base_reg: GeneralReg, offset: i32, size: u8) Allocator.Error!void {
+            if (comptime isa == .arm32) {
+                const slots: u5 = @intCast(size / 4);
+                std.debug.assert(register_index + slots <= 16 and register_index % slots == 0);
+                self.vfp_used |= @intCast(((@as(u32, 1) << slots) - 1) << @intCast(register_index));
+                try self.emitVfpLoadAt(@intCast(register_index), base_reg, offset, size);
+                return;
+            }
             std.debug.assert(register_index < CC_EMIT.FLOAT_PARAM_REGS.len);
             try self.emitFloatLoad(CC_EMIT.FLOAT_PARAM_REGS[register_index], base_reg, offset, size);
             if (comptime uses_position_based_float_args) {
                 self.int_arg_index = @max(self.int_arg_index, @as(usize, register_index) + 1);
             } else {
                 self.float_arg_index = @max(self.float_arg_index, @as(usize, register_index) + 1);
+            }
+        }
+
+        /// The first S register of the lowest free, naturally aligned run of
+        /// `size / 4` S registers in s0-s15 (AAPCS32 VFP back-filling).
+        fn allocVfp(self: *Self, size: u8) u5 {
+            const slots: u5 = @intCast(size / 4);
+            const run: u32 = (@as(u32, 1) << slots) - 1;
+            var first: u5 = 0;
+            while (first + slots <= 16) : (first += slots) {
+                if ((self.vfp_used & (run << first)) == 0) {
+                    self.vfp_used |= @intCast(run << first);
+                    return first;
+                }
+            }
+            // Float arguments beyond the VFP registers go on the stack; no
+            // builtin the dev backend calls takes that many.
+            invariant("arm32 CallBuilder invariant violated: more float arguments than VFP argument registers", .{});
+        }
+
+        fn emitVfpLoadAt(self: *Self, s_index: u5, base_reg: GeneralReg, offset: i32, size: u8) Allocator.Error!void {
+            switch (size) {
+                4 => try self.emit.vldrF32(@fromBackingInt(s_index), base_reg, offset),
+                8 => try self.emit.vldrF64(@fromBackingInt(s_index / 2), base_reg, offset),
+                16 => {
+                    std.debug.assert(base_reg != CC_EMIT.SCRATCH_REG);
+                    const q: arm32.QReg = @fromBackingInt(@intCast(s_index / 4));
+                    try self.emit.vldrF64(q.dLow(), base_reg, offset);
+                    try self.emit.vldrF64(q.dHigh(), base_reg, offset + 8);
+                },
+                else => unreachable,
             }
         }
 
@@ -510,12 +615,13 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
         /// Emit a single argument instruction: move source to destination register.
         fn emitArgInst(self: *Self, dst: GeneralReg, src: ArgSource) Allocator.Error!void {
+            if (comptime isa == .arm32) return self.emitArgInstArm32(dst, src);
             switch (src) {
                 .from_reg => |reg| {
                     if (dst != reg) try self.emit.movRegReg(.w64, dst, reg);
                 },
                 .from_lea => |lea| {
-                    if (comptime is_aarch64) {
+                    if (comptime isa.binaryIs(.aarch64)) {
                         if (lea.offset >= 0 and lea.offset <= 4095) {
                             try self.emit.addRegRegImm12(.w64, dst, lea.base, @intCast(lea.offset));
                         } else if (lea.offset < 0 and -lea.offset <= 4095) {
@@ -531,12 +637,42 @@ pub fn CallBuilder(comptime EmitType: type) type {
                 },
                 .from_mem => |mem| try self.emitLoadPromoted(dst, mem.base, mem.offset, mem.promote),
                 .from_imm => |value| {
-                    if (comptime is_aarch64)
+                    if (comptime isa.binaryIs(.aarch64))
                         try self.emit.movRegImm64(dst, @bitCast(value))
                     else
                         try self.emit.movRegImm64(dst, value);
                 },
             }
+        }
+
+        fn emitArgInstArm32(self: *Self, dst: GeneralReg, src: ArgSource) Allocator.Error!void {
+            switch (src) {
+                .from_reg => |reg| if (dst != reg) try self.emit.movRegReg(dst, reg),
+                .from_lea => |lea| try self.emitAddrArm32(dst, lea.base, lea.offset),
+                .from_mem => |mem| try self.emitLoadPromoted(dst, mem.base, mem.offset, mem.promote),
+                .from_imm => |value| try self.emit.movRegImm32(dst, arm32Word(value)),
+            }
+        }
+
+        /// The 32-bit pattern of an immediate argument, which must fit a
+        /// register as a signed or an unsigned word.
+        fn arm32Word(value: i64) u32 {
+            if (value < std.math.minInt(i32) or value > std.math.maxInt(u32)) {
+                invariant("arm32 CallBuilder invariant violated: immediate argument {d} does not fit a register", .{value});
+            }
+            return @truncate(@as(u64, @bitCast(value)));
+        }
+
+        /// dst = base + offset; `dst` must differ from `base` when the offset
+        /// is not a modified immediate.
+        fn emitAddrArm32(self: *Self, dst: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            if (arm32.ModImm.encode(@abs(offset))) |imm| {
+                if (offset >= 0) try self.emit.addRegRegModImm(dst, base, imm) else try self.emit.subRegRegModImm(dst, base, imm);
+                return;
+            }
+            std.debug.assert(dst != base);
+            try self.emit.movRegImm32(dst, @bitCast(offset));
+            try self.emit.addRegRegReg(dst, base, dst);
         }
 
         /// Load a value into `dst`, applying the C promotion it owes. An
@@ -549,7 +685,32 @@ pub fn CallBuilder(comptime EmitType: type) type {
             offset: i32,
             promote: Promotion,
         ) Allocator.Error!void {
-            if (comptime is_aarch64) {
+            if (comptime isa == .arm32) {
+                const form: arm32.MemForm = switch (promote) {
+                    .none => .word,
+                    .zero_byte => .byte,
+                    .sign_byte => .signed_byte,
+                    .zero_halfword => .halfword,
+                    .sign_halfword => .signed_halfword,
+                };
+                var at_base = base;
+                var at_offset = offset;
+                if (!arm32.fitsImmediate(form, offset)) {
+                    // Form the address in `dst`, which the load overwrites.
+                    try self.emitAddrArm32(dst, base, offset);
+                    at_base = dst;
+                    at_offset = 0;
+                }
+                switch (promote) {
+                    .none => try self.emit.ldrRegMem(dst, at_base, at_offset),
+                    .zero_byte => try self.emit.ldrbRegMem(dst, at_base, at_offset),
+                    .sign_byte => try self.emit.ldrsbRegMem(dst, at_base, at_offset),
+                    .zero_halfword => try self.emit.ldrhRegMem(dst, at_base, at_offset),
+                    .sign_halfword => try self.emit.ldrshRegMem(dst, at_base, at_offset),
+                }
+                return;
+            }
+            if (comptime isa.binaryIs(.aarch64)) {
                 switch (promote) {
                     .none => try self.emit.ldrRegMemSoff(.w64, dst, base, offset),
                     .zero_byte => try self.emit.ldrbRegMemSoff(dst, base, offset),
@@ -652,6 +813,64 @@ pub fn CallBuilder(comptime EmitType: type) type {
             }
         }
 
+        /// Emit one stack argument piece for arm32 (at most a word), using
+        /// r12 as the temporary. Outgoing arguments start at [sp, #0].
+        fn emitStackArgArm32(self: *Self, arg: StackArg) Allocator.Error!void {
+            const stack_offset: i32 = @intCast(arg.byte_offset);
+            const scratch = CC_EMIT.SCRATCH_REG;
+            const value: GeneralReg = switch (arg.src) {
+                .from_reg => |reg| reg,
+                .from_imm => |imm| blk: {
+                    try self.emit.movRegImm32(scratch, arm32Word(imm));
+                    break :blk scratch;
+                },
+                .from_lea => |lea| blk: {
+                    std.debug.assert(arg.size == 4);
+                    try self.emitAddrArm32(scratch, lea.base, lea.offset);
+                    break :blk scratch;
+                },
+                .from_mem => |mem| blk: {
+                    if (mem.promote != .none) {
+                        try self.emitLoadPromoted(scratch, mem.base, mem.offset, mem.promote);
+                    } else switch (arg.size) {
+                        1 => try self.emit.ldrbRegMem(scratch, mem.base, mem.offset),
+                        2 => try self.emit.ldrhRegMem(scratch, mem.base, mem.offset),
+                        4 => try self.emitLoadPromoted(scratch, mem.base, mem.offset, .none),
+                        else => unreachable,
+                    }
+                    break :blk scratch;
+                },
+            };
+            switch (arg.size) {
+                1 => try self.emit.strbRegMem(value, CC_EMIT.STACK_PTR, stack_offset),
+                2 => try self.emit.strhRegMem(value, CC_EMIT.STACK_PTR, stack_offset),
+                4 => try self.emit.strRegMem(value, CC_EMIT.STACK_PTR, stack_offset),
+                else => unreachable,
+            }
+        }
+
+        /// Save r12 if a register argument reads it, drop SP by the argument
+        /// area and store the stack arguments (before the register moves,
+        /// which may clobber their sources).
+        fn emitStackArgsArm32(self: *Self, total_space: u32) Allocator.Error!void {
+            try self.saveScratchIfConflict();
+            try self.emitAdjustSpArm32(-@as(i32, @intCast(total_space)));
+            for (self.stack_args.items) |arg| {
+                try self.emitStackArgArm32(arg);
+            }
+        }
+
+        /// sp += delta (a multiple of 16 for an outgoing argument area).
+        fn emitAdjustSpArm32(self: *Self, delta: i32) Allocator.Error!void {
+            if (delta == 0) return;
+            if (arm32.ModImm.encode(@abs(delta))) |imm| {
+                if (delta > 0) try self.emit.addRegRegModImm(CC_EMIT.STACK_PTR, CC_EMIT.STACK_PTR, imm) else try self.emit.subRegRegModImm(CC_EMIT.STACK_PTR, CC_EMIT.STACK_PTR, imm);
+                return;
+            }
+            try self.emit.movRegImm32(CC_EMIT.SCRATCH_REG, @bitCast(delta));
+            try self.emit.addRegRegReg(CC_EMIT.STACK_PTR, CC_EMIT.STACK_PTR, CC_EMIT.SCRATCH_REG);
+        }
+
         fn emitStackArgX86(self: *Self, arg: StackArg) Allocator.Error!void {
             const stack_offset: i32 = @intCast(CC_EMIT.SHADOW_SPACE + arg.byte_offset);
             const width: x86_64.RegisterWidth = switch (arg.size) {
@@ -691,7 +910,10 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// sources from SCRATCH_REG, save SCRATCH_REG to the caller's frame and
         /// redirect the deferred arg to load from memory instead.
         fn saveScratchIfConflict(self: *Self) Allocator.Error!void {
-            if (comptime !is_x86_64) return;
+            switch (isa) {
+                .x86_64, .arm32 => {},
+                .aarch64 => return,
+            }
 
             // Check if any stack arg needs SCRATCH_REG as a temp
             const needs_scratch = for (self.stack_args.items) |arg| {
@@ -705,7 +927,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                     // Allocate a stack slot in the caller's frame and save SCRATCH_REG
                     self.stack_offset.* -= 8;
                     const save_offset = self.stack_offset.*;
-                    try self.emit.movMemReg(.w64, CC_EMIT.BASE_PTR, save_offset, CC_EMIT.SCRATCH_REG);
+                    try self.emitStoreToFrame(save_offset, CC_EMIT.SCRATCH_REG);
                     ra.src = .{ .from_mem = .{ .base = CC_EMIT.BASE_PTR, .offset = save_offset } };
                     break;
                 }
@@ -735,7 +957,10 @@ pub fn CallBuilder(comptime EmitType: type) type {
                         if (!has_dst_reg[@backingInt(mem.base)]) continue;
 
                         const save_offset = self.allocCallerTempSlot();
-                        if (comptime is_aarch64) {
+                        if (comptime isa == .arm32) {
+                            try self.emitLoadPromoted(CC_EMIT.SCRATCH_REG, mem.base, mem.offset, .none);
+                            try self.emitStoreToFrame(save_offset, CC_EMIT.SCRATCH_REG);
+                        } else if (comptime isa.binaryIs(.aarch64)) {
                             try self.emit.ldrRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, mem.base, mem.offset);
                             try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.BASE_PTR, save_offset);
                         } else {
@@ -754,7 +979,13 @@ pub fn CallBuilder(comptime EmitType: type) type {
                         if (!has_dst_reg[@backingInt(lea.base)]) continue;
 
                         const save_offset = self.allocCallerTempSlot();
-                        if (comptime is_aarch64) {
+                        if (comptime isa == .arm32) {
+                            try self.emitAddrArm32(CC_EMIT.SCRATCH_REG, lea.base, lea.offset);
+                            try self.emitStoreToFrame(save_offset, CC_EMIT.SCRATCH_REG);
+                            ra.src = .{ .from_mem = .{ .base = CC_EMIT.BASE_PTR, .offset = save_offset } };
+                            continue;
+                        }
+                        if (comptime isa.binaryIs(.aarch64)) {
                             if (lea.offset >= 0 and lea.offset <= 4095) {
                                 try self.emit.addRegRegImm12(.w64, CC_EMIT.SCRATCH_REG, lea.base, @intCast(lea.offset));
                             } else if (lea.offset < 0 and -lea.offset <= 4095) {
@@ -766,7 +997,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                         } else {
                             try self.emit.leaRegMem(CC_EMIT.SCRATCH_REG, lea.base, lea.offset);
                         }
-                        if (comptime is_aarch64) {
+                        if (comptime isa.binaryIs(.aarch64)) {
                             try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.BASE_PTR, save_offset);
                         } else {
                             try self.emit.movMemReg(.w64, CC_EMIT.BASE_PTR, save_offset, CC_EMIT.SCRATCH_REG);
@@ -779,13 +1010,28 @@ pub fn CallBuilder(comptime EmitType: type) type {
         }
 
         fn allocCallerTempSlot(self: *Self) i32 {
-            if (comptime is_aarch64) {
-                const offset = self.stack_offset.*;
-                self.stack_offset.* += 16;
-                return offset;
-            } else {
-                self.stack_offset.* -= 8;
-                return self.stack_offset.*;
+            switch (isa) {
+                .aarch64 => {
+                    const offset = self.stack_offset.*;
+                    self.stack_offset.* += 16;
+                    return offset;
+                },
+                .x86_64, .arm32 => {
+                    self.stack_offset.* -= 8;
+                    return self.stack_offset.*;
+                },
+            }
+        }
+
+        /// Store a general register to [fp + offset] in the caller's frame.
+        fn emitStoreToFrame(self: *Self, offset: i32, reg: GeneralReg) Allocator.Error!void {
+            switch (isa) {
+                .x86_64 => try self.emit.movMemReg(.w64, CC_EMIT.BASE_PTR, offset, reg),
+                .aarch64 => try self.emit.strRegMemSoff(.w64, reg, CC_EMIT.BASE_PTR, offset),
+                .arm32 => {
+                    std.debug.assert(arm32.fitsImmediate(.word, offset));
+                    try self.emit.strRegMem(reg, CC_EMIT.BASE_PTR, offset);
+                },
             }
         }
 
@@ -845,7 +1091,10 @@ pub fn CallBuilder(comptime EmitType: type) type {
                         },
                         .being_moved => {
                             // CYCLE: save j's source to SCRATCH_REG.
-                            try self.emit.movRegReg(.w64, CC_EMIT.SCRATCH_REG, src_reg);
+                            switch (isa) {
+                                .x86_64, .aarch64 => try self.emit.movRegReg(.w64, CC_EMIT.SCRATCH_REG, src_reg),
+                                .arm32 => try self.emit.movRegReg(CC_EMIT.SCRATCH_REG, src_reg),
+                            }
                             sources[j] = .{ .from_reg = CC_EMIT.SCRATCH_REG };
                         },
                         .moved => {}, // already handled
@@ -881,31 +1130,35 @@ pub fn CallBuilder(comptime EmitType: type) type {
             // Assert shadow space is included when we have stack args
             std.debug.assert(self.stack_args.items.len == 0 or total_space >= CC_EMIT.SHADOW_SPACE + self.stack_arg_size);
 
-            if (comptime is_x86_64) {
-                // Save SCRATCH_REG if it conflicts with stack arg processing
-                try self.saveScratchIfConflict();
+            switch (isa) {
+                .x86_64 => {
+                    // Save SCRATCH_REG if it conflicts with stack arg processing
+                    try self.saveScratchIfConflict();
 
-                // Allocate all stack space at once
-                if (total_space > 0) {
-                    try self.emit.subRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
-                }
+                    // Allocate all stack space at once
+                    if (total_space > 0) {
+                        try self.emit.subRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+                    }
 
-                // Store stack arguments BEFORE resolving deferred register args,
-                // because the parallel move may clobber registers that stack args
-                // source from (e.g., rhs operand in RCX/RDX when those are also
-                // param register destinations for the first 4 args).
-                for (self.stack_args.items) |arg| {
-                    try self.emitStackArgX86(arg);
-                }
-            } else if (comptime is_aarch64) {
-                // aarch64: allocate stack space and store stack args
-                if (total_space > 0) {
-                    try self.adjustStackPointerAarch64(.down, total_space);
-                }
+                    // Store stack arguments BEFORE resolving deferred register args,
+                    // because the parallel move may clobber registers that stack args
+                    // source from (e.g., rhs operand in RCX/RDX when those are also
+                    // param register destinations for the first 4 args).
+                    for (self.stack_args.items) |arg| {
+                        try self.emitStackArgX86(arg);
+                    }
+                },
+                .aarch64 => {
+                    // aarch64: allocate stack space and store stack args
+                    if (total_space > 0) {
+                        try self.adjustStackPointerAarch64(.down, total_space);
+                    }
 
-                for (self.stack_args.items) |arg| {
-                    try self.emitStackArgAarch64(arg);
-                }
+                    for (self.stack_args.items) |arg| {
+                        try self.emitStackArgAarch64(arg);
+                    }
+                },
+                .arm32 => try self.emitStackArgsArm32(total_space),
             }
 
             try self.stabilizeDeferredMemorySources();
@@ -914,35 +1167,50 @@ pub fn CallBuilder(comptime EmitType: type) type {
             // so the parallel move doesn't clobber stack arg source registers.
             try self.emitDeferredRegArgs();
 
-            // Load function address into scratch register
-            if (comptime is_aarch64) {
-                try self.emit.movRegImm64(CC_EMIT.SCRATCH_REG, fn_addr);
-            } else {
-                try self.emit.movRegImm64(CC_EMIT.SCRATCH_REG, @bitCast(@as(i64, @intCast(fn_addr))));
-            }
-
-            // Call through scratch register
-            if (comptime is_aarch64) {
-                try self.emit.blrReg(CC_EMIT.SCRATCH_REG);
-            } else {
-                try self.emit.callReg(CC_EMIT.SCRATCH_REG);
+            // Load function address into scratch register and call through it
+            switch (isa) {
+                .aarch64 => {
+                    try self.emit.movRegImm64(CC_EMIT.SCRATCH_REG, fn_addr);
+                    try self.emit.blrReg(CC_EMIT.SCRATCH_REG);
+                },
+                .x86_64 => {
+                    try self.emit.movRegImm64(CC_EMIT.SCRATCH_REG, @bitCast(@as(i64, @intCast(fn_addr))));
+                    try self.emit.callReg(CC_EMIT.SCRATCH_REG);
+                },
+                .arm32 => {
+                    // An absolute call target is a host function address, so
+                    // arm32 code only calls one when it runs in the process
+                    // that generated it: on an arm32 host, where every address
+                    // is 32 bits. Code for another host goes through
+                    // `callRelocatable`.
+                    const addr = std.math.cast(u32, fn_addr) orelse invariant(
+                        "arm32 invariant violated: native call target 0x{x} is not a 32-bit address; native execution of arm32 code needs an arm32 host",
+                        .{fn_addr},
+                    );
+                    try self.emit.movRegImm32(CC_EMIT.SCRATCH_REG, addr);
+                    try self.emit.blxReg(CC_EMIT.SCRATCH_REG);
+                },
             }
 
             // Cleanup
-            if (comptime is_x86_64) {
-                // Restore stack pointer
-                if (total_space > 0) {
-                    try self.emit.addRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
-                }
+            switch (isa) {
+                .x86_64 => {
+                    // Restore stack pointer
+                    if (total_space > 0) {
+                        try self.emit.addRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+                    }
 
-                // Restore R12 if we saved it (Windows x64 only)
-                if (self.r12_save_offset) |offset| {
-                    try self.emit.movRegMem(.w64, .R12, CC_EMIT.BASE_PTR, offset);
-                }
-            } else if (comptime is_aarch64) {
-                if (total_space > 0) {
-                    try self.adjustStackPointerAarch64(.up, total_space);
-                }
+                    // Restore R12 if we saved it (Windows x64 only)
+                    if (self.r12_save_offset) |offset| {
+                        try self.emit.movRegMem(.w64, .R12, CC_EMIT.BASE_PTR, offset);
+                    }
+                },
+                .aarch64 => {
+                    if (total_space > 0) {
+                        try self.adjustStackPointerAarch64(.up, total_space);
+                    }
+                },
+                .arm32 => try self.emitAdjustSpArm32(@intCast(total_space)),
             }
         }
 
@@ -961,27 +1229,31 @@ pub fn CallBuilder(comptime EmitType: type) type {
             // Assert shadow space is included when we have stack args
             std.debug.assert(self.stack_args.items.len == 0 or total_space >= CC_EMIT.SHADOW_SPACE + self.stack_arg_size);
 
-            if (comptime is_x86_64) {
-                // Save SCRATCH_REG if it conflicts with stack arg processing
-                try self.saveScratchIfConflict();
+            switch (isa) {
+                .x86_64 => {
+                    // Save SCRATCH_REG if it conflicts with stack arg processing
+                    try self.saveScratchIfConflict();
 
-                // Allocate all stack space at once
-                if (total_space > 0) {
-                    try self.emit.subRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
-                }
+                    // Allocate all stack space at once
+                    if (total_space > 0) {
+                        try self.emit.subRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+                    }
 
-                // Store stack arguments BEFORE resolving deferred register args
-                for (self.stack_args.items) |arg| {
-                    try self.emitStackArgX86(arg);
-                }
-            } else if (comptime is_aarch64) {
-                if (total_space > 0) {
-                    try self.adjustStackPointerAarch64(.down, total_space);
-                }
+                    // Store stack arguments BEFORE resolving deferred register args
+                    for (self.stack_args.items) |arg| {
+                        try self.emitStackArgX86(arg);
+                    }
+                },
+                .aarch64 => {
+                    if (total_space > 0) {
+                        try self.adjustStackPointerAarch64(.down, total_space);
+                    }
 
-                for (self.stack_args.items) |arg| {
-                    try self.emitStackArgAarch64(arg);
-                }
+                    for (self.stack_args.items) |arg| {
+                        try self.emitStackArgAarch64(arg);
+                    }
+                },
+                .arm32 => try self.emitStackArgsArm32(total_space),
             }
 
             try self.stabilizeDeferredMemorySources();
@@ -989,27 +1261,31 @@ pub fn CallBuilder(comptime EmitType: type) type {
             // Resolve deferred register args AFTER stack args are stored
             try self.emitDeferredRegArgs();
 
-            if (comptime is_aarch64) {
-                try self.emit.blrReg(target);
-            } else {
-                try self.emit.callReg(target);
+            switch (isa) {
+                .aarch64 => try self.emit.blrReg(target),
+                .x86_64 => try self.emit.callReg(target),
+                .arm32 => try self.emit.blxReg(target),
             }
 
             // Cleanup
-            if (comptime is_x86_64) {
-                // Restore stack pointer
-                if (total_space > 0) {
-                    try self.emit.addRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
-                }
+            switch (isa) {
+                .x86_64 => {
+                    // Restore stack pointer
+                    if (total_space > 0) {
+                        try self.emit.addRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+                    }
 
-                // Restore R12 if we saved it (Windows x64 only)
-                if (self.r12_save_offset) |offset| {
-                    try self.emit.movRegMem(.w64, .R12, CC_EMIT.BASE_PTR, offset);
-                }
-            } else if (comptime is_aarch64) {
-                if (total_space > 0) {
-                    try self.adjustStackPointerAarch64(.up, total_space);
-                }
+                    // Restore R12 if we saved it (Windows x64 only)
+                    if (self.r12_save_offset) |offset| {
+                        try self.emit.movRegMem(.w64, .R12, CC_EMIT.BASE_PTR, offset);
+                    }
+                },
+                .aarch64 => {
+                    if (total_space > 0) {
+                        try self.adjustStackPointerAarch64(.up, total_space);
+                    }
+                },
+                .arm32 => try self.emitAdjustSpArm32(@intCast(total_space)),
             }
         }
 
@@ -1036,27 +1312,31 @@ pub fn CallBuilder(comptime EmitType: type) type {
             std.debug.assert(total_space % 16 == 0);
             std.debug.assert(self.stack_args.items.len == 0 or total_space >= CC_EMIT.SHADOW_SPACE + self.stack_arg_size);
 
-            if (comptime is_x86_64) {
-                // Save SCRATCH_REG if it conflicts with stack arg processing
-                try self.saveScratchIfConflict();
+            switch (isa) {
+                .x86_64 => {
+                    // Save SCRATCH_REG if it conflicts with stack arg processing
+                    try self.saveScratchIfConflict();
 
-                // Allocate all stack space at once
-                if (total_space > 0) {
-                    try self.emit.subRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
-                }
+                    // Allocate all stack space at once
+                    if (total_space > 0) {
+                        try self.emit.subRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+                    }
 
-                // Store stack arguments BEFORE resolving deferred register args
-                for (self.stack_args.items) |arg| {
-                    try self.emitStackArgX86(arg);
-                }
-            } else if (comptime is_aarch64) {
-                if (total_space > 0) {
-                    try self.adjustStackPointerAarch64(.down, total_space);
-                }
+                    // Store stack arguments BEFORE resolving deferred register args
+                    for (self.stack_args.items) |arg| {
+                        try self.emitStackArgX86(arg);
+                    }
+                },
+                .aarch64 => {
+                    if (total_space > 0) {
+                        try self.adjustStackPointerAarch64(.down, total_space);
+                    }
 
-                for (self.stack_args.items) |arg| {
-                    try self.emitStackArgAarch64(arg);
-                }
+                    for (self.stack_args.items) |arg| {
+                        try self.emitStackArgAarch64(arg);
+                    }
+                },
+                .arm32 => try self.emitStackArgsArm32(total_space),
             }
 
             try self.stabilizeDeferredMemorySources();
@@ -1065,7 +1345,10 @@ pub fn CallBuilder(comptime EmitType: type) type {
             try self.emitDeferredRegArgs();
 
             // Emit relocatable call instruction
-            if (comptime is_aarch64) {
+            if (comptime isa == .arm32) {
+                std.debug.assert(&codegen.emit == self.emit);
+                try codegen.emitCall(symbol);
+            } else if (comptime isa.binaryIs(.aarch64)) {
                 std.debug.assert(&codegen.emit == self.emit);
                 try codegen.emitExternCall(symbol);
             } else {
@@ -1082,18 +1365,22 @@ pub fn CallBuilder(comptime EmitType: type) type {
             }
 
             // Cleanup
-            if (comptime is_x86_64) {
-                if (total_space > 0) {
-                    try self.emit.addRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
-                }
+            switch (isa) {
+                .x86_64 => {
+                    if (total_space > 0) {
+                        try self.emit.addRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+                    }
 
-                if (self.r12_save_offset) |offset| {
-                    try self.emit.movRegMem(.w64, .R12, CC_EMIT.BASE_PTR, offset);
-                }
-            } else if (comptime is_aarch64) {
-                if (total_space > 0) {
-                    try self.adjustStackPointerAarch64(.up, total_space);
-                }
+                    if (self.r12_save_offset) |offset| {
+                        try self.emit.movRegMem(.w64, .R12, CC_EMIT.BASE_PTR, offset);
+                    }
+                },
+                .aarch64 => {
+                    if (total_space > 0) {
+                        try self.adjustStackPointerAarch64(.up, total_space);
+                    }
+                },
+                .arm32 => try self.emitAdjustSpArm32(@intCast(total_space)),
             }
         }
     };
@@ -2527,6 +2814,92 @@ test "parallel move: callReg also resolves deferred args" {
         }
     }
     try std.testing.expect(found_call_rax);
+}
+
+// AAPCS32 (arm32) CallBuilder rules.
+
+const Arm32Emit = arm32.Emit(.arm32musl);
+const Arm32CallBuilder = CallBuilder(Arm32Emit);
+
+test "arm32: a 64-bit argument takes the next even register pair" {
+    var emit = Arm32Emit.init(std.testing.allocator);
+    defer emit.deinit();
+    var stack_offset: i32 = 0;
+    var builder = try Arm32CallBuilder.init(&emit, &stack_offset);
+    defer builder.deinit();
+    try builder.addImmArg(1); // r0
+    try builder.addImm64Arg(0x1_0000_0002); // r2:r3 (r1 skipped)
+    try std.testing.expectEqual(@as(usize, 4), builder.int_arg_index);
+    try std.testing.expectEqual(@as(usize, 0), builder.stack_args.items.len);
+    var dsts: [3]u8 = undefined;
+    for (builder.reg_args[0..builder.reg_arg_count], &dsts) |arg, *dst| dst.* = arg.dst_index;
+    try std.testing.expectEqualSlices(u8, &.{ 0, 2, 3 }, &dsts);
+}
+
+test "arm32: a 64-bit argument with no pair left goes to an 8-aligned stack slot and closes the registers" {
+    var emit = Arm32Emit.init(std.testing.allocator);
+    defer emit.deinit();
+    var stack_offset: i32 = 0;
+    var builder = try Arm32CallBuilder.init(&emit, &stack_offset);
+    defer builder.deinit();
+    try builder.addImmArg(1);
+    try builder.addImmArg(2);
+    try builder.addImmArg(3); // r0-r2; r3 is left, but a pair needs two
+    try builder.addImm64Arg(-1); // [sp, #0], [sp, #4]
+    try builder.addImmArg(4); // [sp, #8]: r3 stays unused (C.5)
+    try std.testing.expectEqual(@as(usize, 3), builder.reg_arg_count);
+    try std.testing.expectEqual(@as(usize, 3), builder.stack_args.items.len);
+    try std.testing.expectEqual(@as(u32, 0), builder.stack_args.items[0].byte_offset);
+    try std.testing.expectEqual(@as(u32, 4), builder.stack_args.items[1].byte_offset);
+    try std.testing.expectEqual(@as(u32, 8), builder.stack_args.items[2].byte_offset);
+    try std.testing.expectEqual(@as(u8, 4), builder.stack_args.items[2].size);
+}
+
+test "arm32: float arguments back-fill S registers" {
+    var emit = Arm32Emit.init(std.testing.allocator);
+    defer emit.deinit();
+    var stack_offset: i32 = 0;
+    var builder = try Arm32CallBuilder.init(&emit, &stack_offset);
+    defer builder.deinit();
+    try builder.addF32MemArg(.r11, -4); // s0
+    try builder.addF64MemArg(.r11, -16); // d1 (s2-s3)
+    try builder.addF32MemArg(.r11, -8); // s1, below the used d1
+    var expected = Arm32Emit.init(std.testing.allocator);
+    defer expected.deinit();
+    try expected.vldrF32(.s0, .r11, -4);
+    try expected.vldrF64(.d1, .r11, -16);
+    try expected.vldrF32(.s1, .r11, -8);
+    try std.testing.expectEqualSlices(u8, expected.buf.items, emit.buf.items);
+    try std.testing.expectEqual(@as(u16, 0b1111), builder.vfp_used);
+}
+
+test "arm32: a relocatable call stores stack arguments, moves registers, BLs and restores sp" {
+    const CodeGen = arm32.CodeGen(.arm32musl);
+    var cg = CodeGen.init(std.testing.allocator, .default);
+    defer cg.deinit();
+    var builder = try Arm32CallBuilder.init(&cg.emit, &cg.stack_offset);
+    defer builder.deinit();
+    try builder.addRegArg(.r5);
+    try builder.addLeaArg(.r11, -24);
+    try builder.addMemArg(.r11, -8);
+    try builder.addImmArg(7);
+    try builder.addImmArg(0x12345678); // fifth argument: [sp, #0]
+    try builder.callRelocatable(@fromBackingInt(3), &cg);
+
+    var e = Arm32Emit.init(std.testing.allocator);
+    defer e.deinit();
+    try e.subRegRegModImm(.sp, .sp, arm32.ModImm.of(16));
+    try e.movRegImm32(.r12, 0x12345678);
+    try e.strRegMem(.r12, .sp, 0);
+    try e.movRegReg(.r0, .r5);
+    try e.subRegRegModImm(.r1, .r11, arm32.ModImm.of(24));
+    try e.ldrRegMem(.r2, .r11, -8);
+    try e.movRegImm32(.r3, 7);
+    try e.bl(0);
+    try e.addRegRegModImm(.sp, .sp, arm32.ModImm.of(16));
+    try std.testing.expectEqualSlices(u8, e.buf.items, cg.getCode());
+    try std.testing.expectEqual(@as(usize, 1), cg.relocations.items.len);
+    try std.testing.expectEqual(@as(u64, 32), cg.relocations.items[0].linked_function.offset);
 }
 
 test "x86_64 by-value stack arguments of any size copy every piece" {

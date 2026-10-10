@@ -1,5 +1,6 @@
 //! Target-agnostic lowering of a hosted-call signature into register/memory placements,
-//! computed from the per-target C-ABI classifiers (`aarch64.zig`, `x86_64.zig`, `wasm.zig`).
+//! computed from the per-target C-ABI classifiers (`aarch64.zig`, `arm32.zig`, `x86_64.zig`,
+//! `wasm.zig`).
 //!
 //! A `LoweredCall` says, for the return value and each argument, whether it travels in
 //! registers (which bytes go in which register file, and which pieces form one LLVM
@@ -17,6 +18,7 @@ const std = @import("std");
 const layout = @import("../layout.zig");
 const store_mod = @import("../store.zig");
 const aarch64 = @import("aarch64.zig");
+const arm32 = @import("arm32.zig");
 const x86_64 = @import("x86_64.zig");
 const wasm = @import("wasm.zig");
 
@@ -129,6 +131,20 @@ pub const PhysicalArg = union(enum) {
     registers: []const AssignedRegPiece,
     stack_value: StackValue,
     indirect: PointerLocation,
+    /// A composite whose leading words go in the last core registers and
+    /// whose remaining bytes go at the start of the stack argument area
+    /// (AAPCS32 rule C.5; no other ABI splits a value).
+    split: Split,
+};
+
+/// A value split between registers and the stack; see `PhysicalArg.split`.
+pub const Split = struct {
+    /// The register pieces, covering the value's first bytes.
+    registers: []const AssignedRegPiece,
+    /// The rest of the value: `size` bytes starting at byte
+    /// `value_offset` of the value, placed at stack offset `offset`.
+    stack: StackValue,
+    value_offset: u16,
 };
 
 /// Fully assigned physical argument locations and outgoing stack size for a call.
@@ -150,6 +166,8 @@ pub const Target = enum {
     aarch64_windows,
     x86_64_sysv,
     x86_64_windows,
+    /// AAPCS32, VFP (hard-float) variant.
+    arm32,
     wasm32,
     /// WebAssembly 1.0 C ABI, with vector arguments scalarized by lane.
     wasm32v1,
@@ -208,7 +226,7 @@ pub fn aarch64Target(os: std.Target.Os.Tag) Target {
 fn isAarch64(target: Target) bool {
     return switch (target) {
         .aarch64, .aarch64_macho, .aarch64_windows => true,
-        .x86_64_sysv, .x86_64_windows, .wasm32, .wasm32v1, .wasm64 => false,
+        .x86_64_sysv, .x86_64_windows, .arm32, .wasm32, .wasm32v1, .wasm64 => false,
     };
 }
 
@@ -356,6 +374,7 @@ pub fn assignPhysicalArgs(
 ) std.mem.Allocator.Error!PhysicalCall {
     std.debug.assert(lowered.args.len == arg_idxs.len);
     std.debug.assert(target != .wasm32 and target != .wasm32v1 and target != .wasm64);
+    if (target == .arm32) return assignPhysicalArgsArm32(arena, store, lowered, arg_idxs);
 
     const args = try arena.alloc(PhysicalArg, lowered.args.len);
     var gp_used: u32 = 0;
@@ -369,7 +388,7 @@ pub fn assignPhysicalArgs(
             win_position = 1;
         },
         .aarch64, .aarch64_macho, .aarch64_windows => {}, // AAPCS64 uses the dedicated x8 indirect-result register.
-        .wasm32, .wasm32v1, .wasm64 => unreachable,
+        .arm32, .wasm32, .wasm32v1, .wasm64 => unreachable,
     };
     if (lowered.leading_ops) switch (target) {
         .x86_64_windows => {
@@ -377,7 +396,7 @@ pub fn assignPhysicalArgs(
             win_position += 1;
         },
         .x86_64_sysv, .aarch64, .aarch64_macho, .aarch64_windows => gp_used += 1,
-        .wasm32, .wasm32v1, .wasm64 => unreachable,
+        .arm32, .wasm32, .wasm32v1, .wasm64 => unreachable,
     };
 
     for (lowered.args, arg_idxs, args) |placement, arg_idx, *assigned| {
@@ -412,7 +431,7 @@ pub fn assignPhysicalArgs(
                     win_position += 1;
                     gp_used = win_position;
                 },
-                .wasm32, .wasm32v1, .wasm64 => unreachable,
+                .arm32, .wasm32, .wasm32v1, .wasm64 => unreachable,
             },
             .registers => |registers| switch (target) {
                 .x86_64_windows => {
@@ -488,7 +507,112 @@ pub fn assignPhysicalArgs(
                         }
                     }
                 },
-                .wasm32, .wasm32v1, .wasm64 => unreachable,
+                .arm32, .wasm32, .wasm32v1, .wasm64 => unreachable,
+            },
+        }
+    }
+
+    return .{
+        .args = args,
+        .stack_size = std.mem.alignForward(u32, stack_size, 8),
+    };
+}
+
+const arm32_core_registers: u8 = 4;
+/// s0-s15 carry VFP arguments.
+const arm32_vfp_s_registers: u5 = 16;
+
+/// AAPCS32 VFP argument allocation (§6.5 of IHI0042): core registers r0-r3
+/// with doubleword alignment rounding NCRN up to even (C.3) and composites
+/// split between the last core registers and the stack while the stack is
+/// still empty (C.5); co-processor register candidates in s0-s15 with
+/// back-filling, where one that cannot be allocated closes the VFP registers;
+/// stack slots of four bytes, eight-aligned for doubleword-aligned values.
+fn assignPhysicalArgsArm32(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    lowered: LoweredCall,
+    arg_idxs: []const Idx,
+) std.mem.Allocator.Error!PhysicalCall {
+    const args = try arena.alloc(PhysicalArg, lowered.args.len);
+    var ncrn: u8 = 0;
+    var vfp_used: u16 = 0;
+    var stack_size: u32 = 0;
+    // The result pointer takes r0 (it is not a separate register as on
+    // AAPCS64), then `*RocOps`.
+    if (lowered.ret == .indirect) ncrn += 1;
+    if (lowered.leading_ops) ncrn += 1;
+
+    for (lowered.args, arg_idxs, args) |placement, arg_idx, *assigned| {
+        const size_align = store.layoutSizeAlign(store.getLayout(arg_idx));
+        const doubleword = size_align.alignment.toByteUnits() >= 8;
+        const slot_alignment: u8 = if (doubleword) 8 else 4;
+        switch (placement) {
+            .none => assigned.* = .none,
+            // AAPCS32 passes every argument by value.
+            .indirect => unreachable,
+            .registers => |registers| {
+                const pieces = registers.pieces;
+                if (pieces[0].class != .integer) {
+                    // A co-processor register candidate: every piece is one
+                    // float or vector, all the same size.
+                    const slots: u5 = @intCast(pieces[0].size / 4);
+                    const total: u5 = @intCast(@as(u32, slots) * pieces.len);
+                    const run: u32 = (@as(u32, 1) << total) - 1;
+                    var first: u5 = 0;
+                    const found = while (first + total <= arm32_vfp_s_registers) : (first += slots) {
+                        if ((vfp_used & (run << first)) == 0) break true;
+                    } else false;
+                    if (found) {
+                        vfp_used |= @intCast(run << first);
+                        const regs = try arena.alloc(AssignedRegPiece, pieces.len);
+                        for (pieces, regs, 0..) |piece, *reg, i| {
+                            reg.* = .{ .piece = piece, .register_index = first + @as(u8, slots) * @as(u8, @intCast(i)) };
+                        }
+                        assigned.* = .{ .registers = regs };
+                    } else {
+                        // C.2: an unallocatable candidate closes the VFP
+                        // registers and goes on the stack.
+                        vfp_used = 0xFFFF;
+                        assigned.* = .{ .stack_value = assignStackValue(&stack_size, size_align.size, slot_alignment, 4) };
+                    }
+                    continue;
+                }
+
+                const words: u8 = @intCast(pieces.len);
+                const first: u8 = if (doubleword) std.mem.alignForward(u8, ncrn, 2) else ncrn;
+                if (first + words <= arm32_core_registers) {
+                    const regs = try arena.alloc(AssignedRegPiece, pieces.len);
+                    for (pieces, regs, 0..) |piece, *reg, i| reg.* = .{ .piece = piece, .register_index = first + @as(u8, @intCast(i)) };
+                    ncrn = first + words;
+                    assigned.* = .{ .registers = regs };
+                    continue;
+                }
+                // A fundamental 64-bit integer is never split (C.3).
+                const composite = registers.carrier != .integer;
+                if (composite and first < arm32_core_registers and stack_size == 0) {
+                    // C.5: the leading words fill the last core registers and
+                    // the rest starts the stack argument area.
+                    const in_registers = arm32_core_registers - first;
+                    const regs = try arena.alloc(AssignedRegPiece, in_registers);
+                    for (pieces[0..in_registers], regs, 0..) |piece, *reg, i| reg.* = .{ .piece = piece, .register_index = first + @as(u8, @intCast(i)) };
+                    const value_offset: u16 = @as(u16, in_registers) * 4;
+                    const rest: u32 = size_align.size - value_offset;
+                    stack_size = @intCast(std.mem.alignForward(u32, rest, 4));
+                    ncrn = arm32_core_registers;
+                    assigned.* = .{ .split = .{
+                        .registers = regs,
+                        .stack = .{ .offset = 0, .size = rest, .alignment = 4 },
+                        .value_offset = value_offset,
+                    } };
+                    continue;
+                }
+                // C.6-C.8: the value goes on the stack and the core
+                // registers close.
+                ncrn = arm32_core_registers;
+                var overflow = assignStackValue(&stack_size, size_align.size, slot_alignment, 4);
+                if (pieces.len == 1) overflow.extend = pieces[0].extend;
+                assigned.* = .{ .stack_value = overflow };
             },
         }
     }
@@ -536,6 +660,7 @@ fn placementFor(
         .aarch64, .aarch64_macho, .aarch64_windows => placementAarch64(arena, store, target, idx, ctx, extend),
         .x86_64_sysv => placementSysV(arena, store, idx, ctx, extend),
         .x86_64_windows => placementWin64(arena, store, idx, ctx, extend),
+        .arm32 => placementArm32(arena, store, idx, ctx, extend),
         .wasm32, .wasm64 => placementWasm(arena, store, idx, ctx, true),
         .wasm32v1 => placementWasm(arena, store, idx, ctx, false),
     };
@@ -608,6 +733,51 @@ fn integerPieces(
         };
     }
     return .{ .registers = .{ .pieces = pieces, .carrier = carrier } };
+}
+
+fn placementArm32(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    idx: Idx,
+    ctx: Context,
+    extend: RegExtension,
+) std.mem.Allocator.Error!Placement {
+    const size = store.layoutSize(store.getLayout(idx));
+    switch (arm32.classifyType(store, idx, if (ctx == .arg) .arg else .ret)) {
+        .memory => return .indirect,
+        .words => |words| {
+            const pieces = try arena.alloc(RegPiece, words.count);
+            for (pieces, 0..) |*piece, i| {
+                const offset: u32 = @intCast(i * 4);
+                piece.* = .{
+                    .class = .integer,
+                    .offset = @intCast(offset),
+                    .size = @intCast(@min(4, size - offset)),
+                    .extend = if (words.count == 1) extend else .none,
+                };
+            }
+            const carrier: RegisterCarrier = if (words.count == 1)
+                .piecewise
+            else if (words.fundamental)
+                .integer
+            else
+                .structure;
+            return .{ .registers = .{ .pieces = pieces, .carrier = carrier } };
+        },
+        .float_array => |fa| {
+            const elem_bytes: u8 = @intCast(fa.elem_bits / 8);
+            const pieces = try arena.alloc(RegPiece, fa.count);
+            for (pieces, 0..) |*piece, i| {
+                piece.* = .{ .class = .float, .offset = @as(u16, @intCast(i)) * elem_bytes, .size = elem_bytes };
+            }
+            return .{ .registers = .{ .pieces = pieces, .carrier = if (fa.count == 1) .piecewise else .structure } };
+        },
+        .vector => |kind| {
+            const pieces = try arena.alloc(RegPiece, 1);
+            pieces[0] = .{ .class = .vector, .offset = 0, .size = 16, .vector_kind = kind };
+            return .{ .registers = .{ .pieces = pieces } };
+        },
+    }
 }
 
 fn placementAarch64(
@@ -1254,4 +1424,80 @@ test "physical Apple arm64 stack arguments use compact natural alignment" {
     try testing.expectEqual(@as(u32, 8), elf.args[9].stack_value.offset);
     try testing.expectEqual(@as(u32, 16), elf.args[10].stack_value.offset);
     try testing.expectEqual(@as(u32, 24), elf.stack_size);
+}
+
+test "physical arm32: a 64-bit integer takes an even pair and closes the core registers" {
+    var store = try Store.init(testing.allocator, .u32);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const args = [_]Idx{ .u8, .u64, .u32 };
+    const lowered = try lower(arena, &store, .arm32, &args, .i32, false);
+    const physical = try assignPhysicalArgs(arena, &store, .arm32, lowered, &args);
+    try testing.expectEqual(@as(u8, 0), physical.args[0].registers[0].register_index);
+    try testing.expectEqual(RegExtension.zero, physical.args[0].registers[0].piece.extend);
+    // r1 is skipped (C.3): the pair is r2:r3.
+    try testing.expectEqual(@as(u8, 2), physical.args[1].registers[0].register_index);
+    try testing.expectEqual(@as(u8, 3), physical.args[1].registers[1].register_index);
+    try testing.expect(physical.args[2] == .stack_value);
+    try testing.expectEqual(@as(u32, 0), physical.args[2].stack_value.offset);
+    try testing.expectEqual(@as(u32, 8), physical.stack_size);
+}
+
+test "physical arm32: a composite splits between r2-r3 and the stack (C.5)" {
+    var store = try Store.init(testing.allocator, .u32);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const args = [_]Idx{ .u32, .u32, .str, .u32 };
+    const lowered = try lower(arena, &store, .arm32, &args, .i32, false);
+    const physical = try assignPhysicalArgs(arena, &store, .arm32, lowered, &args);
+    const split = physical.args[2].split;
+    try testing.expectEqual(@as(usize, 2), split.registers.len);
+    try testing.expectEqual(@as(u8, 2), split.registers[0].register_index);
+    try testing.expectEqual(@as(u8, 3), split.registers[1].register_index);
+    try testing.expectEqual(@as(u16, 8), split.value_offset);
+    try testing.expectEqual(@as(u32, 0), split.stack.offset);
+    try testing.expectEqual(@as(u32, 4), split.stack.size);
+    // The next argument follows the split's stack bytes.
+    try testing.expectEqual(@as(u32, 4), physical.args[3].stack_value.offset);
+}
+
+test "physical arm32: VFP arguments back-fill and an HFA that does not fit closes them" {
+    var store = try Store.init(testing.allocator, .u32);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const four_f64 = try testStruct(&store, &.{ .f64, .f64, .f64, .f64 });
+    const args = [_]Idx{ .f32, .f64, .f32, four_f64, four_f64, .f32 };
+    const lowered = try lower(arena, &store, .arm32, &args, .f64, false);
+    const physical = try assignPhysicalArgs(arena, &store, .arm32, lowered, &args);
+    try testing.expectEqual(@as(u8, 0), physical.args[0].registers[0].register_index); // s0
+    try testing.expectEqual(@as(u8, 2), physical.args[1].registers[0].register_index); // d1 = s2
+    try testing.expectEqual(@as(u8, 1), physical.args[2].registers[0].register_index); // s1
+    try testing.expectEqual(@as(u8, 4), physical.args[3].registers[0].register_index); // d2-d5
+    try testing.expectEqual(@as(u8, 10), physical.args[3].registers[3].register_index);
+    // d6-d7 cannot hold four doubles: to the stack, and s0-s15 close.
+    try testing.expect(physical.args[4] == .stack_value);
+    try testing.expect(physical.args[5] == .stack_value);
+}
+
+test "physical arm32: an indirect result takes r0, then RocOps" {
+    var store = try Store.init(testing.allocator, .u32);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const args = [_]Idx{.i32};
+    const lowered = try lower(arena, &store, .arm32, &args, .str, true);
+    try testing.expectEqual(Placement.indirect, lowered.ret);
+    const physical = try assignPhysicalArgs(arena, &store, .arm32, lowered, &args);
+    try testing.expectEqual(@as(u8, 2), physical.args[0].registers[0].register_index);
 }

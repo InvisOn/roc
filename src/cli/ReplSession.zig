@@ -1308,6 +1308,7 @@ pub fn programFailureKind(err: eval.Inspected.Error) ProgramFailureKind {
         error.FileLocksUnsupported,
         error.FileNotFound,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.FtruncateFailed,
         error.HostedFunctionNotBound,
         error.InputOutput,

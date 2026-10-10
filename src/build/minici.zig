@@ -204,6 +204,7 @@ const jobs = [_]Job{
     .{ .name = "run-check-glue-abi" },
     .{ .name = "run-check-simd-codegen" },
     .{ .name = "run-check-baseline-codegen" },
+    .{ .name = "run-check-arm32-encoding-oracle" },
     .{ .name = "run-check-match-extension-codegen" },
     .{ .name = "run-check-str-eq-same-allocation" },
     .{ .name = "run-check-snapshots" },

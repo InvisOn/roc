@@ -15,8 +15,14 @@ pub const EvalBackend = InspectedRun.Backend;
 pub fn backendAvailable(backend_kind: EvalBackend) bool {
     if (builtin.target.os.tag == .freestanding and backend_kind != .wasm) return false;
     return switch (backend_kind) {
-        .interpreter, .wasm => true,
+        .interpreter => true,
         .dev => backend.host_lir_codegen_available,
+        // Wasm programs run under bytebox, which reserves a module's whole
+        // linear memory up front. Roc's wasm modules declare no memory
+        // maximum, so the reservation is wasm32's full 4 GiB, which a 32-bit
+        // process cannot hold (bytebox reports
+        // `Uninstantiable64BitLimitsOn32BitArch`).
+        .wasm => @sizeOf(usize) >= 8,
         .llvm => builtin.target.os.tag != .freestanding,
     };
 }

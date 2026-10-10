@@ -243,7 +243,7 @@ pub fn writeToSharedMemory(
                 try relocation_records.append(scratch, .{
                     .code_offset = data.offset,
                     .symbol = symbol_refs[@backingInt(data.symbol)],
-                    .kind = @backingInt(relocationKindForData(data.kind)),
+                    .kind = @backingInt(try relocationKindForData(data.kind)),
                 });
             },
             .local_data, .jmp_to_return => return error.UnsupportedDevRunRelocation,
@@ -529,12 +529,16 @@ pub fn viewMappedImage(header: *const Header, base_ptr: [*]align(1) u8, mapped_s
     };
 }
 
-fn relocationKindForData(kind: DataRelocationKind) RelocationKind {
+fn relocationKindForData(kind: DataRelocationKind) error{UnsupportedDevRunRelocation}!RelocationKind {
     return switch (kind) {
         .abs64 => .linked_data_abs64,
         .rel32 => .linked_data_rel32,
         .page21 => .linked_data_page21,
         .pageoff12 => .linked_data_pageoff12,
+        // The machine-code shim runs code for the host it is built for, and
+        // no supported shim host is arm32 (projects/big/arm32-dev-backend.md,
+        // Scope).
+        .abs32, .arm_movw_prel, .arm_movt_prel => error.UnsupportedDevRunRelocation,
     };
 }
 

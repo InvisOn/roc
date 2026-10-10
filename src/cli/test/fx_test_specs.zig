@@ -166,6 +166,16 @@ pub const io_spec_tests = [_]TestSpec{
         .description = "Float-to-integer conversions discard the fractional part toward zero",
     },
     .{
+        .roc_file = "test/fx/runtime_float_arith_widths.roc",
+        .io_spec = "0<3|1>f64: 1.75 -3.5 3.5|1>f32: 5.5 1.5 7 1.75 -3.5|1>lte: yes no yes no yes no",
+        .description = "Float arithmetic at both widths and signed and float comparisons on runtime values",
+    },
+    .{
+        .roc_file = "test/fx/runtime_tail_call_arg_blocks.roc",
+        .io_spec = "0<1000000|1>ping first: 1500015|1>pong first: 1500000",
+        .description = "Tail calls between functions with argument blocks of different sizes run in constant stack",
+    },
+    .{
         .roc_file = "test/fx/runtime_conversion_to_str_widths.roc",
         .io_spec = "0<3|1>unsigned: 3 3 3 3 3|1>signed: -3 -3 -3 -3 -3|1>frac: 3 3 3.0",
         .description = "Every number type renders as text the same way on every backend",
@@ -254,6 +264,11 @@ pub const io_spec_tests = [_]TestSpec{
     // non-alphabetical declared order must reach the host with the matching C /
     // extern-struct byte layout (z@0, padding@4, a@8). The host reads the fields
     // at those offsets and returns "<z*100 + a>"; 11/22 -> "1122".
+    .{
+        .roc_file = "test/fx/abi_call_shapes.roc",
+        .io_spec = "1>i32_i64: 35000000003 -35000000003|1>three_i32_i64: 4000000000321|1>two_i32_triple: 54321|1>f64_f32_f64: 336.5|1>nine_f64: 285|1>triple_from: 7 14 21|1>f64 round trip: -4613937818241073152 -1.5",
+        .description = "Hosted calls whose C signatures are the call shapes a native backend must place exactly (register pairs, stack spill, split records, float back-fill, hidden result pointer)",
+    },
     .{
         .roc_file = "test/fx/host_interop_padding.roc",
         .io_spec = "1>1122",

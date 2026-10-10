@@ -11294,6 +11294,7 @@ test "issue 10354 undefined identifier in expression does not panic monotype low
         error.FileLocksUnsupported,
         error.FileNotFound,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.FtruncateFailed,
         error.HostedFunctionNotBound,
         error.InputOutput,

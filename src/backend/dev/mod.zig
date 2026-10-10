@@ -6,6 +6,8 @@
 //! Supported architectures:
 //! - x86_64: Linux (System V ABI), macOS (System V ABI), Windows (Fastcall)
 //! - aarch64: Linux and macOS (AAPCS64)
+//! - arm32: Linux, musl and glibc (AAPCS32 hard-float, ARMv7-A with NEON;
+//!   see `arm32/DESIGN.md`)
 
 /// Exact procedure-local stack lifetime and slot planning.
 pub const StackPlan = @import("StackPlan.zig");
@@ -15,6 +17,9 @@ const builtin = @import("builtin");
 
 pub const x86_64 = @import("x86_64/mod.zig");
 pub const aarch64 = @import("aarch64/mod.zig");
+pub const arm32 = @import("arm32/mod.zig");
+/// The instruction sets the dev backend emits.
+pub const isa = @import("isa.zig");
 pub const object = @import("object/mod.zig");
 const relocation_mod = @import("Relocation.zig");
 pub const Relocation = relocation_mod.Relocation;
@@ -25,6 +30,9 @@ pub const SymbolResolverContext = relocation_mod.SymbolResolverContext;
 pub const ValueStorage = @import("ValueStorage.zig");
 pub const ObjectWriter = @import("ObjectWriter.zig");
 pub const Dwarf = @import("Dwarf.zig");
+
+/// Publishes newly written instructions (the I-cache/D-cache protocol).
+pub const instruction_cache = @import("instruction_cache.zig");
 
 /// Executable memory for running generated code. Uses OS-specific APIs not available on freestanding.
 pub const ExecutableMemory = if (builtin.os.tag == .freestanding)
@@ -55,6 +63,8 @@ pub const LocatedArtifact = if (builtin.os.tag == .freestanding) void else @impo
 pub const SpliceSource = if (builtin.os.tag == .freestanding) void else @import("ObjectFileCompiler.zig").SpliceSource;
 /// Place object-cache entries into an open code generator.
 pub const spliceExternalProcs = if (builtin.os.tag == .freestanding) void else @import("ObjectFileCompiler.zig").spliceExternalProcs;
+/// Whether the dev backend generates native code for a target.
+pub const supportsTarget = if (builtin.os.tag == .freestanding) void else @import("ObjectFileCompiler.zig").supportsTarget;
 /// Links object-cache entries spliced into the compile-time evaluator's image.
 pub const HostSplice = if (builtin.os.tag == .freestanding) void else @import("HostSplice.zig").HostSplice;
 /// On-disk form of one module's pack of artifacts.
@@ -78,4 +88,7 @@ test "backend module imports" {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(@import("CallingConvention.zig"));
     std.testing.refAllDecls(@import("FrameBuilder.zig"));
+    // The arm32 link smoke program (`ci/arm32_link_smoke.py` runs it); its
+    // test checks the object it builds.
+    _ = @import("arm32_link_smoke.zig");
 }

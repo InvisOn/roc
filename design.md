@@ -22183,7 +22183,8 @@ included merely because some ISA has an instruction for it.
 ### Invariants
 
 1. **Bit-identical results everywhere.** Pure Roc code produces the same
-   answer on every target and every backend—LLVM, both dev backends, wasm,
+   answer on every target and every backend—LLVM, the native dev backends
+   (x86_64, AArch64, ARM32), wasm,
    and the interpreter—and compile-time evaluation, which runs Roc code
    on the dev backend, must agree with all of them. Every SIMD
    operation therefore has a precise scalar reference meaning, including
@@ -22253,14 +22254,23 @@ Instead, each (architecture, OS) target has a static floor:
   unrelated architecture revisions. It covers every Apple Silicon Mac,
   every major ARM cloud chip, and Raspberry Pi 5. Raspberry Pi 3/4 lack these
   extensions.
+- **ARM32:** ARMv7-A with NEON (VFPv3-D32), without the optional
+  integer-divide extension: Cortex-A8/A9 and later, and every AArch64 core
+  that runs 32-bit code. Roc names no CPU features of its own here; the floor
+  is Zig's arm baseline, which `src/backend/dev/arm32/Emit.zig` asserts at
+  compile time. Word division calls the `__aeabi_*` helpers. NEON has a
+  byte-table lookup (`VTBL`) but no 64-bit carryless multiply, which the ARM32
+  dev backend composes as a shift-and-XOR loop, so it is slower but
+  bit-identical.
 - **wasm:** the `simd128` feature (universally shipped in engines since
   2021; the wasm backend already assumes it). wasm has no carryless
   multiply and no AES instructions, so those two operations get slower—
   but bit-identical—software lowerings on wasm.
 
-Under these floors both native architectures guarantee the same capability
-set: full 128-bit integer SIMD, a one-instruction byte shuffle, carryless
-multiply, and AES rounds. Floors only ever affect speed, never results.
+Under these floors x86-64 and AArch64 guarantee the same capability set: full
+128-bit integer SIMD, a one-instruction byte shuffle, carryless multiply, and
+AES rounds. ARM32 has full 128-bit integer SIMD and a byte-table lookup, and
+composes carryless multiply. Floors only ever affect speed, never results.
 
 Each `RocTarget` has one `CpuContract` in `src/target/mod.zig`. Its architecture
 baseline and explicit instruction features are the sole source for both the
@@ -22400,7 +22410,8 @@ and applies the target's C ABI:
   aggregates follow the WebAssembly aggregate rules. An erased callable is the
   direct pointer value exposed by the C, Zig, and Rust glue aliases.
 
-These are target rules, not backend choices. LLVM, the native dev backends, the
+These are target rules, not backend choices. LLVM, the native dev backends
+(x86_64, AArch64, ARM32), the
 interpreter translation shim, wasm, and generated host declarations consume the
 same explicit ABI placements. A backend must not classify a vector from its
 name or reinterpret it as `U128`; in particular, two general-purpose 64-bit
@@ -22559,7 +22570,8 @@ combined size, and preserve inline storage whenever the complete result fits.
 
 The exhaustive bit-level SIMD evaluator in `src/builtins/simd.zig` is the
 correctness oracle for the interpreter, Lambda Mono evaluator, and differential
-tests. Both native dev backends instead dispatch exhaustively on the static LIR
+tests. The native dev backends (x86_64, AArch64, ARM32) instead dispatch
+exhaustively on the static LIR
 operation and its explicit source/destination lane kinds and emit native
 packed-integer instruction sequences. There is no compiled scalar evaluator,
 runtime operation descriptor, or fallback call. Missing native coverage is a
@@ -22631,7 +22643,10 @@ PR MiniCI. This does not remove the dedicated SIMD gate's Lambda Mono lane.
 x86-64 output to contain representative byte-add, pairwise-dot, table-shuffle,
 and carryless-multiply instructions, rejects deleted scalar-evaluator and load
 helpers from dev binaries, and cross-builds the exhaustive corpus through the
-AArch64 dev backend so every supported operation/type lowering is instantiated.
+AArch64 and ARM32 dev backends so every supported operation/type lowering is
+instantiated. The ARM32 lane also requires NEON instructions in the binary and,
+where `qemu-arm-static` is available, runs it on the `cortex-a9` model of the
+ARM32 floor.
 `zig build run-check-glue-abi` compiles
 generated Zig and C declarations for x86-64 and AArch64 Linux/macOS/Windows plus
 wasm, compiles Rust for native and wasm, and the native/wasm glue runtime matrix

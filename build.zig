@@ -60,12 +60,16 @@ const CrossTarget = struct {
 const musl_cross_targets = [_]CrossTarget{
     .{ .name = "x64musl", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl } },
     .{ .name = "arm64musl", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
+    .{ .name = "arm32musl", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .musleabihf } },
 };
 
 /// Glibc cross-compile targets (dynamic linking)
 const glibc_cross_targets = [_]CrossTarget{
     .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
     .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
+    // Named for its RocTarget (arm32linux): test platforms key their
+    // `targets/<name>/` directories by target name.
+    .{ .name = "arm32linux", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
 };
 
 /// Windows cross-compile targets
@@ -664,9 +668,9 @@ const CheckTypeCheckerPatternsStep = struct {
     }
 };
 
-/// Build step that checks for @enumFromInt(0) usage in all .zig files.
+/// Build step that checks for @fromBackingInt(0) usage in all .zig files.
 ///
-/// We forbid @enumFromInt(0) because it hides bugs and makes them harder to debug.
+/// We forbid @fromBackingInt(0) because it hides bugs and makes them harder to debug.
 /// If we need a placeholder value that we believe will never be read, we should
 /// use `undefined` instead - that way our intent is clear, and it can fail in a
 /// more obvious way if our assumption is incorrect.
@@ -1524,7 +1528,7 @@ pub fn build(b: *std.Build) void {
     const run_check_git_lints_step = b.step("run-check-git-lints", "Run Git-backed code checks");
     const run_check_test_asset_coverage_step = b.step("run-check-test-asset-coverage", "Check that every app .roc file in spec-driven test asset dirs has a spec entry");
     const run_check_type_checker_patterns_step = b.step("run-check-type-checker-patterns", "Check forbidden type-checker patterns");
-    const run_check_enum_from_int_zero_step = b.step("run-check-enum-from-int-zero", "Check forbidden @enumFromInt(0) usage");
+    const run_check_enum_from_int_zero_step = b.step("run-check-enum-from-int-zero", "Check forbidden @fromBackingInt(0) usage");
     const run_check_unused_suppression_step = b.step("run-check-unused-suppression", "Check unused-variable suppression patterns");
     const run_check_semantic_audit_step = b.step("run-check-semantic-audit", "Run the checked-data audit gate");
     const run_check_postcheck_architecture_step = b.step("run-check-postcheck-architecture", "Check that deleted post-check output/remapping APIs stay gone");
@@ -1536,6 +1540,7 @@ pub fn build(b: *std.Build) void {
     const run_check_simd_codegen_step = b.step("run-check-simd-codegen", "Check that optimized integer SIMD kernels select native instructions");
     const run_check_match_extension_codegen_step = b.step("run-check-match-extension-codegen", "Check the pinned instruction counts for the match-extension loop");
     const run_check_baseline_codegen_step = b.step("run-check-baseline-codegen", "Check that v1 targets emit no instruction above the architecture baseline");
+    const run_check_arm32_encoding_oracle_step = b.step("run-check-arm32-encoding-oracle", "Check that the arm32 encoder tests match the assembler oracle");
     const run_check_str_eq_same_allocation_step = b.step("run-check-str-eq-same-allocation", "Check that comparing a string against itself does not read its bytes");
     const build_snapshot_tool_step = b.step("build-snapshot-tool", "Build the snapshot tool");
     const run_check_snapshots_step = b.step("run-check-snapshots", "Regenerate snapshots and fail if tracked snapshots changed");
@@ -2309,6 +2314,10 @@ pub fn build(b: *std.Build) void {
     run_baseline_codegen_check.setCwd(test_fixtures.mutableRoot(&.{build_test_hosts_step}));
     run_baseline_codegen_check.step.dependOn(build_test_hosts_step);
     run_check_baseline_codegen_step.dependOn(&run_baseline_codegen_check.step);
+
+    const run_arm32_encoding_oracle_check = b.addSystemCommand(&.{ "python3", "ci/arm32_encoding_oracle.py", "--check" });
+    run_arm32_encoding_oracle_check.setEnvironmentVariable("ZIG", b.graph.zig_exe);
+    run_check_arm32_encoding_oracle_step.dependOn(&run_arm32_encoding_oracle_check.step);
 
     const run_match_extension_codegen_check = b.addSystemCommand(&.{ "bash", "ci/check_match_extension_codegen.sh" });
     run_match_extension_codegen_check.addFileArg(fixture_roc);
@@ -4742,7 +4751,7 @@ pub fn build(b: *std.Build) void {
     const check_patterns = CheckTypeCheckerPatternsStep.create(b);
     run_check_type_checker_patterns_step.dependOn(&check_patterns.step);
 
-    // Add check for @enumFromInt(0) usage
+    // Add check for @fromBackingInt(0) usage
     const check_enum_from_int = CheckEnumFromIntZeroStep.create(b);
     run_check_enum_from_int_zero_step.dependOn(&check_enum_from_int.step);
 
@@ -6375,6 +6384,8 @@ fn addMainExe(
         .{ .name = "arm64musl", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
         .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
         .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
+        .{ .name = "arm32musl", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .musleabihf } },
+        .{ .name = "arm32glibc", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .gnueabihf } },
         .{ .name = "wasm32", .query = .{ .cpu_arch = .wasm32, .os_tag = .freestanding, .abi = .none } },
         .{ .name = "x64win", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc } },
         .{ .name = "x64mingw", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },

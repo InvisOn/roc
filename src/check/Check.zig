@@ -8793,7 +8793,7 @@ fn publishBindingScheme(self: *Self, root_var: Var) Allocator.Error!void {
 /// * Substituting generalized flex vars with fresh flex vars
 /// * Substituting generalized rigid vars with fresh flex vars
 ///
-/// Note that the the rigid var structure will be preserved.
+/// Note that the rigid var structure will be preserved.
 /// E.g. In `a -> a`, all `a` will reference the same new flex var
 fn instantiateVar(
     self: *Self,
