@@ -792,6 +792,17 @@ Done 2026-09-29, locally (nothing pushed).
   Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints x64musl's
   54 lines.
   Logs: `.git/verify-tools/upstream-sync/008dcdf285/`.
+- 2026-10-12, merge `e063d597a9` of upstream `main` at `e89f2c3c6e` (69
+  commits). One conflict, in `src/backend/wasm/WasmModule.zig`: upstream
+  removed the three debug prints on a wasm merge type mismatch, where the
+  arm32 branch had already replaced them with a recorded `merge_type_conflict`
+  (`1138ce4c33`) that the eval builtin merge reports; the resolution keeps the
+  recorded conflict. No fix. Checks: relative 64-bit oracle PASS, nothing
+  differs, no snapshot change; minici 86/86; arm32 eval corpus under qemu 2576
+  passed, 0 failed, 47 with a backend skipped; host effects 106/106; `test/fx`
+  133/133 under qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as
+  arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/e89f2c3c6e/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
