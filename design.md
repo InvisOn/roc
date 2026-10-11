@@ -3737,8 +3737,12 @@ than a silent writer of undefined bytes:
 - *Scrubbable*: undefined bytes or bits exist, but the value itself identifies
   every one of them—a tagged union's discriminant names the live variant, an
   optional's null bit names an empty payload, a narrow scalar's declared width
-  names its value bits. Those are canonicalized into a writer-owned copy; the
-  source is never modified, so a frozen or shared store may be serialized.
+  names its value bits. The writer records the type-specific canonicalization
+  operation with the borrowed source slice. It scrubs the destination when
+  gathering into a buffer, or bounded per-type scratch when streaming to a file.
+  Neither scratch storage nor relocation metadata grows with the number of rows
+  in a column. The source is never modified, so a frozen or shared store may be
+  serialized.
 
 A fixed layout is the author's byte map, so an `extern struct` must declare the
 bytes its alignment adds, as an explicitly zero-defaulted reserved field, and every
@@ -3754,6 +3758,11 @@ safe: their inter-field gaps are scrubbable, but a member whose undefined bytes
 nothing identifies makes the whole type a compile error, exactly as a fixed layout
 would be. A checked store may keep an ergonomic in-memory shape, but not an
 unrepresentable one.
+
+Checked-module cache writes stream the header and the two relocatable
+bodies to a private staging file, then atomically rename it. They never gather
+another full-entry heap buffer. A failed write or rename removes the staging file
+and records a cache-write failure; partial data never becomes a cache entry.
 
 Serialization never writes spare capacity. A `SafeMultiList` persists its live
 rows as `std.MultiArrayList`'s own column layout with capacity equal to length, so
@@ -8073,6 +8082,15 @@ item alignment. Static-data materialization aligns the backing to that
 maximum while keeping the Roc list length and capacity in items rather than
 bytes.
 
+Monotype lowering also packs source lists whose items are all checked builtin
+numeric literals, before constructing per-item IR. It consumes the checked
+numeral data and concrete item type through the ordinary exact numeral-to-bit
+conversion, and records the scalar encoding and item count on the packed view.
+This applies at every list length and includes the initial compile-time evaluation,
+not just restoration of completed constants. A custom conversion plan or root,
+non-literal item, or rejected conversion retains its ordinary computation and
+diagnostic behavior; list packing never evaluates or bypasses such computations.
+
 Readonly literal export demand comes from the retained LIR procedure control-flow
 graphs and their explicit join-point inventories. String literals, packed-list
 literals, and string-match prefixes and delimiters name their exact backing
@@ -8151,6 +8169,31 @@ under—an unreasoned redirect does not compile, and adding a caller means
 adding or citing a member, which is greppable and reviewable. A new
 probe-then-mutate rewrite requires a declared rule in this document first;
 "it makes a test pass" is not a rule.
+
+### Concrete Builtin Numeral Introduction
+
+A numeric expression may omit constructing its `from_numeral` signature graph
+when its explicit suffix, or the checking context supplied by its enclosing
+construction, already names a concrete builtin numeric declaration and its exact
+literal fits that declaration. `checkConcreteBuiltinNumeral` introduces the
+ordinary builtin nominal through `unifyWith`, leaving the enclosing expression's
+ordinary expected-type relation in place. This is a mechanism: builtin conversion
+at this already fixed type has no user computation or remaining checked plan, and
+the checked numeral has the same concrete type and absent custom dispatch plan
+as after ordinary constraint solving. CIR retains an explicit literal plan with
+an absent constraint-function variable; finalization still seals that occurrence
+as `builtin_direct` or a checked error. Consumers must not invent a callable for
+that absent constraint-function variable.
+
+Only producer-owned builtin declaration identity qualifies. Transparent aliases
+may be followed; nominal wrappers, custom suffixes, borrowed record-field context,
+unresolved and generalized targets do not qualify. An invalid literal keeps its
+ordinary conversion constraint and occurrence-specific diagnostics. No arbitrary
+candidate is selected, no shared mutable signature is introduced, and no checked
+dispatch plan is restamped. Expression literals only are covered; pattern equality
+requirements retain their existing introduction path. Tests in
+`issue_11960_test.zig` pin concrete, inferred, custom, and rejected cases, and the
+absence of per-literal signature graphs for concrete builtin lists.
 
 ### Expected Shape Context
 
@@ -8635,9 +8678,10 @@ open; an incoming row carrying unlisted tags is refused by the bounded row,
 as it is today. The coercion's first instance is
 already built and running: the Result-Row Widening Adapter specializes a
 template at its own declared row and re-tags the result at the requested row.
-That adapter is wired to template completion for dispatch plans, so the one
-open question is whether a value coerced inside an ordinary body needs a
-re-tag it does not reach there.
+That adapter is wired to template completion for dispatch plans; a value
+coerced inside an ordinary body needs a re-tag the adapter does not reach, and
+the Row Coercion Primitive below is that re-tag, built ahead of the rule so the
+rule's only remaining work is in the checker.
 
 The host-specific checker rewrite has been removed before subsumption is
 implemented (Hosted Try Question Widening Removed). Roc wrappers must explicitly
@@ -8658,6 +8702,130 @@ Future subsumption must accept closed forwarders without requiring source
 reconstruction. The direct hosted forwarding rejection in
 `src/compile/test/hosted_error_diagnostic_test.zig` pins the current limitation;
 non-hosted closed forwarding needs its own subsumption fixture.
+
+#### Row Coercion Primitive (no producer yet)
+
+The lowering half of row subsumption exists ahead of the rule, so that the
+rule, when it lands, changes only which programs typecheck. It is a
+checker-stamped expression, `row_coerce { value }` in checked bodies
+(`CheckedExprData.row_coerce`), whose own type is the wider row a value is
+used at and whose child keeps its own closed row. NOTHING EMITS IT YET: no
+checker site records a coercion, and no CIR form lowers to it. It exists so
+the pipeline below the checker is complete before the checker learns to
+coerce, and so that its producer (a top-level value evaluated once at its own
+type and widened at each use; Value Rows: Local Values Share, Top-Level Values
+Widen At Each Use) has a target shape to stamp.
+
+The coercion has a fixed REACH, which contains every position the Result-Row
+Widening Adapter re-tags (the direct result row and a `Try`'s error row).
+Starting from the coerced value's own row, it reaches:
+
+1. the row at the root;
+2. every row that is a tag payload of a reached row, recursively;
+3. every row reached by stepping through the backing of a named type that has
+   one (`Try` and user nominals alike) at a reached position.
+
+At a reached row the SUPERSET rule holds: every tag the source row carries is
+listed in the destination row with payloads of the same arity; the empty
+source row is uninhabited and satisfies it trivially. A row at any other
+position (a record field, a tuple item, a list item, a box payload, a
+function argument or result, or an argument of a named type without a backing
+such as `List`) is outside the reach and must be identical on both sides. The
+producer guarantees both rules. Every stage below checks them and raises an
+invariant on a violation; none recovers from one. A `row_coerce` whose child
+diverges diverges, and is lowered by the divergent paths like any other
+wrapper; such a child produces no value, so the checks skip it (Lambda Solved
+by the child's node kind in `relateReturnedExpr`, `.boxy` by the child's
+stored divergence without inline expects).
+
+The primitive is the value-only sibling of the `?` return boundary (Try
+Return-Row Composition): the same relation and the same lowering, without the
+control transfer.
+
+- Monotype lowers it as `row_widen { value }` (`Ast.RowWiden`). The child is
+  lowered at its OWN checked type, exactly as a `try_suffix` return's value
+  is, and the widen node sits at the demanded cell. `row_widen` carries no
+  target field: `Return.target` exists only because a return's own type is not
+  the function result, whereas the widen's own type IS its destination. It is
+  not a `typed_boundary`: Lambda Solved UNIFIES a typed boundary's two slots,
+  which is exactly what a coercion must not do.
+- Monotype relates the demanded cell to the widen node's own type and lowers
+  the child with no expected cell, exactly as it handles a `?` return, so
+  generated-private choices at the destination stay linked to the widen node
+  and the child's own row stays its own.
+- Lambda Solved infers the child with no expected type and then relates it to
+  the destination through the directed return relation (`relateReturn`, in
+  its `row_widen` mode): same-named tags' payloads flow, the two row roots are
+  never linked, the empty source row contributes nothing, and a source tag
+  absent from its destination or of a different arity is an invariant
+  violation. `shapeContent` steps through the backing of EVERY named type
+  that has one, user nominals included, not only `Try`; that is reach item 3,
+  and it is how an `Err` row widens inside a `Try` as it does at a `?`
+  return. Any other pair is unified, and in `row_widen` mode the relation
+  first walks that pair structurally and raises an invariant if it still
+  holds two different rows, because unifying them would merge the narrower
+  row into the wider one across the whole specialization. The `?` return
+  path uses the same relation in its `try_return` mode, which is unchanged
+  and performs no such walk.
+- Direct LIR lowering consumes the two solved types through the ordinary typed
+  assignment (`lowerTypedBoundaryInto`): a value-encoding-equivalent pair
+  copies, a nominal pair is unwrapped to its runtime backing, and a tag-union
+  pair re-tags—one switch on the source discriminant, each variant assigned
+  by name into the destination with its payloads moved through the same
+  boundary, so a nested row inside a payload re-tags too. Before it does,
+  the `row_widen` arm asserts the reach and the superset rule on the two
+  solved types: a tag-union pair (after unwrapping named backings) has every
+  source tag in the destination with equal arity, and any other pair is
+  value-encoding equivalent. The LIR is
+  ownership-neutral: it is the `tag_payload_struct` reads and `assign_tag`
+  statements a `?` return already emits, and ARC inserts the reference-count
+  operations. Backends see nothing new.
+- `.boxy` lowers the checked node directly: the child into a fresh local at
+  its own representation, then the representation boundary into the target
+  (`lowerRowCoerceInto`, the shape of its explicit return), which matches tag
+  variants by name and unwraps nominals through descriptors. The target's
+  representation is its caller's: `lowerExprInto` supplies the node's own,
+  and `lowerExprExpectedInto`, `lowerExprExpectedTypeRefInto` and
+  `lowerExprIntoRep` supply theirs, so a target stored at a generalized or
+  boxed representation gets the one boundary straight into that storage. The
+  target's descriptor is set from the child's representation exactly as
+  `lowerExprIntoRep` sets it. Before lowering, `lowerRowCoerceInto` checks the
+  reach and the superset rule on the pair of the child's and the node's own
+  representations (`assertRowCoerceReach`), because the shared boundary
+  re-tags records and other aggregates structurally and accepts a pure
+  narrowing; the coercion admits neither. Into an open destination row the
+  boundary is the concrete-to-dynamic tag adapter
+  (`assignConcreteTagVariantToDynamic`), which handles an adapted payload as
+  `lowerDynamicTagInto` handles a constructed one: the outer descriptor is
+  built from the payload's own descriptor, and a payload whose tag-payload
+  storage differs from its worker layout (a nested open row) is adapted into
+  a worker value and then moved into that storage.
+- SpecConstr is OPAQUE to it in this first form: it clones and walks through
+  the child like any wrapper, but retains no known-value structure across the
+  widen (the child's structure indexes the child's row, and re-anchoring it
+  would wrap its materialization in a `typed_boundary`), substitutes nothing
+  through it, treats a self call under a widen as NOT a tail call, because the
+  value is re-tagged after the call returns, and does not count a widen as
+  structurally work-free, since it emits a discriminant switch and, for a
+  boxed destination, an allocation. Case-of-case fusion through a widen is
+  future work, not a correctness requirement.
+- The Lambda Mono oracle re-tags by name through `convertValue`, as it does
+  for a `?` return.
+
+Because no checker emits the node, the pipeline is exercised by tests that
+stamp one onto a checked body after checking and before lowering it
+(`src/eval/test/lir_inline_test.zig`, "row coercion"), under both
+specialization strategies with leak checking, with source rows of two or more
+variants so the discriminant switch rather than the single-variant short cut
+is what runs. They cover refcounted `Str` and `List` payloads, a row directly
+in a tag payload, a generic payload, coercions at a let binding and a call
+argument, and children that diverge statically and at runtime. The rejected
+sides of the reach and superset rules are invariant panics, so they are not
+exercised in-process; `solve.zig` pins the accepted side of the Lambda Solved
+relation. Those tests are temporary scaffolding until the first producer
+lands; `src/postcheck/structural_test.zig` pins the node's shape at every
+stage. This section adds no Rewrite Inventory entry: the primitive mutates no
+solved type graph.
 
 ### Value Rows: Local Values Share, Top-Level Values Widen At Each Use
 
@@ -8767,20 +8935,41 @@ two-closed-uses case.
 
 The set of positions a use may widen stays equal to the set lowering can
 convert, by construction (Result-Row Widening Adapter states the same
-invariant for call results). Where a row nested in other structure may
-widen is not yet decided. A record field, tuple item, or tag payload converts
-by rebuilding that one level. A row inside a container (`List`, `Box`, `Dict`)
-converts by rebuilding the whole container, which for a top-level value is
-compile-time work producing another constant, not runtime work. Roc RFC 0011
-refines only the outermost level of a union and never descends under a
-recursion point.
+invariant for call results). That set is the reach of the row coercion (Row
+Coercion Primitive, above): the value's root row, every row that is a tag
+payload of a reached row, and every row behind the backing of a named type
+that has one, such as a `Try`'s error row. Converting a reached row re-tags
+it; no container is rebuilt. A row in a record field, a tuple item, a `List`
+or `Box` item, a function argument or result, or an argument of a named type
+without a backing is outside the reach: every use of the value shares it, and
+a use that needs it at another type is a type mismatch. Roc RFC 0011 likewise
+refines only the levels of a union a re-tag reaches.
 
-NOT YET IMPLEMENTED. Today a top-level value's row is shared by its module's
-uses and closed when the module finishes checking
-(`Check.closeWeakValueImplicitOpenExts`), so every defect listed above is
-present. The implementation replaces that closing with the per-use widening
-above and deletes `closeWeakValueImplicitOpenExts` and
-`weak_value_implicit_open_ext_ranges`.
+Checking implements this at each use of a checked top-level value, in its
+own module (`e_lookup_local`) and in an importer (`e_lookup_external`, for an
+imported value that is not a binding scheme). `Check.computeCoercionReach`
+marks the positions of the value's type the coercion reaches, and
+`Check.widenedValueUseVar` builds the use's copy: every reached tag union, its
+tags' payloads copied through the reach, under a fresh open extension, and
+every other variable shared with the value. A reached alias is copied as its
+widened backing. When the copy differs from the value's type, the use relates
+to the copy and checking records it (`ModuleEnv.RowCoercedUse`: the use and
+the value's own type); checked-body construction lowers each recorded use as a
+`row_coerce` whose child is the lookup at the value's own type, and the
+resolved value reference follows the coercion to that child. A use whose
+value's type has no reached tag union, such as a callable value, relates to
+the value's type itself. Because no use relates to the value's own rows,
+every still-open row the coercion reaches in a top-level value's type closes
+when the module finishes checking, whether or not the value is annotated
+(`Check.closeTopLevelValueRows`, beside the annotation-minted rows
+`Check.closeWeakValueImplicitOpenExts` closes), without any use observing it;
+the closed type is the one the value is evaluated at, so the value stays a
+compile-time root. A value's row can still gain tags after a use copied it (a
+generated codec's validation adds its error tags during finalize), so each
+re-opened row is recorded with the row it copies, and once constraints settle
+`Check.propagateValueRowsToWidenedUses` adds every such tag to the copy; a use
+whose type does not admit it is a type mismatch at the use. A row with no
+tags, which asserts that no value has it, is never re-opened.
 
 ### Hosted Try Question Widening Removed
 
@@ -11213,6 +11402,11 @@ site to any family below must classify it here.
 
 Other solved-graph mutations:
 
+- `checkConcreteBuiltinNumeral`—mechanism: Concrete Builtin Numeral
+  Introduction (above). Uses the existing `unifyWith` descriptor-introduction
+  mechanism for a proved concrete builtin conversion; does not mutate the
+  context's type or introduce a redirect rule.
+
 - `recordForMerge` / `tagUnionForMerge`—mechanism: row-extension
   preservation during ordinary unification. Both operand equivalence classes
   acquire the merged content, so an extension reaching either operand must
@@ -13373,7 +13567,14 @@ owned only by an unresolved callee body are present in the checked interface
 program and have already participated in the request's relation closure.
 Lexically context-dependent local procedures still lower in their owning graph
 because that lexical context is an explicit input rather than a context-free
-specialization key.
+specialization key. A nested function whose body reads a recursive-binding
+local reserved by an enclosing expansion (a callable-eval binding, an active
+constant binding, or an active ConstStore node binding) is lexically dependent
+in exactly this way, as is every function between that read and the
+binding's owner: the local is not a checked capture, so the function's
+specialization identity cannot name it, and such a body is never merged with
+or committed as an equal-looking specialization lowered where that local is
+not in scope.
 
 A deferred procedure-template request has two distinct sources of type
 evidence. Caller value flow owns the request's function arguments and return;
@@ -15866,7 +16067,11 @@ instead of double-boxed. `list_map_can_reuse` also carries its compile-time
 layout decision at LIR lowering: the lowerer computes the per-pointer-width
 interchangeability bits from committed item layouts and emits either a
 constant false value or an `assign_low_level` with explicit
-`interchangeable` metadata.
+`interchangeable` metadata. The same statement carries the committed output
+item layout that the lowerer used for that decision. ARC emission and body
+cloning preserve it, so downstream LIR consumers with their own storage
+representations read it there and never reconstruct the transform's return
+type to recover it.
 
 A low-level operation whose checked result type is the builtin `Try` (the
 typed numeric `*_from_str` parsers, the checked numeric `*_try` conversions,
@@ -20988,8 +21193,14 @@ const CaptureId = union(enum) {
     generated: u32,
 };
 
+const ConstCaptureKind = union(enum) {
+    lexical,
+    recursive_binding: struct { module: CheckedModuleDigest, root: ComptimeRootId },
+};
+
 const ConstCapture = struct {
     id: CaptureId,
+    kind: ConstCaptureKind,
     ty: ConstTypeId,
     value: ConstNodeId,
 };
@@ -21009,7 +21220,19 @@ checked pattern binders. Compiler-generated functions whose captures have no
 source pattern, such as structural parser runtime functions, use explicit
 generated capture ids assigned by the generator. Capture identity selects the
 checked template binder; it is not a substitute for value identity and is never
-used to infer a graph back-edge. A stored function does not store a lambda set,
+used to infer a graph back-edge. `kind` records what the capture is where the
+captured local was bound: compile-time evaluation lowers a top-level value's
+body under a recursive binding local for that value's compile-time root (a
+callable-eval binding, or an active constant binding, including a hoisted
+extraction's result binding), and Monotype marks that local
+`recursive_binding` with the root's module and id when it reserves it. The
+mark travels with the local through every post-check stage to the LIR capture
+slot and into the stored capture. A closure whose body refers back to that
+root captures the local, but a restored worker reaches the root through its
+own top-level reference, so a `recursive_binding` capture fills no worker
+slot. Consumers read the kind; they never derive it from the capture's binder,
+whose index is relative to the root's module rather than the storing module.
+A stored function does not store a lambda set,
 callable-set descriptor, call specialization id, erased ABI, capture layout,
 runtime tag, or LIR proc id.
 
@@ -21396,19 +21619,29 @@ triple, builtin objects, platform-input directory, and final link. It never
 classifies a COFF input as MSVC or MinGW from its container format, symbols,
 or linker failures.
 
-An MSVC target uses the Windows SDK and MSVC runtime discovered for that
-target. A MinGW target does not discover or add MSVC inputs. It uses LLD's
-MinGW mode and links only the startup objects, runtime archives, and import
-libraries declared explicitly by the platform target, together with Roc's
-generated objects. This lets a platform provide a cgo host and its matching
-MinGW runtime without either the compiler or linker reconstructing the host's
-ABI from the archive.
+Neither Windows ABI discovers anything on the machine running the link. Both
+pass `/nodefaultlib` and link only the startup code, runtime archives, and
+import libraries declared explicitly by the platform target, together with
+Roc's generated objects; a `/defaultlib` directive embedded in an input is
+ignored. An MSVC target does not locate Visual Studio or a Windows SDK, so it
+links identically on a machine that has neither and when cross-compiling. A
+MinGW target additionally selects LLD's MinGW mode. This lets a platform
+provide a cgo host and its matching runtime without either the compiler or
+linker reconstructing the host's ABI from the archive.
 
-The synthetic default platform declares MinGW startup and library inputs from
-the same inventory used to embed the vendored runtime in the compiler. Default
-app staging writes those files into the selected target's platform directory;
-the linker consumes them as ordinary explicit platform inputs. Baseline CPU
-targets use the same runtime bytes as their matching architecture and ABI.
+A Windows platform target therefore declares the symbol LLD infers as the
+image entry (`mainCRTStartup`, or `_DllMainCRTStartup` for a `Shared` output),
+whatever C runtime its host needs, and import libraries for `kernel32` and
+`ntdll`, which Roc's own runtime objects import from.
+
+The synthetic default platform declares its Windows startup and library
+inputs from the same inventories used to embed those runtimes in the
+compiler: the vendored MinGW runtime, and for MSVC a startup archive built
+from `src/default_platform/msvc_runtime/` beside the same import libraries.
+Default app staging writes those files into the selected target's platform
+directory; the linker consumes them as ordinary explicit platform inputs.
+Baseline CPU targets use the same runtime bytes as their matching
+architecture and ABI.
 
 ```text
 targets: {

@@ -10715,6 +10715,7 @@ const Builder = struct {
                     if (!draftCodecContractSpecializationEql(spec.codec_contract, codec_contract)) continue;
                     if (!draftCaptureEntryGuardsMatch(source_ctx.graph, spec.capture_entry_guards, capture_entry_guards)) continue;
                     if (!std.meta.eql(spec.lexical_owner, source_ctx.draft.current_owner)) continue;
+                    if (!nestedSpecReusableAt(source_ctx.draft, spec, request_owner)) continue;
                     const spec_request = try draftNestedSpecRequestNode(source_ctx.draft, source_ctx.graph, spec);
                     if (!try source_ctx.graph.typeIsResolved(spec_request)) continue;
                     const spec_fn_ty = try source_ctx.activeTypeFromNode(spec_request);
@@ -10736,6 +10737,7 @@ const Builder = struct {
                         if (!draftCodecContractSpecializationEql(spec.codec_contract, codec_contract)) continue;
                         if (!draftCaptureEntryGuardsMatch(source_ctx.graph, spec.capture_entry_guards, capture_entry_guards)) continue;
                         if (!std.meta.eql(spec.lexical_owner, source_ctx.draft.current_owner)) continue;
+                        if (!nestedSpecReusableAt(source_ctx.draft, spec, request_owner)) continue;
                         if (signature_relation == .exact_graph and
                             source_ctx.draft.fns.items[@backingInt(spec.fn_id)].signature_relation != .exact_graph)
                         {
@@ -10773,6 +10775,7 @@ const Builder = struct {
                             if (!draftCodecContractSpecializationEql(spec.codec_contract, codec_contract)) continue;
                             if (!draftCaptureEntryGuardsMatch(source_ctx.graph, spec.capture_entry_guards, capture_entry_guards)) continue;
                             if (!std.meta.eql(spec.lexical_owner, source_ctx.draft.current_owner)) continue;
+                            if (!nestedSpecReusableAt(source_ctx.draft, spec, request_owner)) continue;
                             if (signature_relation == .exact_graph and
                                 source_ctx.draft.fns.items[@backingInt(spec.fn_id)].signature_relation != .exact_graph)
                             {
@@ -13029,6 +13032,7 @@ const Builder = struct {
             const binder = capture.id.binder();
             const lowered_ty = try fn_ctx.lowerConstCaptureType(store_view, capture.ty);
             const local = try fn_ctx.addFreshLocalWithBinder(self.symbols.fresh(), lowered_ty, binder);
+            fn_ctx.draft.locals.items[@backingInt(local)].capture_kind = capture.kind;
             try fn_ctx.bindLocalName(local, binder);
             const previous = fn_ctx.binders.get(binder);
             try fn_ctx.binders.put(binder, local);
@@ -13241,6 +13245,7 @@ const Builder = struct {
             const lowered_ty = try fn_ctx.lowerConstCaptureType(store_view, capture.ty);
             const capture_cell = try fn_ctx.draftTypeCell(lowered_ty);
             const local = try fn_ctx.addFreshLocalWithBinderCell(self.symbols.fresh(), capture_cell, binder);
+            fn_ctx.draft.locals.items[@backingInt(local)].capture_kind = capture.kind;
             try fn_ctx.bindLocalName(local, binder);
             const previous = fn_ctx.binders.get(binder);
             try fn_ctx.binders.put(binder, local);
@@ -14405,6 +14410,10 @@ const DraftLocal = struct {
     binder: ?checked.PatternBinderId = null,
     capture_id: ?checked.CaptureId = null,
     checked_capture_id: ?checked.CaptureId = null,
+    /// Whether this local, when captured, is a lexical value or the recursive
+    /// binding reserved for a top-level compile-time root. Set where the
+    /// binding is reserved and carried to the stored closure's captures.
+    capture_kind: checked.ConstCaptureKind = .lexical,
 };
 
 const DraftTypedLocal = struct {
@@ -14763,6 +14772,9 @@ const DraftExprData = union(enum(u8)) {
     join_point: DraftJoinPointExpr,
     jump: DraftJumpExpr,
     return_: DraftReturn,
+    /// Draft form of `Ast.RowWiden`: the child at its own closed row, this
+    /// expression's cell at the wider row it is used at.
+    row_widen: struct { value: DraftExprId },
     crash: DraftStringLiteralId,
     /// Code that checking rejected and already reported. It crashes with its
     /// message; compile-time evaluation that reaches it discards the result
@@ -15541,6 +15553,10 @@ const ActiveCallableEvalBinding = struct {
     root: checked.ComptimeRootId,
     request_node: NodeId,
     local: DraftLocalId,
+    /// Owner whose body the reserved local is bound in. A read from deeper
+    /// in the ownership chain makes every function between them lexically
+    /// dependent (`BodyDraftStore.markRecursiveBindingRead`).
+    owner: DraftOwner,
     used: bool = false,
 };
 
@@ -16321,6 +16337,17 @@ const DraftStructuralEqMethodCall = struct {
     callee: DraftFnSlot,
 };
 
+/// Whether a request lowered in `request_owner` may reuse nested
+/// specialization `spec` of the same lexical owner. A body that reads an
+/// enclosing expansion's recursive-binding local names that local directly
+/// (it is not a checked capture), and a second expansion under the same owner
+/// reserves a different local; only a request inside `spec`'s own body is
+/// lowered where the local it names is in scope.
+fn nestedSpecReusableAt(draft: *const BodyDraftStore, spec: *const DraftNestedSpec, request_owner: DraftOwner) bool {
+    if (!spec.reads_recursive_binding) return true;
+    return draft.ownerDescendsFromDraftFn(request_owner, spec.fn_id);
+}
+
 const DraftNestedSpec = struct {
     state: DraftSpecState,
     nested: Ast.NestedFn,
@@ -16343,6 +16370,11 @@ const DraftNestedSpec = struct {
     lexical_owner: DraftOwner,
     requires_local: bool,
     local_context_dependent: bool,
+    /// Whether this body reads a recursive-binding local reserved by an
+    /// enclosing expansion (`BodyDraftStore.markRecursiveBindingRead`). That
+    /// local belongs to one expansion, so this body is reused only by a
+    /// request lowered inside its own body, where the same local is in scope.
+    reads_recursive_binding: bool = false,
     symbol: Common.Symbol,
     fn_id: DraftFnId,
     /// Exact alpha-normalized shape of the unresolved request before this nested
@@ -17132,6 +17164,58 @@ const BodyDraftStore = struct {
         return id;
     }
 
+    /// Record that the body being lowered reads a recursive-binding local
+    /// reserved in `binding_owner`'s body: a callable-eval binding, an active
+    /// constant binding, or an active ConstStore node binding.
+    ///
+    /// Such a local is not a checked capture. Whether a body names it depends
+    /// on the context the body was lowered in, so every function between
+    /// the read and `binding_owner` is lexically dependent: its specialization
+    /// identity omits the local, so it must never be merged with, or
+    /// committed as, an equal-looking specialization lowered elsewhere,
+    /// where that local is not in scope.
+    fn markRecursiveBindingRead(self: *BodyDraftStore, binding_owner: DraftOwner) void {
+        var cursor = self.current_owner;
+        var remaining = self.fns.items.len + 1;
+        while (remaining > 0) : (remaining -= 1) {
+            if (std.meta.eql(cursor, binding_owner)) return;
+            switch (cursor) {
+                .root, .reserved_fn => Common.invariant("recursive binding read was outside the ownership chain of its binding"),
+                .draft_fn => |fn_id| {
+                    const raw = @backingInt(fn_id);
+                    if (raw >= self.fns.items.len) {
+                        Common.invariant("draft owner ancestry referenced an unknown function");
+                    }
+                    self.markDraftFnLexicallyDependent(fn_id);
+                    cursor = self.fns.items[raw].parent_owner;
+                },
+            }
+        }
+        Common.invariant("draft function ownership ancestry contained a cycle");
+    }
+
+    fn markDraftFnLexicallyDependent(self: *BodyDraftStore, fn_id: DraftFnId) void {
+        for (self.nested_specs.items) |*spec| {
+            if (spec.fn_id != fn_id) continue;
+            spec.requires_local = true;
+            spec.local_context_dependent = true;
+            spec.reads_recursive_binding = true;
+            return;
+        }
+        for (self.template_specs.items) |*spec| {
+            if (spec.fn_id != fn_id) continue;
+            // Only a lexically dependent procedure body stays inside its
+            // owner; a context-free one becomes a top-level definition, which
+            // can name no enclosing local.
+            if (!spec.local_context_dependent) {
+                Common.invariant("context-free procedure body read an enclosing recursive binding");
+            }
+            spec.requires_local = true;
+            return;
+        }
+        Common.invariant("draft function had no owning nested or template specialization");
+    }
+
     /// Return whether `owner` is currently lowering inside `ancestor`'s body.
     /// Draft function parents are recorded at creation, so a partial interface
     /// match can only be classified as recursion through an explicit active
@@ -17500,6 +17584,15 @@ const BodyDraftStore = struct {
     fn setLocalName(self: *BodyDraftStore, id: DraftLocalId, name: []const u8) Allocator.Error!void {
         if (name.len == 0) return;
         self.local_names.items[@backingInt(id)] = try self.addSourceText(name);
+    }
+
+    /// Mark `id` as the recursive binding reserved for top-level root `root`
+    /// of `module`, so a closure capturing it stores that capture kind.
+    fn setLocalRecursiveBinding(self: *BodyDraftStore, id: DraftLocalId, module: checked.ModuleId, root: checked.ComptimeRootId) void {
+        self.locals.items[@backingInt(id)].capture_kind = .{ .recursive_binding = .{
+            .module = .{ .bytes = module.bytes },
+            .root = root,
+        } };
     }
 
     fn setLocalCaptureId(self: *BodyDraftStore, id: DraftLocalId, capture_id: u32) void {
@@ -17918,6 +18011,7 @@ const BodyDraftStore = struct {
                 .binder = local.binder,
                 .capture_id = durable_capture_id,
                 .checked_capture_id = local.checked_capture_id,
+                .capture_kind = local.capture_kind,
             });
             const local_name = self.sourceText(self.local_names.items[index]);
             program.local_names.appendAssumeCapacity(if (local_name.len == 0) "" else try program.allocator.dupe(u8, local_name));
@@ -18242,6 +18336,7 @@ const BodyDraftStore = struct {
             .static_data_candidate,
             .comptime_value,
             .typed_boundary,
+            .row_widen,
             .list,
             .record_update,
             .nominal,
@@ -18335,6 +18430,7 @@ const BodyDraftStore = struct {
                 .local => |local| local,
                 .unit,
                 .pending_deferred,
+                .row_widen,
                 .@"unreachable",
                 .int_lit,
                 .frac_f32_lit,
@@ -18565,6 +18661,7 @@ const BodyDraftStore = struct {
                 .loop_values = ids.exprSpan(jump.loop_values),
             } },
             .return_ => |ret| .{ .return_ = try BodyDraftStore.sealCoreReturn(ids, committed_types, ret) },
+            .row_widen => |widen| .{ .row_widen = .{ .value = ids.expr(widen.value) } },
             .crash => |literal| .{ .crash = ids.stringLiteral(literal) },
             .checked_error => |literal| .{ .checked_error = ids.stringLiteral(literal) },
             .comptime_branch_taken => |taken| .{ .comptime_branch_taken = .{
@@ -20916,6 +21013,7 @@ const BodyContext = struct {
             .join_point => null,
             .comptime_branch_taken => |branch| self.exprImpossibilityProof(branch.body),
             .dbg => |child| self.exprImpossibilityProof(child),
+            .row_widen => |widen| self.exprImpossibilityProof(widen.value),
             .expect_err => |expect_err| self.exprImpossibilityProof(expect_err.msg),
             .literal_rejected => |rejected| self.exprImpossibilityProof(rejected.msg),
             .expect => |child| if (self.builder.inline_expects == .shared) null else self.exprImpossibilityProof(child),
@@ -21255,11 +21353,15 @@ const BodyContext = struct {
         }
         var timing_scope = BodyWorkTimingScope.begin(self.builder.timing, .draft_ir);
         defer timing_scope.end();
-        const inherited_capture_id = if (binder) |source_binder| blk: {
-            const existing = self.binders.get(source_binder) orelse break :blk null;
-            break :blk self.draft.locals.items[@backingInt(existing)].capture_id;
-        } else null;
-        return try self.draft.addLocal(symbol, ty, binder, inherited_capture_id);
+        const existing = if (binder) |source_binder| self.binders.get(source_binder) else null;
+        const inherited_capture_id = if (existing) |local| self.draft.locals.items[@backingInt(local)].capture_id else null;
+        const id = try self.draft.addLocal(symbol, ty, binder, inherited_capture_id);
+        // A new version of a binding keeps that binding's capture identity,
+        // including whether it is a root's recursive binding.
+        if (existing) |local| {
+            self.draft.locals.items[@backingInt(id)].capture_kind = self.draft.locals.items[@backingInt(local)].capture_kind;
+        }
+        return id;
     }
 
     /// Materialize a new runtime binding from checked capture provenance even
@@ -22810,6 +22912,7 @@ const BodyContext = struct {
                 .record => |fields| for (self.fieldExprSpan(fields)) |field| try pending.append(self.allocator, field.value),
                 .tag => |tag| try pending.appendSlice(self.allocator, self.exprSpan(tag.payloads)),
                 .nominal => |backing| try pending.append(self.allocator, backing),
+                .row_widen => |widen| try pending.append(self.allocator, widen.value),
                 .let_ => |let_| {
                     try pending.append(self.allocator, let_.value);
                     try pending.append(self.allocator, let_.rest);
@@ -23085,6 +23188,7 @@ const BodyContext = struct {
                 .expect,
                 => |child| try search.push(.{ .expr = child }),
                 .return_ => |ret| try search.push(.{ .expr = ret.value }),
+                .row_widen => |widen| try search.push(.{ .expr = widen.value }),
                 .expect_err => |expect_err| try search.push(.{ .expr = expect_err.msg }),
                 .literal_rejected => |rejected| try search.push(.{ .expr = rejected.msg }),
                 .comptime_branch_taken => |taken| try search.push(.{ .expr = taken.body }),
@@ -24577,6 +24681,7 @@ const BodyContext = struct {
                     .anno_only,
                     .break_,
                     .return_,
+                    .row_coerce,
                     .for_,
                     .run_low_level,
                     => .{
@@ -26661,7 +26766,7 @@ const BodyContext = struct {
                 if (lambda_expr.data != .lambda) Common.invariant("checked closure did not point at a lambda expression");
                 break :blk .{ closure.lambda, lambda_expr.data.lambda };
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("local procedure site did not point at a lambda or closure"),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("local procedure site did not point at a lambda or closure"),
         };
 
         var saved = std.ArrayList(BinderRestore).empty;
@@ -27053,7 +27158,7 @@ const BodyContext = struct {
                             if (lambda.data != .lambda) Common.invariant("checked closure did not point at a lambda expression");
                             break :ty lambda.ty;
                         },
-                        .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("nested callable draft named a non-callable expression"),
+                        .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("nested callable draft named a non-callable expression"),
                     },
                     .value => if (task.closure) |closure| ty: {
                         task.capture_span = try self.lowerClosureCaptureExprSpan(closure.captures);
@@ -27510,7 +27615,7 @@ const BodyContext = struct {
     fn isDispatchExpr(expr: checked.CheckedExpr) bool {
         return switch (expr.data) {
             .dispatch_call, .interpolation, .type_dispatch_call, .method_eq => true,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => false,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => false,
         };
     }
 
@@ -27545,7 +27650,7 @@ const BodyContext = struct {
             .lookup_external, .lookup_required => |resolved| return try self.finishTypeNodeLeaf(task, try self.lookupExprTypeNode(expr.ty, resolved)),
             .lambda => |lambda| return try self.finishTypeNodeLeaf(task, try self.lambdaFunctionNode(expr.ty, lambda)),
             .closure => |closure| return try self.finishTypeNodeLeaf(task, try self.closureFunctionNode(closure)),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return try self.finishTypeNodeLeaf(task, try self.lowerTypeNode(expr.ty)),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => return try self.finishTypeNodeLeaf(task, try self.lowerTypeNode(expr.ty)),
         };
         return evidenceCall(self, next);
     }
@@ -27631,7 +27736,7 @@ const BodyContext = struct {
             },
             .lookup_local => |lookup| return .{ .ret = .{ .maybe_node = try self.lookupCallArgumentEvidenceNode(expr.ty, lookup.resolved, expected_ty) } },
             .lookup_external, .lookup_required => |resolved| return .{ .ret = .{ .maybe_node = try self.lookupCallArgumentEvidenceNode(expr.ty, resolved, expected_ty) } },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         if (expected_ty) |ty| {
             try self.constrainTypeToMono(expr.ty, ty);
@@ -27653,7 +27758,7 @@ const BodyContext = struct {
                 const expr = self.view.bodies.expr(task.expr);
                 switch (expr.data) {
                     .tuple, .record, .tag, .nominal, .list => {},
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return .{ .ret = .{ .maybe_node = null } },
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => return .{ .ret = .{ .maybe_node = null } },
                 }
                 task.argument_node = try self.freshInstNode(expr.ty);
                 frame.cursor = 2;
@@ -27718,7 +27823,7 @@ const BodyContext = struct {
                         task.current_child_node = backing.node;
                         return evidenceCall(self, .{ .produced_value = .{ .expr = nominal.backing_expr, .request_node = backing.node } });
                     },
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return .{ .ret = .{ .maybe_node = null } },
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => return .{ .ret = .{ .maybe_node = null } },
                 }
                 return try self.nextProducedValueChild(task, expr);
             },
@@ -27794,7 +27899,7 @@ const BodyContext = struct {
                         const witness = try self.graph.namedValueNodeWithBacking(representation_node, backing_witness.slot);
                         return .{ .ret = .{ .maybe_node = try self.relateCheckedNodeToProducedValue(representation_node, witness) } };
                     },
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => unreachable,
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => unreachable,
                 }
                 task.index += 1;
                 return try self.nextProducedValueChild(task, expr);
@@ -27867,7 +27972,7 @@ const BodyContext = struct {
                 const witness = try self.constructorWitnessWithStructuralNode(request_node, structural_node);
                 return .{ .ret = .{ .maybe_node = try self.relateCheckedNodeToProducedValue(request_node, witness) } };
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .nominal => unreachable,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level, .nominal => unreachable,
         }
     }
 
@@ -28495,7 +28600,7 @@ const BodyContext = struct {
                     const key = RelatedConstructor{ .expr = checked_expr, .node = self.graph.rootNode(expected_node) };
                     if ((try self.related_constructors.getOrPut(self.allocator, key)).found_existing) return self.finishRelate(task);
                 },
-                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .call, .empty_record, .block, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .call, .empty_record, .block, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
             }
             frame.cursor = 1;
             switch (expr.data) {
@@ -28545,7 +28650,7 @@ const BodyContext = struct {
                 // branches.
                 .block, .match_, .if_, .runtime_error => {},
                 .lambda, .closure => _ = try self.graph.functionNodes(expected_node),
-                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return evidenceCall(self, .{ .type_node = .{ .expr = checked_expr } }),
+                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => return evidenceCall(self, .{ .type_node = .{ .expr = checked_expr } }),
             }
             return self.finishRelate(task);
         }
@@ -28555,7 +28660,7 @@ const BodyContext = struct {
                 try relateRequestComponent(self.graph, input.?.nodeValue(), expected_node);
                 return self.finishRelate(task);
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {
                 try self.graph.unify(expected_node, input.?.nodeValue());
                 return self.finishRelate(task);
             },
@@ -28606,7 +28711,7 @@ const BodyContext = struct {
                     } });
                 }
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .nominal => unreachable,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level, .nominal => unreachable,
         }
         return self.finishRelate(task);
     }
@@ -28713,7 +28818,7 @@ const BodyContext = struct {
             .closure => |closure| try self.closureFunctionType(closure),
             .field_access => |field| try self.activeTypeFromNode(try self.fieldAccessTypeNode(expr.ty, field, null)),
             .tuple_access => |access| try self.activeTypeFromNode(try self.tupleAccessTypeNode(expr.ty, access.tuple, access.elem_index, null)),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => try self.lowerTypeView(expr.ty),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => try self.lowerTypeView(expr.ty),
         };
     }
 
@@ -29646,7 +29751,7 @@ const BodyContext = struct {
                         .result_cell = state.state_cell,
                         .tail = .{ .state_result = .{ .state = state, .result_node = result_node } },
                     }) }),
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
                 }
                 if (try self.nodeIsProvenUninhabited(result_node)) {
                     task.zero_branch_cell = state.state_cell;
@@ -29681,7 +29786,7 @@ const BodyContext = struct {
                 .result_cell = result_cell,
                 .tail = tail,
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => .{
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => .{
                 .statements = &.{},
                 .final_expr = body,
                 .result_cell = result_cell,
@@ -29761,7 +29866,7 @@ const BodyContext = struct {
                 };
                 return self.controlFlowOutputStep(body, task.result_cell, output);
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .hosted_lambda, .run_low_level => {
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .hosted_lambda, .run_low_level => {
                 task.stage = .value;
                 return branchBodyStep(self, body, .{ .value = task.result_cell });
             },
@@ -29786,7 +29891,7 @@ const BodyContext = struct {
                 .output = output,
                 .select = false,
             } }),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => unreachable,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => unreachable,
         };
     }
 
@@ -29846,7 +29951,7 @@ const BodyContext = struct {
                     } });
                 }
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
 
         // A divergent discarded expression never yields the value this
@@ -29975,7 +30080,7 @@ const BodyContext = struct {
                 } };
                 return switch (self.view.bodies.expr(child).data) {
                     .if_, .match_ => self.controlFlowOutputStep(child, task.state_cell, output),
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => branchBodyStep(self, child, output),
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => branchBodyStep(self, child, output),
                 };
             },
             .expect => |child| {
@@ -30202,7 +30307,7 @@ const BodyContext = struct {
             .at_cell => |cell| switch (checked_expr.data) {
                 .match_ => |match| return requestLowerTask(self, .{ .match_task = .{ .expr_id = expr_id, .match = match, .result_cell = cell } }),
                 .if_ => |if_| return requestLowerTask(self, .{ .if_task = .{ .expr_id = expr_id, .if_ = if_, .result_cell = cell } }),
-                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {
+                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {
                     task.finish = .{ .effect_at_cell = cell };
                     return divergentStep(self, expr_id, .{ .at_type = try self.unitType() });
                 },
@@ -30223,7 +30328,7 @@ const BodyContext = struct {
                         }
                         return requestLowerTask(self, .{ .if_task = .{ .expr_id = expr_id, .if_ = if_, .result_cell = .{ .sealed = ty } } });
                     },
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
                 }
                 task.finish = .{ .add_expr = ty };
                 return divergentStep(self, expr_id, .{ .data = ty });
@@ -30306,7 +30411,7 @@ const BodyContext = struct {
             .generated_interpolation_segments => |expr| {
                 const interpolation = switch (self.view.bodies.expr(expr).data) {
                     .interpolation => |value| value,
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("dispatch interpolation segments referenced a non-interpolation expression"),
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .row_coerce => Common.invariant("dispatch interpolation segments referenced a non-interpolation expression"),
                 };
                 try appendInterpolationOperands(self.allocator, &exprs, interpolation);
             },
@@ -30419,6 +30524,7 @@ const BodyContext = struct {
             },
             .tag => |tag| return try self.divergentOperandsStep(tag.args, ty),
             .nominal => |nominal| return self.divergentEffectStep(nominal.backing_expr, ty),
+            .row_coerce => |coerce| return self.divergentEffectStep(coerce.value, ty),
             .binop => |binop| return try self.divergentOperandsStep(&.{ binop.lhs, binop.rhs }, ty),
             .unary_minus,
             .unary_not,
@@ -31292,6 +31398,15 @@ const BodyContext = struct {
 
     fn stepConstructor(self: *BodyContext, frame: *LowerFrame, task: *ConstructorTask, input: ?LowerResult) Allocator.Error!LowerStep {
         if (frame.cursor == 0) {
+            if (task.kind == .list) {
+                const element_node = try self.graph.listElementNode(task.node);
+                const element_content = try self.graph.content(try self.constructorRepresentationNode(element_node));
+                if (element_content == .primitive) {
+                    if (try self.lowerPackedNumeralList(task.children, element_content.primitive)) |data| {
+                        return loweredExprStep(try self.addConstructorExprAtNode(task.node, data));
+                    }
+                }
+            }
             const drafts = try self.beginConstructor(task);
             if (drafts.len != 0) {
                 frame.cursor = constructor_drafts_cursor;
@@ -31683,7 +31798,7 @@ const BodyContext = struct {
                 };
                 const interpolation = switch (self.view.bodies.expr(task.expr).data) {
                     .interpolation => |value| value,
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("interpolation lowering referenced a non-interpolation expression"),
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .row_coerce => Common.invariant("interpolation lowering referenced a non-interpolation expression"),
                 };
                 for (interpolation.values) |value| {
                     try relateRequestComponent(self.graph, item_node, try self.lowerExprTypeNode(value));
@@ -31704,7 +31819,7 @@ const BodyContext = struct {
                     assembler;
                 const interpolation = switch (self.view.bodies.expr(task.expr).data) {
                     .interpolation => |value| value,
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("interpolation lowering referenced a non-interpolation expression"),
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .row_coerce => Common.invariant("interpolation lowering referenced a non-interpolation expression"),
                 };
                 task.values_ty = try self.activeTypeFromNode((try self.graph.functionNodes(task.assembler_node)).args[0]);
                 frame.cursor = 2;
@@ -31808,6 +31923,11 @@ const BodyContext = struct {
                 self.draft.exprs.items[@backingInt(lowered)].ty = cell;
                 return loweredExprStep(lowered);
             },
+            // A row coercion's value, lowered at a graph cell of its own type;
+            // the widen sits at the demanded cell.
+            6 => return loweredExprStep(try self.addExprWithTypeCell(cell, .{ .row_widen = .{
+                .value = input.?.exprValue(),
+            } })),
             // A dispatch or call lowered at this node.
             else => return .{ .ret = input.? },
         }
@@ -31886,7 +32006,9 @@ const BodyContext = struct {
                 return loweredExprStep(try self.addExprWithTypeCell(cell, .{ .checked_error = try self.addStringLiteral("runtime error") }));
             },
             .anno_only => Common.invariant("non-runtime checked expression reached Monotype lowering"),
-            .pending, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            // A row coercion is lowered below, once the demanded node relates
+            // to the coercion's own type.
+            .pending, .str_segment, .str, .bytes_literal, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         switch (expr.data) {
             .tuple_access => |access| {
@@ -31897,7 +32019,7 @@ const BodyContext = struct {
                     return loweredExprStep(try self.addExprWithTypeCell(cell, .{ .checked_error = try self.addStringLiteral("runtime error") }));
                 }
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         try relateRequestComponent(
             self.graph,
@@ -31918,6 +32040,14 @@ const BodyContext = struct {
             .run_low_level => |low_level| {
                 frame.cursor = 3;
                 return requestLowerTask(self, .{ .span = .{ .exprs = low_level.args } });
+            },
+            // The demanded node already relates to the coercion's own type
+            // (above). The value is lowered at a graph cell of its own checked
+            // type, as a `?` return's value is, so a value row that no use
+            // relates to seals by the specialization's row defaults.
+            .row_coerce => |coerce| {
+                frame.cursor = 6;
+                return requestLowerChild(self, coerce.value, DraftTypeCell.fromGraphNode(try self.lowerExprTypeNode(coerce.value)));
             },
             .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda => {},
         }
@@ -31957,7 +32087,7 @@ const BodyContext = struct {
                 if (!self.sameType(ty, try self.exprType(lowered))) {
                     switch (expr.data) {
                         .lambda, .closure => Common.invariant("checked function expression lowered at a type different from its context type"),
-                        .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("checked expression lowered at a type different from its call operand type"),
+                        .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("checked expression lowered at a type different from its call operand type"),
                     }
                 }
                 return loweredExprStep(lowered);
@@ -31973,7 +32103,7 @@ const BodyContext = struct {
                 frame.cursor = 3;
                 return step;
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         if (try self.restoredHoistedExprAtType(checked_expr, ty)) |restored| return loweredExprStep(restored);
         switch (expr.data) {
@@ -32042,7 +32172,7 @@ const BodyContext = struct {
                 } });
             },
             .lambda, .closure => {},
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => try self.constrainKnownType(expr.ty, ty),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => try self.constrainKnownType(expr.ty, ty),
         }
         frame.cursor = 4;
         return requestLowerTask(self, .{ .with_type = .{ .expr = checked_expr, .ty = ty } });
@@ -32078,7 +32208,7 @@ const BodyContext = struct {
                 if (runtime_error.evaluated.len != 0) return divergentStep(self, expr_id, .{ .at_type = try self.unitType() });
                 return requestLowerTask(self, .{ .with_type = .{ .expr = expr_id, .ty = try self.unitType() } });
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         switch (expr.data) {
             .call => |call| {
@@ -32089,7 +32219,7 @@ const BodyContext = struct {
                 frame.cursor = 1;
                 return requestLowerTask(self, .{ .call_expr = .{ .expr = expr_id, .checked_ret_ty = expr.ty, .call = call } });
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         if (self.view.hoisted_constants.lookupByExpr(expr_id) != null) {
             const expr_node = try self.lowerExprTypeNode(expr_id);
@@ -32203,7 +32333,7 @@ const BodyContext = struct {
                 frame.cursor = 1;
                 return requestLowerTask(self, .{ .field_access = .{ .expr = expr_id, .target = .{ .node = expr_node } } });
             },
-            .pending, .str_segment, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .match_, .if_, .call, .block, .closure, .lambda, .binop, .unary_minus, .unary_not, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .str_segment, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .match_, .if_, .call, .block, .closure, .lambda, .binop, .unary_minus, .unary_not, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         const expr_node = try self.lowerExprTypeNode(expr_id);
         switch (expr.data) {
@@ -32227,7 +32357,7 @@ const BodyContext = struct {
                 frame.cursor = 1;
                 return requestLowerTask(self, .{ .dispatch = .{ .checked_ret_ty = expr.ty, .maybe_plan = plan, .expected_ret_cell = DraftTypeCell.fromGraphNode(expr_node) } });
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         const expr_ty = try self.lowerExprType(expr_id);
         if (try self.restoredHoistedExprAtType(expr_id, expr_ty)) |restored| return self.exprInnerDone(task, restored);
@@ -32236,7 +32366,7 @@ const BodyContext = struct {
                 frame.cursor = 1;
                 return requestLowerTask(self, .{ .direct_structural = .{ .expr = expr_id, .ret = .{ .checked = expr.ty } } });
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         frame.cursor = 1;
         return requestLowerTask(self, .{ .with_type = .{ .expr = expr_id, .ty = expr_ty } });
@@ -32290,6 +32420,7 @@ const BodyContext = struct {
                 } }),
                 .expect => try self.withTypeData(task, .{ .expect = child.exprValue() }),
                 .dbg => try self.withTypeData(task, .{ .dbg = child.exprValue() }),
+                .row_coerce => try self.withTypeData(task, .{ .row_widen = .{ .value = child.exprValue() } }),
                 .expect_err => try self.withTypeData(task, .{ .expect_err = .{
                     .msg = child.exprValue(),
                     .region = expr.source_region,
@@ -32450,6 +32581,17 @@ const BodyContext = struct {
                 return requestLowerTask(self, .{ .expr = .{ .expr = child } }),
             .break_ => try self.breakCurrentLoopExprData(),
             .return_ => |ret| return requestLowerTask(self, .{ .return_value = .{ .expr = ret.expr, .lambda = ret.lambda, .context = ret.context } }),
+            // The coerced value is lowered at a graph cell of its own checked
+            // type, like a `?` return's value; the widen node carries the
+            // demanded type and Lambda Solved relates the two without
+            // unifying them. A value's row that no use relates to stays a
+            // graph cell and seals by the specialization's row defaults.
+            .row_coerce => |coerce| return requestLowerTask(self, .{ .at_type_cell = .{
+                .expr = coerce.value,
+                .cell = try self.lowerTypeCell(self.view.bodies.expr(coerce.value).ty),
+                .demand = .runtime_value,
+                .diverges = false,
+            } }),
             .for_ => |for_| return requestLowerTask(self, .{ .loop = try self.boxLowerTask(LoopTask, .{ .kind = .{ .for_ = checkedForLoop(for_) } }) }),
             .hosted_lambda => Common.invariant("hosted lambda expression reached ordinary Monotype expression lowering"),
             .run_low_level => |low_level| return requestLowerTask(self, .{ .span = .{ .exprs = low_level.args } }),
@@ -33549,7 +33691,7 @@ const BodyContext = struct {
         const expr = self.view.bodies.expr(checked_expr);
         const call = switch (expr.data) {
             .call => |call| call,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("call-at-node lowering received a non-call expression"),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("call-at-node lowering received a non-call expression"),
         };
         switch (frame.cursor) {
             0 => {},
@@ -33881,7 +34023,7 @@ const BodyContext = struct {
         if (demand != .runtime_value) return lowered;
         switch (expr.data) {
             .runtime_error, .crash, .ellipsis => return lowered,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .dbg, .expect_err, .expect, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .dbg, .expect_err, .expect, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
         const expr_proof = self.exprImpossibilityProof(lowered);
         const entry_guard_proof = if (self.function_entry_demand_guards.len != 0)
@@ -34321,7 +34463,7 @@ const BodyContext = struct {
         const maybe_ref: ?checked.ResolvedValueId = switch (expr.data) {
             .lookup_local => |lookup| lookup.resolved,
             .lookup_external, .lookup_required => |ref_id| ref_id,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => null,
         };
         if (maybe_ref) |ref_id| {
             if (try self.currentLocalForResolvedValue(ref_id)) |local_id| {
@@ -34546,6 +34688,7 @@ const BodyContext = struct {
 
             try relateRequestComponent(self.graph, active.request_node, request_fn_node);
             self.draft.active_callable_eval_bindings.items[index].used = true;
+            self.draft.markRecursiveBindingRead(active.owner);
             return try self.addExprWithTypeCell(
                 DraftTypeCell.fromGraphNode(request_fn_node),
                 .{ .local = active.local },
@@ -34572,11 +34715,13 @@ const BodyContext = struct {
             DraftTypeCell.fromGraphNode(request_fn_node),
             binder,
         );
+        self.draft.setLocalRecursiveBinding(local, view.key, root_id);
         try self.draft.active_callable_eval_bindings.append(self.allocator, .{
             .module = view.key,
             .root = root_id,
             .request_node = request_fn_node,
             .local = local,
+            .owner = self.draft.current_owner,
         });
         return local;
     }
@@ -34633,6 +34778,7 @@ const BodyContext = struct {
                 break :blk reserved;
             };
             self.draft.active_const_node_bindings.items[index].used = true;
+            self.draft.markRecursiveBindingRead(active.owner);
             return try self.addExprWithTypeCell(request_cell, .{ .local = local });
         }
 
@@ -36335,7 +36481,7 @@ const BodyContext = struct {
         return switch (expr.data) {
             .closure => |closure| try self.closureArgumentEvidenceDigest(expr_id, closure),
             .lambda => |lambda| self.lambdaArgumentEvidenceDigest(expr_id, lambda.args.len),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => null,
         };
     }
 
@@ -41613,7 +41759,7 @@ const BodyContext = struct {
             .lookup_external,
             .lookup_required,
             => try self.localCalleeMonoType(checked_func, checked_args, expected_ret_ty),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => null,
         };
     }
 
@@ -41627,7 +41773,7 @@ const BodyContext = struct {
         const maybe_ref = switch (expr.data) {
             .lookup_local => |lookup| lookup.resolved,
             .lookup_external, .lookup_required => |resolved| resolved,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => return null,
         };
         const ref_id = maybe_ref orelse Common.invariant("checked callee lookup reached Monotype without resolved value ref");
         const local_id = (try self.currentLocalForResolvedValue(ref_id)) orelse return null;
@@ -42702,6 +42848,7 @@ const BodyContext = struct {
             const active = self.draft.active_const_bindings.items[index];
             if (constUseEql(active.const_use, const_use.const_ref)) {
                 self.draft.active_const_bindings.items[index].used = true;
+                self.draft.markRecursiveBindingRead(active.owner);
                 try self.materializeActiveConstBinding(id);
                 return active.local;
             }
@@ -42717,6 +42864,7 @@ const BodyContext = struct {
             const active = self.draft.active_const_bindings.items[index];
             if (moduleBytesEqual(checked.constModuleId(active.const_use).bytes, self.view.key.bytes) and active.binder == binder) {
                 self.draft.active_const_bindings.items[index].used = true;
+                self.draft.markRecursiveBindingRead(active.owner);
                 try self.materializeActiveConstBinding(id);
                 return;
             }
@@ -42724,7 +42872,14 @@ const BodyContext = struct {
         }
     }
 
-    fn topLevelConstBinderForUse(store_view: ModuleView, const_use: checked.ConstLocator) ?checked.PatternBinderId {
+    /// The binder a top-level constant's recursive binding is keyed by, and the
+    /// compile-time root that binding belongs to.
+    const TopLevelConstBinding = struct {
+        binder: checked.PatternBinderId,
+        root: checked.ComptimeRootId,
+    };
+
+    fn topLevelConstBinderForUse(store_view: ModuleView, const_use: checked.ConstLocator) ?TopLevelConstBinding {
         const owner = switch (const_use.owner) {
             .top_level_binding => |owner| owner,
             // A hoisted extraction root binds its result pattern. A reference
@@ -42741,7 +42896,8 @@ const BodyContext = struct {
                 if (raw_pattern >= store_view.bodies.pattern_binder_by_pattern.len) {
                     Common.invariant("hoisted const result pattern was outside the binder index");
                 }
-                return store_view.bodies.pattern_binder_by_pattern[raw_pattern];
+                const binder = store_view.bodies.pattern_binder_by_pattern[raw_pattern] orelse return null;
+                return .{ .binder = binder, .root = entry.root };
             },
         };
         if (!moduleBytesEqual(checked.constModuleId(const_use).bytes, store_view.key.bytes)) {
@@ -42762,7 +42918,7 @@ const BodyContext = struct {
             Common.invariant("top-level const template root had a mismatched checked pattern");
         }
         return switch (store_view.bodies.pattern(pattern).data) {
-            .assign => |binder| binder,
+            .assign => |binder| .{ .binder = binder, .root = root_id },
             .pending, .as, .applied_tag, .nominal, .record_destructure, .list, .tuple, .numeral_literal, .str_literal, .str_interpolation, .underscore, .runtime_error => Common.invariant("top-level const root pattern was not a binder"),
         };
     }
@@ -42796,12 +42952,14 @@ const BodyContext = struct {
         cell: DraftTypeCell,
         scope: *ActiveConstBindingScope,
     ) Allocator.Error!bool {
-        const binder = topLevelConstBinderForUse(store_view, const_use) orelse return false;
+        const binding = topLevelConstBinderForUse(store_view, const_use) orelse return false;
+        const binder = binding.binder;
         const local = try self.addFreshLocalWithBinderCell(
             self.builder.symbols.fresh(),
             cell,
             binder,
         );
+        self.draft.setLocalRecursiveBinding(local, checked.constModuleId(const_use), binding.root);
         try self.bindLocalNameFromView(store_view, local, binder);
         const reservation = try self.addExprWithTypeCell(cell, .pending_deferred);
         const active_id: ActiveConstBindingId = @fromBackingInt(@intCast(@as(u32, @intCast(self.draft.active_const_bindings.items.len))));
@@ -45052,6 +45210,7 @@ const BodyContext = struct {
             const capture_node = try self.graph.importMono(lowered_ty);
             const capture_cell = DraftTypeCell.fromGraphNode(capture_node);
             const local = try fn_ctx.addFreshLocalWithBinderCell(self.builder.symbols.fresh(), capture_cell, binder);
+            fn_ctx.draft.locals.items[@backingInt(local)].capture_kind = capture.kind;
             try fn_ctx.bindLocalName(local, binder);
             const previous = fn_ctx.binders.get(binder);
             try fn_ctx.binders.put(binder, local);
@@ -45114,7 +45273,7 @@ const BodyContext = struct {
                 .exact_graph,
                 .inherit,
             ),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored capturing function did not reference a checked lambda"),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored capturing function did not reference a checked lambda"),
         };
 
         const capture_values = try self.allocator.alloc(DraftFnDefCapture, captures.len);
@@ -45220,6 +45379,7 @@ const BodyContext = struct {
             const lowered_ty = try fn_ctx.lowerConstCaptureType(store_view, capture.ty);
             const capture_cell = try fn_ctx.draftTypeCell(lowered_ty);
             const local = try fn_ctx.addFreshLocalWithBinderCell(self.builder.symbols.fresh(), capture_cell, binder);
+            fn_ctx.draft.locals.items[@backingInt(local)].capture_kind = capture.kind;
             try fn_ctx.bindLocalName(local, binder);
             const previous = fn_ctx.binders.get(binder);
             try fn_ctx.binders.put(binder, local);
@@ -45270,7 +45430,7 @@ const BodyContext = struct {
                 .exact_graph,
                 .inherit,
             ),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored capturing function did not reference a checked lambda"),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored capturing function did not reference a checked lambda"),
         };
 
         const capture_values = try self.allocator.alloc(DraftFnDefCapture, captures.len);
@@ -47754,6 +47914,7 @@ const BodyContext = struct {
                 .fn_ref,
                 => {},
                 .nominal => |backing| try work.append(self.allocator, backing),
+                .row_widen => |widen| try work.append(self.allocator, widen.value),
                 .tag => |tag| try work.appendSlice(self.allocator, self.exprSpan(tag.payloads)),
                 .tuple => |items| try work.appendSlice(self.allocator, self.exprSpan(items)),
                 .record => |fields| for (self.fieldExprSpan(fields)) |field| {
@@ -47955,7 +48116,7 @@ const BodyContext = struct {
         self.builder.countBodyDiagnostic("nested_callable_checks");
         return switch (self.view.bodies.expr(expr_id).data) {
             .lambda, .closure => true,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => false,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => false,
         };
     }
 
@@ -47973,7 +48134,7 @@ const BodyContext = struct {
                 self.builder.countBodyDiagnostic("nested_closures_prepared");
                 _ = try self.ensureClosureAtNode(expr_id, closure, request_fn_node, try self.closureCaptureEntryNodes(closure));
             },
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
         }
     }
 
@@ -48271,7 +48432,7 @@ const BodyContext = struct {
                 .numeral => .numeral,
                 .str_from_quote => .quote,
                 .interpolation => .interpolation,
-                .pending, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("literal rejection site did not point at a literal conversion expression"),
+                .pending, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .row_coerce => Common.invariant("literal rejection site did not point at a literal conversion expression"),
             },
         };
     }
@@ -48281,7 +48442,7 @@ const BodyContext = struct {
         return switch (self.view.bodies.expr(expr_id).data) {
             .numeral => |numeral| numeral.plan,
             .str_from_quote => |quote| quote.plan,
-            .pending, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("literal conversion did not point at a conversion expression"),
+            .pending, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("literal conversion did not point at a conversion expression"),
         };
     }
 
@@ -48506,6 +48667,56 @@ const BodyContext = struct {
         };
     }
 
+    /// A list of checked builtin numerals is already literal data. Preserve
+    /// that fact before allocating per-element IR, using the same exact scalar
+    /// conversion as ordinary numeral lowering. Custom conversion roots and
+    /// dispatch plans remain computations and are not consumed here.
+    fn lowerPackedNumeralList(self: *BodyContext, items: []const checked.CheckedExprId, primitive: Type.Primitive) Allocator.Error!?BodyExprData {
+        if (items.len == 0) return null;
+        const scalar: check.ConstStore.ConstPackedScalar = switch (primitive) {
+            .u8 => .u8,
+            .u16 => .u16,
+            .u32 => .u32,
+            .u64 => .u64,
+            .u128 => .u128,
+            .i8 => .i8,
+            .i16 => .i16,
+            .i32 => .i32,
+            .i64 => .i64,
+            .i128 => .i128,
+            .f32 => .f32,
+            .f64 => .f64,
+            .dec => .dec,
+            .bool, .str, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2 => return null,
+        };
+        for (items) |item| {
+            const expr = self.view.bodies.expr(item);
+            if (expr.data != .numeral) return null;
+            if (expr.data.numeral.plan != null or expr.data.numeral.conversion_root != null) return null;
+        }
+
+        const width = scalar.byteWidth();
+        const bytes = try self.allocator.alloc(u8, items.len * width);
+        defer self.allocator.free(bytes);
+        for (items, 0..) |item, index| {
+            const numeral = self.view.bodies.expr(item).data.numeral;
+            const bits = (try self.numeralScalarBits(numeral.literal, primitive)) orelse return null;
+            var encoded: [16]u8 = undefined;
+            switch (bits) {
+                .int => |value| std.mem.writeInt(i128, &encoded, value.toI128(), .little),
+                .f32 => |value| std.mem.writeInt(u32, encoded[0..4], @bitCast(value), .little),
+                .f64 => |value| std.mem.writeInt(u64, encoded[0..8], @bitCast(value), .little),
+                .dec => |value| std.mem.writeInt(i128, &encoded, value.num, .little),
+            }
+            @memcpy(bytes[index * width ..][0..width], encoded[0..width]);
+        }
+        return .{ .bytes_lit = .{
+            .literal = try self.addStringLiteral(bytes),
+            .len = @intCast(items.len),
+            .element = scalar,
+        } };
+    }
+
     /// The expression flavor of `numeralScalarBits`; null passes through for
     /// the caller's crash-node mapping.
     fn numeralBits(
@@ -48533,7 +48744,7 @@ const BodyContext = struct {
     ) Allocator.Error!DraftExprId {
         const interpolation = switch (self.view.bodies.expr(expr_id).data) {
             .interpolation => |value| value,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("interpolation segments operand referenced a non-interpolation expression"),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .row_coerce => Common.invariant("interpolation segments operand referenced a non-interpolation expression"),
         };
         const str_ty = switch (self.shapeContent(list_ty)) {
             .list => |elem| elem,
@@ -48554,7 +48765,7 @@ const BodyContext = struct {
     ) Allocator.Error!DraftExprId {
         return switch (self.view.bodies.expr(expr_id).data) {
             .str_segment => |literal| try self.lowerQuoteValue(literal, str_ty),
-            .pending, .numeral, .str_from_quote, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("interpolation segment was not a checked string segment"),
+            .pending, .numeral, .str_from_quote, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .row_coerce => Common.invariant("interpolation segment was not a checked string segment"),
         };
     }
 
@@ -49027,7 +49238,7 @@ const BodyContext = struct {
             .dispatch_call => |plan| plan,
             .type_dispatch_call, .method_eq => |plan| plan,
             // An interpolation's value is its conversion result's `Ok` payload.
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .interpolation, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .interpolation, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => return null,
         } orelse return null;
         const plan = self.view.static_dispatch_plans.plans[@backingInt(plan_id)];
         return try self.closedDirectGraphFreeResultType(expr.ty, plan);
@@ -57733,7 +57944,7 @@ const BodyContext = struct {
                         task.stage = .hash_value;
                         return requestLowerChild(self, h.value, self.directStructuralOperandCell(task));
                     },
-                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("direct structural task reached a non-structural expression"),
+                    .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("direct structural task reached a non-structural expression"),
                 }
             },
             .discriminant => {
@@ -57960,7 +58171,7 @@ const BodyContext = struct {
             .lookup_local => |lookup| try self.lookupExprTypeNode(expr.ty, lookup.resolved),
             .lookup_external, .lookup_required => |resolved| try self.lookupExprTypeNode(expr.ty, resolved),
             .field_access => |field| try self.fieldAccessTypeNode(expr.ty, field, null),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => null,
         };
     }
 
@@ -59866,7 +60077,7 @@ const BodyContext = struct {
             .method_eq,
             => (try self.exprCallResultEvidenceNode(checked_expr, null)) orelse
                 try self.lowerExprTypeNode(checked_expr),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => try self.lowerExprTypeNode(checked_expr),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => try self.lowerExprTypeNode(checked_expr),
         };
     }
 
@@ -60278,7 +60489,7 @@ const BodyContext = struct {
                     checked_value = block.final_expr;
                     continue;
                 },
-                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => {},
+                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => {},
             }
             break;
         }
@@ -60338,7 +60549,7 @@ const BodyContext = struct {
                 try self.exprProducedValueEvidenceNode(checked_value, expected_node)
             else
                 null,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .empty_list, .match_, .if_, .empty_record, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .empty_list, .match_, .if_, .empty_record, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => null,
         };
     }
 
@@ -60943,7 +61154,7 @@ const BodyContext = struct {
         self.builder.current_region = statement.source_region;
         const merge_binders: []MergeBinder = switch (self.view.bodies.expr(decl.expr).data) {
             .if_, .match_, .for_ => try self.stateMergeBinders(decl.expr),
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .hosted_lambda, .run_low_level => try self.allocator.alloc(MergeBinder, 0),
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .hosted_lambda, .run_low_level, .row_coerce => try self.allocator.alloc(MergeBinder, 0),
         };
         defer self.allocator.free(merge_binders);
         if (merge_binders.len == 0 and self.view.bodies.pattern(decl.pattern).data == .assign) {
@@ -61099,7 +61310,7 @@ const BodyContext = struct {
     ) Allocator.Error!?LowerStep {
         switch (self.view.bodies.expr(expr_id).data) {
             .if_, .match_, .for_ => {},
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .hosted_lambda, .run_low_level => return null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .hosted_lambda, .run_low_level => return null,
         }
 
         task.expanded_merge_binders = try self.stateMergeBinders(expr_id);
@@ -61310,7 +61521,7 @@ const BodyContext = struct {
                 // information but has no runtime value to bind.
                 .anno_only => false,
                 .pending => Common.invariant("pending checked declaration reached Monotype runtime statement filter"),
-                .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .break_, .return_, .for_, .hosted_lambda, .run_low_level => !self.hoistedBindingRestored(decl.pattern) and
+                .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => !self.hoistedBindingRestored(decl.pattern) and
                     !self.view.compile_time_roots.validationResolvedByPattern(decl.pattern),
             },
             .var_,
@@ -61922,6 +62133,7 @@ const BodyContext = struct {
             },
             .tag => |tag| for (tag.args) |arg| try pending.append(gpa, .{ .expr = arg }),
             .nominal => |nominal| try pending.append(gpa, .{ .expr = nominal.backing_expr }),
+            .row_coerce => |coerce| try pending.append(gpa, .{ .expr = coerce.value }),
             .binop => |binop| {
                 try pending.append(gpa, .{ .expr = binop.lhs });
                 try pending.append(gpa, .{ .expr = binop.rhs });
@@ -62409,7 +62621,7 @@ const BodyContext = struct {
         if (!self.view.bodies.patternBinder(binder).reassignable) return false;
         const captures = switch (self.view.bodies.expr(expr).data) {
             .closure => |closure| closure.captures,
-            .lambda, .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return false,
+            .lambda, .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level, .row_coerce => return false,
         };
         for (captures) |capture| {
             if (checkedCaptureBinder(self.view, capture.pattern) == binder) return true;
@@ -62573,7 +62785,7 @@ const BodyContext = struct {
         if (self.view.bodies.patternBinder(pattern.data.assign).is_scheme_alias) return true;
         return switch (self.view.bodies.expr(expr_id).data) {
             .lambda, .closure => true,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => false,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => false,
         };
     }
 
@@ -65928,7 +66140,7 @@ fn checkedLambdaExprIdForConstFn(view: ModuleView, fn_def: anytype) checked.Chec
             break :blk switch (expr.data) {
                 .lambda => expr_id,
                 .closure => |closure| closure.lambda,
-                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored nested function site did not point at a lambda or closure"),
+                .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored nested function site did not point at a lambda or closure"),
             };
         },
         .local_template, .imported_template, .local_hosted, .imported_hosted, .checked_generated, .parser_runtime, .encoder_for_runtime => Common.invariant("capturing stored function must reference a checked nested function"),
@@ -66075,7 +66287,7 @@ fn dispatchPlanIdForRuntimeExpr(view: ModuleView, expr_id: checked.CheckedExprId
     const plan_id = switch (expr.data) {
         .dispatch_call => |maybe| maybe orelse Common.invariant("stored serialization dispatch expression had no dispatch plan"),
         .type_dispatch_call => |maybe| maybe orelse Common.invariant("stored serialization type dispatch expression had no dispatch plan"),
-        .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .interpolation, .structural_eq, .structural_hash, .method_eq, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored serialization runtime function did not reference a dispatch expression"),
+        .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .interpolation, .structural_eq, .structural_hash, .method_eq, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .row_coerce, .for_, .hosted_lambda, .run_low_level => Common.invariant("stored serialization runtime function did not reference a dispatch expression"),
     };
     const plan_raw = @backingInt(plan_id);
     if (plan_raw >= view.static_dispatch_plans.plans.len) Common.invariant("stored serialization dispatch plan is outside plan table");
