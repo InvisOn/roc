@@ -772,6 +772,18 @@ Done 2026-09-29, locally (nothing pushed).
   Raspberry Pi 5 and on the Pi 3; the int app as arm32musl and arm32linux
   on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/faecf66d88/`.
+- 2026-10-12, merge `6965094ab4` of upstream `main` at `7d256b9546` (103
+  commits), then `61381cf9e1`. Two conflicts, in the test platforms
+  `test/fx/platform/main.roc` and `test/int/platform/main.roc`: upstream lists
+  the Windows targets' new link inputs next to the arm32 targets; the
+  resolution keeps the arm32 targets and takes upstream's Windows lines. No
+  fix. `61381cf9e1` regenerates `dev_object_list_ops.md` after upstream's own
+  output change. Checks: relative 64-bit oracle PASS, nothing differs;
+  minici 86/86 (Node.js 22 on PATH); arm32 eval corpus under qemu 2576
+  passed, 0 failed, 47 with a backend skipped; host effects 106/106;
+  `test/fx` 133/133 under qemu, on the Raspberry Pi 5 and on the Pi 3; the
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/7d256b9546/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
