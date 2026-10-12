@@ -814,6 +814,16 @@ Done 2026-09-29, locally (nothing pushed).
   Raspberry Pi 5 and on the Pi 3; the int app as arm32musl and arm32linux on
   the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/7894793d14/`.
+- 2026-10-13, merge `4f1cb485e5` of upstream `main` at `3eff9c299c` (9
+  commits). No conflicts, no fix. Checks: relative 64-bit oracle PASS,
+  nothing differs, no snapshot change; minici 86/86; arm32 eval corpus under
+  qemu 2576 passed, 0 failed, 47 with a backend skipped; host effects
+  106/106; `test/fx` 133/133 under qemu and on the Pi 3; on the Raspberry
+  Pi 5 the first run lost its SSH connection (64 programs never copied:
+  `scp: Connection closed`; the board was healthy) and the rerun passed
+  133/133; the int app as arm32musl and arm32linux on the Pi 3 prints
+  x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/3eff9c299c/`, `.git/verify-tools/hw-checks/fx-pi5.log`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
