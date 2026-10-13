@@ -2,11 +2,12 @@
 //!
 //! This module provides arm32-specific:
 //! - Register definitions (GeneralReg, the banked S/D/Q float file)
-//! - Instruction encoding (Emit)
+//! - Instruction encoding (Emit, including the NEON encoders)
 //! - Calling convention (Call - AAPCS32, VFP variant)
+//! - The CodeGen facade the shared driver (`LirCodeGen`) calls for arm32
 //!
-//! Nothing outside this directory uses it yet; see
-//! projects/big/arm32-dev-backend.md for the plan that wires it in.
+//! The shared driver selects it through `isa.zig` for the arm32musl and
+//! arm32linux targets; see DESIGN.md in this directory.
 
 const std = @import("std");
 
