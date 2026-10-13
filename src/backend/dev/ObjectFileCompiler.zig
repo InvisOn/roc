@@ -1152,7 +1152,7 @@ test "ObjectFileCompiler runtime static-root pack owns only reachable canonical 
         const target_usize = comptime @import("base").target.TargetUsize.fromPtrBitWidth(target.ptrBitWidth());
         const word = comptime target_usize.size();
         var result = producer: {
-            var arena = std.heap.ArenaAllocator.init(allocator);
+            var arena = collections.SingleThreadArena.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
             var store = LirStore.init(a);

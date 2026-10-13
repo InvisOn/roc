@@ -42,6 +42,7 @@ const build_options = @import("build_options");
 const shim_symbols = @import("builtins").shim_symbols;
 const Sha256Rounds = @import("builtins").sha256.Rounds;
 const base = @import("base");
+const collections = @import("collections");
 const reporting = @import("reporting");
 const parse = @import("parse");
 const tracy = @import("tracy");
@@ -1911,13 +1912,13 @@ fn checkedHostedTable(
 
 const LayoutHashContext = struct {
     layouts: *const layout.Store,
-    seen: std.AutoHashMap(layout.Idx, u32),
+    seen: collections.DenseMap(layout.Idx, u32),
     next_seen: u32 = 0,
 
     fn init(allocator: Allocator, layouts: *const layout.Store) LayoutHashContext {
         return .{
             .layouts = layouts,
-            .seen = std.AutoHashMap(layout.Idx, u32).init(allocator),
+            .seen = collections.DenseMap(layout.Idx, u32).init(allocator),
         };
     }
 
@@ -8211,7 +8212,7 @@ fn writePacksToStore(
             std.debug.print("lowered {s} {x:0>16} {s}\n", .{ &proc.identity.symbolHex(), fingerprint, program_store.procDebugName(proc_id) orelse "" });
         }
         for (app_lowered.lir_result.spec_procs.items) |spec_proc| {
-            if (program_store.getProcSpec(spec_proc.proc).body == null) continue;
+            if (program_store.getProcSpecImmediate(spec_proc.proc).body == null) continue;
             const fingerprint = try procFingerprint(ctx.gpa, app_lowered, spec_proc.proc);
             std.debug.print("compiled {x} {x:0>16} {s}\n", .{ &spec_proc.key, fingerprint, program_store.procDebugName(spec_proc.proc) orelse "" });
         }
@@ -8328,7 +8329,7 @@ fn packFileBytes(
     }
     var specs = std.ArrayList(backend.dev.PackFile.SpecEntry).empty;
     defer specs.deinit(allocator);
-    var conditions_arena = std.heap.ArenaAllocator.init(allocator);
+    var conditions_arena = base.SingleThreadArena.init(allocator);
     defer conditions_arena.deinit();
     const trace = std.c.getenv("ROC_PACK_TRACE") != null;
     var withheld: usize = 0;
@@ -8431,7 +8432,8 @@ const SpliceClosure = struct {
     procs: std.AutoHashMap(lir.ProcIdentity, u32),
     thunks: std.AutoHashMap(lir.ProcIdentity, u32),
     helpers: std.StringHashMap(u32),
-    seen: std.AutoHashMap(u32, void),
+    /// Artifacts the current query reached; exactly the indices in `order`.
+    seen: std.DynamicBitSetUnmanaged,
     order: std.ArrayList(u32) = .empty,
 
     fn init(allocator: Allocator, set: *const backend.dev.ProcArtifact.Set) Allocator.Error!SpliceClosure {
@@ -8441,9 +8443,10 @@ const SpliceClosure = struct {
             .procs = std.AutoHashMap(lir.ProcIdentity, u32).init(allocator),
             .thunks = std.AutoHashMap(lir.ProcIdentity, u32).init(allocator),
             .helpers = std.StringHashMap(u32).init(allocator),
-            .seen = std.AutoHashMap(u32, void).init(allocator),
+            .seen = .{},
         };
         errdefer self.deinit();
+        self.seen = try std.DynamicBitSetUnmanaged.initEmpty(allocator, set.artifacts.len);
         for (set.artifacts, 0..) |artifact, index| {
             switch (artifact.kind) {
                 .proc => |identity| _ = try self.procs.getOrPutValue(identity, @intCast(index)),
@@ -8457,7 +8460,7 @@ const SpliceClosure = struct {
 
     fn deinit(self: *SpliceClosure) void {
         self.order.deinit(self.allocator);
-        self.seen.deinit();
+        self.seen.deinit(self.allocator);
         self.helpers.deinit();
         self.thunks.deinit();
         self.procs.deinit();
@@ -8466,7 +8469,7 @@ const SpliceClosure = struct {
     /// Indices of the artifacts a splice of `root` places, valid until the
     /// next query.
     fn of(self: *SpliceClosure, root: u32) Allocator.Error![]const u32 {
-        self.seen.clearRetainingCapacity();
+        for (self.order.items) |index| self.seen.unset(index);
         self.order.clearRetainingCapacity();
         try self.visit(root);
         var cursor: usize = 0;
@@ -8486,8 +8489,9 @@ const SpliceClosure = struct {
     }
 
     fn visit(self: *SpliceClosure, index: u32) Allocator.Error!void {
-        if ((try self.seen.getOrPut(index)).found_existing) return;
+        if (self.seen.isSet(index)) return;
         try self.order.append(self.allocator, index);
+        self.seen.set(index);
     }
 };
 
@@ -8567,7 +8571,7 @@ test "pack withholds an entry whose stable references reach a constant holding a
             }},
         },
     };
-    const set = ProcArtifact.Set{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .artifacts = &artifacts };
+    const set = ProcArtifact.Set{ .arena = base.SingleThreadArena.init(std.testing.allocator), .artifacts = &artifacts };
     try std.testing.expect(try testNamesProgramLocalSymbols(&set, 0));
     try std.testing.expect(try testNamesProgramLocalSymbols(&set, 1));
 }
@@ -8588,7 +8592,7 @@ test "pack withholds an entry whose stable references reach a literal-converting
         },
         .{ .kind = .{ .proc = converter }, .code = "conv", .entry = 0, .frame = null, .refs = &.{}, .relocations = &.{}, .data = &.{} },
     };
-    const set = ProcArtifact.Set{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .artifacts = &artifacts };
+    const set = ProcArtifact.Set{ .arena = base.SingleThreadArena.init(std.testing.allocator), .artifacts = &artifacts };
     var converters = std.AutoHashMap(lir.ProcIdentity, void).init(std.testing.allocator);
     defer converters.deinit();
     try converters.put(converter, {});
@@ -8628,7 +8632,7 @@ test "pack offers an entry that carries its program data and withholds one that 
             .data = &.{},
         },
     };
-    const set = ProcArtifact.Set{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .artifacts = &artifacts };
+    const set = ProcArtifact.Set{ .arena = base.SingleThreadArena.init(std.testing.allocator), .artifacts = &artifacts };
     try std.testing.expect(!try testNamesProgramLocalSymbols(&set, 0));
     try std.testing.expect(try testNamesProgramLocalSymbols(&set, 1));
 }
