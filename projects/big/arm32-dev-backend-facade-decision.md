@@ -17,7 +17,7 @@ aarch64's. What settled it, measured that day:
   calls and over 100 two-way `arch ==` tests; in six months the driver grew
   from 12,563 to 28,740 lines and the per-ISA `CodeGen`s barely moved (60 to
   66 and 65 to 85 public functions). None of the 21 open upstream PRs,
-  #11885 included, moves instruction selection out of the driver.
+  upstream `90d093540f` included, moves instruction selection out of the driver.
 - The driver is already about 97% ISA-neutral: about 720 of its 28,366
   production lines name an instruction or a register or branch on the ISA,
   concentrated in five families (SIMD, 64-bit values on a 32-bit target,
