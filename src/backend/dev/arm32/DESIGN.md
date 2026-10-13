@@ -716,7 +716,7 @@ is a content hash that includes the compiler's own build hash, which the
 build takes from `git rev-parse --short=8 HEAD`. While the identity only
 appeared in symbol names, the oracles could rename the symbols before
 hashing (`canonicalizeSymbolNames`) and a committed hash file stayed valid
-from commit to commit. Upstream `842120f79f` (in #11885) made a failed Debug
+from commit to commit. Upstream `842120f79f` (in upstream's `90d093540f`) made a failed Debug
 check report the procedure by that identity, passed as two 64-bit
 immediates, so the identity is now inside the machine code of every
 procedure that has such a check. Every eval case has one (each returns a
