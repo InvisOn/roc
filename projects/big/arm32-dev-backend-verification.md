@@ -848,6 +848,18 @@ Done 2026-09-29, locally (nothing pushed).
   Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints x64musl's
   54 lines.
   Logs: `.git/verify-tools/upstream-sync/e395f197a7/`.
+- 2026-10-13, merge `da340ac6d2` of upstream `main` at `964db89b1c` (18
+  commits). One conflict, in `src/layout/abi/call.zig`: both sides added
+  tests at the end; the resolution keeps the arm32 physical-argument tests and
+  upstream's `markRegisterOverflow` test. Fix in the merge: upstream's new
+  `markRegisterOverflow` switches over every ABI target; its only caller is the
+  LLVM backend, which never targets arm32, so arm32 joins the wasm targets in
+  its unreachable arm. Checks: relative 64-bit oracle PASS, nothing differs,
+  no snapshot change; minici 86/86; arm32 eval corpus under qemu 2578 passed,
+  0 failed, 47 with a backend skipped; host effects 106/106; `test/fx`
+  133/133 under qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as
+  arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/964db89b1c/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
