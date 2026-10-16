@@ -920,6 +920,17 @@ Done 2026-09-29, locally (nothing pushed).
   Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints x64musl's
   54 lines.
   Logs: `.git/verify-tools/upstream-sync/c527968388/`.
+- 2026-10-16, merge `a5b75d80d9` of upstream `main` at `7ee6601c7e` (9
+  commits). One conflict in `LirCodeGen.zig`'s `str_from_utf8`: upstream's
+  side taken, with its store moved to the facade's `emitStore`. Upstream's
+  output changed one `dev_object` snapshot; regenerated in `3ddd1baac5`.
+  Checks: relative 64-bit oracle PASS, nothing differs; minici 96/96; arm32
+  eval corpus under qemu 2578 passed, 0 failed, 47 with a backend skipped;
+  host effects 106/106; `test/fx` 133/133 under qemu, on the Raspberry Pi 5
+  and on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3
+  prints x64musl's 54 lines. The checks ran at `9a02726169`, which differs
+  from `3ddd1baac5` only in its commit message.
+  Logs: `.git/verify-tools/upstream-sync/7ee6601c7e/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
