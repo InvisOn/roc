@@ -4533,7 +4533,6 @@ fn isTypeCheckError(err: SnapshotError) bool {
         error.EvaluationFailed,
         error.ExpectErr,
         error.ExpectedPlatformString,
-        error.ExpectedString,
         error.FileBusy,
         error.FileError,
         error.FileLocksUnsupported,
