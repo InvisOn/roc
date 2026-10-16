@@ -7,7 +7,9 @@ details live in the notes each entry links; this is the index for proposing
 them.
 
 Each entry was checked against upstream `main` at `b2b9541c42` (2026-09-28)
-unless it says otherwise. Commit hashes are on `32-bit-backend`.
+unless it says otherwise. Commit hashes are on
+`claude/arm32-dev-backend-reference` (named `32-bit-backend` until
+2026-10-17).
 
 Contents:
 
