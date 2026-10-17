@@ -21,7 +21,8 @@ pub fn generateComprehensiveStub(
     switch (arch_class) {
         .x86_64 => try writer.writeAll("    xor %rax, %rax\n    ret\n\n"),
         .aarch64 => try writer.writeAll("    mov x0, #0\n    ret\n\n"),
-        .aarch64_be, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
+        .arm => try writer.writeAll("    mov r0, #0\n    bx lr\n\n"),
+        .aarch64_be, .wasm32, .other => try writer.writeAll("    ret\n\n"),
     }
 
     // Essential libc symbols that must be present for linking
@@ -90,14 +91,17 @@ pub fn generateComprehensiveStub(
             switch (arch_class) {
                 .x86_64 => try writer.writeAll("    mov $1, %rdi\n    mov $60, %rax\n    syscall\n\n"),
                 .aarch64 => try writer.writeAll("    mov x0, #1\n    mov x8, #93\n    svc #0\n\n"),
-                .aarch64_be, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
+                // exit_group(1): syscall 248 in the ARM EABI.
+                .arm => try writer.writeAll("    mov r0, #1\n    mov r7, #248\n    svc #0\n\n"),
+                .aarch64_be, .wasm32, .other => try writer.writeAll("    ret\n\n"),
             }
         } else {
             // Other symbols return 0 or are no-ops (resolved at runtime)
             switch (arch_class) {
                 .x86_64 => try writer.writeAll("    xor %rax, %rax\n    ret\n\n"),
                 .aarch64 => try writer.writeAll("    mov x0, #0\n    ret\n\n"),
-                .aarch64_be, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
+                .arm => try writer.writeAll("    mov r0, #0\n    bx lr\n\n"),
+                .aarch64_be, .wasm32, .other => try writer.writeAll("    ret\n\n"),
             }
         }
     }

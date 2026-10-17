@@ -120,6 +120,22 @@ const host_routines = struct {
     extern fn ___chkstk_ms() callconv(.c) void;
 };
 
+/// arm32's run-time helpers (D7 of `projects/big/arm32-dev-backend.md`): the
+/// dev backend calls these for word division and 64-bit division and
+/// conversions, which ARMv7-A without `hwdiv` has no instructions for. An
+/// arm32 compiler links compiler-rt, which defines every one, so a loaded
+/// object binds them to the compiler's own definitions.
+const arm_helper_names = [_][]const u8{
+    "__aeabi_idivmod",
+    "__aeabi_uidivmod",
+    "__aeabi_ldivmod",
+    "__aeabi_uldivmod",
+    "__aeabi_l2d",
+    "__aeabi_ul2d",
+    "__aeabi_l2f",
+    "__aeabi_ul2f",
+};
+
 /// The C memory and math routines native codegen may emit calls to, exactly
 /// the ones the boundary contract names. A loaded object's reference to one
 /// binds to the definition this binary already carries.
@@ -141,6 +157,11 @@ pub fn resolve(name: []const u8) ?usize {
     }
     if (builtin.os.tag == .windows and builtin.cpu.arch == .x86_64) {
         if (std.mem.eql(u8, name, "___chkstk_ms")) return @intFromPtr(&host_routines.___chkstk_ms);
+    }
+    if (builtin.cpu.arch == .arm) {
+        inline for (arm_helper_names) |helper| {
+            if (std.mem.eql(u8, name, helper)) return @intFromPtr(@extern(*const fn () callconv(.c) void, .{ .name = helper }));
+        }
     }
     return null;
 }
@@ -165,6 +186,14 @@ test "resolve maps known compiler-rt symbols and rejects others" {
     try std.testing.expect(resolve("__floatuntidf") != null);
     try std.testing.expect(resolve("not_a_runtime_symbol") == null);
     try std.testing.expect(resolve(@import("builtin_registry.zig").BuiltinFn.float_tan.symbolName()) == null);
+}
+
+test "arm32 hosts resolve the __aeabi helpers the dev backend calls" {
+    if (builtin.cpu.arch != .arm) return error.SkipZigTest;
+    for (arm_helper_names) |helper| try std.testing.expect(resolve(helper) != null);
+    const uidivmod: *const fn (u32, u32) callconv(.c) u64 = @ptrFromInt(resolve("__aeabi_uidivmod").?);
+    // Quotient in r0, remainder in r1.
+    try std.testing.expectEqual(@as(u64, 3) | (@as(u64, 2) << 32), uidivmod(17, 5));
 }
 
 test "resolve binds every C routine the boundary contract names" {
