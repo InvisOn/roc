@@ -401,15 +401,21 @@ pub const ModImm = struct {
     /// The encoding with the smallest rotation is chosen, matching the
     /// assembler's canonical encoding.
     pub fn encode(imm: u32) ?ModImm {
-        var rot: u5 = 0;
-        while (true) : (rot += 1) {
-            // imm8 ROR (2*rot) == value  <=>  imm8 == value ROL (2*rot)
-            const imm8 = std.math.rotl(u32, imm, @as(u32, rot) * 2);
-            if (imm8 <= 0xFF) {
-                return .{ .bits = (@as(u12, @intCast(rot)) << 8) | @as(u12, @intCast(imm8)) };
-            }
-            if (rot == 15) return null;
+        // HOLE 1.1. `of` calls this at compile time all over the backend, so
+        // a slow search over all 4096 encodings stands in there to keep the
+        // branch compiling. It is not the answer: write the direct version.
+        if (@inComptime()) return searchAtComptime(imm);
+        @panic("HOLE 1.1 ModImm.encode: not written yet (LEARNING_HOLES.md, stage 1)");
+    }
+
+    fn searchAtComptime(imm: u32) ?ModImm {
+        @setEvalBranchQuota(100_000);
+        var bits: u32 = 0;
+        while (bits < 4096) : (bits += 1) {
+            const candidate: ModImm = .{ .bits = @intCast(bits) };
+            if (candidate.decode() == imm) return candidate;
         }
+        return null;
     }
 
     /// Encode a value known at compile time to have a modified-immediate form.
@@ -614,18 +620,17 @@ pub fn Emit(comptime target: RocTarget) type {
             };
         }
 
-        /// Generic data-processing instruction:
-        /// cond 00 I opcode(4) S Rn(4) Rd(4) operand2(12)
+        /// Generic data-processing instruction: the one layout behind ADD,
+        /// SUB, AND, ORR, CMP, MOV and the rest of `DataOp`. `operand2Bits`
+        /// (above) gives the low 12 bits and the immediate flag.
         pub fn dataProc(self: *Self, cond: Condition, op: DataOp, set_flags: bool, rd: GeneralReg, rn: GeneralReg, op2: Operand2) Allocator.Error!void {
             if (op.isCompare()) std.debug.assert(set_flags and rd == .r0);
             if (op.isMove()) std.debug.assert(rn == .r0);
-            const inst: u32 = condBits(cond) |
-                (@as(u32, @backingInt(op)) << 21) |
-                (@as(u32, @intFromBool(set_flags)) << 20) |
-                (@as(u32, rn.enc()) << 16) |
-                (@as(u32, rd.enc()) << 12) |
-                operand2Bits(op2);
-            try self.emit32(inst);
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            _ = cond;
+            _ = op2;
+            @panic("HOLE 1.2 dataProc: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// MOV rd, rm
@@ -674,27 +679,22 @@ pub fn Emit(comptime target: RocTarget) type {
 
         /// Encode MOVW (top = false) or MOVT (top = true).
         pub fn encodeMovwMovt(top: bool, dst: GeneralReg, imm: u16) u32 {
-            return condBits(.al) |
-                (0b0011 << 24) |
-                (@as(u32, @intFromBool(top)) << 22) |
-                (@as(u32, imm >> 12) << 16) |
-                (@as(u32, dst.enc()) << 12) |
-                (imm & 0xFFF);
+            // Delete each discard below as you start using the parameter.
+            _ = top;
+            _ = dst;
+            _ = imm;
+            @panic("HOLE 1.3a encodeMovwMovt: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// Load a 32-bit constant: MOV #imm or MVN #~imm when one instruction
         /// encodes it, otherwise MOVW followed by MOVT when the top half is
         /// non-zero. The instruction choice depends only on the value.
         pub fn movRegImm32(self: *Self, dst: GeneralReg, imm: u32) Allocator.Error!void {
-            if (ModImm.encode(imm)) |mod| {
-                try self.movRegModImm(dst, mod);
-            } else if (ModImm.encode(~imm)) |mod| {
-                try self.mvnRegModImm(dst, mod);
-            } else {
-                try self.movw(dst, @truncate(imm));
-                const hi: u16 = @truncate(imm >> 16);
-                if (hi != 0) try self.movt(dst, hi);
-            }
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            _ = dst;
+            _ = imm;
+            @panic("HOLE 1.3b movRegImm32: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// ADD rd, rn, rm
@@ -887,18 +887,16 @@ pub fn Emit(comptime target: RocTarget) type {
 
         // Multiply
 
-        /// cond 0000 opc(4) Rd/RdHi(4) Ra/RdLo(4) Rm(4) 1001 Rn(4)
+        /// The layout shared by MUL, MLA, MLS and the long multiplies
+        /// (UMULL, SMULL, ...). `opc` picks the instruction; `hi` and `lo`
+        /// are the two destination fields.
         fn multiply(self: *Self, opc: u4, set_flags: bool, hi: GeneralReg, lo: GeneralReg, rm: GeneralReg, rn: GeneralReg) Allocator.Error!void {
             std.debug.assert(hi != .r15 and lo != .r15 and rm != .r15 and rn != .r15);
-            const inst: u32 = condBits(.al) |
-                (@as(u32, opc) << 21) |
-                (@as(u32, @intFromBool(set_flags)) << 20) |
-                (@as(u32, hi.enc()) << 16) |
-                (@as(u32, lo.enc()) << 12) |
-                (@as(u32, rm.enc()) << 8) |
-                (0b1001 << 4) |
-                rn.enc();
-            try self.emit32(inst);
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            _ = opc;
+            _ = set_flags;
+            @panic("HOLE 1.4 multiply: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// MUL rd, rn, rm (low 32 bits of the product)
@@ -1048,13 +1046,7 @@ pub fn Emit(comptime target: RocTarget) type {
         pub fn encodeBranch(cond: Condition, link: bool, offset_bytes: i32) u32 {
             std.debug.assert(!link or cond == .al);
             std.debug.assert(@mod(offset_bytes, 4) == 0);
-            const disp = (offset_bytes - 8) >> 2;
-            std.debug.assert(disp >= -(1 << 23) and disp < (1 << 23));
-            const imm24: u32 = @as(u24, @bitCast(@as(i24, @intCast(disp))));
-            return condBits(cond) |
-                (0b101 << 25) |
-                (@as(u32, @intFromBool(link)) << 24) |
-                imm24;
+            @panic("HOLE 1.5 encodeBranch: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// B label (unconditional branch)
@@ -1127,20 +1119,16 @@ pub fn Emit(comptime target: RocTarget) type {
 
         // Loads and stores
 
-        /// cond 010 P U B W L Rn Rt imm12, offset addressing (P=1, W=0)
+        /// LDR, STR, LDRB and STRB with an immediate offset from a base
+        /// register (offset addressing: no writeback).
         fn loadStoreWordByte(self: *Self, load: bool, byte: bool, rt: GeneralReg, rn: GeneralReg, offset: i32) Allocator.Error!void {
             std.debug.assert(fitsImmediate(if (byte) .byte else .word, offset));
-            const up = offset >= 0;
-            const inst: u32 = condBits(.al) |
-                (0b010 << 25) |
-                (1 << 24) |
-                (@as(u32, @intFromBool(up)) << 23) |
-                (@as(u32, @intFromBool(byte)) << 22) |
-                (@as(u32, @intFromBool(load)) << 20) |
-                (@as(u32, rn.enc()) << 16) |
-                (@as(u32, rt.enc()) << 12) |
-                @as(u32, @abs(offset));
-            try self.emit32(inst);
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            _ = load;
+            _ = rt;
+            _ = rn;
+            @panic("HOLE 1.6 loadStoreWordByte: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// LDR rt, [rn, #offset]
@@ -1227,7 +1215,9 @@ pub fn Emit(comptime target: RocTarget) type {
         pub fn push(self: *Self, list: u16) Allocator.Error!void {
             std.debug.assert(@popCount(list) >= 2);
             std.debug.assert(list & GeneralReg.sp.listBit() == 0);
-            try self.emit32(condBits(.al) | 0x092D0000 | @as(u32, list));
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            @panic("HOLE 1.7a push: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// POP {list} (LDMIA sp!, {list}). The list names at least two
@@ -1235,7 +1225,9 @@ pub fn Emit(comptime target: RocTarget) type {
         pub fn pop(self: *Self, list: u16) Allocator.Error!void {
             std.debug.assert(@popCount(list) >= 2);
             std.debug.assert(list & GeneralReg.sp.listBit() == 0);
-            try self.emit32(condBits(.al) | 0x08BD0000 | @as(u32, list));
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            @panic("HOLE 1.7b pop: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         // VFP
@@ -1264,17 +1256,14 @@ pub fn Emit(comptime target: RocTarget) type {
         /// `base` supplies bits 27:20 (minus D), 19:16 when Vn is fixed, and
         /// the opcode bits 7:6.
         fn vfpDataProc(self: *Self, base: u32, sz: VfpPrecision, vd: VfpField, vn: VfpField, vm: VfpField) Allocator.Error!void {
-            const inst: u32 = condBits(.al) |
-                base |
-                (@as(u32, vd.one) << 22) |
-                (@as(u32, vn.four) << 16) |
-                (@as(u32, vd.four) << 12) |
-                (0b101 << 9) |
-                (@as(u32, @backingInt(sz)) << 8) |
-                (@as(u32, vn.one) << 7) |
-                (@as(u32, vm.one) << 5) |
-                vm.four;
-            try self.emit32(inst);
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            _ = base;
+            _ = sz;
+            _ = vd;
+            _ = vn;
+            _ = vm;
+            @panic("HOLE 1.8a vfpDataProc: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         const vfp_zero: VfpField = .{ .four = 0, .one = 0 };
@@ -1519,20 +1508,17 @@ pub fn Emit(comptime target: RocTarget) type {
             try self.vmovCorePairDouble(false, src_lo, src_hi, dst);
         }
 
-        /// cond 1101 U D 0 L Rn Vd 101 sz imm8
+        /// VLDR and VSTR: a VFP register loaded from or stored to
+        /// [rn, #offset].
         fn vfpLoadStore(self: *Self, load: bool, sz: VfpPrecision, vd: VfpField, rn: GeneralReg, offset: i32) Allocator.Error!void {
             std.debug.assert(fitsImmediate(.vfp, offset));
-            const up = offset >= 0;
-            const inst: u32 = condBits(.al) |
-                0x0D000A00 |
-                (@as(u32, @intFromBool(up)) << 23) |
-                (@as(u32, vd.one) << 22) |
-                (@as(u32, @intFromBool(load)) << 20) |
-                (@as(u32, rn.enc()) << 16) |
-                (@as(u32, vd.four) << 12) |
-                (@as(u32, @backingInt(sz)) << 8) |
-                (@as(u32, @abs(offset)) >> 2);
-            try self.emit32(inst);
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            _ = load;
+            _ = sz;
+            _ = vd;
+            _ = rn;
+            @panic("HOLE 1.8b vfpLoadStore: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// VLDR sd, [rn, #offset]
@@ -1593,21 +1579,21 @@ pub fn Emit(comptime target: RocTarget) type {
             }
         };
 
-        /// 1111 001U 0 D sz Vn Vd opc N Q M o1 Vm
+        /// The NEON "three registers of the same length" layout (VADD, VAND,
+        /// VCEQ, ...). Unlike the instructions above it has no condition
+        /// field.
         fn neonThreeSameFields(self: *Self, u: u1, size: u2, opc: u4, o1: u1, quad: bool, vd: NeonField, vn: NeonField, vm: NeonField) Allocator.Error!void {
-            const inst: u32 = 0xF2000000 |
-                (@as(u32, u) << 24) |
-                (@as(u32, vd.one) << 22) |
-                (@as(u32, size) << 20) |
-                (@as(u32, vn.four) << 16) |
-                (@as(u32, vd.four) << 12) |
-                (@as(u32, opc) << 8) |
-                (@as(u32, vn.one) << 7) |
-                (@as(u32, @intFromBool(quad)) << 6) |
-                (@as(u32, vm.one) << 5) |
-                (@as(u32, o1) << 4) |
-                vm.four;
-            try self.emit32(inst);
+            // Delete each discard below as you start using the parameter.
+            _ = self;
+            _ = u;
+            _ = size;
+            _ = opc;
+            _ = o1;
+            _ = quad;
+            _ = vd;
+            _ = vn;
+            _ = vm;
+            @panic("HOLE 1.9 neonThreeSameFields: not written yet (LEARNING_HOLES.md, stage 1)");
         }
 
         /// <op>.<size> Qd, Qn, Qm (see `NeonThreeSame` for the shift forms'
