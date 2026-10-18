@@ -960,6 +960,22 @@ Done 2026-09-29, locally (nothing pushed).
   Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints x64musl's
   54 lines.
   Logs: `.git/verify-tools/upstream-sync/c8fb3b1da2/`.
+- 2026-10-18, merge `b47be6d45e` of upstream `main` at `ac741012c8` (62
+  commits). Conflicts in three dev backend files: upstream now derives the
+  RocStr/RocList offsets and sizes from the builtins (`d79554539c`), still
+  for 8-byte words. `LirCodeGen.zig` keeps our word-size-aware code at all
+  49 conflicts (upstream's side there only renamed constants); its 8-byte
+  assert and the constants nothing uses are dropped. `CallingConvention.zig`
+  takes upstream's target-word offsets and its `addListBytesLenCapMemArgs`
+  name. The `ObjectFileCompiler.zig` test takes upstream's source files,
+  with layouts sized for the target word. No other fix. The arm32 lines of
+  four `dev_object` snapshots changed; regenerated in `bd82afab07`. Checks:
+  relative 64-bit oracle PASS, nothing differs; minici 96/96; arm32 eval
+  corpus under qemu 2578 passed, 0 failed, 47 with a backend skipped; host
+  effects 106/106; `test/fx` 133/133 under qemu, on the Raspberry Pi 5 and
+  on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
+  x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/ac741012c8/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
