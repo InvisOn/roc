@@ -188,12 +188,12 @@ Assumptions, confirmed by me on 2026-10-03:
 
 ## Running in the other conversation
 
-- [ ] **Upstream sync of the reference** (`32-bit-backend`): weekdays 00:17
-      to 12:17. Last sync 2026-10-03 (upstream `d16a6598e4`).
+- [ ] **Upstream sync of the reference** (`claude/arm32-dev-backend-reference`,
+      `32-bit-backend` until 2026-10-17): continuous since 2026-10-13; state in
+      `.git/verify-tools/upstream-sync/state.txt` on the first PC.
 - [x] **Push the local notes commits** (the facade decision, the basic-cli panic): pushed 2026-10-03
-- [ ] **Re-create the sync schedule** around 2026-10-08, when it expires.
-- [ ] **Watch upstream #11885** (the 120,000-line consolidation): it
-      rewrites the calling-convention files we change.
+- [x] **Re-create the sync schedule**: no longer needed; the sync runs continuously (2026-10-13)
+- [x] **Watch upstream #11885** (the 120,000-line consolidation): merged into the reference 2026-10-03
 
 ## Decided 2026-10-02
 

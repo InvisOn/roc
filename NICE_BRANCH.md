@@ -7,35 +7,44 @@ The reference branch `32-bit-backend` adds 26,348 lines to upstream. That is
 too much to review. We build a new branch from upstream, commit by commit,
 with better code and less of it.
 
-## Handoff: where things stand (2026-10-02)
+## Handoff: where things stand (2026-10-18)
 
-For a new conversation.
+For a new conversation, on my second PC. **Order:** I do the learning holes
+first (`LEARNING_HOLES.md`) to learn the ropes and the workflow, then this
+branch.
 
-- **The clean branch** is `dev-backend-aarch32`, in the worktree
-  `~/repos/roc-dev-backend-aarch32`, created from upstream
-  `e79b7f856b` (the commit the reference is verified against). It has no
-  commits of ours yet. Work there.
-- **The notes** are symlinked into that worktree at their usual paths
-  (`projects/big/arm32-*.md`, `src/backend/dev/arm32/*.md`, `TODO.md`,
-  `LEARNING*.md`, this file, `COMPILER_CHARTS.md`). The real files live in
-  `~/repos/roc_32bit`. They show as untracked; **never commit them**
-  (no `git add -A` or `git add .`; add files by name).
-- **The reference** is `32-bit-backend` in `~/repos/roc_32bit`
-  (PR InvisOn/roc#1): working, verified, 26K lines. Claude keeps it merged
-  with upstream every night from a separate long-running conversation
-  (`.git/verify-tools/UPSTREAM_SYNC.md`). Do not sync it from here. Before
-  any heavy build, check `.git/verify-tools/upstream-sync/state.txt` in
-  `roc_32bit`: only one heavy job at a time.
+- **The clean branch** is `dev-backend-aarch32` on the fork InvisOn/roc. It
+  has no commits of ours yet; on 2026-10-18 it was fast-forwarded to
+  upstream `632d64e404` and pushed. **I keep it synced with upstream
+  myself** (before our first commit that is a fast-forward:
+  `git fetch upstream && git merge --ff-only upstream/main`).
+  On this PC: `git worktree add ../roc-dev-backend-aarch32 dev-backend-aarch32`.
+- **The notes** are on the orphan branch `notes` of the fork (check it out
+  as its own worktree, e.g. `../roc-notes`). The first PC symlinked them
+  into its worktrees; this PC does not need to. **Never commit them to a
+  code branch** (no `git add -A` or `git add .`; add files by name).
+- **The reference** is `claude/arm32-dev-backend-reference` (PR
+  InvisOn/roc#2; `32-bit-backend` and PR #1 until 2026-10-17): working,
+  verified, 26K lines. Claude keeps it merged with upstream from a separate
+  long-running conversation on the first PC. Do not sync it from here.
+- **One heavy job at a time per machine**, under a memory limit.
+- **Commits:** signed; no Co-Authored-By or Claude-Session line; no
+  upstream `#NNNN` or roc-lang links in messages or committed files.
 - **Decided:** I write commits, Claude proposes and reviews; match the
   maintainers' style; the facade is closed with option (b); `ci/` scripts
-  stay Python; we sync this branch with upstream together.
+  stay Python.
+- **Waiting for my answers** (delivered 2026-10-02, the sections at the end
+  of this file): the encoder proposal (E1 to E6), decision 2 (needs a short
+  trial of the oracle as a build step), the `Isa` recommendation.
 - **Not decided:** the 8-week target needs me to write only the first of
   each pattern and Claude the rest (Claude proposed it; I have not said
   yes). Until I do, the rule is that I write every commit.
-- **Claude owes:** see `CLAUDE_OWES.md`. Delivered 2026-10-02 (the two
-  sections at the end of this file): the breakdown of the driver's changed
-  lines, the `Isa` recommendation, and the encoder proposal (E1 to E6).
-  Waiting for my answers to them.
+- **Stale:** the measurements below (line counts, the driver breakdown)
+  were taken against upstream `e79b7f856b` (2026-10-02). Upstream changed
+  a lot since (its sort moved to Roc and `generateListSortWith` is gone;
+  RocStr/RocList offsets come from the builtins). Remeasure before
+  relying on them.
+- **Claude owes:** see `CLAUDE_OWES.md`.
 
 **This branch is what goes upstream, when it is done.** The reference
 branch does not (decided 2026-10-02).
@@ -50,8 +59,8 @@ branch does not (decided 2026-10-02).
 6. I commit.
 
 - The new branch gets its own worktree. The notes stay in `roc_32bit`.
-- We sync the new branch with upstream together, as part of the learning.
-  Claude keeps syncing the reference branch by itself every night.
+- I sync the new branch with upstream myself (decided 2026-10-18; it was
+  "together"). Claude keeps syncing the reference branch by itself.
 - Goal: better code quality. A smaller diff is welcome, never at the cost of
   quality.
 - **Weigh every decision's effect on upstream** (decided 2026-10-03): what
@@ -63,7 +72,8 @@ branch does not (decided 2026-10-02).
   Where upstream already has a way of doing something, the clean branch does
   it that way, even where the reference did it differently.
 - The `ci/` scripts we added stay in Python.
-- Heavy builds and tests by Claude only between 00:00 and 17:00.
+- One heavy build or test at a time per machine (the 00:00 to 17:00
+  window was dropped on 2026-10-13).
 
 ## Where the 26,348 added lines are
 
