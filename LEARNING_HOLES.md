@@ -7,26 +7,40 @@ The goal is unchanged: how the Roc compiler works, how to get a feel for a
 large codebase I did not write, and how to approach new codebases. The
 implementation matters less than that.
 
-## Handoff: where things stand (2026-10-01)
+## Handoff: where things stand (2026-10-18)
 
-For a new conversation.
+For a new conversation, on my second PC (two monitors). The order I chose:
+these holes first, to learn the ropes and the workflow; then the clean
+branch (`NICE_BRANCH.md`).
 
-- Repo `/home/aj/repos/roc_32bit`, branch `32-bit-backend`, pushed; PR
-  InvisOn/roc#1. This is the finished arm32 dev backend (about 26K lines,
-  written by Claude), the **reference**. Claude keeps it merged with
-  upstream by itself, in a separate long-running conversation
-  (`.git/verify-tools/UPSTREAM_SYNC.md`); do not do that work here.
-- Heavy compute (builds, tests, qemu) by Claude only between 00:00 and
-  17:00. In the evening the machine is mine.
-- **Built:** stage 1's holes, on branch `arm32-holes` in the worktree
-  `../roc-by-hand` (see "Progress"). Later stages' holes are built when I
-  reach them.
-- `TODO.md`, `LEARNING.md` and this file are personal and never committed.
-- Open decision (mine): hold the upstream PRs during this, or still send
-  PR 1's independent fixes (`TODO.md`).
+- **The reference** is `claude/arm32-dev-backend-reference` on the fork
+  InvisOn/roc (PR InvisOn/roc#2; it was `32-bit-backend` and PR #1 until
+  2026-10-17). It is the finished arm32 dev backend (about 26K lines,
+  written by Claude). Claude keeps it merged with upstream by itself, in a
+  separate long-running conversation on the first PC
+  (`.git/verify-tools/UPSTREAM_SYNC.md` there); do not do that work here.
+- **The holes branch** is `arm32-holes` on the fork, cut from the tag
+  `arm32-reference` (also on the fork). Stage 1's holes are built (see
+  "Progress"); later stages' holes are built when I reach them. It stays on
+  its commit and does not follow upstream.
+- **Getting it on this PC:**
+  ```sh
+  git clone git@github.com:InvisOn/roc.git roc && cd roc   # or fetch in an existing clone
+  git fetch origin --tags
+  git worktree add ../roc-by-hand arm32-holes
+  git worktree add ../roc-notes notes    # this file and the other notes
+  ```
+  The notes live on the orphan branch `notes`. The first PC pushes them
+  there; pull it before starting, and push my own changes to it (commit
+  them there only, never on a code branch: the fork is public, and notes
+  are never committed next to code).
+- Heavy jobs (a full build, the eval tests, qemu) one at a time per
+  machine, under a memory limit; the first PC's runs do not touch this one.
+- `TODO.md`, `LEARNING.md` and this file are personal and never committed
+  to a code branch.
 
 **First thing in a new conversation:** read this file, check "Progress",
-then start me on stage 0, or on stage 1 if its holes are ready.
+then start me on stage 0, or on stage 1 (its holes are ready).
 
 ## The idea
 
@@ -153,9 +167,8 @@ How to work a hole:
 
 ```sh
 cd ../roc-by-hand
-git show 381ecf805e --stat          # what was removed
-XDG_CACHE_HOME=/home/aj/repos/roc_32bit/.git/verify-tools/xdg-cache \
-  zig build run-test-zig-module-backend --summary all 2>&1 | grep -E "HOLE|pass,"
+git show arm32-holes --stat         # what was removed
+zig build run-test-zig-module-backend --summary all 2>&1 | grep -E "HOLE|pass,"
 ```
 
 - With every hole open: 710 tests pass, 199 crash, each crash naming its
@@ -181,10 +194,11 @@ cannot lie").
 
 ## Setup (done 2026-10-02)
 
-- Tag `arm32-reference` is on the verified reference tip `22af835e08`.
+- Tag `arm32-reference` is on the verified reference tip `83be07cd49`
+  (`22af835e08` before the 2026-10-17 history rewrite; same files).
 - Branch `arm32-holes` starts at that tag, in the worktree `../roc-by-hand`.
-  It stays on that commit; it does not need to follow upstream. Neither the
-  tag nor the branch is pushed.
+  It stays on that commit; it does not need to follow upstream. Both are
+  pushed to the fork (2026-10-18).
 - One commit per stage that makes the holes, so
   `git show <that commit>` lists exactly what I have to write.
 
@@ -195,6 +209,9 @@ cannot lie").
   thirteen stubs in `arm32/Emit.zig`. Checked: the branch compiles, and the
   backend tests report 710 passed, 199 crashed, every crash naming a hole,
   all thirteen holes hit. Not started by me yet.
+- 2026-10-18: the stage 1 commit is `dd330ea86a` (it was `381ecf805e`;
+  recreated on the rewritten reference without the Claude trailers, same
+  files). Branch and tag pushed to the fork; I start on the second PC.
 
 ## Where the reference explains itself
 
