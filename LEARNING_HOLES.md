@@ -171,9 +171,10 @@ git show arm32-holes --stat         # what was removed
 zig build run-test-zig-module-backend --summary all 2>&1 | grep -E "HOLE|pass,"
 ```
 
-- With every hole open: 710 tests pass, 199 crash, each crash naming its
-  hole (`panic: HOLE 1.2 dataProc: ...`). Fill a hole and its crashes go.
-  Done when it reads 909 pass, 2 skip.
+- With every hole open: 669 tests pass, 2 skip, 198 crash, each crash
+  naming its hole (`panic: HOLE 1.2 dataProc: ...`). Fill a hole and its
+  crashes go. Done when it reads 867 pass, 2 skip. (Counts from
+  2026-10-18; on 2026-10-02 they were 710/199 of 911.)
 - Each stub discards its unused parameters (`_ = rd;`). Delete a discard
   when I start using that parameter, or Zig reports a pointless discard.
 - The bit-layout comments above the holes were removed; the ARMv7-A manual
@@ -194,8 +195,9 @@ cannot lie").
 
 ## Setup (done 2026-10-02)
 
-- Tag `arm32-reference` is on the verified reference tip `83be07cd49`
-  (`22af835e08` before the 2026-10-17 history rewrite; same files).
+- Tag `arm32-reference` is on the verified reference tip `ee5664f6a5`
+  (upstream `220b9b7941`, 2026-10-18). Until then it was `83be07cd49`
+  (`22af835e08` before the 2026-10-17 history rewrite).
 - Branch `arm32-holes` starts at that tag, in the worktree `../roc-by-hand`.
   It stays on that commit; it does not need to follow upstream. Both are
   pushed to the fork (2026-10-18).
@@ -212,6 +214,11 @@ cannot lie").
 - 2026-10-18: the stage 1 commit is `dd330ea86a` (it was `381ecf805e`;
   recreated on the rewritten reference without the Claude trailers, same
   files). Branch and tag pushed to the fork; I start on the second PC.
+- 2026-10-18: rebuilt on the current reference `ee5664f6a5` before I
+  started: stage 1 commit `9e314c109a`. The same thirteen holes; three stubs
+  sat where Zig renamed `@intFromEnum` to `@backingInt`. Checked: compiles;
+  669 passed, 2 skipped, 198 crashed, every crash naming a hole, all
+  thirteen hit.
 
 ## Where the reference explains itself
 
