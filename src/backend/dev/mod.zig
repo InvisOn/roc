@@ -9,9 +9,6 @@
 //! - arm32: Linux, musl and glibc (AAPCS32 hard-float, ARMv7-A with NEON;
 //!   see `arm32/DESIGN.md`)
 
-/// Exact procedure-local stack lifetime and slot planning.
-pub const StackPlan = @import("StackPlan.zig");
-
 const std = @import("std");
 const builtin = @import("builtin");
 
