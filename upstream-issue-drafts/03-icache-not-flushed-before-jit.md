@@ -23,9 +23,11 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 `ExecutableMemory` writes machine code, then makes the pages executable with `mprotect`, and runs them. It never flushes the instruction cache. On aarch64 that relies on the kernel's cache maintenance at `mprotect`; the architecture requires an explicit flush after writing code. On ARMv7 it is required for correctness.
 
-**Where**
+**Where** (upstream `main` at `5fc587cf51`)
 
-`src/backend/dev/ExecutableMemory.zig`, `protectExecutable` / `finishWrite`.
+- `src/backend/dev/ExecutableMemory.zig:404-408`, `protectExecutable`: `mprotect` to read+execute, no instruction-cache flush.
+- Called from `ExecutableMemory.zig:251` (`initWithEntryOffsetAndUnwindInfo`, line 217) and `:281` (`finishWrite`, line 280).
+- A flush already exists upstream: `src/machine_code_shim/instruction_cache.zig:11`, `flush`.
 
 **Why it matters**
 

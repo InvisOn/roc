@@ -27,6 +27,11 @@ The compiler's own build hash is part of every checked-artifact key, and procedu
 
 Is the compiler hash meant to reach symbol names, or only cache keys? If only cache keys, symbol names could be derived without it.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/check/checked_artifact.zig:144`: `build_options.compiler_artifact_hash` is taken into every checked-artifact key; hashed at `:178` in `computeCheckedArtifactKeyBytes` (line 168).
+- `src/lir/LIR.zig:67, 94-96`: procedure symbols are named `roc__p` plus a digest (`ProcIdentity.writeSymbolName`), which changes with that key.
+
 **Why it matters**
 
 Only our test oracle ran into it, because upstream has no test that pins the machine code of a real program. It matters because it makes such a test impossible: it would fail on the next compiler commit. A byte-pinning test is the cheapest way to prove that a backend refactor changed nothing, which is what a change as large as a new architecture needs. It also means builds are not reproducible across compiler commits.

@@ -23,6 +23,11 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 On the `macos-15-intel` runner, glue tests fail because the RustGlue plugins do not load, and `--opt=speed` builds report `LlvmBackendUnavailable`. Seen in our CI run 36615593810 and in upstream's nightly at the time (2026-09-29).
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `.github/workflows/ci_zig.yml:180` and `:262`: the `macos-15-intel` entries of the `zig-tests` matrix.
+- Latest: upstream Nightly Gate run 39320401466 (2026-10-19), `zig-tests (macos-15-intel)` cancelled after 6 hours.
+
 **Why it matters**
 
 The Intel macOS job cannot go green, so it cannot signal a real regression on that platform.

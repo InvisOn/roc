@@ -27,6 +27,11 @@ On the 64-bit targets the discriminant is loaded as eight bytes and masked only 
 
 Is the padding after a discriminant guaranteed to be zero? If yes, this is fine and a comment would help. If no, the load needs a mask.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/backend/dev/LirCodeGen.zig:11351-11424`, `loadAndMaskDiscriminant`: loads with `.w64` unless `disc_use_w32` (lines 11366-11389), and masks only when the discriminant is narrower than 4 bytes (11410-11421).
+- `LirCodeGen.zig:12795`: `disc_use_w32` is set only when an 8-byte load would run past the end of the value.
+
 **Why it matters**
 
 If the padding can hold non-zero bytes, a `match` on such a tag union could take the wrong branch, silently.

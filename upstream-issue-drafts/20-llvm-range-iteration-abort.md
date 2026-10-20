@@ -37,6 +37,12 @@ FAIL  inspect: inclusive numeric ranges all iterate
   `aarch64-linux-musl` at `00cab95af8`: the inclusive case aborts; the
   exclusive case passes.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- The case: `src/eval/test/eval_tests.zig:6942` ("inspect: inclusive numeric ranges all iterate"); its neighbour at `:6962` ("exclusive").
+- Abort site seen 2026-10-01 (Debug, aarch64): `src/llvm_compile/compile.zig:483` in `emitMergedBitcodeModulesToObjectFile`; on `5fc587cf51` that line is inside the bitcode-module linking loop (480-485).
+- Upstream's Nightly Gate 2026-10-19 (`eval-llvm (macos-15)`) no longer lists either case among its 17 failures.
+
 **Why it matters**
 
 The compiler aborts instead of producing a program. Anyone using the LLVM backend on aarch64 with code like this would hit it, and the CI job that should catch it (`eval-llvm` on macOS) is failing because of it.

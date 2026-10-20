@@ -23,6 +23,12 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 When applying a relocation, `Relocation.zig` decides between x86_64 and aarch64 by looking at the byte before the operand: `0xE8` means an x86_64 call. If that byte is not `0xE8`, it reads the four bytes as an aarch64 instruction and checks for a `bl`. That is a heuristic: the function is never told the target, and it is correct only as long as no other instruction set puts `0xE8` in that position. On 32-bit ARM it does: `pop {...}` encodes as `0xE8BD....`, so a `pop` followed by a call would be patched as an x86_64 call. AGENTS.md forbids heuristics outside parsing and error reporting.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/backend/dev/Relocation.zig:194-199`, in `patchLinkedFunctionRelocation` (line 191): `prev == 0xE8` picks the x86_64 path.
+- `src/backend/dev/Relocation.zig:202-207`: otherwise the four bytes are tested as an aarch64 `bl` (`(inst >> 26) == 0b100101`).
+- `src/backend/dev/Relocation.zig:257-267`, in `patchJumpToReturnRelocation` (line 233): the instruction set is chosen by the site's byte length (4 means aarch64, 5 means an x86_64 `0xE9`/`0xE8`).
+
 **Why it matters**
 
 For x86_64 and aarch64 the guess happens to work today. It stops working with any further instruction set: a wrong guess patches the call with another architecture's encoding and the generated code is silently corrupt. The caller already knows the target, so the guess is unnecessary, and AGENTS.md forbids heuristics in this stage.

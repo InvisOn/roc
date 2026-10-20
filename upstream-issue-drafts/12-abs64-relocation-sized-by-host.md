@@ -23,6 +23,10 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 `patchAbsolutePointerOperand` writes 8 bytes when the compiler runs on a 64-bit host and 4 bytes on a 32-bit host. The width should come from the relocation kind (the target), not from the machine the compiler runs on. Latent today: it only matters for a compiler running on a 32-bit host.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/backend/dev/Relocation.zig:329-345`, `patchAbsolutePointerOperand`: writes 8 bytes if `@sizeOf(usize) == 8` (line 330), 4 bytes if `@sizeOf(usize) == 4` (line 336).
+
 **Why it matters**
 
 Today only a compiler running on a 32-bit host is affected, which means only arm32 work. There, an 8-byte absolute relocation would be patched with 4 bytes and half the address left unwritten, with nothing checking for it. It is the same habit as sizing target data by the host's word.

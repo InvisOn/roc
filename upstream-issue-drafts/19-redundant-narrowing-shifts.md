@@ -23,6 +23,10 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 Before storing a byte, the driver emits a shift pair to narrow the value, and then stores only the low byte anyway. The shifts are dead work. No wrong behaviour.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/backend/dev/LirCodeGen.zig:16783-16800`, `.u8` and `.i8` cases of `storeResultToSavedPtr` (line 16769): `shl` 56 then `shr`/`sar` 56 on `.w64` (16788-16789, 16797-16798), then `emitStoreScalarToPtr(..., 1)` stores one byte (16790, 16799).
+
 **How to reproduce**
 
 By reading the code:
