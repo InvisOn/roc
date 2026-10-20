@@ -2,7 +2,7 @@
 
 Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
-**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179) and 32 (#12207). Upstream fixed 21, 22 and 28 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
+**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179), 32 (#12207) and 10 (#12480). Upstream fixed 21, 22 and 28 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
 
 **Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
@@ -11,7 +11,6 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 | `02-snapshot-tool-errors-as-not-implemented.md` | no | yes: `src/snapshot_tool/main.zig:4011`, `else \|_\|` still sets `supported = false` | none. #12199 (our 09) is a different snapshot-tool bug | yes, `d910f7aa39`: `processDevObjectSnapshot` already skips unsupported targets before compiling, so any compile error left is real; it now logs the error and fails the snapshot instead of recording `NOT_IMPLEMENTED` |
 | `03-icache-not-flushed-before-jit.md` | no | yes: `ExecutableMemory.zig:404-408` calls `mprotect`, no flush | none for `ExecutableMemory`. #11193 and #11452 (merged) gave only the machine-code shim its flush | yes, `49bf1449b9`: the shim's flush moved from `src/machine_code_shim/instruction_cache.zig` to `src/backend/dev/instruction_cache.zig` so both share it, and `protectExecutable` calls it before `mprotect` (`ExecutableMemory.zig:409`), which flushes with the `cacheflush` syscall on 32-bit ARM; every error set listing `ExecutableMemory`'s errors gains `FlushInstructionCacheFailed` |
 | `07-32-bit-host-readiness.md` | no | yes: `LirCodeGen.zig:8223, 8236, 14093, 14100, 14562, 14587`; `eval/mod.zig:18`; `compile_time_host.zig:39` stamp (could be added) | none. #9436 (closed) was the same habit in the LIR interpreter | yes: `f4af9e372d` uses the target's `word_size` for the Debug string alignment check, the erased-call descriptor array and the drop-pointer offset; `d69fb5eb7f` derives erased-callable payload offsets from the builtins structs scaled by the target word (`erased_layout`), with a compile-time check that every field is pointer-sized; `1344ce3159` makes `backendAvailable(.wasm)` false on 32-bit hosts |
-| `10-lir-image-drops-recursive-graph-keys.md` | no | yes: `lir_image.zig:388, 734` create the map empty; `layout/digest.zig:108` `base.invariant` | none | no; we avoid the path (`lir_image.zig:388, 734`) |
 | `11-proc-symbol-names-change-every-build.md` | no | yes: `checked_artifact.zig:144-178` still hashes `compiler_artifact_hash`; design question | none. #11430 (closed) was a different reproducibility bug (the builtin bake); open PR #12463 changes the key's shape but keeps the compiler hash in it | no; our oracle renames symbols before comparing |
 | `12-abs64-relocation-sized-by-host.md` | no | yes: `Relocation.zig:329-337` branches on `@sizeOf(usize)` | none | no (`Relocation.zig:403-404`); matters to us only for a compiler running on arm32 |
 | `13-string-result-stored-from-one-register.md` | no | yes: `LirCodeGen.zig:16911` "Fallback for non-stack string location"; we found no way to reach it, so it may be dead | none | no (`LirCodeGen.zig:19603`) |
@@ -31,6 +30,7 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 | 06: No prerequisite list mentions MiniCI's `run-test-repl-wasm` needs Node.js (removed) | yes, #12202 (closed) | — | — | — |
 | 08: wasm miscompile `List.sublist` narrows a `U64` start index to 32 bits (removed) | yes, #12198 (closed) | — | — | — |
 | 09: The snapshot tool hashes `dev_object` programs that failed to type-check (removed) | yes, #12199 (closed) | — | — | — |
+| 10: A loaded LIR image has no recursive-graph keys in its layout store (removed) | yes, #12480 (open) | — | — | — |
 | 17: `run-check-git-lints` pads a file name with NUL bytes (removed) | yes, #12201 (closed) | — | — | — |
 | 29: LSP integration test depends on the contents of `/tmp` (removed) | yes, #12176 (closed) | — | — | — |
 | 30: Segfault in `fuzz-build` (removed) | yes, #12197 (closed) | — | — | — |
