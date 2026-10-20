@@ -23,9 +23,10 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 When a LIR image is loaded, the layout store's `interned_recursive_graphs` map is created empty. Any consumer that passes such an image to the object-file path panics on the first recursive type, because the layout digest needs the key.
 
-**Where**
+**Where** (upstream `main` at `5fc587cf51`)
 
-`src/lir/lir_image.zig` (the map initialised with `RecursiveGraphMap.init`), `src/layout/digest.zig` (the panic).
+- `src/lir/lir_image.zig:388` and `:734`: `interned_recursive_graphs` is created empty (`RecursiveGraphMap.init`) when an image is loaded or cloned.
+- `src/layout/digest.zig:108`, in `Digests.get` (line 85): `base.invariant("layout digest: cyclic layout {d} has no recursive-graph key", ...)`; unreachable in release builds.
 
 **Why it matters**
 

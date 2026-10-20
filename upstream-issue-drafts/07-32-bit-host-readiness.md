@@ -30,6 +30,14 @@ Host and target word sizes agree for every combination upstream supports, so the
 
 Separately, `eval.backendAvailable(.wasm)` returns `true` on every host. The wasm eval backend reserves a module's full linear memory (4 GiB for wasm32), which a 32-bit process cannot do, so on a 32-bit host the wasm eval tests fail instead of being reported as unavailable.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- Debug string check: `src/backend/dev/LirCodeGen.zig:8223, 8236` (`@alignOf(usize) - 1`), in `emitDebugAssertValidStrLocal` (line 8154).
+- Erased-call descriptor array: `LirCodeGen.zig:14093, 14100` (`@sizeOf(usize)`), in `generateErasedCall` (line 14064).
+- Erased-callable drop pointer: `LirCodeGen.zig:14562, 14587` (offset `@sizeOf(usize)`, stored with `.w64`), in `generatePackedErasedFn` (line 14358).
+- Erased-callable payload layout: `LirCodeGen.zig:14393, 14411, 14421, 14429, 14571, 14581, 14607, 14622` (`@sizeOf`/`@offsetOf` of `builtins.erased_callable` structs, compiled for the host).
+- wasm eval availability: `src/eval/mod.zig:18` (`.interpreter, .wasm => true`), in `backendAvailable` (line 15).
+
 **Why it matters**
 
 Nothing breaks upstream today. It matters as a habit worth removing: sizes of target data taken from the host are right only by coincidence, and they become silent miscompiles the moment a target with a different word size is added to the dev backend. The fixes change no 64-bit output.

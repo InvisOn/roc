@@ -21,6 +21,12 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 Kept for the record. At upstream `58508d582b`, `zig build run-test-zig -Doptimize=ReleaseFast -Dfuzz` failed tests that pass in Debug: "no-op workers do not append duplicate source bodies", two staged SpecConstr tests, two interface-summary tests, range proving, an inline test, and three fx stack-overflow tests on macOS only.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/lir/proc_passes_test.zig:653`, test "LIR proc pass no-op workers do not append duplicate source bodies".
+- `src/postcheck/monotype_lifted/spec_constr.zig:17063`, test "staged SpecConstr discovery admits source order with duplicates and bounded reverse waves".
+- `src/postcheck/monotype_lifted/spec_constr.zig:17297`, test "staged SpecConstr submission failure drains accepted tasks".
+
 **How to reproduce**
 
 At upstream `58508d582b` (about an hour, up to 24 GB of memory):

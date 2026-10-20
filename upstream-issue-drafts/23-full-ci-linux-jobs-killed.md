@@ -27,6 +27,11 @@ In a full run, the `zig-cross-compile` jobs, the Linux `zig-tests`, valgrind and
 
 The hosted runner runs out of memory linking the LLVM-enabled compiler. Not confirmed.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `.github/workflows/ci_zig.yml:524`, step `cross compile with llvm`: the step during which jobs end with exit 143.
+- Latest: upstream Nightly Gate run 39320401466 (2026-10-19), `zig-cross-compile (arm-linux-musleabihf)`, "Process completed with exit code 143", "The runner has received a shutdown signal".
+
 **Why it matters**
 
 Every step after `cross compile with llvm` in those jobs never runs on GitHub: cross-compilation for several targets, valgrind and a Linux test pass. A regression in any of them goes unnoticed until someone runs the step locally.

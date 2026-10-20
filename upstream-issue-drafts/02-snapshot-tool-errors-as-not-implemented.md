@@ -23,9 +23,10 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 For `type=dev_object` snapshots, any error from compiling the object file is turned into the `NOT_IMPLEMENTED` hash. A real code-generation failure for a supported target therefore looks like an unsupported target, and the snapshot passes.
 
-**Where**
+**Where** (upstream `main` at `5fc587cf51`)
 
-`src/snapshot_tool/main.zig`, the per-target loop that hashes `result.object_bytes`: the `else |_|` branch sets `supported = false` for every error.
+- `src/snapshot_tool/main.zig:4009-4012`, in `processDevObjectSnapshot` (line 3870): the `else |_|` branch of the object-compile call sets `hash_results[i].supported = false` for every error.
+- `src/snapshot_tool/main.zig:4073`: an unsupported target is written as `NOT_IMPLEMENTED`.
 
 **Why it matters**
 

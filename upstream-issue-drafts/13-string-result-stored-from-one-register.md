@@ -23,6 +23,10 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 In `storeResultToSavedPtr`, the `.str` case handles a value that is not on the stack by loading it into one general register and storing that one word. A string is three words; length and capacity are left unwritten. The branch is either dead or corrupts the result. Its comment calls it a fallback, which AGENTS.md forbids in this stage.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/backend/dev/LirCodeGen.zig:16899-16914`, the `.str` case of `storeResultToSavedPtr` (line 16769): for `.general_reg`, `.float_reg`, `.vector_reg`, `.stack_i128`, `.list_stack` and the immediates, it loads one register (16912) and stores one word (16913).
+
 **Why it matters**
 
 A Roc string is three words. If this branch is ever taken, the result has an unwritten length and capacity, which means reading or freeing memory at random. If it can never be taken, it is dead code that hides an invariant the backend should assert.

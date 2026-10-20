@@ -23,6 +23,11 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 The generated glibc stub writes `ret` as the body of every stub function for `.aarch64_be`, `.arm`, `.wasm32` and `.other`. `ret` is not an A32 instruction (it would be `bx lr`) and means nothing for wasm32. Unreached today because those targets do not use the stub, but it would assemble wrongly or not at all if they did.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `src/build/glibc_stub.zig:24`, `:93` and `:100`, in `generateComprehensiveStub` (line 7): `.aarch64_be, .arm, .wasm32, .other => "    ret\n\n"`.
+- `src/build/glibc_stub.zig:14`: the same group is given a 4-byte size.
+
 **Why it matters**
 
 Nobody upstream is affected: those architectures do not use the stub. It mattered for arm32, which does, and it would produce a wrong or unassemblable stub for any of the others the moment they used it.

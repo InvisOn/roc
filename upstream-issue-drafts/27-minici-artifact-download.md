@@ -23,6 +23,10 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 Occasionally one minici shard fails at the artifact download step and runs no tests; the `finish` job then fails the whole run. Rerunning the failed jobs passes.
 
+**Where** (upstream `main` at `5fc587cf51`)
+
+- `.github/workflows/ci_manager.yml:488`, step `Download MiniCI build artifact`.
+
 **How to reproduce**
 
 It cannot be triggered on demand. Two runs where it happened:
