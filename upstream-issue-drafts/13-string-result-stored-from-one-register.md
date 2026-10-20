@@ -11,7 +11,7 @@ Not filed. For roc-lang/roc.
 | Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
 | Already upstream? | No issue or PR found (searched 2026-10-20). |
 | Fixed on our reference branch? | No. |
-| Before filing | Nothing. Whether the branch can be reached is the open question. |
+| Before filing | Nothing. We found no way to reach the branch, so it may be dead. File it as "this fallback should be an assertion". |
 
 ---
 
@@ -38,6 +38,8 @@ We don't know of a program that reaches the branch. Reading the code shows it:
 ```sh
 grep -n -B8 -A4 'Fallback for non-stack string location' src/backend/dev/LirCodeGen.zig
 ```
+
+We did not find a way to write a test that reaches the branch. `storeResultToSavedPtr` is called from four places (`LirCodeGen.zig:1627`, `22136`, `22701` and `22848`). The dev backend keeps strings on the stack (`.stack_str`), and we found no code that puts a string result anywhere else. This was a short search, not a proof. If the branch is dead, it should be an assertion instead of a fallback.
 
 **Environment**
 
