@@ -1,6 +1,6 @@
 # The clean arm32 branch: first cut
 
-Personal note; not committed. Written 2026-10-02. This is a first cut from
+Written 2026-10-02. This is a first cut from
 what was already known; each item gets checked properly when we reach it.
 
 The reference branch `32-bit-backend` adds 26,348 lines to upstream. That is

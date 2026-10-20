@@ -4,7 +4,7 @@
 
 > **Relevance to our arm32 work:** It fails `eval-llvm (macos-15)` in our CI. arm32 does not use the LLVM backend, so it is unrelated to our code.
 
-Personal note; not committed. For roc-lang/roc. Before filing, Claude
+For roc-lang/roc. Before filing, Claude
 rechecks it on a clean checkout of current upstream `main` (see "To verify
 first").
 

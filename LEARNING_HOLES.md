@@ -1,6 +1,6 @@
 # Learning the arm32 dev backend: the reference with holes
 
-Personal plan; not committed. A faster route to the same learning as
+A faster route to the same learning as
 `LEARNING.md` (the full rebuild by hand, kept as it was). Chosen 2026-10-01.
 
 The goal is unchanged: how the Roc compiler works, how to get a feel for a
@@ -36,8 +36,8 @@ branch (`NICE_BRANCH.md`).
   are never committed next to code).
 - Heavy jobs (a full build, the eval tests, qemu) one at a time per
   machine, under a memory limit; the first PC's runs do not touch this one.
-- `TODO.md`, `LEARNING.md` and this file are personal and never committed
-  to a code branch.
+- `TODO.md`, `LEARNING.md` and this file live on the `notes` branch, never
+  on a code branch.
 
 **First thing in a new conversation:** read this file, check "Progress",
 then start me on stage 0, or on stage 1 (its holes are ready).

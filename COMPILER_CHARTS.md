@@ -1,6 +1,6 @@
 # Compiler charts
 
-Personal note; not committed. The Roc compiler's pipeline today, and with
+The Roc compiler's pipeline today, and with
 the arm32 dev backend added. Written 2026-10-02 from `design.md`, the source
 layout and `src/backend/dev/arm32/DESIGN.md`.
 

@@ -1,6 +1,6 @@
 # Roc apps that can be tested on arm32
 
-Personal note; not committed. As of 2026-10-20 (reference `9f8e26252e`).
+As of 2026-10-20 (reference `9f8e26252e`).
 
 Two test platforms build for arm32: `test/int` and `test/fx`. Every app on them is
 cross-built with the dev backend from x86_64 and run under qemu, on the Pi 5 and on

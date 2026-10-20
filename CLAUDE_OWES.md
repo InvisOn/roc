@@ -1,6 +1,6 @@
 # What Claude owes me
 
-Personal note; not committed. Written 2026-10-02. Claude updates this when
+Written 2026-10-02. Claude updates this when
 something is delivered or newly promised.
 
 ## For the clean branch (`dev-backend-aarch32`)
@@ -191,7 +191,7 @@ Assumptions, confirmed by me on 2026-10-03:
 - [ ] **Upstream sync of the reference** (`claude/arm32-dev-backend-reference`,
       `32-bit-backend` until 2026-10-17): continuous since 2026-10-13; state in
       `.git/verify-tools/upstream-sync/state.txt` on the first PC.
-- [x] **Push the local notes commits** (the facade decision, the basic-cli panic): pushed 2026-10-03
+- [x] **Push the notes commits** (the facade decision, the basic-cli panic): pushed 2026-10-03
 - [x] **Re-create the sync schedule**: no longer needed; the sync runs continuously (2026-10-13)
 - [x] **Watch upstream #11885** (the 120,000-line consolidation): merged into the reference 2026-10-03
 
