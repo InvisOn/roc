@@ -1,6 +1,6 @@
 # Roc packages on GitHub with tests, for arm32
 
-Personal note; not committed. Surveyed 2026-10-20. Clones (shallow, read only)
+Surveyed 2026-10-20. Clones (shallow, read only)
 in the session scratchpad `pkgs/`; baseline results there in `pkg-baseline.txt`.
 
 ## How a package's tests can run on arm32

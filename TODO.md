@@ -1,6 +1,6 @@
 # TODO (arm32 dev backend)
 
-Personal list; not committed (listed in `.git/info/exclude`). Details live in
+Details live in
 `projects/big/arm32-dev-backend-*.md`; this is only the overview.
 
 Last updated 2026-10-01. Branch `32-bit-backend` is merged with upstream

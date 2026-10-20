@@ -1,6 +1,6 @@
 # Rebuilding the arm32 dev backend by hand
 
-Personal plan; not committed. The goal is learning: how the Roc compiler
+The goal is learning: how the Roc compiler
 works, and how to find my way in a large codebase I did not write. The
 finished branch `32-bit-backend` is the reference, not the thing to copy.
 
@@ -21,7 +21,7 @@ For a new conversation. Everything below this section is the plan itself.
   full CI run is traced to upstream, a runner, or macOS (verification note).
 - PR minici run 36824390785 on `cd28ff621a` was still running when this was
   written (12 jobs passed, 2 to go, none failed). Check it once.
-- `TODO.md` and `LEARNING.md` (repo root) are personal and never committed.
+- `TODO.md` and `LEARNING.md` live on the `notes` branch, never on a code branch.
 
 **Not done yet**
 

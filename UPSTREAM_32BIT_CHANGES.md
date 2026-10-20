@@ -1,6 +1,6 @@
 # Roc on 32-bit: upstream changes needed
 
-Personal note; not committed. As of 2026-10-20, upstream `main` at `cf05860a7c`.
+As of 2026-10-20, upstream `main` at `cf05860a7c`.
 
 Upstream Roc's dev backend assumes an 8-byte machine word, and in several
 places it takes the size of the target's data from the machine the compiler
