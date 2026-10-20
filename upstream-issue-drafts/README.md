@@ -2,7 +2,7 @@
 
 Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
-**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179), 32 (#12207), 10 (#12480) and 13 (#12481). Upstream fixed 21, 22 and 28 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
+**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179), 32 (#12207), 10 (#12480), 13 (#12481) and 19 (#12483). Upstream fixed 21, 22 and 28 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
 
 **Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
@@ -16,7 +16,6 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 | `14-list-get-unsafe-truncates-i128-index.md` | no | yes: `LirCodeGen.zig:2229` "just load the low 64 bits" | none | no (`LirCodeGen.zig:2279`, now "the low word") |
 | `15-u64-discriminant-load.md` | no | probably not: the 8-byte load happens only for a `U64` target, and upstream always reads discriminants into `U32` locals; the refcount helper masks | none | no (`LirCodeGen.zig:13898`); unconfirmed |
 | `16-glibc-stub-ret-for-other-arches.md` | no | yes: `glibc_stub.zig:24, 93, 100` write `ret` for `.aarch64_be, .arm, .wasm32, .other` | none | yes, `627b4b7248`: `.arm` gets its own stub body, `mov r0, #0` / `bx lr` (`glibc_stub.zig:24, 103`); `.aarch64_be, .wasm32, .other` still write `ret` |
-| `19-redundant-narrowing-shifts.md` | no | yes (reread): `storeResultToSavedPtr` (`LirCodeGen.zig:16769`) `.u8`/`.i8` shift by 56 twice, then store 1 byte; minor | none | no (`LirCodeGen.zig:19472-19473`, now shifts by `word_bits - 8`) |
 | `20-llvm-range-iteration-abort.md` | no | **probably fixed**: upstream's Nightly Gate 2026-10-19, `eval-llvm (macos-15)`: 17 failures, all `LlvmBackendUnavailable` (wide UTF decoding, a Fluxsort case), none of the range cases. Not rerun on the Pi 5 | none | not ours (upstream CI) |
 | `23-full-ci-linux-jobs-killed.md` | no | yes, on upstream's own Nightly Gate (fails every night 2026-10-16..19; 2026-10-19 `zig-cross-compile (arm-linux-musleabihf)` exit 143, runner shutdown); visible to upstream, low value to file | none filed; upstream's own Nightly Gate shows it every night | not ours (upstream CI) |
 | `24-releasefast-test-failures.md` | no | **probably fixed**; not rerun | none | not ours (upstream tests) |
@@ -32,6 +31,7 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 | 10: A loaded LIR image has no recursive-graph keys in its layout store (removed) | yes, #12480 (open) | — | — | — |
 | 13: Fallback in dev backend (a string result stored from one register) (removed) | yes, #12481 (open) | — | — | — |
 | 17: `run-check-git-lints` pads a file name with NUL bytes (removed) | yes, #12201 (closed) | — | — | — |
+| 19: Dev backend: extra shifts before storing a single byte (removed) | yes, #12483 (open) | — | — | — |
 | 29: LSP integration test depends on the contents of `/tmp` (removed) | yes, #12176 (closed) | — | — | — |
 | 30: Segfault in `fuzz-build` (removed) | yes, #12197 (closed) | — | — | — |
 | 31: A syntax error in an app file makes `roc check` check a nearby `main.roc` instead (removed) | yes, #12179 (closed) | — | — | — |
