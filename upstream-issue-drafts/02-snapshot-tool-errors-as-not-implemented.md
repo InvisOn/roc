@@ -1,19 +1,17 @@
 # Draft: The snapshot tool records every dev-backend compile error as `NOT_IMPLEMENTED`
 
-> **Upstream or ours:** Upstream. The defect is in upstream's code and does not depend on our arm32 work.
+> **Upstream or ours:** Upstream. The bug is in upstream's code and has nothing to do with our arm32 work.
 
-> **Relevance to our arm32 work:** While arm32 code generation was incomplete, real arm32 compile failures were recorded as `NOT_IMPLEMENTED` and looked like "not supported yet". The reference fixes it.
+> **Relevance to our arm32 work:** While arm32 code generation was unfinished, real arm32 compile errors were recorded as `NOT_IMPLEMENTED`. They looked like "not supported yet" instead of failures. Our reference branch fixes this.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes, by code reading: in `src/snapshot_tool/main.zig` the object-compile call still ends in `else |_| { ... supported = false }`. |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | `d910f7aa39`. |
-| Before filing | Nothing; code reading is enough. |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
+| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Fixed on our reference branch? | Yes, in `d910f7aa39`. |
+| Before filing | Nothing. Reading the code is enough. |
 
 ---
 
@@ -21,26 +19,30 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 **What happens**
 
-For `type=dev_object` snapshots, any error from compiling the object file is turned into the `NOT_IMPLEMENTED` hash. A real code-generation failure for a supported target therefore looks like an unsupported target, and the snapshot passes.
+A `type=dev_object` snapshot compiles a program to an object file for each target and stores a hash of the result. If compiling fails for any reason, the snapshot tool stores `NOT_IMPLEMENTED` instead of failing. That is the same value it stores for targets the dev backend does not support.
+
+So when a supported target fails to compile, the snapshot looks like the target is simply not supported, and the snapshot passes.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `src/snapshot_tool/main.zig:4009-4012`, in `processDevObjectSnapshot` (line 3870): the `else |_|` branch of the object-compile call sets `hash_results[i].supported = false` for every error.
-- `src/snapshot_tool/main.zig:4073`: an unsupported target is written as `NOT_IMPLEMENTED`.
+- `src/snapshot_tool/main.zig:4009-4012`, in `processDevObjectSnapshot` (line 3870). The `else |_|` branch catches every compile error and sets `hash_results[i].supported = false`.
+- `src/snapshot_tool/main.zig:4073` writes `NOT_IMPLEMENTED` for every result marked unsupported.
 
 **Why it matters**
 
-`dev_object` snapshots exist to catch changes in generated code. With this behaviour, a regression that makes a supported target fail to compile shows up as its hash turning into `NOT_IMPLEMENTED`, which reads as "this target is not supported", and `--update-expected` accepts it. The test cannot catch the failure it is there for.
+`dev_object` snapshots exist to catch changes in generated code. Suppose a change makes a supported target fail to compile. Its hash turns into `NOT_IMPLEMENTED`, which reads as "this target is not supported". `--update-expected` then accepts it. The test cannot catch the very failure it is there for.
+
+The function already skips unsupported targets before it compiles anything, so any error that reaches this branch is a real failure.
 
 **How to reproduce**
 
-No program is known that makes a supported target fail to compile today, so this is seen by reading the code:
+We don't know of a program that makes a supported target fail to compile today, so this comes from reading the code:
 
 ```sh
 grep -n 'else |_|' src/snapshot_tool/main.zig
 ```
 
-The match in the per-target loop that hashes `result.object_bytes` sets `supported = false` for every error; further down, an unsupported target is written as `NOT_IMPLEMENTED`.
+The match at line 4009 is in the loop that hashes `result.object_bytes`. It marks every error as unsupported, and line 4073 writes those as `NOT_IMPLEMENTED`.
 
 **Environment**
 
