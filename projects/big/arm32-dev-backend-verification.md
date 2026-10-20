@@ -1004,6 +1004,23 @@ Done 2026-09-29, locally (nothing pushed).
   on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
   x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/1df370f066/`.
+- 2026-10-20, merge `429e5bec83` of upstream `main` at `574a683ec5` (26
+  merged pull requests), then `3d0078e779`, one `dev_object` snapshot
+  regenerated for upstream's output change. One conflict, in
+  `src/lir/LIR.zig`: both sides added a test at the same place; kept both.
+  No fix to compiler code. Checks: relative 64-bit oracle PASS, nothing
+  differs; minici 96/96; host effects 106/106; `test/fx` 133/133 under
+  qemu, on the Raspberry Pi 5 and on the Pi 3; the int app as arm32musl and
+  arm32linux on the Pi 3 prints x64musl's 54 lines. The arm32 eval corpus
+  under qemu first gave 2577 passed and 1 failed: the interpreter ran out of
+  stack in "recursive function with record stack restoration" (SIGSEGV;
+  the dev backend passed). Bisected to upstream `9aa5608b7f` (compact LIR
+  statements), after which that case needs about 8.7 MB of main stack on
+  arm32. The runner asks for 64 MiB (`roc_stack_size`, PT_GNU_STACK), which
+  hardware grants (the same binary passes natively on the Pi 5), but
+  qemu-user gives a fixed 8 MiB. The qemu eval runs now pass `-s 64M`;
+  rerun: 2578 passed, 0 failed, 47 with a backend skipped.
+  Logs: `.git/verify-tools/upstream-sync/574a683ec5/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
