@@ -21,7 +21,7 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 **What happens**
 
-`ExecutableMemory` writes machine code, then makes the pages executable with `mprotect`, and runs them. It never flushes the instruction cache. On aarch64 that relies on the kernel's cache maintenance at `mprotect`; the architecture requires an explicit flush after writing code. On ARMv7 it is required for correctness.
+`ExecutableMemory` copies machine code into memory, makes that memory executable with `mprotect`, and runs it, without flushing the instruction cache first. On x86 that is fine. On aarch64 it works only because Linux happens to flush when `mprotect` is called; the architecture itself says the program must flush after writing code. On 32-bit ARM, code run without a flush can fail. Upstream already has the flush (`src/machine_code_shim/instruction_cache.zig`), but only the machine-code shim calls it.
 
 **Where** (upstream `main` at `5fc587cf51`)
 

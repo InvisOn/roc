@@ -1,14 +1,13 @@
 # Upstream issue drafts
 
 Personal notes; not committed. One draft per finding from the arm32 work,
-for roc-lang/roc. Filed so far (these drafts, and the fixed 21, 22 and 28, deleted 2026-10-17; copies stay on the `notes` branch): 01 (#11995), 04 (#12200), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197) 31 (#12179) and 32 (#12207). Status rechecked 2026-10-20 against upstream `main` at `5fc587cf51` (all, by code reading and the 2026-10-19 Nightly Gate; searched issues and PRs since 2026-10-10); before that 2026-10-17 against upstream `main` at `43b87451c5` (02, 03, 05, 10, 12, 13, 14, 16, 26 by code reading; searched for new reports since 2026-10-10: none); before that 2026-10-10 against upstream
+for roc-lang/roc. Filed so far (these drafts, and the fixed 21, 22 and 28, deleted 2026-10-17; copies stay on the `notes` branch): 01 (#11995), 04 (#12200), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197) 31 (#12179), 32 (#12207) and 05 (#12479, 2026-10-20). Status rechecked 2026-10-20 against upstream `main` at `5fc587cf51` (all, by code reading and the 2026-10-19 Nightly Gate; searched issues and PRs since 2026-10-10); before that 2026-10-17 against upstream `main` at `43b87451c5` (02, 03, 05, 10, 12, 13, 14, 16, 26 by code reading; searched for new reports since 2026-10-10: none); before that 2026-10-10 against upstream
 `main` at `faecf66d88` (02-27, by code reading and a search for new reports since 2026-10-01; first checked 2026-10-02 at `d16a6598e4`); "code reading" means the code was read, not run.
 
 | File | Still an issue? (2026-10-20, upstream `main` `5fc587cf51`, code reading) | Already upstream? (searched since 2026-10-10) |
 |---|---|---|
 | `02-snapshot-tool-errors-as-not-implemented.md` | yes: `src/snapshot_tool/main.zig:4011`, `else \|_\|` still sets `supported = false` | none found |
 | `03-icache-not-flushed-before-jit.md` | yes: `ExecutableMemory.zig:404-408` calls `mprotect`, no flush | none found |
-| `05-relocation-isa-guessed-from-bytes.md` | yes: `Relocation.zig:196` `prev == 0xE8`, `:263` | none found |
 | `07-32-bit-host-readiness.md` | yes: `LirCodeGen.zig:8223, 8236, 14093, 14100, 14562, 14587`; `eval/mod.zig:18`; `compile_time_host.zig:39` stamp (could be added) | none found |
 | `10-lir-image-drops-recursive-graph-keys.md` | yes: `lir_image.zig:388, 734` create the map empty; `layout/digest.zig:108` `base.invariant` | none found |
 | `11-proc-symbol-names-change-every-build.md` | yes: `checked_artifact.zig:144-178` still hashes `compiler_artifact_hash`; design question | related, does not fix it: open PR #12463 (checked-artifact keys become identity bytes only) |
