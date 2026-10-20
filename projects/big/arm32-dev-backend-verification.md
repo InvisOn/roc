@@ -1021,6 +1021,19 @@ Done 2026-09-29, locally (nothing pushed).
   qemu-user gives a fixed 8 MiB. The qemu eval runs now pass `-s 64M`;
   rerun: 2578 passed, 0 failed, 47 with a backend skipped.
   Logs: `.git/verify-tools/upstream-sync/574a683ec5/`.
+- 2026-10-21, merge `d65fdf3ac1` of upstream `main` at `cf05860a7c` (9
+  merged pull requests). One conflict, in `src/eval/inspected.zig`.
+  Upstream added a switch on the lss and boxy options in code that we had
+  moved into our `lowerCheckedRootLive` helper, so the switch now lives in
+  that helper. No fix to compiler code. Checks: relative 64-bit oracle
+  PASS, nothing differs. minici 98/98. The arm32 eval corpus under qemu
+  gives 2578 passed, 0 failed, 47 with a backend skipped. Host effects
+  106/106. `test/fx` 133/133 under qemu, on the Raspberry Pi 5 and on the
+  Pi 3. The int app as arm32musl and arm32linux on the Pi 3 prints
+  x64musl's 54 lines. The chain now also measures each step. minici peaked
+  at the 24 GiB memory cap and used 38,441 CPU seconds. The qemu eval
+  peaked at 4.3 GiB and used 22,335 CPU seconds.
+  Logs: `.git/verify-tools/upstream-sync/cf05860a7c/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
