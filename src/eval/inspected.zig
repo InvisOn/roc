@@ -1720,15 +1720,16 @@ fn lowerCheckedRootLive(
     target_usize: base.target.TargetUsize,
     options: LowerToLirOptions,
 ) Error!lir.CheckedPipeline.LoweredProgram {
-    return lir.CheckedPipeline.lowerCheckedModulesToLir(
-        allocator,
-        .{
-            .root = check.CheckedArtifact.loweringView(root_module),
-            .imports = import_views,
-        },
-        .{ .requests = root_module.root_requests.runtime_requests },
-        lowerToLirTarget(target_usize, options),
-    );
+    const modules: lir.CheckedPipeline.CheckedModuleSet = .{
+        .root = check.CheckedArtifact.loweringView(root_module),
+        .imports = import_views,
+    };
+    const roots: lir.CheckedPipeline.RootRequestSet = .{ .requests = root_module.root_requests.runtime_requests };
+    const target = lowerToLirTarget(target_usize, options);
+    return switch (target.specialization_strategy) {
+        .lss => lir.CheckedPipeline.lowerCheckedModulesToLir(allocator, modules, roots, target),
+        .boxy => CompileTimeFinalization.lowerBoxyRuntime(allocator, modules, roots, target),
+    };
 }
 
 /// The Blake3 of one dev-backend object file, or the error compiling it
@@ -3114,7 +3115,24 @@ pub fn llvmEvalBoolRootModules(
 }
 
 fn legacyInspectedRun(allocator: Allocator, comptime backend_kind: InspectedRun.Backend, lowered: *const LoweredProgram) Error!EvalRunResult {
-    const result = try InspectedRun.run(allocator, backend_kind, .{
+    const result = try inspectedRunResult(allocator, backend_kind, lowered);
+    result.deinitEvents(allocator);
+    return switch (result.outcome) {
+        .returned => |output| .{
+            .output = output,
+            .allocation_count = result.allocation_count,
+        },
+        .crashed => |message| {
+            allocator.free(message);
+            return error.Crash;
+        },
+    };
+}
+
+/// Execute an inspect-wrapped program, returning its semantic outcome and the
+/// host events it produced in order.
+pub fn inspectedRunResult(allocator: Allocator, comptime backend_kind: InspectedRun.Backend, lowered: *const LoweredProgram) Error!InspectedRun.Result {
+    return try InspectedRun.run(allocator, backend_kind, .{
         .store = &lowered.view.store,
         .layouts = &lowered.view.layouts,
         .boxy_tables = boxy_runtime.BoxyTables.fromImageView(&lowered.view),
@@ -3127,17 +3145,6 @@ fn legacyInspectedRun(allocator: Allocator, comptime backend_kind: InspectedRun.
         .interpreter => .reject,
         .dev, .wasm, .llvm => {},
     });
-    result.deinitEvents(allocator);
-    return switch (result.outcome) {
-        .returned => |output| .{
-            .output = output,
-            .allocation_count = result.allocation_count,
-        },
-        .crashed => |message| {
-            allocator.free(message);
-            return error.Crash;
-        },
-    };
 }
 
 /// Evaluate a lowered program via the LIR interpreter and return the output string.
@@ -3302,9 +3309,20 @@ pub fn wasmEvaluatorStrWithStats(allocator: Allocator, lowered: *const LoweredPr
     return legacyInspectedRun(allocator, .wasm, lowered);
 }
 
-/// Evaluate via the wasm backend at `cpu_level`.
-pub fn wasmRunAt(allocator: Allocator, lowered: *const LoweredProgram, cpu_level: roc_target.CpuLevel) Error!EvalRunResult {
-    const result = try InspectedRun.runWasmAt(allocator, .{
+/// The wasm module the wasm backend runs for `lowered`, with its bodies
+/// generated on `executor`. The caller owns the returned bytes.
+pub fn wasmModuleBytes(allocator: Allocator, lowered: *const LoweredProgram, executor: ?base.post_check_task_executor.Executor) Error![]u8 {
+    var program = wasmProgram(lowered);
+    program.post_check_executor = executor;
+    const result = InspectedRun.generateWasmModule(allocator, program, .default) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Internal, error.WasmExecFailed => error.Internal,
+    };
+    return result.wasm_bytes;
+}
+
+fn wasmProgram(lowered: *const LoweredProgram) InspectedRun.Program {
+    return .{
         .store = &lowered.view.store,
         .layouts = &lowered.view.layouts,
         .boxy_tables = boxy_runtime.BoxyTables.fromImageView(&lowered.view),
@@ -3313,7 +3331,12 @@ pub fn wasmRunAt(allocator: Allocator, lowered: *const LoweredProgram, cpu_level
         .main_proc = lowered.mainProc(),
         .static_data = lowered.view.static_data,
         .static_data_value_count = lowered.view.static_data_value_count,
-    }, cpu_level);
+    };
+}
+
+/// Evaluate via the wasm backend at `cpu_level`.
+pub fn wasmRunAt(allocator: Allocator, lowered: *const LoweredProgram, cpu_level: roc_target.CpuLevel) Error!EvalRunResult {
+    const result = try InspectedRun.runWasmAt(allocator, wasmProgram(lowered), cpu_level);
     result.deinitEvents(allocator);
     return switch (result.outcome) {
         .returned => |output| .{
