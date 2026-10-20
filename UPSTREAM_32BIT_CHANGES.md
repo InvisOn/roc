@@ -1,6 +1,6 @@
 # Roc on 32-bit: upstream changes needed
 
-As of 2026-10-20, upstream `main` at `cf05860a7c`.
+As of 2026-10-21, upstream `main` at `5fc587cf51`.
 
 Upstream Roc's dev backend assumes an 8-byte machine word, and in several
 places it takes the size of the target's data from the machine the compiler
@@ -87,6 +87,6 @@ Raspberry Pi. Run qemu with `-s 64M`.
 Each row matches a change on our arm32 reference branch
 (`projects/big/arm32-dev-backend-existing-code-changes.md` lists every one,
 with its commit). Every file and line above was then looked up again in
-upstream `main` at `cf05860a7c` with `git grep` and `git show`. The counts in
+upstream `main` at `5fc587cf51` with `git grep` and `git show`. The counts in
 the whole-file row are raw pattern counts: candidates to review, not all of
 them bugs.
