@@ -1,11 +1,10 @@
 # Upstream issue drafts
 
-Upstream issue drafts from the arm32 work, for roc-lang/roc; one draft per finding.
+Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
-Filed: 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179) and 32 (#12207). 21, 22 and 28 were fixed upstream before filing. Filed and fixed drafts are removed from this folder; earlier versions are in this branch's history.
+**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179) and 32 (#12207). Upstream fixed 21, 22 and 28 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
 
-Status rechecked 2026-10-20 against upstream `main` at `5fc587cf51` (all, by code reading and the 2026-10-19 Nightly Gate; all of upstream's issues and PRs searched); before that 2026-10-17 against upstream `main` at `43b87451c5` (02, 03, 05, 10, 12, 13, 14, 16, 26 by code reading; searched for new reports since 2026-10-10: none); before that 2026-10-10 against upstream
-`main` at `faecf66d88` (02-27, by code reading and a search for new reports since 2026-10-01; first checked 2026-10-02 at `d16a6598e4`); "code reading" means the code was read, not run.
+**Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
 | File | Reported? | Still an issue? (2026-10-20, upstream `main` `5fc587cf51`, code reading) | Already upstream? (all issues and PRs searched 2026-10-20) | Fixed on our reference? (`d65fdf3ac1`) |
 |---|---|---|---|---|
@@ -38,17 +37,18 @@ Status rechecked 2026-10-20 against upstream `main` at `5fc587cf51` (all, by cod
 | 31: A syntax error in an app file makes `roc check` check a nearby `main.roc` instead (removed) | yes, #12179 (closed) | — | — | — |
 | 32: `apt install afl++` in the fuzzing guide no longer works since Zig 0.17 (removed) | yes, #12207 (closed) | — | — | — |
 
-Every draft is about upstream's code or CI; none is a defect of our reference
-branch (those were fixed there and are in the verification note's findings
-table). Each file's first line says whether upstream is affected today or
-only a 32-bit host or target would hit it (07, 12; and 03, 10, 11, 16 are
-latent or unreached upstream).
+Every draft is about upstream's code or CI. None is a bug in our reference branch; those were fixed there and are listed in the verification note's findings table.
 
-Deleted 2026-10-02: 18, the type checker panic on basic-cli 0.22.2. It was
-reported upstream as #11640 and fixed by #11671; it no longer reproduces on
-the nightly with basic-cli 0.22.2 or 0.23.0.
+Some drafts can't fail upstream today:
 
-Not drafted: partially deleting `.zig-cache/o` breaks Zig's cache (that is
-Zig's behaviour, not Roc's), and the proposals (stop committing prebuilt
-binaries; report peak memory per test; the byte-identity oracle), which are
-suggestions, not defects. See `projects/big/arm32-dev-backend-upstream-now.md`.
+- 07 and 12 matter only for a 32-bit machine or target.
+- 03, 10, 11 and 16 are in upstream code that nothing upstream currently reaches, or reaches only by luck.
+
+Each draft's first lines say which case it is.
+
+**Deleted 2026-10-02:** 18, the type checker panic on basic-cli 0.22.2. Someone else reported it as #11640, and #11671 fixed it. It no longer happens on the nightly with basic-cli 0.22.2 or 0.23.0.
+
+**Not drafted:**
+
+- Deleting part of `.zig-cache/o` breaks Zig's cache. That is how Zig behaves, not a Roc bug.
+- Suggestions rather than bugs: stop committing prebuilt binaries, report peak memory per test, and the byte-for-byte comparison oracle. See `projects/big/arm32-dev-backend-upstream-now.md`.

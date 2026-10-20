@@ -1,40 +1,38 @@
-# Draft: The full `ci_zig.yml` run loses its Linux build jobs on hosted runners
+# Draft: In a full `ci_zig.yml` run, the Linux build jobs get killed on GitHub's runners
 
 > **Upstream or ours:** Upstream's CI workflow. Seen on our fork's runs and on upstream's own nightly.
 
-> **Relevance to our arm32 work:** The arm32 eval steps come after the step that gets killed, so they never run on GitHub. We ran them in a separate, smaller CI job to get coverage.
+> **Relevance to our arm32 work:** The arm32 eval steps come after the step that gets killed, so they never run on GitHub. We ran them in a separate, smaller CI job instead.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes: seen again on 2026-10-01 (run 36764332316 on InvisOn/roc: `zig-cross-compile` targets, a Linux `zig-tests`, the arm64 nix build cancelled; valgrind and x86-linux-musl died without logs). |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | Not ours to fix. |
-| Before filing | Look at upstream's own recent nightly runs to confirm it still happens there before filing. |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
+| Still an issue? | Yes. Upstream's Nightly Gate failed every night from 2026-10-16 to 2026-10-19. In run 39320401466 (2026-10-19), `zig-cross-compile (arm-linux-musleabihf)` ended with exit code 143. |
+| Already upstream? | No issue filed (searched 2026-10-20). Upstream's own Nightly Gate shows it every night. |
+| Fixed on our reference branch? | Not ours to fix. |
+| Before filing | Low value, since upstream sees it every night. |
 
 ---
 
-**Title:** The full `ci_zig.yml` run loses its Linux build jobs on hosted runners
+**Title:** In a full `ci_zig.yml` run, the Linux build jobs get killed on GitHub's runners
 
 **What happens**
 
-In a full run, the `zig-cross-compile` jobs, the Linux `zig-tests`, valgrind and the arm64 nix build are killed together (exit 143) 12 to 35 minutes into building `roc` with LLVM. Every step after `cross compile with llvm` in those jobs is therefore never run on GitHub. Upstream's nightly showed the same on 2026-09-29 and 2026-09-30.
+In a full run, several jobs are killed at the same time (exit code 143) while they build `roc` with LLVM, 12 to 35 minutes in. They are the `zig-cross-compile` jobs, the Linux `zig-tests`, valgrind, and the arm64 nix build. None of the steps after `cross compile with llvm` in those jobs ever run on GitHub. Upstream's nightly showed the same thing on 2026-09-29 and 2026-09-30, and still does.
 
 **Likely cause**
 
-The hosted runner runs out of memory linking the LLVM-enabled compiler. Not confirmed.
+The runner probably runs out of memory while linking the LLVM-enabled compiler. Not confirmed.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `.github/workflows/ci_zig.yml:524`, step `cross compile with llvm`: the step during which jobs end with exit 143.
-- Latest: upstream Nightly Gate run 39320401466 (2026-10-19), `zig-cross-compile (arm-linux-musleabihf)`, "Process completed with exit code 143", "The runner has received a shutdown signal".
+- `.github/workflows/ci_zig.yml:524`, the step `cross compile with llvm`. Jobs end with exit code 143 during this step.
+- The latest example: upstream Nightly Gate run 39320401466 (2026-10-19), job `zig-cross-compile (arm-linux-musleabihf)`. Its log says "Process completed with exit code 143" and "The runner has received a shutdown signal".
 
 **Why it matters**
 
-Every step after `cross compile with llvm` in those jobs never runs on GitHub: cross-compilation for several targets, valgrind and a Linux test pass. A regression in any of them goes unnoticed until someone runs the step locally.
+The steps after `cross compile with llvm` never run on GitHub. They cover cross-compilation for several targets, valgrind, and a Linux test run. A regression in any of them goes unnoticed until someone runs the step by hand.
 
 **How to reproduce**
 
@@ -46,7 +44,7 @@ gh run view 36666186906 -R InvisOn/roc --json jobs \
   --jq '.jobs[] | select(.conclusion=="cancelled") | "\(.name) \(.startedAt) \(.completedAt)"'
 ```
 
-Each cancelled job's log ends in "Process completed with exit code 143".
+Each cancelled job's log ends with "Process completed with exit code 143".
 
 **Environment**
 

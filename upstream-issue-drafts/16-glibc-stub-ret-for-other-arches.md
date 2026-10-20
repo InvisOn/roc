@@ -1,48 +1,38 @@
-# Draft: The glibc stub emits `ret` for architectures where it is not an instruction
+# Draft: The glibc stub writes `ret` for architectures that have no `ret` instruction
 
-> **Upstream or ours:** Upstream. Unreached there today: the affected architectures do not use the stub. Our arm32 work would have reached it for `.arm`.
+> **Upstream or ours:** Upstream. Nothing upstream reaches it today, because the affected architectures don't use the stub. Our arm32 work would have reached it for `.arm`.
 
-> **Relevance to our arm32 work:** `arm32linux` uses the glibc stub, and `ret` is not an A32 instruction. The reference gives arm its own stub body.
+> **Relevance to our arm32 work:** `arm32linux` uses the glibc stub, and `ret` is not a 32-bit ARM instruction. Our reference branch gives arm its own stub body.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes, by code reading: `src/build/glibc_stub.zig` emits `ret` for `.aarch64_be, .arm, .wasm32, .other`. |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | Our reference gives arm its own stub body. |
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`). The test below fails. |
+| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Fixed on our reference branch? | Yes, in `627b4b7248`, for arm only (`mov r0, #0` / `bx lr`). |
 | Before filing | Nothing. |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 ---
 
-**Title:** The glibc stub emits `ret` for architectures where it is not an instruction
+**Title:** The glibc stub writes `ret` for architectures that have no `ret` instruction
 
 **What happens**
 
-The generated glibc stub writes `ret` as the body of every stub function for `.aarch64_be`, `.arm`, `.wasm32` and `.other`. `ret` is not an A32 instruction (it would be `bx lr`) and means nothing for wasm32. Unreached today because those targets do not use the stub, but it would assemble wrongly or not at all if they did.
+The generated glibc stub gives every stub function the body `ret` on `.aarch64_be`, `.arm`, `.wasm32` and `.other`. 32-bit ARM has no `ret` instruction; it returns with `bx lr`. For wasm32, `ret` means nothing at all. Nothing upstream reaches this today, because those targets don't use the stub. If one did, the stub would fail to assemble or assemble into the wrong thing.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `src/build/glibc_stub.zig:24`, `:93` and `:100`, in `generateComprehensiveStub` (line 7): `.aarch64_be, .arm, .wasm32, .other => "    ret\n\n"`.
-- `src/build/glibc_stub.zig:14`: the same group is given a 4-byte size.
+- `src/build/glibc_stub.zig:24`, `:93` and `:100`, in `generateComprehensiveStub` (line 7). Each writes `"    ret\n\n"` for `.aarch64_be, .arm, .wasm32, .other`.
+- `src/build/glibc_stub.zig:14` gives the same group a 4-byte pointer size.
 
 **Why it matters**
 
-Nobody upstream is affected: those architectures do not use the stub. It mattered for arm32, which does, and it would produce a wrong or unassemblable stub for any of the others the moment they used it.
+Nobody upstream is affected now. It affected our arm32 work, which uses the stub. It would break any of the other architectures the moment they used the stub too.
 
 **How to reproduce**
 
-Unreached today, so this is seen by reading the code:
-
-```sh
-grep -n 'ret' src/build/glibc_stub.zig
-```
-
-It shows `ret` written for `.aarch64_be, .arm, .wasm32, .other`.
-
-**A test that fails** (run on upstream `main` at `5fc587cf51`). Append to `src/build/glibc_stub.zig`:
+A test that fails (run on upstream `main` at `5fc587cf51`). Append it to `src/build/glibc_stub.zig`:
 
 ```zig
 test "the 32-bit ARM glibc stub uses A32 returns" {
@@ -54,14 +44,14 @@ test "the 32-bit ARM glibc stub uses A32 returns" {
 }
 ```
 
-The file imports `../target/mod.zig`, so run it through a root in `src/`:
+The file imports `../target/mod.zig`, so run the test through a small root file in `src/`:
 
 ```sh
 printf 'test {\n    _ = @import("build/glibc_stub.zig");\n}\n' > src/probe_glibc_stub.zig
 zig test src/probe_glibc_stub.zig --test-filter "32-bit ARM glibc stub"
 ```
 
-Output: `src/build/glibc_stub.zig:156:5 ... try std.testing.expect(...)`, `2 passed; 0 skipped; 1 failed.` The assembler confirms `ret` is not A32:
+It fails at the `expect` (`src/build/glibc_stub.zig:156:5`) and ends with `2 passed; 0 skipped; 1 failed.` The assembler confirms that `ret` is not a 32-bit ARM instruction:
 
 ```
 $ printf '.text\n.globl f\nf:\n    ret\n' > s.s && zig cc -target arm-linux-musleabihf -c s.s

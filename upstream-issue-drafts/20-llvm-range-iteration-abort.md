@@ -1,12 +1,17 @@
-# Draft: upstream issue (not filed)
+# Draft: LLVM eval backend aborts on "inspect: inclusive numeric ranges all iterate" on aarch64
 
-> **Upstream or ours:** Upstream, as far as we can tell: reproduced with a compiler built from upstream's code plus one unrelated local patch. The CI sightings are from our fork's branch. To be confirmed on clean upstream.
+> **Upstream or ours:** Upstream, as far as we can tell. We reproduced it with a compiler built from upstream's code plus one unrelated local patch. The CI failures were on our fork's branch. Still to be confirmed on clean upstream.
 
-> **Relevance to our arm32 work:** It fails `eval-llvm (macos-15)` in our CI. arm32 does not use the LLVM backend, so it is unrelated to our code.
+> **Relevance to our arm32 work:** It failed `eval-llvm (macos-15)` in our CI. arm32 doesn't use the LLVM backend, so it is unrelated to our code.
 
-For roc-lang/roc. Before filing, Claude
-rechecks it on a clean checkout of current upstream `main` (see "To verify
-first").
+Not filed. For roc-lang/roc.
+
+| | |
+|---|---|
+| Still an issue? | Probably fixed. Upstream's Nightly Gate on 2026-10-19 (`eval-llvm (macos-15)`) does not list either range case among its 17 failures. Not rerun on the Pi 5. |
+| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Fixed on our reference branch? | Not ours to fix (upstream's LLVM backend). |
+| Before filing | See "To check first" at the end. Don't file unless it still fails on clean upstream. |
 
 ---
 
@@ -14,9 +19,7 @@ first").
 
 **What happens**
 
-The eval test `inspect: inclusive numeric ranges all iterate`
-(`src/eval/test/eval_tests.zig`) aborts in the LLVM backend on aarch64. The
-interpreter, the dev backend and the wasm backend pass the same case.
+The eval test `inspect: inclusive numeric ranges all iterate` aborts in the LLVM backend on aarch64. The interpreter, the dev backend and the wasm backend all pass it.
 
 ```
 FAIL  inspect: inclusive numeric ranges all iterate
@@ -27,25 +30,20 @@ FAIL  inspect: inclusive numeric ranges all iterate
       llvm:           FAIL 'signal: 6'
 ```
 
-**Where seen**
+**Where it was seen**
 
-- CI, `eval-llvm (macos-15)` (aarch64): this case and `inspect: exclusive
-  numeric ranges all iterate` both abort with `signal: 6`.
-- CI, `eval-llvm (ubuntu-24.04)` (x86_64): the inclusive case aborts too
-  (among the failures of #11909 in the same run).
-- Locally on a Raspberry Pi 5 (aarch64 Linux), Debug eval runner built for
-  `aarch64-linux-musl` at `00cab95af8`: the inclusive case aborts; the
-  exclusive case passes.
+- CI, `eval-llvm (macos-15)` (aarch64). This case and `inspect: exclusive numeric ranges all iterate` both aborted with `signal: 6`.
+- CI, `eval-llvm (ubuntu-24.04)` (x86_64). The inclusive case aborted too, along with the failures of #11909 in the same run.
+- A Raspberry Pi 5 (aarch64 Linux), with a Debug eval runner built for `aarch64-linux-musl` at `00cab95af8`. The inclusive case aborted and the exclusive case passed.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- The case: `src/eval/test/eval_tests.zig:6942` ("inspect: inclusive numeric ranges all iterate"); its neighbour at `:6962` ("exclusive").
-- Abort site seen 2026-10-01 (Debug, aarch64): `src/llvm_compile/compile.zig:483` in `emitMergedBitcodeModulesToObjectFile`; on `5fc587cf51` that line is inside the bitcode-module linking loop (480-485).
-- Upstream's Nightly Gate 2026-10-19 (`eval-llvm (macos-15)`) no longer lists either case among its 17 failures.
+- The test: `src/eval/test/eval_tests.zig:6942` ("inclusive"). The "exclusive" one is at line 6962.
+- Where it aborted on 2026-10-01 (Debug, aarch64): `src/llvm_compile/compile.zig:483`, in `emitMergedBitcodeModulesToObjectFile`. On `5fc587cf51` that line is inside the loop that links bitcode modules (lines 480-485).
 
 **Why it matters**
 
-The compiler aborts instead of producing a program. Anyone using the LLVM backend on aarch64 with code like this would hit it, and the CI job that should catch it (`eval-llvm` on macOS) is failing because of it.
+The compiler aborts instead of producing a program. Anyone using the LLVM backend on aarch64 with code like this would hit it. It also kept the macOS `eval-llvm` CI job failing.
 
 **How to reproduce** (aarch64 Linux)
 
@@ -56,7 +54,7 @@ zig build build-test-eval-runner -Dtarget=aarch64-linux-musl
 
 On CI: `zig build run-test-eval -- --llvm`.
 
-**Stack (aarch64 Linux, Debug)**
+**Stack trace (aarch64 Linux, Debug)**
 
 ```
 thread 58070 panic: incorrect alignment
@@ -69,10 +67,9 @@ src/eval/inspected_run.zig:655:72: in runLlvm
 src/eval/inspected.zig:3923:42: in llvmEvaluatorInspectedStr
 ```
 
-The LLVM step ran for about 12 seconds before aborting; the exclusive case
-next to it takes under 1 second.
+The LLVM step ran for about 12 seconds before aborting. The exclusive case next to it takes under a second.
 
-**The case**
+**The test case**
 
 ```roc
 {
@@ -91,26 +88,19 @@ next to it takes under 1 second.
 }
 ```
 
-The case was added by `641d298ae1` ("Integrate stored ranges with
-iteration").
+The test was added in `641d298ae1` ("Integrate stored ranges with iteration").
 
 **Environment**
 
 - OS: Pop!_OS 24.04 LTS, x86_64
 - Roc compiler version `release-fast-a932c654`
-- The aarch64 run: Raspberry Pi 5, Debian GNU/Linux 13 (trixie), aarch64; compiler cross-built on the machine above at upstream `00cab95af8`.
+- The aarch64 run: Raspberry Pi 5, Debian GNU/Linux 13 (trixie), aarch64. The compiler was cross-built on the machine above at upstream `00cab95af8`.
 
 ---
 
-## To verify first (Claude, in the compute window)
+## To check first
 
-- The Pi 5 run used upstream `00cab95af8` with one local patch applied (it
-  adds a hash-writing mode to the eval runner and does not touch the LLVM
-  path). Rerun on a clean checkout of current `main`, with no patch.
-- Is it still present on current `main`? Last seen 2026-10-01.
-- The macOS and Ubuntu observations are from CI on our fork's branch, which
-  includes the arm32 changes; the Pi 5 run is what ties it to upstream. The
-  macOS abort message itself was not captured (only `signal: 6`).
-- Which of the eleven lines triggers it: cut the case down to one line.
-- No existing upstream issue was found on 2026-10-02 (searched the test
-  name, "incorrect alignment", the function name).
+- The Pi 5 run used upstream `00cab95af8` plus one local patch. The patch adds a hash-writing mode to the eval runner and doesn't touch the LLVM code. Rerun on a clean checkout of current `main`, without the patch.
+- Check whether it still fails on current `main`. It was last seen on 2026-10-01, and upstream's 2026-10-19 nightly no longer shows it.
+- The macOS and Ubuntu failures were on our fork's branch, which includes the arm32 changes. Only the Pi 5 run ties it to upstream. The macOS abort message itself was not captured, only `signal: 6`.
+- Find which of the eleven lines triggers it by cutting the test down to one line.

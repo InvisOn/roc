@@ -1,49 +1,52 @@
-# Draft: The build's forbidden-pattern check excludes lines by number, and the numbers have gone stale
+# Draft: The forbidden-pattern check skips lines by number, and the numbers are out of date
 
-> **Upstream or ours:** Upstream. The defect is in upstream's code and does not depend on our arm32 work.
+> **Upstream or ours:** Upstream. The bug is in upstream's code and has nothing to do with our arm32 work.
 
-> **Relevance to our arm32 work:** Our changes move lines in the checked files, which shifts the exemptions onto the wrong lines and makes the check fail or pass for the wrong reason.
+> **Relevance to our arm32 work:** Our changes move lines in the checked files. That moves the skipped lines onto the wrong code, so the check fails or passes for the wrong reason.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-20, `5fc587cf51`, checked by the script below): the ranges are now in `src/build/check_runner.zig`, and four entries are stale: `cir_to_lir.zig` no longer exists; `inspected.zig` 2474 is a lone `}` and 3264-3275 is past the end of its 3255 lines; `inspected_run.zig` 109 is blank. |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | Not fixed by us. |
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`). The script below finds four out-of-date entries. |
+| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Fixed on our reference branch? | No. Our branch has the same entries, shifted by one line. |
 | Before filing | Nothing. |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 ---
 
-**Title:** The build's forbidden-pattern check excludes lines by number, and the numbers have gone stale
+**Title:** The forbidden-pattern check skips lines by number, and the numbers are out of date
 
 **What happens**
 
-`src/build/check_runner.zig` has `excluded_ranges` entries like `.{ .file = "inspected.zig", .start = 3264, .end = 3275 }` that exempt specific lines from a forbidden-pattern check. When the file changes, the numbers keep pointing at the old positions: the exemption silently moves to unrelated code, and the line it was meant for is no longer exempt (or the check no longer covers what it should).
+`src/build/check_runner.zig` checks `src/` for forbidden patterns. A list called `excluded_ranges` lets specific lines through, by file name and line number, for example `.{ .file = "inspected.zig", .start = 3264, .end = 3275 }`. When someone edits a file, the numbers stay the same while the code moves. The exemption then lands on unrelated code, and the line it was written for is checked again.
+
+Four of the entries are out of date on `5fc587cf51`:
+
+- `cir_to_lir.zig` (lines 110-115) no longer exists.
+- `inspected.zig` line 2474 is a lone `}`.
+- `inspected.zig` lines 3264-3275 are past the end of the file, which has 3255 lines.
+- `inspected_run.zig` line 109 is blank.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `src/build/check_runner.zig:193-225`, `excluded_ranges`; the `inspected.zig` entries are at lines 211 (226-232), 214 (2474) and 217 (3264-3275).
-- `src/eval/inspected.zig` is 3255 lines: 2474 is a lone `}` and 3264-3275 is past the end of the file.
-- `check_runner.zig:208` names `cir_to_lir.zig`, which no longer exists; `:220` points at `inspected_run.zig:109`, a blank line.
-- Used at `check_runner.zig:231`.
+- `src/build/check_runner.zig:193-225`, the `excluded_ranges` list. It is used at line 231.
+- The out-of-date entries are at lines 208 (`cir_to_lir.zig`), 214 (`inspected.zig` 2474), 217 (`inspected.zig` 3264-3275) and 220 (`inspected_run.zig` 109).
 
 **Why it matters**
 
-The check stops doing its job without any sign of it: lines that should be checked are exempt, and the line the exemption was written for is checked again. It only stays correct as long as nobody edits the file above those lines.
+The check stops doing its job without any sign. Code that should be checked is skipped, and the line an exemption was written for is checked again. The list stays correct only as long as nobody edits the lines above the listed ones.
 
 **How to reproduce**
 
-```sh
-grep -n -A32 'excluded_ranges = ' src/build/check_runner.zig
-sed -n '2474p;3264,3275p' src/eval/inspected.zig; wc -l src/eval/inspected.zig
+This script checks that every entry names a file that exists, lies inside it, and points at more than blank lines or braces. Run it from the repository root. It printed the following on `5fc587cf51` and exited with 1:
+
 ```
-
-The first command shows the ranges and the comment saying what each allows; the second shows what those lines hold now: a lone `}`, and nothing (the file has 3255 lines).
-
-**A check that fails** (run on upstream `main` at `5fc587cf51`): every excluded range should name an existing file, lie inside it, and hold more than blank lines or braces. Run from the repository root:
+cir_to_lir.zig:110-115: no such file under src/
+src/eval/inspected.zig:2474-2474: only blank lines or braces
+src/eval/inspected.zig:3264-3275: past the end (3255 lines)
+src/eval/inspected_run.zig:109-109: only blank lines or braces
+```
 
 ```sh
 #!/bin/sh
@@ -65,15 +68,6 @@ done <<RANGES
 $ranges
 RANGES
 exit $bad
-```
-
-Output on `5fc587cf51` (exit 1): four of the entries are stale, not two.
-
-```
-cir_to_lir.zig:110-115: no such file under src/
-src/eval/inspected.zig:2474-2474: only blank lines or braces
-src/eval/inspected.zig:3264-3275: past the end (3255 lines)
-src/eval/inspected_run.zig:109-109: only blank lines or braces
 ```
 
 **Environment**

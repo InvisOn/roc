@@ -1,31 +1,29 @@
-# Draft: Dev backend: redundant narrowing shifts before byte stores
+# Draft: Dev backend: extra shifts before storing a single byte
 
-> **Upstream or ours:** Upstream. The defect is in upstream's code and does not depend on our arm32 work.
+> **Upstream or ours:** Upstream. It has nothing to do with our arm32 work.
 
-> **Relevance to our arm32 work:** It does not affect arm32 in particular. Noticed while reading the driver.
+> **Relevance to our arm32 work:** None in particular. We noticed it while reading the backend.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Not rechecked. `storeResultToSavedPtr` still exists; the `.u8`/`.i8` cases were not reread today. |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | Not fixed by us. |
-| Before filing | Reread the `.u8`/`.i8` cases on current upstream before filing. Low value; consider not filing. |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
+| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Fixed on our reference branch? | No. |
+| Before filing | Low value. Consider not filing. |
 
 ---
 
-**Title:** Dev backend: redundant narrowing shifts before byte stores
+**Title:** Dev backend: extra shifts before storing a single byte
 
 **What happens**
 
-Before storing a byte, the driver emits a shift pair to narrow the value, and then stores only the low byte anyway. The shifts are dead work. No wrong behaviour.
+Before storing a `U8` or `I8` result, the backend shifts the register left by 56 bits and back again to clear the upper bits. Then it stores only the lowest byte, so the upper bits never matter. The two shifts do nothing useful. Nothing goes wrong; it is only wasted work.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `src/backend/dev/LirCodeGen.zig:16783-16800`, `.u8` and `.i8` cases of `storeResultToSavedPtr` (line 16769): `shl` 56 then `shr`/`sar` 56 on `.w64` (16788-16789, 16797-16798), then `emitStoreScalarToPtr(..., 1)` stores one byte (16790, 16799).
+- `src/backend/dev/LirCodeGen.zig:16783-16800`, the `.u8` and `.i8` cases of `storeResultToSavedPtr` (line 16769). Each shifts left by 56 and then right by 56 (lines 16788-16789 and 16797-16798), and then `emitStoreScalarToPtr(..., 1)` stores one byte (lines 16790 and 16799).
 
 **How to reproduce**
 
@@ -35,7 +33,7 @@ By reading the code:
 grep -n -A40 'fn storeResultToSavedPtr' src/backend/dev/LirCodeGen.zig
 ```
 
-Look at the `.u8` and `.i8` cases: a shift pair narrows the value before a store that writes only the low byte.
+In the `.u8` and `.i8` cases, two shifts come before a store that writes only the lowest byte.
 
 **Environment**
 

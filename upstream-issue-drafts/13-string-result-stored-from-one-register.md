@@ -1,39 +1,39 @@
-# Draft: Dev backend: a string result is stored from one register for non-stack locations
+# Draft: Dev backend stores only one word of a string result that is not on the stack
 
-> **Upstream or ours:** Upstream. The defect is in upstream's code and does not depend on our arm32 work.
+> **Upstream or ours:** Upstream. The bug is in upstream's code and has nothing to do with our arm32 work.
 
-> **Relevance to our arm32 work:** It does not affect arm32 in particular. Found while reading the driver for word-size assumptions; the reference leaves it as it is.
+> **Relevance to our arm32 work:** None in particular. We found it while reading the backend for word-size assumptions. Our reference branch leaves it as it is.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes, by code reading: `storeResultToSavedPtr` in `src/backend/dev/LirCodeGen.zig` still has the branch commented "Fallback for non-stack string location". |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | Not fixed by us. |
-| Before filing | Nothing; whether the branch is reachable is the open question. |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
+| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Fixed on our reference branch? | No. |
+| Before filing | Nothing. Whether the branch can be reached is the open question. |
 
 ---
 
-**Title:** Dev backend: a string result is stored from one register for non-stack locations
+**Title:** Dev backend stores only one word of a string result that is not on the stack
 
 **What happens**
 
-In `storeResultToSavedPtr`, the `.str` case handles a value that is not on the stack by loading it into one general register and storing that one word. A string is three words; length and capacity are left unwritten. The branch is either dead or corrupts the result. Its comment calls it a fallback, which AGENTS.md forbids in this stage.
+`storeResultToSavedPtr` copies a procedure's result to the place the caller asked for. For a string, it handles a value on the stack correctly. For a value anywhere else, it loads it into one register and stores that one word. A Roc string is three words, so the length and capacity are never written.
+
+The comment on that branch calls it a fallback. AGENTS.md forbids fallbacks in this stage.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `src/backend/dev/LirCodeGen.zig:16899-16914`, the `.str` case of `storeResultToSavedPtr` (line 16769): for `.general_reg`, `.float_reg`, `.vector_reg`, `.stack_i128`, `.list_stack` and the immediates, it loads one register (16912) and stores one word (16913).
+- `src/backend/dev/LirCodeGen.zig:16899-16914`, the `.str` case of `storeResultToSavedPtr` (line 16769). For `.general_reg`, `.float_reg`, `.vector_reg`, `.stack_i128`, `.list_stack` and the immediate locations, it loads one register (line 16912) and stores one word (line 16913).
 
 **Why it matters**
 
-A Roc string is three words. If this branch is ever taken, the result has an unwritten length and capacity, which means reading or freeing memory at random. If it can never be taken, it is dead code that hides an invariant the backend should assert.
+If this branch is ever taken, the result's length and capacity are garbage. Code that later reads or frees that string uses random memory. If the branch can never be taken, it is dead code where the backend should assert instead.
 
 **How to reproduce**
 
-No program is known that reaches the branch, so this is seen by reading the code:
+We don't know of a program that reaches the branch. Reading the code shows it:
 
 ```sh
 grep -n -B8 -A4 'Fallback for non-stack string location' src/backend/dev/LirCodeGen.zig

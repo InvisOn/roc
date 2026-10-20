@@ -1,19 +1,17 @@
 # Draft: Procedure symbol names change with every compiler build
 
-> **Upstream or ours:** Upstream. It bites any test that pins machine-code bytes; upstream has none of those for real programs, which is why only our oracle ran into it.
+> **Upstream or ours:** Upstream. It breaks any test that compares the exact machine code of real programs. Upstream has no such test, which is why only our test oracle ran into it.
 
-> **Relevance to our arm32 work:** It broke our byte-identity oracle on every commit. We work around it by renaming the symbols before hashing.
+> **Relevance to our arm32 work:** It broke our byte-for-byte comparison on every commit. We work around it by renaming the symbols before comparing.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes, by code reading: `src/check/checked_artifact.zig` still folds `build_options.compiler_artifact_hash` into the checked-artifact key. |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | Worked around in our test oracles (`ProcIdentity.canonicalizeSymbolNames`). |
-| Before filing | Nothing. This is a design question more than a bug. |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
+| Already upstream? | No issue or PR found (searched 2026-10-20). #11430 (closed) was a different reproducibility bug. Open PR #12463 changes the key's shape but keeps the compiler hash in it. |
+| Fixed on our reference branch? | No. Our test oracle renames symbols before comparing (`ProcIdentity.canonicalizeSymbolNames`). |
+| Before filing | Nothing. It is a design question more than a bug. |
 
 ---
 
@@ -21,24 +19,24 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 **What happens**
 
-The compiler's own build hash is part of every checked-artifact key, and procedure symbol names derive from it. Two builds of `roc` at different commits name the same procedure differently, so the object file for an unchanged program changes with every compiler commit. Any test that pins machine-code bytes of real programs breaks on the next commit, and builds are not reproducible across compiler versions.
+Every checked-artifact key includes a hash of the compiler build itself. Procedure symbol names are made from a digest that depends on that key. So two builds of `roc` from different commits give the same procedure different names. The object file for an unchanged program changes with every compiler commit.
 
 **Question for the maintainers**
 
-Is the compiler hash meant to reach symbol names, or only cache keys? If only cache keys, symbol names could be derived without it.
+Is the compiler hash meant to reach symbol names, or only cache keys? If only cache keys, symbol names could be made without it.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `src/check/checked_artifact.zig:144`: `build_options.compiler_artifact_hash` is taken into every checked-artifact key; hashed at `:178` in `computeCheckedArtifactKeyBytes` (line 168).
-- `src/lir/LIR.zig:67, 94-96`: procedure symbols are named `roc__p` plus a digest (`ProcIdentity.writeSymbolName`), which changes with that key.
+- `src/check/checked_artifact.zig:144` puts `build_options.compiler_artifact_hash` into every checked-artifact key. It is hashed at line 178, in `computeCheckedArtifactKeyBytes` (line 168).
+- `src/lir/LIR.zig:67` and `94-96`. Procedure symbols are named `roc__p` followed by a digest (`ProcIdentity.writeSymbolName`), and that digest changes with the key.
 
 **Why it matters**
 
-Only our test oracle ran into it, because upstream has no test that pins the machine code of a real program. It matters because it makes such a test impossible: it would fail on the next compiler commit. A byte-pinning test is the cheapest way to prove that a backend refactor changed nothing, which is what a change as large as a new architecture needs. It also means builds are not reproducible across compiler commits.
+A test that compares a real program's machine code byte for byte would fail on the next compiler commit, so such a test can't exist. That kind of test is the cheapest way to prove a backend refactor changed nothing, which matters for large changes such as a new architecture. It also means builds of the same program are not reproducible across compiler commits.
 
 **How to reproduce**
 
-Build `roc` at two different commits and compare the symbol names of the same program (the second build is a full rebuild):
+Build `roc` at two different commits and compare the symbol names in the same program. The second build is a full rebuild.
 
 ```sh
 zig build

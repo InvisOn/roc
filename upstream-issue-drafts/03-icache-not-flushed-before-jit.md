@@ -1,19 +1,17 @@
 # Draft: JIT memory is made executable without flushing the instruction cache
 
-> **Upstream or ours:** Upstream. The code is upstream's. On aarch64 it is timing-dependent and we never saw it fail; our arm32 work hit it because ARMv7 requires the flush.
+> **Upstream or ours:** Upstream. On aarch64 a failure would depend on timing, and we never saw one. Our arm32 work needed the fix because 32-bit ARM requires the flush.
 
-> **Relevance to our arm32 work:** Required for arm32: ARMv7 does not run freshly written code reliably without the flush. The reference adds it.
+> **Relevance to our arm32 work:** Needed for arm32. Without the flush, freshly written code does not run reliably on 32-bit ARM. Our reference branch adds it.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes, by code reading: `src/backend/dev/ExecutableMemory.zig` calls `mprotect` and has no flush. |
-| Already upstream? | None found (searched issues and PRs, 2026-10-02). |
-| Fix on our reference branch | `49bf1449b9` (and `6eeba018af`). |
-| Before filing | Nothing. There is no reliable reproduction on aarch64 (it is timing-dependent). |
-
-Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
+| Already upstream? | No issue or PR for `ExecutableMemory` (searched 2026-10-20). #11193 and #11452 (both merged) added the flush to the machine-code shim only. |
+| Fixed on our reference branch? | Yes, in `49bf1449b9`. |
+| Before filing | Nothing. There is no reliable way to make it fail on aarch64. |
 
 ---
 
@@ -21,21 +19,29 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 **What happens**
 
-`ExecutableMemory` copies machine code into memory, makes that memory executable with `mprotect`, and runs it, without flushing the instruction cache first. On x86 that is fine. On aarch64 it works only because Linux happens to flush when `mprotect` is called; the architecture itself says the program must flush after writing code. On 32-bit ARM, code run without a flush can fail. Upstream already has the flush (`src/machine_code_shim/instruction_cache.zig`), but only the machine-code shim calls it.
+`ExecutableMemory` copies machine code into memory, makes that memory executable with `mprotect`, and runs it. It never flushes the instruction cache first.
+
+- On x86 that is fine, because the CPU keeps its caches in step by itself.
+- On aarch64 it works only because Linux happens to flush when `mprotect` is called. The architecture says the program must flush after writing code, and Linux does not promise to do it.
+- On 32-bit ARM, code run without a flush can fail.
+
+Upstream already has a flush function (`src/machine_code_shim/instruction_cache.zig`), but only the machine-code shim calls it.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
-- `src/backend/dev/ExecutableMemory.zig:404-408`, `protectExecutable`: `mprotect` to read+execute, no instruction-cache flush.
-- Called from `ExecutableMemory.zig:251` (`initWithEntryOffsetAndUnwindInfo`, line 217) and `:281` (`finishWrite`, line 280).
-- A flush already exists upstream: `src/machine_code_shim/instruction_cache.zig:11`, `flush`.
+- `src/backend/dev/ExecutableMemory.zig:404-408`, `protectExecutable`. It calls `mprotect` to make the memory readable and executable, with no flush.
+- It is called from `ExecutableMemory.zig:251` (in `initWithEntryOffsetAndUnwindInfo`, line 217) and `:281` (in `finishWrite`, line 280).
+- The existing flush is `src/machine_code_shim/instruction_cache.zig:11`, `flush`.
 
 **Why it matters**
 
-Today only arm32 depends on this: ARMv7 requires the flush, and without it code generated at compile time does not run reliably there. It is still worth fixing for upstream's own targets. A CPU caches instructions separately from data. Machine code written into memory goes through the data side, so the instruction cache can still hold whatever was at those addresses before. Running the code without flushing can execute stale bytes: a crash or a wrong result that appears rarely, depends on timing and cache state, and cannot be reproduced on demand. x86 keeps the two caches in step by itself; AArch64, like ARMv7, does not, and requires the program to flush after writing code. This path runs the code the compiler generates at compile time (compile-time evaluation, the eval tests, the machine-code shim), so a failure would look like the compiler misbehaving at random on ARM machines. On aarch64 it works today only because the kernel happens to do cache maintenance when the pages are made executable, which neither the architecture nor the kernel promises.
+A CPU caches instructions separately from data. Machine code written into memory goes through the data cache, so the instruction cache can still hold whatever was at those addresses before. Running the code without a flush can run those old bytes. The result is a crash or a wrong answer that shows up rarely, depends on timing, and can't be reproduced on demand.
+
+This memory runs the code the compiler generates for itself: compile-time evaluation, the eval tests, and the machine-code shim. A failure would look like the compiler misbehaving at random on ARM machines.
 
 **How to reproduce**
 
-There is no reliable reproduction: on aarch64 a failure depends on timing. The missing flush is seen by reading the code:
+There is no reliable way to make it fail, because on aarch64 a failure depends on timing. The missing flush shows up when reading the code:
 
 ```sh
 grep -n -i 'mprotect\|flush\|clear_cache' src/backend/dev/ExecutableMemory.zig
