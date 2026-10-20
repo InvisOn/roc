@@ -1034,6 +1034,19 @@ Done 2026-09-29, locally (nothing pushed).
   at the 24 GiB memory cap and used 38,441 CPU seconds. The qemu eval
   peaked at 4.3 GiB and used 22,335 CPU seconds.
   Logs: `.git/verify-tools/upstream-sync/cf05860a7c/`.
+- 2026-10-21, merge `69684181bc` of upstream `main` at `5fc587cf51` (1
+  merged pull request, no conflicts). No fix to compiler code. Checks:
+  relative 64-bit oracle PASS, nothing differs. minici ran under a 20 GiB
+  memory cap, down from 24 GiB. Sections 1 to 88 passed in one run. Then
+  the cap stopped section 89, `run-test-strategy-differential`, because its
+  16 worker processes need more than 20 GiB together. That section passed
+  on its own with `--threads 8` (peak 17.9 GiB), and sections 90 to 98
+  passed one at a time after it. The arm32 eval corpus under qemu gives
+  2578 passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
+  `test/fx` 133/133 under qemu, on the Raspberry Pi 5 and on the Pi 3. The
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
+  lines.
+  Logs: `.git/verify-tools/upstream-sync/5fc587cf51/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
