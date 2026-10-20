@@ -1,17 +1,17 @@
 # Draft: Dev backend: is the padding after a tag union's discriminant always zero?
 
-> **Upstream or ours:** Upstream's code. Not confirmed as a bug.
+> **Upstream or ours:** Upstream's code. Probably not a bug: see "What we found" below.
 
-> **Relevance to our arm32 work:** None in particular. We noticed it while reading the backend and never confirmed it.
+> **Relevance to our arm32 work:** None in particular. We noticed it while reading the backend.
 
 Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Unconfirmed (2026-10-20, upstream `main` at `5fc587cf51`). Nobody has built a case that reads a wrong tag. |
+| Still an issue? | Probably not (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). The 8-byte load is used only when a discriminant is read into a `U64` local, and upstream's lowering always reads discriminants into `U32` locals. |
 | Already upstream? | No issue or PR found (searched 2026-10-20). |
 | Fixed on our reference branch? | No. |
-| Before filing | Build a tag union whose 4-byte discriminant is followed by non-zero padding, and see whether the tag is read wrong. Don't file before that. |
+| Before filing | Probably don't file. At most, ask whether the backend should assert that a discriminant is never read into a `U64`. |
 
 ---
 
@@ -19,30 +19,32 @@ Not filed. For roc-lang/roc.
 
 **What might happen**
 
-On the 64-bit targets, the dev backend usually loads a tag union's discriminant as 8 bytes. It masks the loaded value only when the discriminant is smaller than 4 bytes. For a 4-byte discriminant, the upper 4 bytes of the load come from the padding after it. If that padding is not always zero, the comparison could see the wrong tag.
+`loadAndMaskDiscriminant` loads a tag union's discriminant as 4 or 8 bytes. It masks the loaded value only when the discriminant is smaller than 4 bytes. If it loads 8 bytes for a 4-byte discriminant, the upper 4 bytes come from the padding after it. If that padding is not zero, the comparison could see the wrong tag.
 
-**Question**
+**What we found**
 
-Is the padding after a discriminant guaranteed to be zero? If so, this is fine, and a comment saying so would help. If not, the load needs a mask.
+The load is 8 bytes only when the discriminant is read into a `U64` local. Every place in upstream's lowering that reads a discriminant uses a `U32` local, so the load is 4 bytes and no padding is read. A 4-byte discriminant also needs more than 65,536 variants.
+
+The other place that loads a discriminant, the refcount helper for tag unions, loads 8 bytes but then masks to the discriminant's size, so it is safe too.
+
+So the problem can't happen with LIR that upstream produces today. It could only happen with LIR that reads a 4-byte discriminant into a `U64` local.
 
 **Where** (upstream `main` at `5fc587cf51`)
 
 - `src/backend/dev/LirCodeGen.zig:11351-11424`, `loadAndMaskDiscriminant`. It loads 8 bytes (`.w64`) unless `disc_use_w32` is set (lines 11366-11389). It masks only when the discriminant is smaller than 4 bytes (lines 11410-11421).
-- `LirCodeGen.zig:12795`. `disc_use_w32` is set only when an 8-byte load would run past the end of the value.
-
-**Why it matters**
-
-If the padding can hold non-zero bytes, a `match` on such a tag union could quietly take the wrong branch.
+- `LirCodeGen.zig:13362-13376`, `generateDiscriminantAccess`. It passes `disc_use_w32 = target_layout != .u64`, so it loads 4 bytes unless the target local is a `U64`.
+- `src/postcheck/solved_lir_lower.zig:8387`, `10348`, `10888`, `11884`, `12019-12020`, `12066`, `13005` and `13338`. Each creates a discriminant local with layout `.u32`.
+- `LirCodeGen.zig:12795-12818`, the tag-union refcount helper. It loads 8 bytes when there is room, then masks to the discriminant's size (lines 12813-12818).
 
 **How to reproduce**
 
-Not reproduced. The code in question:
+Not reproduced. Upstream's lowering doesn't produce the LIR that would trigger it.
 
 ```sh
 grep -n -A30 'fn loadAndMaskDiscriminant' src/backend/dev/LirCodeGen.zig
+grep -n 'disc.target_layout != .u64' src/backend/dev/LirCodeGen.zig
+grep -n 'RefOp.discriminant' src/postcheck/solved_lir_lower.zig
 ```
-
-A reproduction needs a tag union whose 4-byte discriminant is followed by padding that holds non-zero bytes.
 
 **Environment**
 
