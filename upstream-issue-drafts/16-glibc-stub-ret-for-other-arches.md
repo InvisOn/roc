@@ -42,6 +42,32 @@ grep -n 'ret' src/build/glibc_stub.zig
 
 It shows `ret` written for `.aarch64_be, .arm, .wasm32, .other`.
 
+**A test that fails** (run on upstream `main` at `5fc587cf51`). Append to `src/build/glibc_stub.zig`:
+
+```zig
+test "the 32-bit ARM glibc stub uses A32 returns" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try generateComprehensiveStub(&aw.writer, .arm);
+    // `ret` is not an A32 instruction; the assembler rejects it ("invalid instruction").
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "    ret\n") == null);
+}
+```
+
+The file imports `../target/mod.zig`, so run it through a root in `src/`:
+
+```sh
+printf 'test {\n    _ = @import("build/glibc_stub.zig");\n}\n' > src/probe_glibc_stub.zig
+zig test src/probe_glibc_stub.zig --test-filter "32-bit ARM glibc stub"
+```
+
+Output: `src/build/glibc_stub.zig:156:5 ... try std.testing.expect(...)`, `2 passed; 0 skipped; 1 failed.` The assembler confirms `ret` is not A32:
+
+```
+$ printf '.text\n.globl f\nf:\n    ret\n' > s.s && zig cc -target arm-linux-musleabihf -c s.s
+s.s:4:5: error: invalid instruction, did you mean: rev?
+```
+
 **Environment**
 
 - OS: Pop!_OS 24.04 LTS, x86_64
