@@ -27,7 +27,7 @@ Checked 2026-10-02 against upstream `main` at `d16a6598e4`.
 
 - `src/build/check_runner.zig:193-225`, `excluded_ranges`; the `inspected.zig` entries are at lines 211 (226-232), 214 (2474) and 217 (3264-3275).
 - `src/eval/inspected.zig` is 3255 lines: 2474 is a lone `}` and 3264-3275 is past the end of the file.
-- `check_runner.zig:208` names `cir_to_lir.zig`, which no longer exists; `:216` points at `inspected_run.zig:109`, a blank line.
+- `check_runner.zig:208` names `cir_to_lir.zig`, which no longer exists; `:220` points at `inspected_run.zig:109`, a blank line.
 - Used at `check_runner.zig:231`.
 
 **Why it matters**
