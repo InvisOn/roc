@@ -43,6 +43,41 @@ grep -rn 'has no recursive-graph key' src/layout             # the panic it lead
 
 To trigger it, hand a loaded LIR image of a program with a recursive type (for example a `Tree` holding `Box(Tree)`) to the object-file compiler.
 
+A test that shows it (untested; append to `src/lir/lir_image.zig`, run with `zig build test` filtered to it). It commits `Node := [Nil, Cons(Box(Node))]` into a program's layouts, copies the program into an image, views it, and digests the root layout; in a Debug build `layout/digest.zig:108` fires:
+
+```zig
+test "a viewed LIR image digests a recursive layout" {
+    const allocator = std.testing.allocator;
+    var program = try Program.Result.init(allocator, .u64);
+    defer program.deinit();
+
+    // `Node := [Nil, Cons(Box(Node))]`, as in layout/digest.zig's tests.
+    var graph = layout_mod.Graph{};
+    defer graph.deinit(allocator);
+    const union_node = try graph.reserveNode(allocator);
+    const box_node = try graph.reserveNode(allocator);
+    graph.setNode(box_node, .{ .box = .{ .local = union_node } });
+    graph.setNode(union_node, .{ .tag_union = try graph.appendRefs(allocator, &[_]layout_mod.GraphRef{ .{ .canonical = .zst }, .{ .local = box_node } }) });
+    var commit = try program.layouts.commitGraph(&graph, .{ .local = union_node });
+    defer commit.deinit(allocator);
+    const root = commit.root_idx;
+    const expected = try program.layouts.contentDigest(root); // fine: the source store has the key
+
+    const memory = try allocator.alignedAlloc(u8, .@"16", 1 << 16);
+    defer allocator.free(memory);
+    var fixed = std.heap.FixedBufferAllocator.init(memory);
+    const header = try fixed.allocator().create(Header);
+    const copied = try copyProgramWithStaticDataIntoBuffer(fixed.allocator(), memory.ptr, memory.len, .mapped, &program, &.{}, &.{});
+    try copied.fillHeader(header, fixed.end_index);
+    var view = try viewMappedImageWithAllocator(header, memory.ptr, fixed.end_index, .u64, allocator);
+    defer view.deinit();
+
+    // The viewed store's `interned_recursive_graphs` is empty (line 388), so
+    // this hits "cyclic layout ... has no recursive-graph key".
+    try std.testing.expectEqualSlices(u8, &expected, &(try view.layouts.contentDigest(root)));
+}
+```
+
 **Environment**
 
 - OS: Pop!_OS 24.04 LTS, x86_64
