@@ -8,8 +8,8 @@ Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
-| Already upstream? | No issue or PR found (searched 2026-10-20). #11430 (closed) was a different reproducibility bug. Open PR #12463 changes the key's shape but keeps the compiler hash in it. |
+| Still an issue? | Yes (2026-10-21, upstream `main` at `534956997e`, by reading the code). |
+| Already upstream? | No issue or PR found (searched 2026-10-21). #11430 (closed) was a different reproducibility bug. PR #12463 would have changed the key's shape but kept the compiler hash in it. It was closed without merging on 2026-10-20. |
 | Fixed on our reference branch? | No. Our test oracle renames symbols before comparing (`ProcIdentity.canonicalizeSymbolNames`). |
 | Before filing | Nothing. It is a design question more than a bug. |
 
@@ -25,10 +25,10 @@ Every checked-artifact key includes a hash of the compiler build itself. Procedu
 
 Is the compiler hash meant to reach symbol names, or only cache keys? If only cache keys, symbol names could be made without it.
 
-**Where** (upstream `main` at `5fc587cf51`)
+**Where** (upstream `main` at `534956997e`)
 
-- `src/check/checked_artifact.zig:144` puts `build_options.compiler_artifact_hash` into every checked-artifact key. It is hashed at line 178, in `computeCheckedArtifactKeyBytes` (line 168).
-- `src/lir/LIR.zig:67` and `94-96`. Procedure symbols are named `roc__p` followed by a digest (`ProcIdentity.writeSymbolName`), and that digest changes with the key.
+- `src/check/checked_artifact.zig:144` puts `build_options.compiler_artifact_hash` into every checked-artifact key. It is hashed at line 164, in `computeCheckedArtifactKeyBytes` (line 155).
+- `src/lir/LIR.zig:67` and `94-98`. Procedure symbols are named `roc__p` followed by a digest (`ProcIdentity.writeSymbolName`), and that digest changes with the key.
 
 **Why it matters**
 
