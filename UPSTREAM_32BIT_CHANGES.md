@@ -1,6 +1,6 @@
 # Roc on 32-bit: upstream changes needed
 
-As of 2026-10-21, upstream `main` at `5fc587cf51`.
+As of 2026-10-21, upstream `main` at `73df27a5bb`.
 
 Upstream Roc's dev backend assumes an 8-byte machine word, and in several
 places it takes the size of the target's data from the machine the compiler
@@ -43,7 +43,7 @@ version produce byte-identical x86_64 and aarch64 output.
 | `src/backend/dev/CallingConvention.zig:354, 616, 669` | Asserts an address argument (`.from_lea`) is 8 bytes. | Expect the target's word size. |
 | `src/backend/dev/Relocation.zig:191-198, 255-266` | Recognizes a call to patch by guessing from the bytes: `0xE8` before the operand means x86_64; a 4-byte site means an aarch64 branch. | Pass in the instruction set the code was built for. On 32-bit ARM, ordinary instructions can begin with `0xE8`, so the guess patches the wrong bytes. |
 | `src/backend/dev/Relocation.zig:329-337` | Chooses the width of an absolute-address patch (`abs64`) from the compiler machine's `usize`. | Use the width of the target's addresses. |
-| `src/snapshot_tool/main.zig:3939` | The `dev_object` snapshot check lists only the 64-bit architectures. | Ask the dev backend which targets it supports, so 32-bit snapshots are checked too. |
+| `src/snapshot_tool/main.zig:3953` | The `dev_object` snapshot check lists only the 64-bit architectures. | Ask the dev backend which targets it supports, so 32-bit snapshots are checked too. |
 | `src/build/glibc_stub.zig:24, 93` | Writes `ret` for 32-bit ARM, which has no such instruction. | Write `bx lr` for 32-bit ARM. |
 
 ## 2. The compiler running on a 32-bit computer
@@ -87,6 +87,6 @@ Raspberry Pi. Run qemu with `-s 64M`.
 Each row matches a change on our arm32 reference branch
 (`projects/big/arm32-dev-backend-existing-code-changes.md` lists every one,
 with its commit). Every file and line above was then looked up again in
-upstream `main` at `5fc587cf51` with `git grep` and `git show`. The counts in
+upstream `main` at `73df27a5bb` with `git grep` and `git show`. The counts in
 the whole-file row are raw pattern counts: candidates to review, not all of
 them bugs.
