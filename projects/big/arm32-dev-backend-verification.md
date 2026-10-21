@@ -1047,6 +1047,17 @@ Done 2026-09-29, locally (nothing pushed).
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
   lines.
   Logs: `.git/verify-tools/upstream-sync/5fc587cf51/`.
+- 2026-10-21, merge `2f5d8e3685` of upstream `main` at `73df27a5bb` (4
+  merged pull requests, no conflicts). No fix to compiler code. Checks:
+  relative 64-bit oracle PASS, nothing differs. minici under the 20 GiB
+  cap: every section except `run-test-strategy-differential` passed (97
+  passed, that one left out). That section then passed alone with
+  `--threads 8` (peak 17.4 GiB). The arm32 eval corpus under qemu gives
+  2578 passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
+  `test/fx` 133/133 under qemu, on the Raspberry Pi 5 and on the Pi 3. The
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
+  lines.
+  Logs: `.git/verify-tools/upstream-sync/73df27a5bb/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
