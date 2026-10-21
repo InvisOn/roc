@@ -8,10 +8,10 @@ Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). The test below is not run yet. |
+| Still an issue? | Yes (2026-10-21, upstream `main` at `534956997e`). The test below fails there, as expected. |
 | Already upstream? | No issue or PR found (searched 2026-10-20). |
 | Fixed on our reference branch? | No. |
-| Before filing | Run the test below and add its output. |
+| Before filing | Ready. |
 
 ---
 
@@ -21,10 +21,10 @@ Not filed. For roc-lang/roc.
 
 `list_get_unsafe` takes a list and an index. If the index is an i128 or Dec value, the dev backend loads its low 64 bits and carries on. An index of that type can only come from a bug in an earlier compiler stage. The backend hides that bug instead of reporting it. AGENTS.md forbids this kind of recovery in the backend.
 
-**Where** (upstream `main` at `5fc587cf51`)
+**Where** (upstream `main` at `534956997e`)
 
-- `src/backend/dev/LirCodeGen.zig:2228-2231`, in `generateLowLevel` (line 1850). When the index is on the stack as an i128 (`.stack_i128`), it loads the low 64 bits. The comment says "Dec/i128 index - just load the low 64 bits as U64".
-- `LirCodeGen.zig:2232-2236`. An i128 constant (`.immediate_i128`) is cut to 64 bits the same way.
+- `src/backend/dev/LirCodeGen.zig:2230-2233`, in `generateLowLevel` (line 1852). When the index is on the stack as an i128 (`.stack_i128`), it loads the low 64 bits. The comment says "Dec/i128 index - just load the low 64 bits as U64".
+- `LirCodeGen.zig:2234-2238`. An i128 constant (`.immediate_i128`) is cut to 64 bits the same way.
 
 **Why it matters**
 
@@ -32,7 +32,7 @@ An index of the wrong type means an earlier stage produced wrong LIR. Cutting it
 
 **How to reproduce**
 
-No Roc program is known to produce such an index. A test that builds the LIR by hand should show it (not run yet; append it to `src/backend/dev/LirCodeGen.zig`). It makes the list `[10, 20, 30]` and reads it at index 2^64 + 1. The backend keeps only the low 64 bits, which is 1, and returns 20.
+No Roc program is known to produce such an index. A test that builds the LIR by hand should show it (append it to `src/backend/dev/LirCodeGen.zig`). It makes the list `[10, 20, 30]` and reads it at index 2^64 + 1. The backend keeps only the low 64 bits, which is 1, and returns 20.
 
 ```zig
 test "list_get_unsafe does not read through a truncated i128 index" {
@@ -95,7 +95,23 @@ test "list_get_unsafe does not read through a truncated i128 index" {
 }
 ```
 
+Run it with:
+
+```sh
+zig build run-test-zig-module-backend -- --test-filter "list_get_unsafe does not read through a truncated i128 index"
+```
+
+Output at `534956997e`. The test fails because the backend returned 20:
+
+```
+run-test-zig-module-backend
++- run test backend 0 pass, 1 fail (1 total)
+error: 'dev.LirCodeGen.test.list_get_unsafe does not read through a truncated i128 index' failed:
+       Cannot print stack trace: stack tracing is disabled
+Build Summary: 15/17 steps succeeded (1 failed); 0/1 tests passed (1 failed)
+```
+
 **Environment**
 
 - OS: Pop!_OS 24.04 LTS, x86_64
-- Roc compiler version `release-fast-a932c654`
+- Upstream `main` at `534956997e`, Zig 0.17.0
