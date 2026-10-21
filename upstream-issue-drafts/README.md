@@ -22,6 +22,7 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 | `25-macos-15-intel-glue-failures.md` | no | unknown: `zig-tests (macos-15-intel)` was cancelled after 6 h on 2026-10-19; the `LlvmBackendUnavailable` part now shows in `eval-llvm (macos-15)` | none | not ours (upstream CI) |
 | `26-stale-line-number-exclusions.md` | no | yes, four stale entries (checked by a script in the draft): `cir_to_lir.zig` no longer exists; `inspected.zig` 2474 is a `}` and 3264-3275 is past its 3255 lines; `inspected_run.zig` 109 is blank | none | no; same stale ranges, shifted by one (`check_runner.zig:211-217`) |
 | `27-minici-artifact-download.md` | no | yes (2026-10-02); minor | none | not ours (upstream CI) |
+| `33-curried-lambdas-memory-regression.md` | no | yes (2026-10-21, upstream `main` `534956997e`, measured on x86_64 and arm32) | no open issue. Closed #11997 fixed the same test's quadratic cost; this looks like part of it coming back | no; not ours. It blocks our sync of `534956997e` |
 | 01: Default-platform glibc programs built with `--opt=dev` crash at startup (removed) | yes, #11995 (closed) | — | — | — |
 | 04: A passing backend unit test prints a WASM merge message that zig build shows as a failed command (removed) | yes, #12200 (closed) | — | — | — |
 | 05: Relocation patching guesses the instruction set from the code bytes (removed) | yes, #12479 (open) | — | — | — |
