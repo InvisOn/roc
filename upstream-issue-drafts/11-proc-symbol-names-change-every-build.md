@@ -36,17 +36,17 @@ A test that compares a real program's machine code byte for byte would fail on t
 
 **How to reproduce**
 
-Build `roc` at two different commits and compare the symbol names in the same program. The second build is a full rebuild.
+Build `roc` at two different commits and compare the symbol names in the same program. The built program keeps its symbols, so `nm` can read them directly. The second `zig build roc` is a full rebuild.
 
 ```sh
-zig build
+zig build roc
 zig build update-test-fixtures    # copies the test platform's host libraries into the checkout
-./zig-out/bin/roc build --opt=dev --no-cache --keep-temp --output=/tmp/int1 test/int/app.roc
-nm <kept directory it prints>/roc_app_*.o | grep roc__p | head -3
+./zig-out/bin/roc build --opt=dev --no-cache --output=/tmp/int1 test/int/app.roc
+nm /tmp/int1 | grep roc__p | sort -k3 | head -3
 git commit --allow-empty -m probe && zig build roc
-./zig-out/bin/roc build --opt=dev --no-cache --keep-temp --output=/tmp/int2 test/int/app.roc
-nm <new kept directory>/roc_app_*.o | grep roc__p | head -3    # different digests
-git reset --hard HEAD~1                                        # drop the probe commit
+./zig-out/bin/roc build --opt=dev --no-cache --output=/tmp/int2 test/int/app.roc
+nm /tmp/int2 | grep roc__p | sort -k3 | head -3    # different digests
+git reset --hard HEAD~1                            # drop the probe commit
 ```
 
 The cause: `grep -n compiler_artifact_hash src/check/checked_artifact.zig`.
