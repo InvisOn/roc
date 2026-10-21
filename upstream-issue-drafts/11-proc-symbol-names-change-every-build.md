@@ -40,6 +40,7 @@ Build `roc` at two different commits and compare the symbol names in the same pr
 
 ```sh
 zig build
+zig build update-test-fixtures    # copies the test platform's host libraries into the checkout
 ./zig-out/bin/roc build --opt=dev --no-cache --keep-temp --output=/tmp/int1 test/int/app.roc
 nm <kept directory it prints>/roc_app_*.o | grep roc__p | head -3
 git commit --allow-empty -m probe && zig build roc
