@@ -148,6 +148,7 @@ const DevError = Allocator.Error || error{
     Internal,
     MmapFailed,
     MprotectFailed,
+    FlushInstructionCacheFailed,
     UnsupportedPlatform,
     UnwindRegistrationFailed,
     VirtualAllocFailed,

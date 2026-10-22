@@ -4592,6 +4592,7 @@ fn isTypeCheckError(err: SnapshotError) bool {
         error.MonoFormattingFailed,
         error.MonoValidationFailed,
         error.MprotectFailed,
+        error.FlushInstructionCacheFailed,
         error.NameTooLong,
         error.NetworkNotFound,
         error.NoBitcodeModules,

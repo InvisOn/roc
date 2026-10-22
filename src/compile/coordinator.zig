@@ -6073,6 +6073,7 @@ pub const Coordinator = struct {
             error.LockedMemoryLimitExceeded,
             error.MmapFailed,
             error.MprotectFailed,
+            error.FlushInstructionCacheFailed,
             error.SystemResources,
             error.ThreadQuotaExceeded,
             error.Unexpected,
