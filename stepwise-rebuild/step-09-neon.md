@@ -52,7 +52,7 @@ Test counts: to be measured.
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-09-neon.md` on the
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-09-neon.md` on the
 > `notes` branch. Build step 9 on top of step 8 with its holes, and guide
 > me through them.
 

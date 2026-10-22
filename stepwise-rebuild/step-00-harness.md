@@ -40,7 +40,7 @@ anything in `LirCodeGen.zig`.
 
 `.git/verify-tools/roc/hw_checks.roc` on the first PC runs every arm32
 check under the memory cap and prints one summary. It hard-codes paths
-from an old session. Claude turns it into a script in the series worktree
+from an old session. Claude turns it into a script in the stepwise-rebuild worktree
 that takes the board names and output folder as arguments.
 
 ## Mirrors
@@ -75,8 +75,8 @@ Test counts: to be measured (eval under qemu: 0 of about 2,580 pass).
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-00-harness.md` on
-> the `notes` branch of InvisOn/roc. Build step 0 on the series branch:
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-00-harness.md` on
+> the `notes` branch of InvisOn/roc. Build step 0 on the stepwise-rebuild branch:
 > cut its files from `git diff 73df27a5bb 2f5d8e3685`, write the stub, and
 > tidy the hw_checks driver into a script. Propose each commit, I write
 > it. Then measure the counts and update the step file.

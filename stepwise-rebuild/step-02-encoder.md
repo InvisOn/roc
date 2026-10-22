@@ -71,7 +71,7 @@ Test counts: to be measured. On the holes branch, with every hole open,
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-02-encoder.md` on
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-02-encoder.md` on
 > the `notes` branch. Build step 2 on top of step 1 with the thirteen
 > holes, then guide me: the blank-page exercise first, then the holes in
 > order. Give hints in three levels, and never show the reference unless

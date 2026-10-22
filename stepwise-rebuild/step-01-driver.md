@@ -70,7 +70,7 @@ Test counts: arm32 unchanged from step 0. 64-bit hashes: identical.
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-01-driver.md` on
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-01-driver.md` on
 > the `notes` branch. Build step 1 on top of step 0. Cut the driver
 > changes from `git diff 73df27a5bb 2f5d8e3685`, write the arm32 CodeGen
 > stub, and prove the 64-bit output is unchanged. Walk me through
