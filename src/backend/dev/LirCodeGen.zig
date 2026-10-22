@@ -2225,15 +2225,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                             const off = s.offset;
                             try self.codegen.emitLoadStack(.w64, index_reg, off);
                         },
-                        .stack_i128 => |off| {
-                            // Dec/i128 index - just load the low 64 bits as U64
-                            try self.codegen.emitLoadStack(.w64, index_reg, off);
-                        },
-                        .immediate_i128 => |val| {
-                            // i128 immediate - truncate to 64 bits for index
-                            const low: u64 = @truncate(@as(u128, @bitCast(val)));
-                            try self.codegen.emitLoadImm(index_reg, @bitCast(low));
-                        },
+                        // A list index is a U64. An i128 or Dec index means an
+                        // earlier stage produced the wrong LIR, so the backend
+                        // must not cut it down to 64 bits and carry on.
+                        .stack_i128,
+                        .immediate_i128,
+                        => base.invariant(
+                            "LIR/codegen invariant violated: list_get_unsafe index is a {s} location, but list indices are U64",
+                            .{@tagName(index_loc)},
+                        ),
                         .float_reg,
                         .vector_reg,
                         .stack_str,
@@ -26140,4 +26140,64 @@ test "branch location checkpoints restore only changed bindings in a wide proced
     try codegen.setLocalLocation(8, .{ .immediate_i64 = 500 });
     codegen.restoreStmtEnv(&outer);
     try std.testing.expectEqual(@as(i64, 8), codegen.local_locations.get(8).?.immediate_i64);
+}
+
+/// Builds `[10, 20, 30]` and reads it at index 2^64 + 1, an i128 that no list
+/// index can be, so list_get_unsafe must reject it rather than read element 1.
+fn readListAtI128Index() anyerror!void {
+    const allocator = std.testing.allocator;
+    var store = LirStore.init(allocator);
+    defer store.deinit();
+    var test_state = try TestLayoutState.init(allocator);
+    defer test_state.deinit();
+
+    const list_layout = try test_state.layout_store.insertLayout(layout.Layout.list(.u64));
+    const elems = [_]i64{ 10, 20, 30 };
+    var elem_locals: [elems.len]LocalId = undefined;
+    for (&elem_locals) |*local| local.* = try addLocal(&store, .u64);
+    const list = try addLocal(&store, list_layout);
+    const index = try addLocal(&store, .i128);
+    const result = try addLocal(&store, .u64);
+
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = result } }, .test_fixture);
+    const drop_list = try store.addCFStmt(.{ .decref = .{
+        .value = list,
+        .rc = try store.addRcHelperRef(LIR.RcHelper.fromConcrete(.{ .op = .decref, .layout_idx = list_layout })),
+        .next = ret,
+    } }, .test_fixture);
+    const get = try store.addCFStmt(.{ .assign_low_level = .{
+        .target = result,
+        .op = .list_get_unsafe,
+        .rc_effect = try store.addRcEffect(lir.LowLevel.list_get_unsafe.rcEffect()),
+        .args = try store.addLocalSpan(&.{ list, index }),
+        .next = drop_list,
+    } }, .test_fixture);
+    const index_stmt = try store.addCFStmt(.{ .assign_literal = .{
+        .target = index,
+        .value = .{ .i128_literal = try store.addStmtRow(LIR.I128Literal, .{ .value = (1 << 64) + 1, .layout_idx = .i128 }) },
+        .next = get,
+    } }, .test_fixture);
+    var current = try store.addCFStmt(.{ .assign_list = .{
+        .target = list,
+        .elems = try store.addLocalSpan(&elem_locals),
+        .next = index_stmt,
+    } }, .test_fixture);
+    var i: usize = elems.len;
+    while (i > 0) {
+        i -= 1;
+        current = try store.addCFStmt(.{ .assign_literal = .{
+            .target = elem_locals[i],
+            .value = .{ .i64_literal = .{ .value = elems[i], .layout_idx = .u64 } },
+            .next = current,
+        } }, .test_fixture);
+    }
+    const root_proc = try addNoArgProc(&store, current, .u64);
+    _ = try runRootU64(&store, &test_state.layout_store, root_proc, .u64);
+}
+
+test "list_get_unsafe rejects an i128 index instead of truncating it" {
+    if (comptime builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64) {
+        return error.SkipZigTest;
+    }
+    try base.death_test.expectPanic("list_get_unsafe index is a", readListAtI128Index, .{});
 }
