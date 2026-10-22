@@ -22,6 +22,8 @@ pub const applyRelocationsWithContext = relocation_mod.applyRelocationsWithConte
 pub const SymbolResolver = relocation_mod.SymbolResolver;
 pub const SymbolResolverContext = relocation_mod.SymbolResolverContext;
 pub const ValueStorage = @import("ValueStorage.zig");
+/// Publishes newly written instructions (the I-cache/D-cache protocol).
+pub const instruction_cache = @import("instruction_cache.zig");
 pub const ObjectWriter = @import("ObjectWriter.zig");
 pub const Dwarf = @import("Dwarf.zig");
 

@@ -24158,7 +24158,7 @@ fn compileRootWith(
     };
 }
 
-fn runRootI64(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.LirProcSpecId) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!i64 {
+fn runRootI64(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.LirProcSpecId) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!i64 {
     const allocator = std.testing.allocator;
     const compiled = try compileRoot(store, layout_store, root_proc, .i64);
     defer allocator.free(compiled.code);
@@ -24176,7 +24176,7 @@ fn runRootI64(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.
     return out;
 }
 
-fn runRootU64(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.LirProcSpecId, ret_layout: layout.Idx) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
+fn runRootU64(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.LirProcSpecId, ret_layout: layout.Idx) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
     const allocator = std.testing.allocator;
     const compiled = try compileRoot(store, layout_store, root_proc, ret_layout);
     defer allocator.free(compiled.code);
@@ -24194,7 +24194,7 @@ fn runRootU64(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.
     return out;
 }
 
-fn runRootU8(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.LirProcSpecId, ret_layout: layout.Idx) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u8 {
+fn runRootU8(store: *LirStore, layout_store: *layout.Store, root_proc: lir.LIR.LirProcSpecId, ret_layout: layout.Idx) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u8 {
     const allocator = std.testing.allocator;
     const compiled = try compileRoot(store, layout_store, root_proc, ret_layout);
     defer allocator.free(compiled.code);
@@ -24217,7 +24217,7 @@ fn runRootFloatBits(
     layout_store: *layout.Store,
     root_proc: lir.LIR.LirProcSpecId,
     ret_layout: layout.Idx,
-) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
+) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
     const allocator = std.testing.allocator;
     const compiled = try compileRoot(store, layout_store, root_proc, ret_layout);
     defer allocator.free(compiled.code);
@@ -25487,7 +25487,7 @@ test "generate shift right zero-fill" {
 // (as an unsigned bit pattern), so both signed and unsigned expectations can be
 // compared directly.
 const ShiftHarness = struct {
-    fn run(op: lir.LowLevel, lhs: i64, rhs: i64, operand_layout: layout.Idx, comptime width: u7) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
+    fn run(op: lir.LowLevel, lhs: i64, rhs: i64, operand_layout: layout.Idx, comptime width: u7) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!u64 {
         const allocator = std.testing.allocator;
         var store = LirStore.init(allocator);
         defer store.deinit();
@@ -25848,7 +25848,7 @@ fn runHostedRootOverDirtyStack(
     layout_store: *layout.Store,
     root: lir.LIR.LirProcSpecId,
     hosted: builtins.host_abi.HostedFn,
-) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!void {
+) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!void {
     const allocator = std.testing.allocator;
     const HostedResolver = struct {
         fn resolve(context: *const anyopaque, _: []const u8) ?usize {

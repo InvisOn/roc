@@ -4505,6 +4505,7 @@ fn isTypeCheckError(err: SnapshotError) bool {
         error.FileNotFound,
         error.FileSystem,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.FtruncateFailed,
         error.HostedFunctionNotBound,
         error.InputOutput,
