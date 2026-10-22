@@ -383,8 +383,8 @@ fn expectLinkerOwnedReferences(comptime width: AddressWidth) (Allocator.Error ||
     const gpa = std.testing.allocator;
     const files = [_][]const u8{"main"};
     const entries = [_]LineEntry{
-        .{ .offset = 0, .loc = .{ .file = 0, .line = 3, .column = 1 } },
-        .{ .offset = 16, .loc = .{ .file = 0, .line = 4, .column = 5 } },
+        .{ .offset = 0, .loc = .{ .file = 0, .line = 3, .column = 1 }, .region = base.Region.zero() },
+        .{ .offset = 16, .loc = .{ .file = 0, .line = 4, .column = 5 }, .region = base.Region.zero() },
     };
     const procs = [_]ProcEntry{
         .{ .name = "roc_proc_0", .code_start = 0, .code_size = 32, .loc = .{ .file = 0, .line = 3, .column = 1 } },
