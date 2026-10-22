@@ -56,7 +56,7 @@ Test counts: to be measured.
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-05-wide64.md` on
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-05-wide64.md` on
 > the `notes` branch. Build step 5 on top of step 4 with its holes.
 > Start by explaining D6 to me with one example traced through the
 > generated code.

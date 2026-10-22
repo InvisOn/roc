@@ -60,7 +60,7 @@ Test counts: to be measured (fx under qemu).
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-07-objects.md` on
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-07-objects.md` on
 > the `notes` branch. Build step 7 on top of step 6 with its holes. Plant
 > one bug hunt in the relocation code after I finish.
 

@@ -1,8 +1,9 @@
-# The arm32 series: rebuilding the backend step by step
+# Stepwise Rebuild: the arm32 backend, step by step
 
-Written 2026-10-22. This folder plans how I build the arm32 dev backend
-myself, in eleven steps (0 to 10), with the reference as the source. Each
-step has its own file with everything a new conversation needs to start it.
+Written 2026-10-22, and named Stepwise Rebuild the same day. This folder
+plans how I build the arm32 dev backend myself, in eleven steps (0 to
+10), with the reference as the source. Each step has its own file with
+everything a new conversation needs to start it.
 
 ## Why a rebuilt series
 
@@ -45,7 +46,7 @@ own.
 git clone git@github.com:InvisOn/roc.git roc && cd roc
 git remote add upstream https://github.com/roc-lang/roc.git
 git fetch upstream && git fetch origin
-git worktree add ../roc-series -b arm32-series 73df27a5bb   # or reuse dev-backend-aarch32
+git worktree add ../roc-stepwise -b stepwise-rebuild 73df27a5bb   # or reuse dev-backend-aarch32
 git worktree add ../roc-notes notes
 ```
 

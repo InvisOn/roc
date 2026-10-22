@@ -65,7 +65,7 @@ Test counts: to be measured.
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-03-codegen-frames.md`
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-03-codegen-frames.md`
 > on the `notes` branch. Build step 3 on top of step 2. Propose the final
 > hole list first, then build it, measure the counts and guide me through
 > the holes.

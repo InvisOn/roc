@@ -54,7 +54,7 @@ Test counts: to be measured.
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-08-native.md` on
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-08-native.md` on
 > the `notes` branch. Build step 8 on top of step 7 with its holes, and
 > guide me through them.
 

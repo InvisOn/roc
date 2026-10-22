@@ -64,8 +64,8 @@ Test counts: to be measured.
 
 ## Prompt
 
-> Read `arm32-series/README.md` and
-> `arm32-series/step-04-calling-convention.md` on the `notes` branch.
+> Read `stepwise-rebuild/README.md` and
+> `stepwise-rebuild/step-04-calling-convention.md` on the `notes` branch.
 > Build step 4 on top of step 3 with its holes. Before I start, have me
 > explain AAPCS32 rules C.3 and C.5 back to you from the spec.
 

@@ -44,7 +44,7 @@ Test counts: to be measured.
 
 ## Prompt
 
-> Read `arm32-series/README.md` and `arm32-series/step-10-hardware.md` on
+> Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-10-hardware.md` on
 > the `notes` branch. Run step 10 on top of step 9: the hardware checks on
 > both Pis, then review my walkthrough.
 
