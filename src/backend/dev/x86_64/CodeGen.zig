@@ -610,7 +610,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
             return switch (index) {
                 0 => .XMM0,
                 1 => .XMM1,
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: hosted float result index {d} exceeds the return registers", .{index}),
             };
         }
 
@@ -621,7 +621,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
                 4 => try self.emit.movssMemReg(Emit.CC.BASE_PTR, dst_off, freg),
                 8 => try self.emit.movsdMemReg(Emit.CC.BASE_PTR, dst_off, freg),
                 16 => try self.emit.movdquMemReg(Emit.CC.BASE_PTR, dst_off, freg),
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: hosted float result piece has size {d}", .{size}),
             }
         }
 
@@ -974,7 +974,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
                 4 => try self.emit.movssMemReg(Emit.CC.BASE_PTR, dest_off, freg),
                 8 => try self.emit.movsdMemReg(Emit.CC.BASE_PTR, dest_off, freg),
                 16 => try self.emit.movdquMemReg(Emit.CC.BASE_PTR, dest_off, freg),
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: entry float argument has size {d}", .{size}),
             }
         }
 
@@ -987,7 +987,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
                 4 => try self.emit.movssRegMem(freg, Emit.CC.BASE_PTR, src_off),
                 8 => try self.emit.movsdRegMem(freg, Emit.CC.BASE_PTR, src_off),
                 16 => try self.emit.movdquRegMem(freg, Emit.CC.BASE_PTR, src_off),
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: entry float return piece has size {d}", .{size}),
             }
         }
 

@@ -138,7 +138,7 @@ fn fundamentalKind(store: *const Store, idx: Idx) ?Fundamental {
             };
         },
         .list, .list_of_zst, .struct_, .closure => null,
-        .zst => unreachable,
+        .zst => unreachable, // classifyType asserts a nonzero size, and placement returns .none for zero-sized values first
     };
 }
 

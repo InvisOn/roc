@@ -28,7 +28,7 @@ pub const DataRelocationKind = enum {
         return switch (self) {
             .arm_movw_prel => -16,
             .arm_movt_prel => -12,
-            .abs64, .rel32, .page21, .pageoff12, .abs32 => unreachable,
+            .abs64, .rel32, .page21, .pageoff12, .abs32 => unreachable, // called only for arm_movw_prel and arm_movt_prel, from patchArmMovPrel and the matching ELF prongs
         };
     }
 };
@@ -294,7 +294,7 @@ fn patchArmMovPrel(code: []u8, inst_offset: usize, inst_addr: usize, target_addr
     const imm16: u32 = switch (kind) {
         .arm_movw_prel => bits & 0xFFFF,
         .arm_movt_prel => bits >> 16,
-        .abs64, .rel32, .page21, .pageoff12, .abs32 => unreachable,
+        .abs64, .rel32, .page21, .pageoff12, .abs32 => unreachable, // patchLinkedDataRelocation calls this only for arm_movw_prel and arm_movt_prel
     };
     var inst = std.mem.readInt(u32, code[inst_offset..][0..4], .little);
     inst = (inst & 0xFFF0F000) | ((imm16 >> 12) << 16) | (imm16 & 0xFFF);

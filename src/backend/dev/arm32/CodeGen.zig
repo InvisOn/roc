@@ -716,7 +716,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
                     try self.emitLoadImm(reg, 0);
                     try self.emitStoreStack(.w32, offset + 4, reg);
                 },
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: discriminant of {d} bytes", .{disc_size}),
             }
         }
 
@@ -795,7 +795,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
                 },
                 8 => try self.emitStoreStackF64(dest_off, @fromBackingInt(@as(u5, @intCast(s_index / 2)))),
                 16 => try self.emitStoreStackV128(dest_off, @fromBackingInt(@as(u5, @intCast(s_index / 2)))),
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: entry float argument has size {d}", .{size}),
             }
         }
 
@@ -809,7 +809,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
                 },
                 8 => try self.emitLoadStackF64(@fromBackingInt(@as(u5, @intCast(index))), src_off),
                 16 => try self.emitLoadStackV128(@fromBackingInt(@as(u5, @intCast(index * 2))), src_off),
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: entry float return piece has size {d}", .{size}),
             }
         }
 
@@ -821,7 +821,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
                 },
                 8 => try self.emitStoreStackF64(dst_off, @fromBackingInt(@as(u5, @intCast(index)))),
                 16 => try self.emitStoreStackV128(dst_off, @fromBackingInt(@as(u5, @intCast(index * 2)))),
-                else => unreachable,
+                else => invariant("LIR/codegen invariant violated: hosted float result piece has size {d}", .{size}),
             }
         }
 

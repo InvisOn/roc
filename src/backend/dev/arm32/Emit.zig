@@ -17,6 +17,7 @@
 //! The Emit function is parameterized by RocTarget to enable full cross-compilation.
 
 const std = @import("std");
+const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
 const RocTarget = @import("roc_target").RocTarget;
 const Registers = @import("Registers.zig");
@@ -1812,7 +1813,7 @@ pub fn Emit(comptime target: RocTarget) type {
                 .i8 => .{ .b = 1, .e = 0 },
                 .i16 => .{ .b = 0, .e = 1 },
                 .i32 => .{ .b = 0, .e = 0 },
-                .i64 => unreachable,
+                .i64 => invariant("arm32 Emit invariant violated: VDUP from a core register has no 64-bit lane form", .{}),
             };
             const vd = NeonField.q(dst);
             const inst: u32 = condBits(.al) |
@@ -1832,7 +1833,7 @@ pub fn Emit(comptime target: RocTarget) type {
                 .i8 => (@as(u4, lane) << 1) | 1,
                 .i16 => (@as(u4, @intCast(lane)) << 2) | 2,
                 .i32 => (@as(u4, @intCast(lane)) << 3) | 4,
-                .i64 => unreachable,
+                .i64 => invariant("arm32 Emit invariant violated: VDUP (scalar) has no 64-bit lane form", .{}),
             };
         }
 
@@ -1857,7 +1858,7 @@ pub fn Emit(comptime target: RocTarget) type {
                 .i8 => .{ .opc1 = 0b10 | @as(u2, @intCast(lane >> 2)), .opc2 = @intCast(lane & 3) },
                 .i16 => .{ .opc1 = @intCast(lane >> 1), .opc2 = (@as(u2, @intCast(lane & 1)) << 1) | 1 },
                 .i32 => .{ .opc1 = @intCast(lane), .opc2 = 0 },
-                .i64 => unreachable,
+                .i64 => invariant("arm32 Emit invariant violated: VMOV between a core register and a scalar has no 64-bit lane form", .{}),
             };
         }
 
