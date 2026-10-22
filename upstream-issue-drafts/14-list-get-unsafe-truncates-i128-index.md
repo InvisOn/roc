@@ -8,8 +8,8 @@ Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-21, upstream `main` at `534956997e`). The test below fails there, as expected. |
-| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Still an issue? | Yes (2026-10-22). The test below fails on upstream `main` at `35eb6b1cee`, and the code is unchanged at the newer `6de96ed3af`. |
+| Already upstream? | No issue or PR found (searched 2026-10-22). |
 | Fixed on our reference branch? | No. |
 | Before filing | Ready. |
 
@@ -21,10 +21,10 @@ Not filed. For roc-lang/roc.
 
 `list_get_unsafe` takes a list and an index. If the index is an i128 or Dec value, the dev backend loads its low 64 bits and carries on. An index of that type can only come from a bug in an earlier compiler stage. The backend hides that bug instead of reporting it. AGENTS.md forbids this kind of recovery in the backend.
 
-**Where** (upstream `main` at `534956997e`)
+**Where** (upstream `main` at `6de96ed3af`)
 
-- `src/backend/dev/LirCodeGen.zig:2230-2233`, in `generateLowLevel` (line 1852). When the index is on the stack as an i128 (`.stack_i128`), it loads the low 64 bits. The comment says "Dec/i128 index - just load the low 64 bits as U64".
-- `LirCodeGen.zig:2234-2238`. An i128 constant (`.immediate_i128`) is cut to 64 bits the same way.
+- [`src/backend/dev/LirCodeGen.zig:2384-2387`](https://github.com/roc-lang/roc/blob/6de96ed3afba20699688bc30ce40c062267f2382/src/backend/dev/LirCodeGen.zig#L2384-L2387), in `generateLowLevel` (line 2022). When the index is on the stack as an i128 (`.stack_i128`), it loads the low 64 bits. The comment says "Dec/i128 index - just load the low 64 bits as U64".
+- [`LirCodeGen.zig:2388-2393`](https://github.com/roc-lang/roc/blob/6de96ed3afba20699688bc30ce40c062267f2382/src/backend/dev/LirCodeGen.zig#L2388-L2393). An i128 constant (`.immediate_i128`) is unwrapped with `imm.get()` and cut to 64 bits the same way.
 
 **Why it matters**
 
@@ -101,7 +101,7 @@ Run it with:
 zig build run-test-zig-module-backend -- --test-filter "list_get_unsafe does not read through a truncated i128 index"
 ```
 
-Output at `534956997e`. The test fails because the backend returned 20:
+Output at `35eb6b1cee`. The test fails because the backend returned 20:
 
 ```
 run-test-zig-module-backend
@@ -114,4 +114,4 @@ Build Summary: 15/17 steps succeeded (1 failed); 0/1 tests passed (1 failed)
 **Environment**
 
 - OS: Pop!_OS 24.04 LTS, x86_64
-- Upstream `main` at `534956997e`, Zig 0.17.0
+- Upstream `main` at `35eb6b1cee` (test run) and `6de96ed3af` (code checked), Zig 0.17.0
