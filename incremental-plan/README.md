@@ -152,6 +152,17 @@ The drafts in `upstream-issue-drafts/` that are upstream bugs. File the
 issue first. Offer a PR only if they want one. Draft 14 is first (ready
 now), then 02 and 03.
 
+Fork PRs for review (against InvisOn/roc `main`, as of 2026-10-23):
+
+| Draft | Fork PR | Checked with |
+|---|---|---|
+| 12 | #3 | its unit test |
+| 16 | #4 | the stub assembles |
+| 26 | #5 | `run-check-type-checker-patterns` |
+| 14 | #6 | its death test (1/1 passed) |
+| 02 | #7 | `run-check-snapshots` |
+| 03 | #8 | `build-ci` on x86_64 only, not yet on aarch64 |
+
 ### 2. Architecture dispatch
 
 `src/backend/dev/isa.zig`: `isaOf` and `Isa.binaryIs`. It replaces
