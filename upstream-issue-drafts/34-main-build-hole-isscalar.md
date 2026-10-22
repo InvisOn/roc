@@ -8,7 +8,7 @@ Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-22 23:00 NZDT, upstream `main` at `6de96ed3af`). |
+| Still an issue? | No. Fixed upstream by `616828472f`, in `main` at `55a9d652c1` (checked 2026-10-23). Don't file. |
 | Already upstream? | No issue or PR found (searched 2026-10-22). Likely fixed within hours, since CI on `main` fails too. |
 | Fixed on our reference branch? | No. It is upstream code. |
 | Before filing | Check `main` again first. File only if it is still broken. |
