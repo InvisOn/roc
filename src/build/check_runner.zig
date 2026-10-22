@@ -187,50 +187,40 @@ const CheckTypeCheckerPatternsStep = struct {
                 .{violations.items.len},
             );
         }
+
+        var stale: usize = 0;
+        for (excluded_ranges, excluded_range_used) |range, used| {
+            if (used) continue;
+            std.debug.print("excluded range {s}:{d}-{d} excuses no forbidden pattern: update its line numbers or remove it\n", .{ range.file, range.start, range.end });
+            stale += 1;
+        }
+        if (stale > 0) {
+            return fail("Found {d} stale entries in excluded_ranges (src/build/check_runner.zig).", .{stale});
+        }
     }
 
     const ExcludedRange = struct { file: []const u8, start: usize, end: usize };
+    /// Lines allowed to hold a forbidden pattern, by file name and line
+    /// number. Every entry must excuse at least one forbidden pattern, or the
+    /// check fails, because line numbers go stale when a file changes.
     const excluded_ranges = [_]ExcludedRange{
-        // Runtime equality compares Roc value bytes, never compiler identifiers.
-        .{ .file = "boxy_runtime.zig", .start = 5614, .end = 5614 },
-        .{ .file = "boxy_runtime.zig", .start = 5624, .end = 5624 },
-        // Cross-module name matching in Check.zig requires string comparison (lines 5530-5547)
-        // This is necessary because origin_module is an ident from the type's defining module,
-        // while module_name is from the importing module's ident store - no way to compare without strings
-        .{ .file = "Check.zig", .start = 5530, .end = 5547 },
-        // Cross-module nominal type matching in store.zig requires string comparison
-        // because ident indices are module-local—same nominal from different modules
-        // has different Ident.Idx values, so we must compare the underlying strings
-        .{ .file = "store.zig", .start = 340, .end = 355 },
-        // Cross-module ident matching in cir_to_lir.zig requires string comparison
-        // because platform and app modules have separate ident stores—the same alias
-        // name has different Ident.Idx values across modules, so we must compare via text.
-        .{ .file = "cir_to_lir.zig", .start = 110, .end = 115 },
         // inspected.zig resolves a type module's import statement from the caller's
         // module name, which arrives as text from outside this module's ident store.
         .{ .file = "inspected.zig", .start = 226, .end = 232 },
-        // inspected.zig trims the trailing newline off a rendered report. This is
-        // presentation text on its way out, not a type-checker comparison.
-        .{ .file = "inspected.zig", .start = 2474, .end = 2474 },
-        // inspected.zig converts a NUL-terminated dylib path from the linker into a
-        // slice. Path bytes, not identifiers.
-        .{ .file = "inspected.zig", .start = 3264, .end = 3275 },
-        // inspected_run.zig dispatches on a hosted function's ABI symbol, which is
-        // matched by name at the host boundary and has no Ident.Idx.
-        .{ .file = "inspected_run.zig", .start = 109, .end = 109 },
-        // Consumer compatibility excludes observation sinks by Zig field name at
-        // compile time. These are compiler API fields, never Roc identifiers.
-        .{ .file = "compile_time_finalization.zig", .start = 171, .end = 183 },
-        // report.zig compares already-formatted diagnostic text only to avoid
-        // printing two visually identical types. This is presentation logic,
-        // not a type-checking or identifier comparison.
-        .{ .file = "report.zig", .start = 615, .end = 615 },
     };
 
+    /// Which entries of `excluded_ranges` excused a forbidden pattern in this
+    /// run. The scan is single-threaded. An entry that excused nothing has
+    /// gone stale: its file changed and the numbers now point elsewhere.
+    var excluded_range_used: [excluded_ranges.len]bool = @splat(false);
+
+    /// Called only for a line that holds a forbidden pattern. Returns whether
+    /// an entry excuses it, and records that the entry was needed.
     fn isInExcludedRange(file_path: []const u8, line_number: usize) bool {
-        for (excluded_ranges) |range| {
+        for (excluded_ranges, 0..) |range, i| {
             if (std.mem.endsWith(u8, file_path, range.file)) {
                 if (line_number >= range.start and line_number <= range.end) {
+                    excluded_range_used[i] = true;
                     return true;
                 }
             }
