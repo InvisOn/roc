@@ -9,9 +9,9 @@ Not filed. For roc-lang/roc.
 | | |
 |---|---|
 | Still an issue? | Yes (2026-10-23, upstream `main` at `55a9d652c1`). |
-| Already upstream? | Not searched yet. Related: draft 33 (#12500), the same test family. |
+| Already upstream? | No issue or PR found (searched 2026-10-23: NestedProcSiteBuilder, path_pool, the test name). Related: draft 33 (#12500), the same test family. |
 | Fixed on our reference branch? | No. It is upstream code. |
-| Before filing | Search for an existing issue. Check `main` again. |
+| Before filing | Check `main` again. The owner files it (2026-10-23). |
 
 ---
 
