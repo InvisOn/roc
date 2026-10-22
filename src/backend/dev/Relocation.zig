@@ -220,7 +220,7 @@ fn patchLinkedDataRelocation(
     const reloc_offset = try asCodeOffset(reloc_offset_u64, code.len);
 
     switch (kind) {
-        .abs64 => return patchAbsolutePointerOperand(code, reloc_offset, target_addr),
+        .abs64 => return patchAbs64Operand(code, reloc_offset, target_addr),
         .rel32 => {
             const next_instr = code_base_addr + reloc_offset + 4;
             return patchX86Rel32Operand(code, reloc_offset, next_instr, target_addr);
@@ -326,21 +326,11 @@ fn patchAarch64BranchInstruction(code: []u8, inst_offset: usize, inst_addr: usiz
     std.mem.writeInt(u32, code[inst_offset..][0..4], inst, .little);
 }
 
-fn patchAbsolutePointerOperand(code: []u8, operand_offset: usize, target_addr: usize) ApplyRelocationsError!void {
-    if (@sizeOf(usize) == 8) {
-        if (operand_offset + 8 > code.len) return error.InvalidOffset;
-        std.mem.writeInt(u64, code[operand_offset..][0..8], @intCast(target_addr), .little);
-        return;
-    }
-
-    if (@sizeOf(usize) == 4) {
-        if (operand_offset + 4 > code.len) return error.InvalidOffset;
-        if (target_addr > std.math.maxInt(u32)) return error.BranchOutOfRange;
-        std.mem.writeInt(u32, code[operand_offset..][0..4], @intCast(target_addr), .little);
-        return;
-    }
-
-    @compileError("Unsupported pointer size");
+/// An `abs64` operand is eight bytes in the generated code, whatever the
+/// word size of the machine running the compiler.
+fn patchAbs64Operand(code: []u8, operand_offset: usize, target_addr: usize) ApplyRelocationsError!void {
+    if (operand_offset + 8 > code.len) return error.InvalidOffset;
+    std.mem.writeInt(u64, code[operand_offset..][0..8], target_addr, .little);
 }
 
 fn patchAarch64AdrpRelocation(code: []u8, inst_offset: usize, inst_addr: usize, target_addr: usize) ApplyRelocationsError!void {
@@ -420,16 +410,8 @@ fn testNullResolver(_: []const u8) ?usize {
     return null;
 }
 
-fn readPointerFromCode(bytes: []const u8) usize {
-    if (@sizeOf(usize) == 8) {
-        return @intCast(std.mem.readInt(u64, bytes[0..8], .little));
-    }
-
-    if (@sizeOf(usize) == 4) {
-        return @intCast(std.mem.readInt(u32, bytes[0..4], .little));
-    }
-
-    @compileError("Unsupported pointer size");
+fn readAbs64Operand(bytes: []const u8) u64 {
+    return std.mem.readInt(u64, bytes[0..8], .little);
 }
 
 test "applyRelocations patches x86_64 linked_function call" {
@@ -493,7 +475,7 @@ test "applyRelocations patches linked_data absolute pointer operand" {
     };
 
     try applyRelocations(&code, 0, &relocs, resolver);
-    try std.testing.expectEqual(target_addr, readPointerFromCode(code[4..]));
+    try std.testing.expectEqual(@as(u64, target_addr), readAbs64Operand(code[4..]));
 }
 
 test "applyRelocations patches local_data pointer and stores bytes" {
@@ -506,9 +488,9 @@ test "applyRelocations patches local_data pointer and stores bytes" {
 
     try applyRelocations(&code, 0, &relocs, testNullResolver);
 
-    const ptr_value = readPointerFromCode(code[0..]);
+    const ptr_value = readAbs64Operand(code[0..]);
     try std.testing.expect(ptr_value != 0);
-    const data_ptr: [*]const u8 = @ptrFromInt(ptr_value);
+    const data_ptr: [*]const u8 = @ptrFromInt(@as(usize, @intCast(ptr_value)));
     try std.testing.expectEqualSlices(u8, &bytes, data_ptr[0..bytes.len]);
 }
 
@@ -579,4 +561,17 @@ test "aarch64 signed branch and page displacements preserve exact units" {
     }
     std.mem.writeInt(u32, &code, 0x90000000, .little);
     try std.testing.expectError(error.BranchOutOfRange, patchAarch64AdrpRelocation(&code, 0, 0, 0x100000000));
+}
+
+test "an abs64 data relocation writes all eight bytes of its operand" {
+    var code: [16]u8 = @splat(0xAA);
+    const resolver: SymbolResolver = struct {
+        fn resolve(name: []const u8) ?usize {
+            return if (std.mem.eql(u8, name, "global_data")) 0x11223344 else null;
+        }
+    }.resolve;
+    const relocs = [_]Relocation{.{ .linked_data = .{ .offset = 4, .name = "global_data", .kind = .abs64 } }};
+    try applyRelocations(&code, 0, &relocs, resolver);
+    // On a 32-bit machine only 4 bytes used to be written, leaving 0xAA in code[8..12].
+    try std.testing.expectEqual(@as(u64, 0x11223344), std.mem.readInt(u64, code[4..12], .little));
 }
