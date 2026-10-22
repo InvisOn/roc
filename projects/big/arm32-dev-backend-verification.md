@@ -1058,6 +1058,26 @@ Done 2026-09-29, locally (nothing pushed).
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
   lines.
   Logs: `.git/verify-tools/upstream-sync/73df27a5bb/`.
+- 2026-10-23, merges `7a2882864c`, `dc62d644e1` and `7465e27d59` of
+  upstream `main` at `534956997e`, `7f1955b3bd` and `35eb6b1cee` (10 merged
+  pull requests), pushed together. The first two were not pushed alone:
+  `534956997e` made the curried-lambdas eval case run out of memory on
+  arm32 (draft 33), and upstream fixed that in `35eb6b1cee`. Conflicts: one
+  in `list_append_sublist` (took upstream's code, kept our U64 start and
+  length), and 57 regions in the second merge across `CallingConvention.zig`,
+  `FrameBuilder.zig`, `HostSplice.zig`, `LirCodeGen.zig`, `object/elf.zig`
+  and `layout/abi/call.zig`. In those we followed upstream: its
+  `stackArgs()`, `Immediate128.get()` and `codegen.cpu_level`, and the
+  removal of the baseline SIMD builtin path. 73 bare `unreachable`s gained a
+  reason. Upstream `6de96ed3af` was not merged, because it does not compile
+  (draft 34). Checks at `7465e27d59`: relative 64-bit oracle PASS, nothing
+  differs. minici under the 20 GiB cap: 98 passed, 1 skipped, then
+  `run-test-strategy-differential` alone with `--threads 8` passed (peak
+  16.6 GiB). The arm32 eval corpus under qemu gives 2592 passed, 0 failed,
+  47 with a backend skipped. Host effects 106/106. `test/fx` 134/134 under
+  qemu, on the Raspberry Pi 5 and on the Pi 3. The int app as arm32musl
+  and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/7f1955b3bd/` and `35eb6b1cee/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
