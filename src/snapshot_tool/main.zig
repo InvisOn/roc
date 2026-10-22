@@ -3995,10 +3995,10 @@ fn processDevObjectSnapshot(
                 target,
                 .{ .include_provided_exports = true },
             ) catch |err| {
+                // The architecture check above admits only targets the dev
+                // backend serves, so a failure here is real, not "unsupported".
                 std.log.err("Failed to materialize static data exports for {s}: {}", .{ field_name, err });
-                hash_results[i].hash_hex = undefined;
-                hash_results[i].supported = false;
-                break :target_snapshot;
+                return false;
             };
             defer compile.static_data_exports.deinitStaticData(allocator, static_data_exports);
 
@@ -4020,9 +4020,10 @@ fn processDevObjectSnapshot(
                 hash_results[i].hash_hex = std.fmt.bytesToHex(hash, .lower);
                 hash_results[i].supported = true;
                 result.allocator.free(result.object_bytes);
-            } else |_| {
-                hash_results[i].hash_hex = undefined;
-                hash_results[i].supported = false;
+            } else |err| {
+                // As above: every error here is a real code-generation failure.
+                std.log.err("Dev object compilation failed for {s}: {}", .{ field_name, err });
+                return false;
             }
         }
     }
