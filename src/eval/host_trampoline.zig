@@ -135,9 +135,7 @@ pub fn call(
                 if (end > max_stack_bytes) return Error.TooManyStackBytes;
                 @memcpy(stack[stack_value.offset..end], value[0..stack_value.size]);
             },
-            // Only AAPCS32 splits a value, and this trampoline serves
-            // x86_64 and aarch64 hosts.
-            .split => unreachable,
+            .split => unreachable, // only AAPCS32 splits a value, and call returns UnsupportedArch on every host but x86_64 and aarch64
             .registers => |pieces| {
                 for (pieces) |assigned| {
                     const piece = assigned.piece;
@@ -218,7 +216,7 @@ fn writeUnaligned(dst: [*]u8, bytes: []const u8) void {
 fn invoke(ctl: *const Call) void {
     if (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .aarch64_be or builtin.cpu.arch == .x86_64) {
         rocCallTrampoline(ctl);
-    } else unreachable;
+    } else unreachable; // call returns UnsupportedArch before reaching invoke on every other architecture
 }
 
 // The fixed trampoline, defined in `host_trampoline.S`. It saves the control pointer in a

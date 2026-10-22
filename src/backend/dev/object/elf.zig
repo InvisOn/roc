@@ -8,8 +8,8 @@
 //! Reference: https://refspecs.linuxfoundation.org/elf/elf.pdf
 
 const std = @import("std");
-const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
+const invariant = @import("base").invariant;
 const DataRelocationKind = @import("../Relocation.zig").DataRelocationKind;
 const object = @import("mod.zig");
 const DebugReloc = object.DebugReloc;
@@ -378,48 +378,51 @@ pub const ElfWriter = struct {
                 .kind = switch (self.arch) {
                     .x86_64 => ELF.R_X86_64_64,
                     .aarch64 => ELF.R_AARCH64_ABS64,
-                    .arm => unreachable,
+                    .arm => invariant("ELF invariant violated: abs64 data relocation in arm32 code, which emits abs32 and movw/movt", .{}),
                 },
                 .addend = @as(i64, 0),
             },
             .rel32 => .{
                 .kind = switch (self.arch) {
                     .x86_64 => ELF.R_X86_64_PC32,
-                    .aarch64, .arm => unreachable,
+                    .aarch64 => invariant("ELF invariant violated: rel32 data relocation in aarch64 code, which emits page21 and pageoff12", .{}),
+                    .arm => invariant("ELF invariant violated: rel32 data relocation in arm32 code, which emits abs32 and movw/movt", .{}),
                 },
                 .addend = @as(i64, -4),
             },
             .page21 => .{
                 .kind = switch (self.arch) {
-                    .x86_64, .arm => unreachable,
+                    .x86_64 => invariant("ELF invariant violated: page21 data relocation in x86_64 code, which emits rel32", .{}),
+                    .arm => invariant("ELF invariant violated: page21 data relocation in arm32 code, which emits abs32 and movw/movt", .{}),
                     .aarch64 => ELF.R_AARCH64_ADR_PREL_PG_HI21,
                 },
                 .addend = @as(i64, 0),
             },
             .pageoff12 => .{
                 .kind = switch (self.arch) {
-                    .x86_64, .arm => unreachable,
+                    .x86_64 => invariant("ELF invariant violated: pageoff12 data relocation in x86_64 code, which emits rel32", .{}),
+                    .arm => invariant("ELF invariant violated: pageoff12 data relocation in arm32 code, which emits abs32 and movw/movt", .{}),
                     .aarch64 => ELF.R_AARCH64_ADD_ABS_LO12_NC,
                 },
                 .addend = @as(i64, 0),
             },
             .abs32 => .{
                 .kind = switch (self.arch) {
-                    .x86_64, .aarch64 => unreachable,
+                    .x86_64, .aarch64 => invariant("ELF invariant violated: arm32 data relocation in {t} code", .{self.arch}),
                     .arm => ELF.R_ARM_ABS32,
                 },
                 .addend = @as(i64, 0),
             },
             .arm_movw_prel => .{
                 .kind = switch (self.arch) {
-                    .x86_64, .aarch64 => unreachable,
+                    .x86_64, .aarch64 => invariant("ELF invariant violated: arm32 data relocation in {t} code", .{self.arch}),
                     .arm => ELF.R_ARM_MOVW_PREL_NC,
                 },
                 .addend = kind.armMovAddend(),
             },
             .arm_movt_prel => .{
                 .kind = switch (self.arch) {
-                    .x86_64, .aarch64 => unreachable,
+                    .x86_64, .aarch64 => invariant("ELF invariant violated: arm32 data relocation in {t} code", .{self.arch}),
                     .arm => ELF.R_ARM_MOVT_PREL,
                 },
                 .addend = kind.armMovAddend(),
@@ -964,8 +967,7 @@ fn appendDebugRelocations(
                 .four => ELF.R_AARCH64_ABS32,
                 .eight => ELF.R_AARCH64_ABS64,
             },
-            // arm32 objects are ELF32; write32 emits their REL records.
-            .arm => unreachable,
+            .arm => unreachable, // write64 is the only non-test caller, and write sends arm objects to write32
         };
         const elf_rela = Elf64_Rela{
             .r_offset = rel.section_offset,
@@ -1010,8 +1012,7 @@ fn debugTargetSymbol(rel: DebugReloc) u32 {
 fn debugRelType32(rel: DebugReloc) u32 {
     return switch (rel.width) {
         .four => ELF.R_ARM_ABS32,
-        // ELF32 DWARF addresses and offsets are four bytes.
-        .eight => unreachable,
+        .eight => unreachable, // ObjectFileCompiler builds DWARF with four-byte addresses for every 32-bit target
     };
 }
 
@@ -1224,7 +1225,7 @@ test "arm32 object is ELF32, EM_ARM, hard-float, with REL relocations and in-pla
             for (all) |h| {
                 if (std.mem.eql(u8, std.mem.sliceTo(strtab[h.sh_name..], 0), name)) return h;
             }
-            unreachable;
+            std.debug.panic("no {s} section", .{name});
         }
     };
     const strtab = bytes[shstr.sh_offset..][0..shstr.sh_size];
