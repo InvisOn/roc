@@ -266,6 +266,7 @@ const jobs = [_]Job{
     .{ .name = "run-check-baseline-codegen", .placement = .primary_host },
     .{ .name = "run-check-match-extension-codegen" },
     .{ .name = "run-check-str-eq-same-allocation", .placement = .primary_host },
+    .{ .name = "run-check-arm32-encoding-oracle" },
     .{ .name = "run-check-snapshots" },
     // Builds its own ReleaseSafe shim: the archive it checks is the one a
     // release ships, and everything `build-ci` builds is Debug.

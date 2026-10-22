@@ -13,7 +13,7 @@ const builtin = @import("builtin");
 const has_windows_x64_impl = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
 const has_windows_aarch64_impl = builtin.os.tag == .windows and builtin.cpu.arch == .aarch64;
 const has_linux_impl = builtin.os.tag == .linux and
-    (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64);
+    (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .arm);
 const has_macos_impl = builtin.os.tag == .macos;
 
 /// Whether this platform supports setjmp/longjmp.

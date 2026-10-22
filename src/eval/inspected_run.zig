@@ -145,6 +145,7 @@ const InterpreterError = Allocator.Error || error{
 const DevError = Allocator.Error || error{
     DevBackendUnavailable,
     EmptyCode,
+    FlushInstructionCacheFailed,
     Internal,
     MmapFailed,
     MprotectFailed,

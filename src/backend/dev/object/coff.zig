@@ -401,6 +401,7 @@ pub const CoffWriter = struct {
                 .x86_64 => invariant("COFF invariant violated: pageoff12 data relocation in x86_64 code, which emits rel32", .{}),
                 .aarch64 => COFF.IMAGE_REL_ARM64_PAGEOFFSET_12A,
             },
+            .abs32, .arm_movw_prel, .arm_movt_prel => invariant("COFF invariant violated: arm32 data relocation, but arm32 code is written only as ELF", .{}),
         };
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,

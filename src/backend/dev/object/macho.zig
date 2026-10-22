@@ -382,6 +382,7 @@ pub const MachOWriter = struct {
                     .aarch64 => MachO.ARM64_RELOC_PAGEOFF12,
                 },
             },
+            .abs32, .arm_movw_prel, .arm_movt_prel => invariant("Mach-O invariant violated: arm32 data relocation, but arm32 code is written only as ELF", .{}),
         };
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,

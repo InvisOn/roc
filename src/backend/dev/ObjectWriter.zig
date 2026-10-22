@@ -104,12 +104,19 @@ pub fn generateIndexedObjectFileWithDebug(
 
     switch (roc_target.classifyOs(os_tag)) {
         .linux, .freebsd, .openbsd, .netbsd => {
-            const elf_arch: object.elf.Architecture = if (cpu_arch == .x86_64)
-                .x86_64
-            else if (cpu_arch == .aarch64)
-                .aarch64
-            else
-                return error.UnsupportedTarget;
+            const elf_arch: object.elf.Architecture = switch (roc_target.classifyCpuArch(cpu_arch)) {
+                .x86_64 => .x86_64,
+                .aarch64 => .aarch64,
+                .arm => .arm,
+                .aarch64_be, .wasm32, .other => return error.UnsupportedTarget,
+            };
+            // The addend of a call relocation compensates for where the
+            // architecture's PC reads relative to the relocated field.
+            const call_addend: i64 = switch (elf_arch) {
+                .x86_64 => -4,
+                .aarch64 => 0,
+                .arm => -8,
+            };
             var elf = try object.ElfWriter.init(allocator, elf_arch, elfOsabi(os_tag));
             defer elf.deinit();
 
@@ -137,7 +144,7 @@ pub fn generateIndexedObjectFileWithDebug(
             }
             for (relocations) |rel| {
                 switch (rel) {
-                    .linked_function => |f| try elf.addTextRelocation(rel.getOffset(), target_indices[@backingInt(f.symbol)], if (cpu_arch == .x86_64) -4 else 0),
+                    .linked_function => |f| try elf.addTextRelocation(rel.getOffset(), target_indices[@backingInt(f.symbol)], call_addend),
                     .linked_data => |d| try elf.addTextDataRelocation(rel.getOffset(), target_indices[@backingInt(d.symbol)], d.kind),
                     .local_data, .jmp_to_return, .retired => {},
                 }
