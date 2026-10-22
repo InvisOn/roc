@@ -858,7 +858,6 @@ fn exprIsSubstitutable(program: *const Ast.Program, allocator: Allocator, expr_i
         .return_,
         .crash,
         .checked_error,
-        .comptime_branch_taken,
         .comptime_exhaustiveness_failed,
         .dbg,
         .expect_err,
@@ -1818,7 +1817,6 @@ const Pass = struct {
             .return_,
             .crash,
             .checked_error,
-            .comptime_branch_taken,
             .comptime_exhaustiveness_failed,
             .dbg,
             .expect_err,
@@ -1862,7 +1860,7 @@ const Pass = struct {
             .record => |span| for (0..span.len) |i| try components.append(self.allocator, GuardedList.at(self.program.fieldExprSpan(span), i).value),
             .nominal => |backing| try components.append(self.allocator, backing),
             .fn_ref => |ref| for (0..ref.captures.len) |i| try components.append(self.allocator, self.program.captureOperandAt(ref.captures, i).value),
-            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .comptime_value, .typed_boundary, .row_widen, .list, .record_update, .let_, .lambda, .def_ref, .fn_def, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // staticDataLeaf returns null, and so a frame is built, only for these constructor forms
+            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .comptime_value, .typed_boundary, .row_widen, .list, .record_update, .let_, .lambda, .def_ref, .fn_def, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // staticDataLeaf returns null, and so a frame is built, only for these constructor forms
         }
         const owned = try components.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned);
@@ -1911,7 +1909,7 @@ const Pass = struct {
                 }
                 break :blk try callableValue(self.program, self.allocator, expr.ty, ref.fn_id, captures, false);
             },
-            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .comptime_value, .typed_boundary, .row_widen, .list, .record_update, .let_, .lambda, .def_ref, .fn_def, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // frames are built only for the constructor forms staticDataLeaf returns null for
+            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .comptime_value, .typed_boundary, .row_widen, .list, .record_update, .let_, .lambda, .def_ref, .fn_def, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // frames are built only for the constructor forms staticDataLeaf returns null for
         };
         return try self.storeStaticDataStructure(expr_id, value);
     }
@@ -2243,7 +2241,6 @@ const Pass = struct {
                     try tails.append(self.allocator, payload_switch.uninitialized);
                 },
                 inline .try_sequence, .try_record_sequence => |sequence| try tails.append(self.allocator, sequence.ok_body),
-                .comptime_branch_taken => |taken| try tails.append(self.allocator, taken.body),
                 .typed_boundary => |boundary| try tails.append(self.allocator, boundary.value),
                 // A self call under a row coercion is not in tail position: the
                 // call's type and the coercion's are distinct Monotype types
@@ -2592,7 +2589,7 @@ const Pass = struct {
                     // selected by operational consumers, but must never cause
                     // argument specialization; the standard child list
                     // excludes them.
-                    .join_point, .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .structural_eq, .structural_hash, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => {},
+                    .join_point, .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .structural_eq, .structural_hash, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => {},
                 }
                 try Ast.appendChildren(self.allocator, self.program, id, &stack);
             },
@@ -2628,11 +2625,16 @@ const Pass = struct {
                     .def_ref,
                     .fn_def,
                     => Common.invariant("pre-lift function expression reached call-pattern specialization"),
-                    .call_proc => |call| if (Ast.localDirectCallee(call)) |callee|
+                    // A demand-shaped call's operands keep the caller's types,
+                    // not the callee's, so its patterns cannot specialize the
+                    // callee.
+                    .call_proc => |call| if (call.demand_shaped)
+                        .descend
+                    else if (Ast.localDirectCallee(call)) |callee|
                         (if (@backingInt(callee) < visitor.pass.plans.len) .descend_then_exit else .descend)
                     else
                         .descend,
-                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
                 };
             }
 
@@ -3341,7 +3343,7 @@ const Pass = struct {
             switch (expr.data) {
                 .continue_ => |continue_| return self.program.exprSpan(continue_.values),
                 .block => |block| current = block.final_expr,
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .loop_, .break_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => return null,
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .loop_, .break_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => return null,
             }
         }
     }
@@ -3500,7 +3502,6 @@ const Pass = struct {
                     if (self.program.stmtSpan(block.statements).len != 0) return .disproven;
                     try stack.append(self.allocator, block.final_expr);
                 },
-                .comptime_branch_taken => |taken| try stack.append(self.allocator, taken.body),
                 .@"unreachable",
                 .list,
                 .record_update,
@@ -4231,7 +4232,6 @@ const Pass = struct {
                 .break_,
                 .join_point,
                 .jump,
-                .comptime_branch_taken,
                 .comptime_exhaustiveness_failed,
                 .dbg,
                 .expect_err,
@@ -4283,6 +4283,7 @@ const Pass = struct {
                     .iterator_procedure = call.iterator_procedure,
                     .captures = try clone.captureOperandSpan(call.captures, children[call.args.len..]),
                     .is_cold = call.is_cold,
+                    .demand_shaped = call.demand_shaped,
                 } },
                 .call_value => .{ .call_value = .{
                     .callee = @fromBackingInt(@intCast(children[0])),
@@ -4325,7 +4326,6 @@ const Pass = struct {
                 .break_,
                 .join_point,
                 .jump,
-                .comptime_branch_taken,
                 .comptime_exhaustiveness_failed,
                 .dbg,
                 .expect_err,
@@ -4403,7 +4403,6 @@ const Pass = struct {
                 .return_,
                 .crash,
                 .checked_error,
-                .comptime_branch_taken,
                 .comptime_exhaustiveness_failed,
                 .dbg,
                 .expect_err,
@@ -4423,7 +4422,7 @@ const Pass = struct {
                 .block => .{ .block = try clone.blockData(children) },
                 .if_ => .{ .if_ = try clone.ifData(children) },
                 .match_ => |match| .{ .match_ = try clone.matchData(match, children) },
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => Common.invariant("new-carry clone finished an expression it does not rebuild"),
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => Common.invariant("new-carry clone finished an expression it does not rebuild"),
             };
             try clone.replaceResults(base, @backingInt(try program.addExpr(.{ .ty = loop_parts.value_ty, .data = data })));
         }
@@ -4673,7 +4672,9 @@ const Pass = struct {
     }
 
     /// Once the specialization graph is complete, clone only functions whose
-    /// loop result ABI contains fields their exact continuation cannot observe.
+    /// loop result tuple their exact continuation never observes whole: the
+    /// exit then transfers the components the continuation reads, dropping
+    /// any it cannot observe.
     /// Calls and loop-carried state stay unchanged in this final pass; its sole
     /// authority is the producer-visible result binding and continuation.
     fn projectUnusedLoopResults(self: *Pass) Common.LowerError!void {
@@ -4737,7 +4738,7 @@ const Pass = struct {
                     .fn_def,
                     => Common.invariant("pre-lift function expression reached call-pattern specialization"),
                     .call_proc => .descend_then_exit,
-                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
                 };
             }
 
@@ -4749,6 +4750,7 @@ const Pass = struct {
     }
 
     fn rewriteCallProc(self: *Pass, expr_id: Ast.ExprId, call: @import("../monotype/ast.zig").CallProc) Allocator.Error!void {
+        if (call.demand_shaped) return;
         const callee = Ast.localDirectCallee(call) orelse return;
         const raw = @backingInt(callee);
         if (raw >= self.plans.len) return;
@@ -4976,7 +4978,6 @@ const Pass = struct {
             .return_,
             .crash,
             .checked_error,
-            .comptime_branch_taken,
             .comptime_exhaustiveness_failed,
             .dbg,
             .expect_err,
@@ -5075,7 +5076,7 @@ const Pass = struct {
                     .captures = capture_shapes,
                 } };
             },
-            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .let_, .lambda, .def_ref, .fn_def, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // enterConstructorShape returns components only for the constructor forms above
+            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .let_, .lambda, .def_ref, .fn_def, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // enterConstructorShape returns components only for the constructor forms above
         };
     }
 
@@ -6832,7 +6833,6 @@ const Cloner = struct {
             .return_,
             .crash,
             .checked_error,
-            .comptime_branch_taken,
             .comptime_exhaustiveness_failed,
             .dbg,
             .expect_err,
@@ -7045,7 +7045,6 @@ const Cloner = struct {
                 .{ .demanding = .{ .expr = block.final_expr, .bindings = bindings } }
             else
                 value_task },
-            .comptime_branch_taken => |taken| return .{ .tail = .{ .demanding = .{ .expr = taken.body, .bindings = bindings } } },
             .typed_boundary, .row_widen => return .{ .tail = value_task },
             .local,
             .unit,
@@ -7268,7 +7267,6 @@ const Cloner = struct {
                     .try_sequence,
                     .try_record_sequence,
                     .return_,
-                    .comptime_branch_taken,
                     .dbg,
                     .expect_err,
                     .literal_rejected,
@@ -7574,14 +7572,6 @@ const Cloner = struct {
             },
             .crash => |msg| return self.finishPlainData(task, expr, .{ .crash = msg }),
             .checked_error => |msg| return self.finishPlainData(task, expr, .{ .checked_error = msg }),
-            .comptime_branch_taken => |taken| {
-                if (cursor == 0) return .{ .call = .{ .expr = taken.body } };
-                return self.finishPlainData(task, expr, .{ .comptime_branch_taken = .{
-                    .site = taken.site,
-                    .branch_index = taken.branch_index,
-                    .body = input.?.get(.expr),
-                } });
-            },
             .comptime_exhaustiveness_failed => |site| return self.finishPlainData(task, expr, .{ .comptime_exhaustiveness_failed = site }),
             .dbg => |child| {
                 if (cursor == 0) return .{ .call = .{ .expr = child } };
@@ -8250,7 +8240,7 @@ const Cloner = struct {
                         task.if_branches = try walkRows(self.pass.program, arena, Ast.IfBranch, if_.branches);
                         task.if_rewritten = try arena.alloc(Ast.IfBranch, task.if_branches.len);
                     },
-                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // cursor 0 returned unless the value is a match or if
+                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // cursor 0 returned unless the value is a match or if
                 }
                 frame.cursor = 1;
             },
@@ -8285,7 +8275,7 @@ const Cloner = struct {
                             } };
                         }
                     },
-                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // cursor 0 returned unless the value is a match or if
+                    .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // cursor 0 returned unless the value is a match or if
                 }
                 frame.index += 1;
             },
@@ -8340,7 +8330,7 @@ const Cloner = struct {
                     } } };
                 }
             },
-            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // cursor 0 returned unless the value is a match or if
+            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // cursor 0 returned unless the value is a match or if
         }
 
         // Different outer constructors cannot expose shared leaves to one continuation.
@@ -8478,7 +8468,7 @@ const Cloner = struct {
                     .final_else = final_else,
                 } } });
             },
-            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // let_of_case_shared is entered only from stepLetOfCase after its match/if check
+            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // let_of_case_shared is entered only from stepLetOfCase after its match/if check
         };
 
         return .{ .join_point = .{
@@ -8551,7 +8541,7 @@ const Cloner = struct {
                     // thrown away.
                     switch (self.pass.program.getExpr(block.final_expr).data) {
                         .match_, .if_, .loop_ => return .{ .ret = .{ .maybe_expr = null } },
-                        .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => {},
+                        .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => {},
                     }
 
                     task.change_start = self.subst.watermark();
@@ -8599,7 +8589,7 @@ const Cloner = struct {
                 },
             },
             .match_, .if_, .loop_ => return .{ .ret = .{ .maybe_expr = null } },
-            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => switch (frame.cursor) {
+            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => switch (frame.cursor) {
                 0 => {
                     frame.cursor = 1;
                     return .{ .call = .{ .expr_value_owned = .{ .expr = task.branch_body, .demand_shape = false } } };
@@ -8658,7 +8648,7 @@ const Cloner = struct {
                     .target = ret.target,
                 } } });
             },
-            .local, .unit, .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .comptime_branch_taken, .dbg, .expect_err, .expect, .literal_rejected => null,
+            .local, .unit, .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .dbg, .expect_err, .expect, .literal_rejected => null,
         } } };
     }
 
@@ -9878,7 +9868,7 @@ const Cloner = struct {
         switch (frame.cursor) {
             CallProcCursor.start => {
                 const rewrites = if (Ast.localDirectCallee(call)) |callee|
-                    !call.is_cold and self.rewrite_call_patterns and @backingInt(callee) < self.pass.plans.len
+                    !call.is_cold and !call.demand_shaped and self.rewrite_call_patterns and @backingInt(callee) < self.pass.plans.len
                 else
                     false;
                 if (!rewrites) {
@@ -9901,6 +9891,7 @@ const Cloner = struct {
                 .iterator_procedure = call.iterator_procedure,
                 .captures = input.?.get(.capture_span),
                 .is_cold = call.is_cold,
+                .demand_shaped = call.demand_shaped,
             } } })),
             CallProcCursor.analyzed_arg => {
                 task.analyzed[frame.index] = input.?.get(.cloned);
@@ -9933,6 +9924,7 @@ const Cloner = struct {
                     .iterator_procedure = call.iterator_procedure,
                     .captures = input.?.get(.capture_span),
                     .is_cold = call.is_cold,
+                    .demand_shaped = call.demand_shaped,
                 } } });
                 return retExpr(try self.wrapBindings(task.chain.*, residual));
             },
@@ -10845,7 +10837,7 @@ const Cloner = struct {
             const branch_work = switch (scrutinee_data) {
                 .match_ => |inner_match| self.pass.program.branchSpan(inner_match.branches).len,
                 .if_ => |inner_if| self.pass.program.ifBranchSpan(inner_if.branches).len + 1,
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => return .{ .ret = .{ .maybe_value = null } },
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => return .{ .ret = .{ .maybe_value = null } },
             };
             task.recorded = self.arm_values.get(task.scrutinee_expr);
             if (task.recorded == null and @backingInt(task.scrutinee_expr) >= self.output_start) return .{ .ret = .{ .maybe_value = null } };
@@ -10862,7 +10854,7 @@ const Cloner = struct {
                     task.if_rewritten = try arena.alloc(Ast.IfBranch, task.if_branches.len);
                     task.values = try arena.alloc(Value, task.if_branches.len + 1);
                 },
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the branch_work switch returned for every non-case scrutinee
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the branch_work switch returned for every non-case scrutinee
             }
             frame.cursor = 1;
         } else {
@@ -10892,7 +10884,7 @@ const Cloner = struct {
                     try self.recordArmValues(distributed, task.values);
                     return .{ .ret = .{ .maybe_value = .{ .expr = distributed } } };
                 },
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the branch_work switch returned for every non-case scrutinee
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the branch_work switch returned for every non-case scrutinee
             }
             task.values[index] = arm.value;
             frame.index += 1;
@@ -10928,7 +10920,7 @@ const Cloner = struct {
                 .outer_branches = task.outer_branches,
                 .widen_to = task.widen_to,
             } } },
-            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the branch_work switch returned for every non-case scrutinee
+            .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the branch_work switch returned for every non-case scrutinee
         }
     }
 
@@ -11269,7 +11261,12 @@ const Cloner = struct {
         switch (frame.cursor) {
             InlineDirectCursor.start => {
                 const source_fn = self.pass.program.getFn(callee);
-                task.result_ty = self.pass.program.getExpr(task.original_expr).ty;
+                const original = self.pass.program.getExpr(task.original_expr);
+                // A demand-shaped callee's body is typed at its holes and layout
+                // representatives, not at this call's types, so it stays a
+                // call (design.md "Specialization By Demand").
+                if (original.data == .call_proc and original.data.call_proc.demand_shaped) return plainDirectCall(frame, task);
+                task.result_ty = original.ty;
                 const source = try self.pass.inlineSourceBody(callee) orelse return plainDirectCall(frame, task);
                 if (!source.size.admits()) return plainDirectCall(frame, task);
                 if (try exprContainsReturn(self.pass.allocator, self.pass.program, source.expr) or
@@ -11871,7 +11868,7 @@ const Cloner = struct {
             current = switch (data) {
                 .field_access => |field| field.receiver,
                 .tuple_access => |access| access.tuple,
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => Common.invariant("recursive field/tuple read replacement reached a non-access expression before its root"),
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => Common.invariant("recursive field/tuple read replacement reached a non-access expression before its root"),
             };
         }
         var rebuilt = replacement;
@@ -11895,7 +11892,7 @@ const Cloner = struct {
                     .tuple = rebuilt,
                     .elem_index = access.elem_index,
                 } } }),
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the chain collected above holds only field and tuple accesses
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // the chain collected above holds only field and tuple accesses
             };
         }
         return rebuilt;
@@ -12353,7 +12350,6 @@ const Cloner = struct {
             .return_ => |ret| try items.append(allocator, .{ .expr = ret.value }),
             .expect_err => |expect_err| try items.append(allocator, .{ .expr = expect_err.msg }),
             .literal_rejected => |rejected| try items.append(allocator, .{ .expr = rejected.msg }),
-            .comptime_branch_taken => |taken| try items.append(allocator, .{ .expr = taken.body }),
             .let_ => |let_| {
                 try items.append(allocator, .{ .expr = let_.value });
                 try items.append(allocator, .open_scope);
@@ -12635,7 +12631,6 @@ const Cloner = struct {
                 // A row coercion is opaque to static matching: the child's
                 // known tag structure indexes the child's own row.
                 .row_widen => return false,
-                .comptime_branch_taken => |taken| expr_id = taken.body,
                 .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .comptime_value, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => break,
             }
         }
@@ -12676,7 +12671,6 @@ const Cloner = struct {
             .static_data_candidate,
             .typed_boundary,
             .row_widen,
-            .comptime_branch_taken,
             => Common.invariant("known-shape probe did not unwrap a transparent wrapper"),
             .comptime_value, .comptime_exhaustiveness_failed => false,
             .unit,
@@ -12840,7 +12834,6 @@ const Cloner = struct {
             .structural_hash,
             .if_,
             .return_,
-            .comptime_branch_taken,
             .dbg,
             .expect_err,
             .literal_rejected,
@@ -13364,7 +13357,6 @@ const Cloner = struct {
                 .return_,
                 .crash,
                 .checked_error,
-                .comptime_branch_taken,
                 .comptime_exhaustiveness_failed,
                 .dbg,
                 .expect_err,
@@ -13381,7 +13373,7 @@ const Cloner = struct {
                     self.pass.program.fieldAccessSegmentSpan(field.segments),
                 ),
                 .tuple_access => |access| itemFromValue(value, access.elem_index),
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // accessors collects only field and tuple accesses
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .lambda, .def_ref, .fn_def, .fn_ref, .call_value, .call_proc, .low_level, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => unreachable, // accessors collects only field and tuple accesses
             } orelse return null;
         }
         return value;
@@ -14900,7 +14892,6 @@ const BodyLocalScope = struct {
                 .return_ => |ret| try walk.push(.{ .expr = ret.value }),
                 .expect_err => |expect_err| try walk.push(.{ .expr = expect_err.msg }),
                 .literal_rejected => |rejected| try walk.push(.{ .expr = rejected.msg }),
-                .comptime_branch_taken => |taken| try walk.push(.{ .expr = taken.body }),
                 .let_ => |let_| {
                     try walk.push(.{ .expr = let_.value });
                     try walk.push(.open_scope);
@@ -15077,7 +15068,7 @@ fn exprBodySizeWithin(allocator: Allocator, program: *const Ast.Program, expr_id
                 .fn_def,
                 => Common.invariant("pre-lift function expression reached SpecConstr body-size counting"),
                 .static_data_candidate, .comptime_value => {},
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => try Ast.appendChildren(allocator, program, id, &stack),
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => try Ast.appendChildren(allocator, program, id, &stack),
             }
         },
     };
@@ -15177,7 +15168,7 @@ fn collectAllFnUsesInExpr(
                         summary.external_call_owner = owner;
                     }
                 },
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => {},
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .comptime_value, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => {},
             }
             try Ast.appendChildren(allocator, program, id, &stack);
         },
@@ -15261,7 +15252,6 @@ fn tailSelfCallSummary(allocator: Allocator, program: *const Ast.Program, root: 
             if (try exprCallsFn(allocator, program, sequence.try_expr, target)) return invalid;
             try tails.append(allocator, sequence.ok_body);
         },
-        .comptime_branch_taken => |taken| try tails.append(allocator, taken.body),
         .typed_boundary => |boundary| try tails.append(allocator, boundary.value),
         // A self call under a row coercion is not in tail position: the
         // call's type and the coercion's are distinct Monotype types until
@@ -15344,7 +15334,7 @@ fn exprContainsIteratorProducer(allocator: Allocator, program: *const Ast.Progra
                     try pushExprSpanSearch(search.allocator, search.program, jump.args, stack);
                     break :blk .children;
                 },
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
             };
         }
 
@@ -15365,7 +15355,7 @@ fn exprCallsFn(allocator: Allocator, program: *const Ast.Program, expr_id: Ast.E
                 .comptime_value => .skip,
                 .lambda, .def_ref, .fn_def => Common.invariant("pre-lift function expression reached recursive-call scan"),
                 .call_proc => |call| if (Ast.localDirectCallee(call) == search.fn_id) .found else .descend,
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
             };
         }
 
@@ -15409,7 +15399,7 @@ fn exprContainsReturn(allocator: Allocator, program: *const Ast.Program, expr_id
             return switch (search.program.getExpr(id).data) {
                 .return_ => .found,
                 .lambda, .def_ref, .fn_def, .comptime_value => .skip,
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .join_point, .jump, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
             };
         }
 
@@ -15438,7 +15428,7 @@ fn exprReferencesLocal(allocator: Allocator, program: *const Ast.Program, expr_i
                 .uninitialized_payload => |payload| if (payload.condition == search.local) .found else .skip,
                 .join_point => |join_point| if (typedLocalSpanContains(search.program, join_point.retained, search.local)) .found else .descend,
                 .lambda, .def_ref, .fn_def, .comptime_value => .skip,
-                .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .loop_, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
             };
         }
 
@@ -15578,7 +15568,7 @@ fn walkLoopBodyContents(pass: *Pass, root_body: Ast.ExprId, root_uses: []Initial
                             try children.append(allocator, .{ .expr = GuardedList.at(initial_values, index) });
                         }
                     },
-                    .unit, .@"unreachable", .int_lit, .dec_lit, .frac_f32_lit, .frac_f64_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .break_, .continue_, .jump, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => try Ast.appendChildren(allocator, program, expr_id, &children),
+                    .unit, .@"unreachable", .int_lit, .dec_lit, .frac_f32_lit, .frac_f64_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .break_, .continue_, .jump, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => try Ast.appendChildren(allocator, program, expr_id, &children),
                 },
             },
         }
@@ -15645,7 +15635,7 @@ fn exprContainsFreeLoopControl(allocator: Allocator, program: *const Ast.Program
                     if (item.loop_depth == 0) return true;
                     try Ast.appendChildren(allocator, program, id, &children);
                 },
-                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .join_point, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => try Ast.appendChildren(allocator, program, id, &children),
+                .local, .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .if_initialized_payload, .try_sequence, .try_record_sequence, .block, .join_point, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => try Ast.appendChildren(allocator, program, id, &children),
             },
         }
         for (children.items) |child| try stack.append(allocator, .{ .child = child, .loop_depth = item.loop_depth });
@@ -15712,7 +15702,7 @@ fn collectTupleLocalDemand(
                     try stack.append(search.allocator, .{ .expr = sequence.try_expr });
                     break :blk .children;
                 },
-                .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .block, .loop_, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .block, .loop_, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
             };
         }
 
@@ -15774,7 +15764,7 @@ fn localUseCount(allocator: Allocator, program: *const Ast.Program, local: Ast.L
                     try stack.append(counter.allocator, .{ .expr = sequence.try_expr });
                     break :blk .children;
                 },
-                .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .block, .loop_, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_branch_taken, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
+                .unit, .@"unreachable", .int_lit, .frac_f32_lit, .frac_f64_lit, .dec_lit, .str_lit, .bytes_lit, .static_data_candidate, .typed_boundary, .row_widen, .list, .tuple, .record, .record_update, .tag, .nominal, .let_, .fn_ref, .call_value, .call_proc, .low_level, .field_access, .tuple_access, .structural_eq, .structural_hash, .match_, .if_, .uninitialized, .uninitialized_payload, .block, .loop_, .break_, .continue_, .jump, .return_, .crash, .checked_error, .comptime_exhaustiveness_failed, .dbg, .expect_err, .expect, .literal_rejected => .descend,
             };
         }
 
@@ -16418,6 +16408,8 @@ fn emptyLiftedProgramForTest(allocator: Allocator) Ast.Program {
         names.NameStore.init(allocator),
         Type.Store.init(allocator),
         .empty, // const_fn_evidence
+        .empty, // const_fn_evidence_targets
+        .empty, // const_fn_evidence_structurals
         .empty, // const_fn_evidence_frames
         .empty, // exprs
         .empty, // pats
@@ -17160,7 +17152,7 @@ test "SpecConstr accepts a transparent alias record update base" {
     const module_identity = try program.names.internModuleIdentity(&(@as([32]u8, @splat(0xAB))));
     const type_name = try program.names.internTypeName("RecordAlias");
     const alias_ty = try program.types.add(.{ .named = .{
-        .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(1)) },
+        .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(1)), .ty_module = .{} },
         .def = .{ .module = module_identity, .type_name = type_name },
         .kind = .alias,
         .args = Type.Span.empty(),
@@ -17196,7 +17188,7 @@ test "SpecConstr compares representations, not checked provenance" {
     const Nominal = struct {
         fn add(p: *Ast.Program, module: names.ModuleIdentityId, name: names.TypeNameId, checked_ty: u32, backing: Type.TypeId) Allocator.Error!Type.TypeId {
             return p.types.add(.{ .named = .{
-                .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(checked_ty)) },
+                .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(checked_ty)), .ty_module = .{} },
                 .def = .{ .module = module, .type_name = name, .source_decl = 7 },
                 .kind = .nominal,
                 .args = Type.Span.empty(),
@@ -18921,14 +18913,14 @@ fn substituteNamedForTest(
     const type_name = try program.names.internTypeName("Nominal");
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
     const first_ty = try program.types.add(.{ .named = .{
-        .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(first_checked_ty)) },
+        .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(first_checked_ty)), .ty_module = .{} },
         .def = def,
         .kind = .nominal,
         .args = Type.Span.empty(),
         .backing = .{ .ty = first_backing, .use = .inspectable },
     } });
     const second_ty = try program.types.add(.{ .named = .{
-        .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(second_checked_ty)) },
+        .named_type = .{ .module = .{}, .ty = @fromBackingInt(@intCast(second_checked_ty)), .ty_module = .{} },
         .def = def,
         .kind = .nominal,
         .args = Type.Span.empty(),
@@ -19206,6 +19198,108 @@ test "loop exit demand is linear in tuple width and rejects whole tuple uses" {
         try whole.collect(whole_use);
         try std.testing.expect(!whole.hasSelection());
     }
+}
+
+test "loop exit demand selects a fully read tuple exactly when a component may be refcounted" {
+    const allocator = std.testing.allocator;
+    var program = emptyLiftedProgramForTest(allocator);
+    defer program.deinit();
+    const ty = try program.types.add(.{ .list = try program.types.add(.zst) });
+    const tuple_ty = try program.types.add(.{ .tuple = try program.types.addSpan(&.{ ty, ty }) });
+    const input = try program.addLocal(@fromBackingInt(@intCast(1)), tuple_ty);
+    const ref = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .local = input } });
+    const exit = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .break_ = ref } });
+    const loop = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .loop_ = .{
+        .params = .empty(),
+        .initial_values = .empty(),
+        .body = exit,
+    } } });
+
+    // Both components bound by the pattern and both read.
+    const first = try program.addLocal(@fromBackingInt(@intCast(2)), ty);
+    const second = try program.addLocal(@fromBackingInt(@intCast(3)), ty);
+    const pats = [_]Ast.PatId{
+        try program.addPat(.{ .ty = ty, .data = .{ .bind = first } }),
+        try program.addPat(.{ .ty = ty, .data = .{ .bind = second } }),
+    };
+    const pat = try program.addPat(.{ .ty = tuple_ty, .data = .{ .tuple = try program.addPatSpan(&pats) } });
+    const reads = [_]Ast.ExprId{
+        try program.addExpr(.{ .ty = ty, .data = .{ .local = first } }),
+        try program.addExpr(.{ .ty = ty, .data = .{ .local = second } }),
+    };
+    const rest = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .tuple = try program.addExprSpan(&reads) } });
+    const body = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .let_ = .{ .bind = pat, .value = loop, .rest = rest } } });
+    var demand = ExitDemand.Inventory.init(allocator, &program);
+    defer demand.deinit();
+    try demand.collect(body);
+    const plan = demand.get(pat) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), plan.used_count);
+
+    // Both components projected from a bound aggregate.
+    const aggregate = try program.addLocal(@fromBackingInt(@intCast(4)), tuple_ty);
+    const aggregate_pat = try program.addPat(.{ .ty = tuple_ty, .data = .{ .bind = aggregate } });
+    const aggregate_ref = [_]Ast.ExprId{
+        try program.addExpr(.{ .ty = tuple_ty, .data = .{ .local = aggregate } }),
+        try program.addExpr(.{ .ty = tuple_ty, .data = .{ .local = aggregate } }),
+    };
+    const projections = [_]Ast.ExprId{
+        try program.addExpr(.{ .ty = ty, .data = .{ .tuple_access = .{ .tuple = aggregate_ref[0], .elem_index = 0 } } }),
+        try program.addExpr(.{ .ty = ty, .data = .{ .tuple_access = .{ .tuple = aggregate_ref[1], .elem_index = 1 } } }),
+    };
+    const projected = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .tuple = try program.addExprSpan(&projections) } });
+    const projected_body = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .let_ = .{
+        .bind = aggregate_pat,
+        .value = loop,
+        .rest = projected,
+    } } });
+    var projected_demand = ExitDemand.Inventory.init(allocator, &program);
+    defer projected_demand.deinit();
+    try projected_demand.collect(projected_body);
+    try std.testing.expect(projected_demand.get(aggregate_pat) != null);
+
+    // The same projections followed by a read of the whole tuple.
+    const whole_ref = try program.addExpr(.{ .ty = tuple_ty, .data = .{ .local = aggregate } });
+    const both = [_]Ast.ExprId{ projected, whole_ref };
+    const both_ty = try program.types.add(.{ .tuple = try program.types.addSpan(&.{ tuple_ty, tuple_ty }) });
+    const whole_rest = try program.addExpr(.{ .ty = both_ty, .data = .{ .tuple = try program.addExprSpan(&both) } });
+    const whole_body = try program.addExpr(.{ .ty = both_ty, .data = .{ .let_ = .{
+        .bind = aggregate_pat,
+        .value = loop,
+        .rest = whole_rest,
+    } } });
+    var whole = ExitDemand.Inventory.init(allocator, &program);
+    defer whole.deinit();
+    try whole.collect(whole_body);
+    try std.testing.expect(!whole.hasSelection());
+
+    // Scalar components, both read, keep the tuple.
+    const scalar_ty = try program.types.add(.{ .primitive = .u64 });
+    const scalar_tuple_ty = try program.types.add(.{ .tuple = try program.types.addSpan(&.{ scalar_ty, scalar_ty }) });
+    const scalar_input = try program.addLocal(@fromBackingInt(@intCast(5)), scalar_tuple_ty);
+    const scalar_ref = try program.addExpr(.{ .ty = scalar_tuple_ty, .data = .{ .local = scalar_input } });
+    const scalar_exit = try program.addExpr(.{ .ty = scalar_tuple_ty, .data = .{ .break_ = scalar_ref } });
+    const scalar_loop = try program.addExpr(.{ .ty = scalar_tuple_ty, .data = .{ .loop_ = .{
+        .params = .empty(),
+        .initial_values = .empty(),
+        .body = scalar_exit,
+    } } });
+    const scalar_first = try program.addLocal(@fromBackingInt(@intCast(6)), scalar_ty);
+    const scalar_second = try program.addLocal(@fromBackingInt(@intCast(7)), scalar_ty);
+    const scalar_pats = [_]Ast.PatId{
+        try program.addPat(.{ .ty = scalar_ty, .data = .{ .bind = scalar_first } }),
+        try program.addPat(.{ .ty = scalar_ty, .data = .{ .bind = scalar_second } }),
+    };
+    const scalar_pat = try program.addPat(.{ .ty = scalar_tuple_ty, .data = .{ .tuple = try program.addPatSpan(&scalar_pats) } });
+    const scalar_reads = [_]Ast.ExprId{
+        try program.addExpr(.{ .ty = scalar_ty, .data = .{ .local = scalar_first } }),
+        try program.addExpr(.{ .ty = scalar_ty, .data = .{ .local = scalar_second } }),
+    };
+    const scalar_rest = try program.addExpr(.{ .ty = scalar_tuple_ty, .data = .{ .tuple = try program.addExprSpan(&scalar_reads) } });
+    const scalar_body = try program.addExpr(.{ .ty = scalar_tuple_ty, .data = .{ .let_ = .{ .bind = scalar_pat, .value = scalar_loop, .rest = scalar_rest } } });
+    var scalars = ExitDemand.Inventory.init(allocator, &program);
+    defer scalars.deinit();
+    try scalars.collect(scalar_body);
+    try std.testing.expect(scalars.get(scalar_pat) == null);
 }
 
 test "loop exit projection retains typed boundaries around known tuples" {

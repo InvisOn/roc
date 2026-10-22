@@ -179,6 +179,9 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// RBP-relative offset where R12 is saved (only used on Windows x64)
         /// Set via saveR12 before adding arguments that might clobber R12
         r12_save_offset: ?i32 = null,
+        /// Code offset just past the last emitted call instruction: the
+        /// return address that call leaves, before any argument cleanup.
+        return_offset: ?usize = null,
         /// Deferred register arguments, resolved via parallel move before call
         reg_args: [CC_EMIT.PARAM_REGS.len]DeferredRegArg = undefined,
         reg_arg_count: u8 = 0,
@@ -1253,6 +1256,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                     try self.emit.blxReg(CC_EMIT.SCRATCH_REG);
                 },
             }
+            self.return_offset = self.emit.buf.items.len;
 
             try self.finishCall(total_space);
         }
@@ -1268,6 +1272,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                 .x86_64 => try self.emit.callReg(target),
                 .arm32 => try self.emit.blxReg(target),
             }
+            self.return_offset = self.emit.buf.items.len;
 
             try self.finishCall(total_space);
         }
@@ -1308,6 +1313,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                     },
                 });
             }
+            self.return_offset = self.emit.buf.items.len;
 
             try self.finishCall(total_space);
         }

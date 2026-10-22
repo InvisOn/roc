@@ -138,7 +138,7 @@ fn fundamentalKind(store: *const Store, idx: Idx) ?Fundamental {
             };
         },
         .list, .list_of_zst, .struct_, .closure => null,
-        .zst => unreachable, // classifyType asserts a nonzero size, and placement returns .none for zero-sized values first
+        .zst, .hole => unreachable, // classifyType asserts a nonzero size, and placement returns .none for zero-sized values first
     };
 }
 
@@ -174,7 +174,7 @@ fn countVectors(store: *const Store, idx: Idx, maybe_kind: *?layout.Vector) u8 {
             if (info.variants.len != 1 or info.data.discriminant_size != 0) return invalid_count;
             return countVectors(store, info.variants.get(0).payload_layout, maybe_kind);
         },
-        .box, .box_of_zst, .erased_box, .list, .list_of_zst, .closure, .erased_callable, .zst, .ptr => return invalid_count,
+        .box, .box_of_zst, .erased_box, .list, .list_of_zst, .closure, .erased_callable, .zst, .hole, .ptr => return invalid_count,
     }
 }
 
@@ -216,7 +216,7 @@ fn countFloats(store: *const Store, idx: Idx, maybe_bits: *?u16) u8 {
             if (info.variants.len != 1 or info.data.discriminant_size != 0) return invalid_count;
             return countFloats(store, info.variants.get(0).payload_layout, maybe_bits);
         },
-        .box, .box_of_zst, .erased_box, .list, .list_of_zst, .closure, .erased_callable, .zst, .ptr => return invalid_count,
+        .box, .box_of_zst, .erased_box, .list, .list_of_zst, .closure, .erased_callable, .zst, .hole, .ptr => return invalid_count,
     }
 }
 
