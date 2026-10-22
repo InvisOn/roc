@@ -37,6 +37,7 @@ A separate, related problem: `eval.backendAvailable(.wasm)` returns `true` on ev
 - Erased-callable drop pointer: `LirCodeGen.zig:14562` and `14587` (offset `@sizeOf(usize)`, stored with an 8-byte `.w64` store), in `generatePackedErasedFn` (line 14358).
 - Erased-callable payload layout: `LirCodeGen.zig:14393`, `14411`, `14421`, `14429`, `14571`, `14581`, `14607` and `14622` (`@sizeOf` and `@offsetOf` of the `builtins.erased_callable` structs).
 - wasm eval availability: `src/eval/mod.zig:18` (`.interpreter, .wasm => true`), in `backendAvailable` (line 15).
+- Does not compile for a 32-bit machine (added 2026-10-23, upstream `main` at `55a9d652c1`): `src/backend/dev/ProcArtifact.zig:1049`, in `relocationOffset`, returns `relocation.getOffset()` (a `u64`) as `?usize`. `ObjectWriter.zig` already narrows the same value with `@intCast`. Added by `81fe0e217b`.
 
 **Why it matters**
 
