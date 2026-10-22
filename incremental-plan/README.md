@@ -40,6 +40,9 @@ these pull requests.
   against are built from the pinned Zig, not committed (see part 12). If
   the maintainers want them committed, they must be byte-reproducible and
   checked in CI. The Zig ABI workaround is named where it appears.
+- **Test commands in every PR.** Each description ends with a "How to
+  test" section: copy-paste commands run from the repository root, and what
+  their output should be.
 - **One PR open at a time**, so review effort goes to one thing and nothing
   waits on a stack of unmerged work.
 - Commits: signed, no Co-Authored-By or Claude-Session line, no upstream
@@ -249,7 +252,8 @@ upstream wants to keep, and the CI lane made required.
 2. Make it match upstream's current style and rules.
 3. Run the full check: fast checks, the relative oracle, minici, and for
    arm32 parts qemu and the Pis.
-4. Claude drafts the description. I review, edit and post it.
+4. Claude drafts the description, with its "How to test" commands. I
+   review, edit and post it.
 5. Keep it rebased on `main` daily until it merges. Then cut the next one.
 
 ## Timing
