@@ -74,6 +74,55 @@ Parts 3 to 5 together are the biggest change to upstream's own code, about
 in the x86_64 and aarch64 code generators. That is why it is split in
 three, each proven byte-identical.
 
+## Where each part fits in the compiler pipeline
+
+```
+source -> parse -> canonicalize -> type check          (front end, unchanged)
+       -> post-check: monotype, lambda sets, Boxy plan  (unchanged)
+       -> LIR, with the target's word size              (unchanged, already 32-bit ready)
+       -> dev backend:
+            LirCodeGen.zig, the shared driver            [3, 4, 5, 10, 11]
+              -> per-architecture CodeGen               [2, 8]
+                   -> instruction encoder               [6]
+              -> calls: C ABI and frames                [9]
+       -> output, one of:
+            object file (ELF32, relocations, DWARF)      [7]
+              -> link with the platform and C runtime   [12]
+              -> executable
+            code in memory, run by the compiler itself   [13]
+```
+
+Everything up to and including LIR already works for a 32-bit target: LIR
+takes its word size from the target and already produces 32-bit layouts for
+wasm32. All the arm32 work is after LIR, in the dev backend and what follows
+it.
+
+- **0 and 1** touch no pipeline stage of ours. Draft fixes land wherever
+  each bug is (the snapshot tool, the backend, the build scripts).
+- **2, architecture dispatch:** inside the dev backend. It is how the shared
+  driver chooses the architecture's code, before any code is generated.
+- **3 to 5, word size:** the shared driver, `LirCodeGen.zig`. It turns each
+  LIR statement into calls on the architecture's code generator. These
+  parts remove its fixed 8-byte assumptions.
+- **6, encoder:** the last step of code generation. It turns one
+  instruction into its four bytes.
+- **7, objects:** after code generation. It packs the machine code into an
+  ELF32 object with relocations and debug info, for the linker.
+- **8, code generator:** between the driver and the encoder. It turns the
+  driver's requests (load, add, branch, frame) into arm32 instructions.
+- **9, calling convention:** in code generation, wherever a call is made or
+  received. It decides which registers and stack slots hold arguments and
+  results, so Roc code and C code (the platform, builtins) agree.
+- **10 and 11, wide values and SIMD:** in the shared driver, where LIR
+  operations on 64-bit, 128-bit and vector values are lowered. On arm32
+  they need word pairs, four words and NEON registers.
+- **12, targets and platforms:** at both ends. The CLI accepts the target at
+  the start, and linking at the end needs the platform and C runtime files.
+- **13, host:** a second output path. Instead of an object file, the compiler
+  writes the code into executable memory and runs it itself, which the
+  eval tests and compile-time evaluation use.
+- **14, docs:** none.
+
 ## Each pull request
 
 ### 0. The proposal
@@ -215,3 +264,4 @@ upstream first, so stopping early still leaves something of value.
   draft 14 (part 1).
 - 2026-10-22: part 12 changed: the C runtime files are built, not
   committed (security). Committed only if reproducible and checked in CI.
+- 2026-10-22: added where each part fits in the compiler pipeline.
