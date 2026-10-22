@@ -17,6 +17,7 @@
 //! - CC: Calling convention constants
 
 const std = @import("std");
+const isaOf = @import("isa.zig").isaOf;
 const Allocator = std.mem.Allocator;
 
 const layout = @import("layout");
@@ -91,8 +92,9 @@ pub fn CallBuilder(comptime EmitType: type) type {
     const GeneralReg = EmitType.GeneralReg;
     const FloatReg = EmitType.FloatReg;
     const roc_target = EmitType.roc_target;
-    const is_x86_64 = roc_target.toCpuArch() == .x86_64;
-    const is_aarch64 = roc_target.toCpuArch() == .aarch64 or roc_target.toCpuArch() == .aarch64_be;
+    const isa = isaOf(roc_target);
+    const is_x86_64 = isa.binaryIs(.x86_64);
+    const is_aarch64 = isa.binaryIs(.aarch64);
     const is_windows = roc_target.isWindows();
     const uses_position_based_float_args = is_x86_64 and is_windows;
     // Apple's arm64 ABI packs overflow arguments on the stack at their natural
