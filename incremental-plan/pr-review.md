@@ -23,4 +23,6 @@ Next: once no heavy job runs, rebase each PR onto upstream `main`, apply the
 fixes above, and run each PR's "How to test" commands. Since the folding the
 same day, #9 also takes #8's commit (with its fix above) and the glibc stub
 commit from closed #4, and is then rerun as one PR; #8 closes after that.
-#3 waits for the step 3 PR.
+Later the same day step 3 merged into step 2, so #9 also takes #3's commit,
+the first word-size change (sizes through `word`) and the draft 07 fixes, cut
+from the reference branch; #3 closes after that too.
