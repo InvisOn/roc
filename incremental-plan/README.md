@@ -57,26 +57,29 @@ stay out of upstream. They will change as upstream moves.
 | # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR |
 |---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none |
-| 2 | Architecture dispatch (`isa.zig`, `binaryIs`), with the glibc stub's arm32 body (draft 16) and the instruction cache flush (draft 03) | dev backend: architecture choice, glibc stub, code in memory | about 100 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8) and closed [#4](https://github.com/InvisOn/roc/pull/4) |
-| 3 | Driver word size, part 1: sizes through `word`, with the host word-size fixes (drafts 07 and 12) | dev backend: shared driver, relocations | about 2,050 | no | not yet, will fold in [#3](https://github.com/InvisOn/roc/pull/3) |
+| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) and driver word size, part 1: sizes through `word`. With the glibc stub's arm32 body (draft 16), the instruction cache flush (draft 03) and the host word-size fixes (drafts 07 and 12) | dev backend: architecture choice and shared driver, plus glibc stub, code in memory, relocations | about 2,150 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8), [#3](https://github.com/InvisOn/roc/pull/3) and closed [#4](https://github.com/InvisOn/roc/pull/4) |
 | 4 | Driver word size, part 2: emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet |
 | 5 | Driver word size, part 3: the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet |
 | 6 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet |
 | 7 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet |
 | 8 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet |
 | 9 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet |
-| 10 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | in 3 to 5 | no | not yet |
-| 11 | NEON SIMD | dev backend: shared driver | in 3 to 5 | no | not yet |
+| 10 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | in 2, 4 and 5 | no | not yet |
+| 11 | NEON SIMD | dev backend: shared driver | in 2, 4 and 5 | no | not yet |
 | 12 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet |
 | 13 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet |
 | 14 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet |
 
 There is no part 1 any more (2026-10-24). It was a row of separate upstream
-bug fixes. The drafts that matter to arm32 folded into parts 2 and 3, so the
+bug fixes. The drafts that matter to arm32 folded into part 2, so the
 maintainers review them together with the change that needs them. The other
 drafts are not part of this plan.
 
-Parts 3 to 5 together are the biggest change to upstream's own code, about
+There is no part 3 any more either (2026-10-24). The first word-size part
+joined the architecture dispatch in part 2, so the dispatch arrives together
+with the first change that needs it.
+
+Parts 2, 4 and 5 together are the biggest change to upstream's own code, about
 5,400 added and 2,800 removed lines in `LirCodeGen.zig`, plus about 1,000
 in the x86_64 and aarch64 code generators. That is why it is split in
 three, each proven byte-identical.
@@ -88,7 +91,7 @@ source -> parse -> canonicalize -> type check          (front end, unchanged)
        -> post-check: monotype, lambda sets, Boxy plan  (unchanged)
        -> LIR, with the target's word size              (unchanged, already 32-bit ready)
        -> dev backend:
-            LirCodeGen.zig, the shared driver            [3, 4, 5, 10, 11]
+            LirCodeGen.zig, the shared driver            [2, 4, 5, 10, 11]
               -> per-architecture CodeGen               [2, 8]
                    -> instruction encoder               [6]
               -> calls: C ABI and frames                [9]
@@ -107,7 +110,7 @@ it.
 - **0** touches no pipeline stage.
 - **2, architecture dispatch:** inside the dev backend. It is how the shared
   driver chooses the architecture's code, before any code is generated.
-- **3 to 5, word size:** the shared driver, `LirCodeGen.zig`. It turns each
+- **2, 4 and 5, word size:** the shared driver, `LirCodeGen.zig`. It turns each
   LIR statement into calls on the architecture's code generator. These
   parts remove its fixed 8-byte assumptions.
 - **6, encoder:** the last step of code generation. It turns one
@@ -138,7 +141,7 @@ A message to the maintainers (their usual channel, Claude drafts it):
 - what exists: a working arm32 dev backend, verified under qemu and on two
   Raspberry Pis, kept merged with upstream daily
 - what we propose: landing it in the order above, one PR at a time
-- the cost to them: review time, the shared-code changes in parts 3 to 5,
+- the cost to them: review time, the shared-code changes in parts 2, 4 and 5,
   one extra CI lane
 - what we ask: yes or no to arm32 as a dev backend target, and their
   preferences (CI lane, how big a PR may be)
@@ -159,8 +162,8 @@ cut, and is then closed.
 |---|---|---|---|---|
 | 16, glibc stub writes `ret` for 32-bit ARM | 2 | [#4](https://github.com/InvisOn/roc/pull/4) | closed, commit kept | the stub assembles |
 | 03, no instruction cache flush before JIT code runs | 2 | [#8](https://github.com/InvisOn/roc/pull/8) | open | `build-ci` on x86_64 only, not yet on aarch64 |
-| 07, 32-bit host readiness | 3 | none yet | | |
-| 12, abs64 relocation sized by the host | 3 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test |
+| 07, 32-bit host readiness | 2 | none yet | | |
+| 12, abs64 relocation sized by the host | 2 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test |
 
 Not part of the plan: 02, 14 (filed as #12532), 26 and the CI drafts. Their
 fork PRs ([#5](https://github.com/InvisOn/roc/pull/5) for 26,
@@ -170,7 +173,7 @@ fork PRs ([#5](https://github.com/InvisOn/roc/pull/5) for 26,
 If upstream merges the owner's glibc stub PR (#12513) first, draft 16 drops
 out of part 2.
 
-### 2. Architecture dispatch
+### 2. Architecture dispatch and word size, part 1
 
 `src/backend/dev/isa.zig`: `isaOf` and `Isa.binaryIs`. It replaces
 scattered `target.toCpuArch() == .x86_64` checks with one switch. Useful
@@ -181,12 +184,12 @@ architecture": the glibc stub, which wrote the AArch64 `ret` for 32-bit ARM
 too (draft 16), and the instruction cache flush, which only x86 can skip
 (draft 03).
 
-### 3 to 5. The driver for any word size
+### 2, 4 and 5. The driver for any word size
 
 From `LirCodeGen.zig` and the x86_64 and aarch64 code generators. Each part
 compiles and runs only the 64-bit targets, and includes the oracle proof.
 Splitting by area:
-- **3:** sizes, offsets and loops go through `word`, `word_size` and
+- **2 (with the dispatch):** sizes, offsets and loops go through `word`, `word_size` and
   `word_bits` instead of a fixed 8. It also takes the host word-size fixes:
   the places that use the compiler's own word size where the target's is
   meant (draft 07), and the abs64 relocation that writes four bytes on a
@@ -283,7 +286,7 @@ upstream wants to keep, and the CI lane made required.
 
 ## Timing
 
-If the maintainers review one PR a week, the 14 items take about 4 months.
+If the maintainers review one PR a week, the 13 items take about 4 months.
 Two a week, about 2 months. The order puts the parts most useful to
 upstream first, so stopping early still leaves something of value.
 
@@ -297,3 +300,6 @@ upstream first, so stopping early still leaves something of value.
 - 2026-10-24: part 1 removed. The arm32 drafts fold into parts 2 (16, 03)
   and 3 (07, 12). The other drafts are not part of the plan. Each plan PR's
   description carries the plan table (#, pull request, where it sits).
+- 2026-10-24: part 3 folded into part 2. Part 2 is now the architecture
+  dispatch plus the first word-size part, with drafts 16, 03, 07 and 12.
+  The other part numbers stay as they were.
