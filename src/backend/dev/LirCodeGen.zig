@@ -25811,7 +25811,8 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             if (comptime isa == .aarch64) {
                 if (relocation == .linked_function) {
                     const loc: usize = @intCast(relocation.linked_function.offset);
-                    if (self.codegen.isBlAt(loc)) try self.codegen.registerAssembledExternCall(loc, reloc_index);
+                    std.debug.assert(relocation.linked_function.kind == .aarch64_call26);
+                    try self.codegen.registerAssembledExternCall(loc, reloc_index);
                 }
             }
         }
@@ -25838,6 +25839,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     relocations[stub.original_relocation] = .{ .linked_function = .{
                         .offset = @intCast(stub.call),
                         .symbol = stub.symbol,
+                        .kind = .aarch64_call26,
                     } };
                     relocations[stub.page_relocation] = .retired;
                     relocations[stub.page_relocation + 1] = .retired;
@@ -28777,7 +28779,7 @@ test "independent fragments record their static data use" {
             .linked_data => |data| {
                 if (std.mem.eql(u8, cg.getSymbolNames()[@backingInt(data.symbol)], "fragment_static_value")) reads_value = true;
             },
-            .linked_function, .jmp_to_return, .retired => {},
+            .linked_function, .retired => {},
         }
     }
     try std.testing.expect(reads_value);

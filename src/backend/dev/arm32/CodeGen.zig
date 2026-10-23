@@ -900,12 +900,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         pub fn emitCall(self: *Self, symbol: SymbolTable.Id) Allocator.Error!void {
             const at = self.currentOffset();
             try self.emit.bl(0);
-            try self.relocations.append(self.allocator, .{ .linked_function = .{ .offset = at, .symbol = symbol } });
-        }
-
-        /// Whether the instruction at `loc` is a BL.
-        pub fn isBlAt(self: *Self, loc: usize) bool {
-            return (self.readInst(loc) & 0x0F000000) == 0x0B000000;
+            try self.relocations.append(self.allocator, .{ .linked_function = .{ .offset = at, .symbol = symbol, .kind = .arm32_call24 } });
         }
 
         /// Raise SIGILL (`UDF #0`), like x86's UD2.
@@ -1066,8 +1061,6 @@ test "branch placeholders are retargeted with their condition and link bit" {
     try cg.patchJump(jump, 16);
     try cg.patchJump(cond, 0);
     try cg.patchCall(call, 16);
-    try std.testing.expect(cg.isBlAt(call));
-    try std.testing.expect(!cg.isBlAt(jump));
 
     var e = MuslEmit.init(std.testing.allocator);
     defer e.deinit();
