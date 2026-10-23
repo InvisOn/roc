@@ -5,7 +5,20 @@ itself is in `README.md`. The review findings for each fork PR are in
 `pr-review.md`. This page says where things stand, what to do next, and how
 to set up and check the work.
 
-Upstream `main` was at `9b119d59e4` when this was written.
+Upstream `main` was at `9b119d59e4` when this was written. Updated the
+same day: upstream `main` is now `04d6133c76`, and fork `main` has been
+fast-forwarded to it.
+
+### Changes since `9b119d59e4`
+
+- Upstream added 11 commits. One of them evaluates compile-time values in
+  the interpreter on hosts without native code generation (`c6154cb220`). It
+  matters for the sync, not for the fold.
+- Of the files the fold changes, only `src/eval/test/lir_inline_test.zig`
+  changed upstream, and that was a test appended at the end of the file. A
+  conflict there, if any, is two tests side by side.
+- Upstream PR #12546 fixes #12531. It is open and not merged yet. When it
+  merges, `dev_object` hashes no longer depend on the compiler build.
 
 ## Who does what
 
@@ -13,10 +26,13 @@ Upstream `main` was at `9b119d59e4` when this was written.
 - **The sync machine** keeps `claude/arm32-dev-backend-reference` merged
   with upstream and fast-forwards fork `main`. It no longer touches the plan
   PR branches, so the two machines don't push to the same branches.
-- Two signed merges are held on the sync machine and not pushed, because
-  upstream issue #12531 (`dev_object` snapshot hashes depend on the compiler
-  build) fails minici. The pushed reference branch is at `bcf98f7fc8`. It is
-  behind upstream, but every commit the plan needs is already on it.
+- Two signed merges (up to `9b119d59e4`) are held on the sync machine.
+  They were held because of upstream issue #12531 (`dev_object` snapshot
+  hashes depend on the compiler build). A temporary fix (`606eaf8310`,
+  hashes from a normal build) passed minici, and the last check is running.
+  Once they are pushed, the reference branch moves past `bcf98f7fc8`. Every
+  commit the plan needs is already on `bcf98f7fc8`, so the fold doesn't
+  wait for this.
 
 ## Set up on a new machine
 
