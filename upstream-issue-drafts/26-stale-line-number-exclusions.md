@@ -19,7 +19,7 @@ Not filed. For roc-lang/roc.
 
 **What happens**
 
-`src/build/check_runner.zig` checks `src/canonicalize/`, `src/check/`, `src/layout/` and `src/eval/` for raw string comparison: a `std.mem.` call outside an allowed list, or `findByString`, `findIdent` or `getMethodIdent`. A list called `excluded_ranges` lets specific lines through, by file name and line number. When someone edits a file, the code moves and the numbers stay.
+`src/build/check_runner.zig` checks `src/check/`, `src/layout/` and `src/eval/` for raw string comparison (its message also names `src/canonicalize/`, but that directory is commented out of the scan with a TODO). It skips comments and tests, and flags a `std.mem.` call outside an allowed list, or `findByString`, `findIdent` or `getMethodIdent`. A list called `excluded_ranges` lets specific lines through, by file name and line number. When someone edits a file, the code moves and the numbers stay.
 
 On `b9ec1d6645`, 10 of the 11 entries point at lines with nothing the check would flag:
 
@@ -43,7 +43,7 @@ Only `inspected.zig` 226-232 still excuses something (`findIdent` at line 227).
 
 **How to reproduce**
 
-This script looks at every entry and every scanned file that the entry's name matches. It reports an entry when none of those files has a line in its range that the check would flag. Run it from the repository root. On `b9ec1d6645` it printed the following and exited with 1:
+This script looks at every entry and every scanned file that the entry's name matches. Unlike the check, it does not skip comments and tests, so it can only miss a stale entry, never invent one. It reports an entry when none of those files has a line in its range that the check would flag. Run it from the repository root. On `b9ec1d6645` it printed the following and exited with 1:
 
 ```
 boxy_runtime.zig:5614-5614: nothing the check would flag (src/eval/boxy_runtime.zig)
@@ -61,7 +61,7 @@ report.zig:615-615: nothing the check would flag (src/check/report.zig)
 ```sh
 #!/bin/sh
 # Run from a roc checkout. An entry in excluded_ranges (src/build/check_runner.zig)
-# is stale unless one of the files it matches (by name suffix, in the four
+# is stale unless one of the files it matches (by name suffix, in the three
 # scanned directories) has a line in its range that the check would flag:
 # a std.mem. call outside the allowed list, or findByString, findIdent or
 # getMethodIdent. Prints each stale entry; exits 1 if any.
@@ -70,7 +70,7 @@ ranges=$(grep -o '\.file = "[^"]*", \.start = [0-9]*, \.end = [0-9]*' src/build/
 allowed='Allocator|Alignment|sort|asBytes|bytesAsValue\(|readInt\(|writeInt\(|reverse|alignForward|order|copyForwards'
 bad=0
 while read -r name start end; do
-  files=$(find src/canonicalize src/check src/layout src/eval -name "*$name" 2>/dev/null)
+  files=$(find src/check src/layout src/eval -name "*$name" 2>/dev/null)
   if [ -z "$files" ]; then echo "$name:$start-$end: no matching file in the scanned directories"; bad=1; continue; fi
   hit=0
   for f in $files; do
