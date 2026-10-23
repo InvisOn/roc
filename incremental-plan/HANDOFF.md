@@ -17,7 +17,7 @@ fast-forwarded to it.
 - Of the files the fold changes, only `src/eval/test/lir_inline_test.zig`
   changed upstream, and that was a test appended at the end of the file. A
   conflict there, if any, is two tests side by side.
-- Upstream PR #12546 fixes #12531. It is open and not merged yet. When it
+- Upstream PR 12546 fixes 12531. It is open and not merged yet. When it
   merges, `dev_object` hashes no longer depend on the compiler build.
 
 ## Who does what
@@ -27,7 +27,7 @@ fast-forwarded to it.
   with upstream and fast-forwards fork `main`. It no longer touches the plan
   PR branches, so the two machines don't push to the same branches.
 - Two signed merges (up to `9b119d59e4`) are held on the sync machine.
-  They were held because of upstream issue #12531 (`dev_object` snapshot
+  They were held because of upstream issue 12531 (`dev_object` snapshot
   hashes depend on the compiler build). A temporary fix (`606eaf8310`,
   hashes from a normal build) passed minici, and the last check is running.
   Once they are pushed, the reference branch moves past `bcf98f7fc8`. Every
@@ -79,9 +79,9 @@ The other machines: the Pi 5 (`aj@roc5.local`, aarch64) and the Pi 3
 | [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | `127015276f` | `75d613ba5c` (61 behind) | Step 2. Only the dispatch commit so far. The fold has not started. |
 | [#8](https://github.com/InvisOn/roc/pull/8) | `fix/flush-jit-instruction-cache` | `5aa8ffecbf` | `73df27a5bb` (653 behind) | Draft 03. Folds into #9, then closes. |
 | [#3](https://github.com/InvisOn/roc/pull/3) | `fix/abs64-relocation-width` | `9ee4d148e8` | `73df27a5bb` | Draft 12. Folds into #9, then closes. |
-| [#4](https://github.com/InvisOn/roc/pull/4) | `fix/glibc-stub-arm-returns` | `4dffc5b3ea` | `73df27a5bb` | Draft 16. Closed. Its commit folds into #9. The same commit is open upstream as your #12513. |
+| [#4](https://github.com/InvisOn/roc/pull/4) | `fix/glibc-stub-arm-returns` | `4dffc5b3ea` | `73df27a5bb` | Draft 16. Closed. Its commit folds into #9. The same commit is open upstream as your 12513. |
 | [#5](https://github.com/InvisOn/roc/pull/5) | `fix/stale-check-exclusions` | `80360119bf` | `73df27a5bb` | Draft 26. Not part of the plan. |
-| [#6](https://github.com/InvisOn/roc/pull/6) | `fix/list-get-unsafe-i128-index` | `36e90a6776` | `73df27a5bb` | Draft 14 (filed as #12532). Not part of the plan. Conflicts with upstream. |
+| [#6](https://github.com/InvisOn/roc/pull/6) | `fix/list-get-unsafe-i128-index` | `36e90a6776` | `73df27a5bb` | Draft 14 (filed as 12532). Not part of the plan. Conflicts with upstream. |
 | [#7](https://github.com/InvisOn/roc/pull/7) | `fix/snapshot-dev-object-errors` | `f9e096039e` | `73df27a5bb` | Draft 02. Not part of the plan. |
 
 Every open PR has a "How the code flows" section and a posted review (links
@@ -104,7 +104,7 @@ Work in `.workspaces/pr-isa`.
    `protectExecutable`. Add `FlushInstructionCacheFailed` to its error set,
    as #8 does for `finishWrite`.
 3. **#4, glibc stub** (`4dffc5b3ea`). Cherry-pick it. If upstream merges
-   #12513 first, drop this piece.
+   12513 first, drop this piece.
 4. **#3, abs64 width** (`9ee4d148e8`). Cherry-pick it.
 5. **Draft 07, host word size.** Cut from the reference branch:
    - `722823bb21` Fix target data sized by the host's usize in the dev backend driver

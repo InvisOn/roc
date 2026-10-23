@@ -9,7 +9,7 @@ Not filed. For roc-lang/roc.
 | | |
 |---|---|
 | Still an issue? | Yes (2026-10-24, upstream `main` at `9b119d59e4`, by reading the code). It can't be seen on upstream's supported targets. Upstream's 32-bit compile fixes (`03f133636a`) do not touch these places. |
-| Already upstream? | No issue or PR found (searched 2026-10-20). #9436 (closed) was the same mistake in the LIR interpreter. |
+| Already upstream? | No issue or PR found (searched 2026-10-20). 9436 (closed) was the same mistake in the LIR interpreter. |
 | Fixed on our reference branch? | Yes, in `f4af9e372d`, `d69fb5eb7f` and `1344ce3159` (the wasm part). |
 | Before filing | Decide whether it is worth filing, since nothing upstream fails. If so, file it as a code-health note, not a bug. |
 

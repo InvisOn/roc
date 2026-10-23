@@ -9,7 +9,7 @@ Not filed. For roc-lang/roc.
 | | |
 |---|---|
 | Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). |
-| Already upstream? | No issue or PR for `ExecutableMemory` (searched 2026-10-20). #11193 and #11452 (both merged) added the flush to the machine-code shim only. |
+| Already upstream? | No issue or PR for `ExecutableMemory` (searched 2026-10-20). 11193 and 11452 (both merged) added the flush to the machine-code shim only. |
 | Fixed on our reference branch? | Yes, in `49bf1449b9`. |
 | Before filing | Nothing. There is no reliable way to make it fail on aarch64. |
 

@@ -24,7 +24,7 @@ something is delivered or newly promised.
       until most of the preparation is done. To measure before that stage.
 - [ ] **Generated files: a proposal.** Commit the encoder's oracle tests and
       the eval hash file, or generate them during the test run.
-      2026-10-03: the eval hash file half is settled by upstream #11885: a
+      2026-10-03: the eval hash file half is settled by upstream 11885: a
       committed file cannot work any more (`NICE_BRANCH.md`, last section).
       The encoder's oracle tests are still open.
 - [ ] **Check each "useful to the wider Roc project" item properly** when we
@@ -193,7 +193,7 @@ Assumptions, confirmed by me on 2026-10-03:
       `.git/verify-tools/upstream-sync/state.txt` on the first PC.
 - [x] **Push the notes commits** (the facade decision, the basic-cli panic): pushed 2026-10-03
 - [x] **Re-create the sync schedule**: no longer needed; the sync runs continuously (2026-10-13)
-- [x] **Watch upstream #11885** (the 120,000-line consolidation): merged into the reference 2026-10-03
+- [x] **Watch upstream 11885** (the 120,000-line consolidation): merged into the reference 2026-10-03
 
 ## Decided 2026-10-02
 

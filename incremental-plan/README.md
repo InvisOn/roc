@@ -168,12 +168,12 @@ cut, and is then closed.
 | 07, 32-bit host readiness | 2 | none yet | | |
 | 12, abs64 relocation sized by the host | 2 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test |
 
-Not part of the plan: 02, 14 (filed as #12532), 26 and the CI drafts. Their
+Not part of the plan: 02, 14 (filed as 12532), 26 and the CI drafts. Their
 fork PRs ([#5](https://github.com/InvisOn/roc/pull/5) for 26,
 [#6](https://github.com/InvisOn/roc/pull/6) for 14,
 [#7](https://github.com/InvisOn/roc/pull/7) for 02) stay open on their own.
 
-If upstream merges the owner's glibc stub PR (#12513) first, draft 16 drops
+If upstream merges the owner's glibc stub PR (12513) first, draft 16 drops
 out of part 2.
 
 ### 2. Architecture dispatch and word size (1 of 3)
