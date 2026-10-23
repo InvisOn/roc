@@ -51,6 +51,10 @@ git worktree add .workspaces/notes notes
 Fetch each remote on its own, as above. `git fetch upstream origin` treats
 `origin` as a refspec.
 
+Install the git hooks from `tools/git-hooks/` on `notes` (its README says
+how). They block upstream references, session trailers and unsigned
+commits before they reach GitHub.
+
 You need Zig 0.17.0, Python 3 and `gh`. Commits are signed with `-S`. Signing
 is set up per machine, so check `git config user.signingkey` and
 `gpg.format` first.
