@@ -57,21 +57,21 @@ Sizes are hand-written lines from the verified reference diff
 (`git diff 73df27a5bb 2f5d8e3685`), without our `projects/` notes, which
 stay out of upstream. They will change as upstream moves.
 
-| # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR |
-|---|---|---|---|---|---|
-| 0 | Proposal to the maintainers (no code) | none | none | no | none |
-| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) and driver word size (1 of 3): sizes through `word`. With the glibc stub's arm32 body (draft 16), the instruction cache flush (draft 03) and the host word-size fixes (drafts 07 and 12) | dev backend: architecture choice and shared driver, plus glibc stub, code in memory, relocations | about 2,150 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8), [#3](https://github.com/InvisOn/roc/pull/3) and closed [#4](https://github.com/InvisOn/roc/pull/4) |
-| 4 | Driver word size (2 of 3): emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet |
-| 5 | Driver word size (3 of 3): the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet |
-| 6 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet |
-| 7 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet |
-| 8 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet |
-| 9 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet |
-| 10 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | in 2, 4 and 5 | no | not yet |
-| 11 | NEON SIMD | dev backend: shared driver | in 2, 4 and 5 | no | not yet |
-| 12 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet |
-| 13 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet |
-| 14 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet |
+| # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR | Branch |
+|---|---|---|---|---|---|---|
+| 0 | Proposal to the maintainers (no code) | none | none | no | none | none |
+| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) and driver word size (1 of 3): sizes through `word`. With the glibc stub's arm32 body (draft 16), the instruction cache flush (draft 03) and the host word-size fixes (drafts 07 and 12) | dev backend: architecture choice and shared driver, plus glibc stub, code in memory, relocations | about 2,150 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8), [#3](https://github.com/InvisOn/roc/pull/3) and closed [#4](https://github.com/InvisOn/roc/pull/4) | `dispatch/isa` |
+| 4 | Driver word size (2 of 3): emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet | `word-size/emit-helpers` |
+| 5 | Driver word size (3 of 3): the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet | `word-size/driver-rest` |
+| 6 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet | `arm32/encoder` |
+| 7 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet | `arm32/elf32-objects` |
+| 8 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet | `arm32/codegen` |
+| 9 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet | `arm32/aapcs32` |
+| 10 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | in 2, 4 and 5 | no | not yet | (in 2, 4 and 5) |
+| 11 | NEON SIMD | dev backend: shared driver | in 2, 4 and 5 | no | not yet | (in 2, 4 and 5) |
+| 12 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet | `arm32/targets` |
+| 13 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet | `arm32/host` |
+| 14 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet | `arm32/docs` |
 
 There is no part 1 any more (2026-10-24). It was a row of separate upstream
 bug fixes. The drafts that matter to arm32 folded into part 2, so the
@@ -161,12 +161,12 @@ Since 2026-10-24 the arm32 drafts are part of the PRs that need them, not
 separate fixes. Each fork PR below is folded into its part when that part is
 cut, and is then closed.
 
-| Draft | Folds into | Fork PR | State | Checked with |
-|---|---|---|---|---|
-| 16, glibc stub writes `ret` for 32-bit ARM | 2 | [#4](https://github.com/InvisOn/roc/pull/4) | closed, commit kept | the stub assembles |
-| 03, no instruction cache flush before JIT code runs | 2 | [#8](https://github.com/InvisOn/roc/pull/8) | open | `build-ci` on x86_64 only, not yet on aarch64 |
-| 07, 32-bit host readiness | 2 | none yet | | |
-| 12, abs64 relocation sized by the host | 2 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test |
+| Draft | Folds into | Fork PR | State | Checked with | Branch |
+|---|---|---|---|---|---|
+| 16, glibc stub writes `ret` for 32-bit ARM | 2 | [#4](https://github.com/InvisOn/roc/pull/4) | closed, commit kept | the stub assembles | `fix/glibc-stub-arm-returns` |
+| 03, no instruction cache flush before JIT code runs | 2 | [#8](https://github.com/InvisOn/roc/pull/8) | open | `build-ci` on x86_64 only, not yet on aarch64 | `fix/flush-jit-instruction-cache` |
+| 07, 32-bit host readiness | 2 | none yet | | | none yet |
+| 12, abs64 relocation sized by the host | 2 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test | `fix/abs64-relocation-width` |
 
 Not part of the plan: 02, 14 (filed as 12532), 26 and the CI drafts. Their
 fork PRs ([#5](https://github.com/InvisOn/roc/pull/5) for 26,
