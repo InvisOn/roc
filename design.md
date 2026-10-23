@@ -11100,7 +11100,17 @@ constraints is grounded to the empty row by unifying the tail with it
 (`Check.closeValueRowTailsCarryingDerivations`), as every row of a top-level
 value closes when its module finishes checking (Value Rows: Uses Share One
 Row). A function's tail is left open: it
-generalizes, and each instantiation supplies its row. Displayed in an output position, such a tail is implicit openness
+generalizes, and each instantiation supplies its row. An instantiation whose
+copy of the tail nothing pins leaves that copy to its row default too, so the
+ambiguity judgment never reports it: `make : U64 -> Set([X, Y])` built with
+`insert` gives its implicitly opened tail a `to_hash` requirement, and
+`make(0).len()` closes the call's copy rather than reporting a hash with no
+owner. The instantiator records each copy it places in a row's extension
+position (`Instantiator.constrained_row_tail_copies`), the derivation records
+the extension it constrains, and the judgment acquits a candidate in that
+position (`AmbiguityCandidate.Position`) whose constraints the empty row
+discharges. A payload in the same row has no default, so an undetermined
+payload is still reported. Displayed in an output position, such a tail is implicit openness
 like an unconstrained one.
 
 The row variable's evidence parameter is an `erased_row_remainder`: Monotype
@@ -23216,11 +23226,17 @@ compile-time evaluator does not interpret Monotype IR, Lambda Solved IR,
 logical Lambda Mono expressions, or any source-level IR.
 
 The only interpreter path is for compiler hosts that cannot run generated native
-code, currently wasm32 and freestanding compiler builds. This decision is made
-from the compiler's own build target. The Roc program target selected by
-`roc --target` does not affect the compile-time evaluation strategy. A native
-compiler host without host dev-backend code generation support is unsupported for
-compile-time evaluation; it must not silently use the interpreter.
+code: freestanding compiler builds, and every host the dev backend has no code
+generator for (`host_lir_codegen_available`), currently wasm32 and 32-bit ARM
+and x86. This decision is made from the compiler's own build target. The Roc
+program target selected by `roc --target` does not affect the compile-time
+evaluation strategy. The interpreter evaluates at the compiler host's pointer
+width, and a program target of another width receives the completed values
+re-encoded at its own layouts, exactly as a 64-bit host's values reach a
+32-bit target. Roc exposes no pointer-width type, so a value means the same at
+either width; one too large for its destination's widths (a 32-bit target's
+lengths, or the ConstStore's) is `error.OutOfMemory`, as it would be on that
+target at runtime.
 
 Diagnostic behavior must be identical between the dev-backend evaluator and the
 host-restricted LIR interpreter. A mismatch in crashes, expect failures,
