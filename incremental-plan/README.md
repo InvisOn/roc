@@ -54,23 +54,23 @@ Sizes are hand-written lines from the verified reference diff
 (`git diff 73df27a5bb 2f5d8e3685`), without our `projects/` notes, which
 stay out of upstream. They will change as upstream moves.
 
-| # | Pull request | Where it sits | Size | Changes 64-bit output? |
-|---|---|---|---|---|
-| 0 | Proposal to the maintainers (no code) | none | none | no |
-| 1 | Upstream bug fixes from our drafts, one PR each, only those the maintainers want | where each bug is | small each | no |
-| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) | dev backend: architecture choice | about 50 | no |
-| 3 | Driver word size, part 1: sizes through `word` | dev backend: shared driver | about 2,000 | no |
-| 4 | Driver word size, part 2: emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no |
-| 5 | Driver word size, part 3: the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no |
-| 6 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no |
-| 7 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no |
-| 8 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no |
-| 9 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no |
-| 10 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | in 3 to 5 | no |
-| 11 | NEON SIMD | dev backend: shared driver | in 3 to 5 | no |
-| 12 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no |
-| 13 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no |
-| 14 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no |
+| # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR |
+|---|---|---|---|---|---|
+| 0 | Proposal to the maintainers (no code) | none | none | no | none |
+| 1 | Upstream bug fixes from our drafts, one PR each, only those the maintainers want | where each bug is | small each | no | [#3](https://github.com/InvisOn/roc/pull/3), [#5](https://github.com/InvisOn/roc/pull/5), [#6](https://github.com/InvisOn/roc/pull/6), [#7](https://github.com/InvisOn/roc/pull/7), [#8](https://github.com/InvisOn/roc/pull/8), [#4](https://github.com/InvisOn/roc/pull/4) (closed) |
+| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) | dev backend: architecture choice | about 50 | no | [#9](https://github.com/InvisOn/roc/pull/9) |
+| 3 | Driver word size, part 1: sizes through `word` | dev backend: shared driver | about 2,000 | no | not yet |
+| 4 | Driver word size, part 2: emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet |
+| 5 | Driver word size, part 3: the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet |
+| 6 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet |
+| 7 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet |
+| 8 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet |
+| 9 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet |
+| 10 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | in 3 to 5 | no | not yet |
+| 11 | NEON SIMD | dev backend: shared driver | in 3 to 5 | no | not yet |
+| 12 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet |
+| 13 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet |
+| 14 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet |
 
 Parts 3 to 5 together are the biggest change to upstream's own code, about
 5,400 added and 2,800 removed lines in `LirCodeGen.zig`, plus about 1,000
@@ -154,14 +154,14 @@ now), then 02 and 03.
 
 Fork PRs for review (against InvisOn/roc `main`, as of 2026-10-23):
 
-| Draft | Fork PR | Checked with |
-|---|---|---|
-| 12 | #3 | its unit test |
-| 16 | #4 | the stub assembles |
-| 26 | #5 | `run-check-type-checker-patterns` |
-| 14 | #6 | its death test (1/1 passed) |
-| 02 | #7 | `run-check-snapshots` |
-| 03 | #8 | `build-ci` on x86_64 only, not yet on aarch64 |
+| Draft | Fork PR | State | Checked with |
+|---|---|---|---|
+| 12 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test |
+| 16 | [#4](https://github.com/InvisOn/roc/pull/4) | closed | the stub assembles |
+| 26 | [#5](https://github.com/InvisOn/roc/pull/5) | open | `run-check-type-checker-patterns` |
+| 14 | [#6](https://github.com/InvisOn/roc/pull/6) | open | its death test (1/1 passed) |
+| 02 | [#7](https://github.com/InvisOn/roc/pull/7) | open | `run-check-snapshots` |
+| 03 | [#8](https://github.com/InvisOn/roc/pull/8) | open | `build-ci` on x86_64 only, not yet on aarch64 |
 
 ### 2. Architecture dispatch
 
