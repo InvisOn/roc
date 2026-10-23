@@ -26,13 +26,9 @@ fast-forwarded to it.
 - **The sync machine** keeps `claude/arm32-dev-backend-reference` merged
   with upstream and fast-forwards fork `main`. It no longer touches the plan
   PR branches, so the two machines don't push to the same branches.
-- Two signed merges (up to `9b119d59e4`) are held on the sync machine.
-  They were held because of upstream issue 12531 (`dev_object` snapshot
-  hashes depend on the compiler build). A temporary fix (`606eaf8310`,
-  hashes from a normal build) passed minici, and the last check is running.
-  Once they are pushed, the reference branch moves past `bcf98f7fc8`. Every
-  commit the plan needs is already on `bcf98f7fc8`, so the fold doesn't
-  wait for this.
+- The merges up to upstream `9b119d59e4` are pushed. The reference branch
+  is at `a5666157e7`. They carry a temporary fix for upstream issue 12531
+  (`dev_object` hashes from a normal build, `606eaf8310`).
 
 ## Set up on a new machine
 
