@@ -1302,6 +1302,7 @@ pub fn programFailureKind(err: eval.Inspected.Error) ProgramFailureKind {
         error.MmapFailed,
         error.ModuleLinkFailed,
         error.MprotectFailed,
+        error.FlushInstructionCacheFailed,
         error.NameTooLong,
         error.NetworkNotFound,
         error.NoBitcodeModules,

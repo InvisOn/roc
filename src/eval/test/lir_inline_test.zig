@@ -12006,6 +12006,7 @@ test "issue 10354 undefined identifier in expression does not panic monotype low
         error.MmapFailed,
         error.ModuleLinkFailed,
         error.MprotectFailed,
+        error.FlushInstructionCacheFailed,
         error.NameTooLong,
         error.NetworkNotFound,
         error.NoBitcodeModules,
