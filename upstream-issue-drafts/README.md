@@ -2,7 +2,7 @@
 
 Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
-**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179), 32 (#12207), 10 (#12480), 13 (#12481), 19 (#12483), 11 (#12499), 33 (#12500) and 35 (#12520). Upstream fixed 21, 22 and 28 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
+**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179), 32 (#12207), 10 (#12480), 13 (#12481), 19 (#12483), 11 (#12499), 33 (#12500), 35 (#12520) and 36 (#12531). Upstream fixed 21, 22 and 28 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
 
 **Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
@@ -22,7 +22,6 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 | `26-stale-line-number-exclusions.md` | Our changes move lines in the checked files, so the skipped lines land on the wrong code and the check passes or fails for the wrong reason. | no | yes, four stale entries (checked by a script in the draft): `cir_to_lir.zig` no longer exists; `inspected.zig` 2474 is a `}` and 3264-3275 is past its 3255 lines; `inspected_run.zig` 109 is blank | none | no; same stale ranges, shifted by one (`check_runner.zig:211-217`) |
 | `27-minici-artifact-download.md` | It sometimes fails our PR's CI run before any test runs. A rerun passes. | no | yes (2026-10-02); minor | none | not ours (upstream CI) |
 | `34-main-build-hole-isscalar.md` | It blocks verifying merges of upstream past `35eb6b1cee`, so we merged that commit instead. | no | no: fixed upstream by `616828472f` (in `main` at `55a9d652c1`, 2026-10-23), which adds `.hole` to `isScalar`. Don't file | none (searched 2026-10-22) | not ours (upstream code) |
-| `36-dev-object-order-depends-on-compiler-build.md` | It blocks our sync. Three of our `dev_object` snapshots fail minici after every merge since `16a3cb76e5`, because their hashes depend on the compiler build. | no | yes: reproduced on `16a3cb76e5` (2026-10-23); `aa370e8626` doesn't touch the code | none (searched 2026-10-23) | not ours (upstream code) |
 | 01: Default-platform glibc programs built with `--opt=dev` crash at startup (removed) | Found bringing up `arm32linux`, where the dev backend is the only backend. Our reference fixes it for every target. | yes, #11995 (closed) | — | — | — |
 | 04: A passing backend unit test prints a WASM merge message that zig build shows as a failed command (removed) | It made our backend test runs report failure with every test passing. Our reference fixes it. | yes, #12200 (closed) | — | — | — |
 | 05: Relocation patching guesses the instruction set from the code bytes (removed) | A byte test can't tell a third instruction set apart, so arm32 needed the caller to pass it. Our reference does that. | yes, #12479 (open) | — | — | — |
@@ -40,6 +39,7 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 | 32: `apt install afl++` in the fuzzing guide no longer works since Zig 0.17 (removed) | It blocks AFL++ fuzzing of the dev backend before draft 30's crash is even reached. | yes, #12207 (closed) | — | — | — |
 | 33: The deep "curried lambdas" eval test now needs three times the memory (removed) | It blocks our sync. The test now needs more memory than a 32-bit process can have, so it fails on arm32. | yes, #12500 (open) | — | — | — |
 | 35: The nested procedure path pool grows with the square of nesting depth (removed) | It blocks our sync. Since `55a9d652c1` the deep "closures nested as call arguments" test runs out of memory on arm32. | yes, #12520 (open) | — | — | — |
+| 36: `dev_object` snapshot hashes depend on the compiler build (removed) | It blocks our sync. Three of our `dev_object` snapshots fail minici after every merge since `16a3cb76e5`. | yes, #12531 (open) | — | — | — |
 
 Every draft is about upstream's code or CI. None is a bug in our reference branch; those were fixed there and are listed in the verification note's findings table.
 
