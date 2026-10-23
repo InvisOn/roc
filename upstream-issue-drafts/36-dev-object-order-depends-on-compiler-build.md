@@ -50,8 +50,7 @@ pass for a while and then fail on an unrelated commit.
 **How to reproduce**
 
 Save this as `test/snapshots/dev_object_float_math.md` (a `dev_object`
-snapshot with no `DEV OUTPUT` section yet; our run used the same file with
-a `DEV OUTPUT` section already in it, so this exact file is untested):
+snapshot with no `DEV OUTPUT` section yet):
 
 ````
 # META
@@ -83,6 +82,9 @@ platform ""
         inputs_dir: "targets/",
         x64glibc: { inputs: [app] },
     }
+
+main_for_host : F64, F32, I64 -> I64
+main_for_host = main
 ~~~
 ````
 
