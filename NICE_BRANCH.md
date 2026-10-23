@@ -341,7 +341,7 @@ stay, each in the commit that adds what it tests.
 Before E2 can be written, decision 2 needs an answer, and that needs a
 short trial of the build step.
 
-## Upstream #11885 landed (2026-10-03): what it changes for this plan
+## Upstream 11885 landed (2026-10-03): what it changes for this plan
 
 Added by the sync conversation. Upstream's consolidation PR (332 commits,
 785 files) is merged into the reference as `da28d4ab0e`; details are in the
@@ -370,8 +370,8 @@ verification note and in `src/backend/dev/arm32/DESIGN.md`.
    invalid-local check takes a frame index and the two halves of the proc
    identity. The reference shows how arm32 follows each (the merge commit's
    message lists them).
-4. **The measurements above predate #11885.** The driver breakdown and the
+4. **The measurements above predate 11885.** The driver breakdown and the
    line counts were taken against upstream `e79b7f856b`. Upstream's driver
    grew by about 290 lines; the categories still hold.
-5. **Upstream issue #11909 is closed** (the SysV zero-size assertion), so
+5. **Upstream issue 11909 is closed** (the SysV zero-size assertion), so
    the x64musl cross-compile and `eval-llvm` failures should be gone.

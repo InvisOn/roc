@@ -33,7 +33,7 @@ FAIL  inspect: inclusive numeric ranges all iterate
 **Where it was seen**
 
 - CI, `eval-llvm (macos-15)` (aarch64). This case and `inspect: exclusive numeric ranges all iterate` both aborted with `signal: 6`.
-- CI, `eval-llvm (ubuntu-24.04)` (x86_64). The inclusive case aborted too, along with the failures of #11909 in the same run.
+- CI, `eval-llvm (ubuntu-24.04)` (x86_64). The inclusive case aborted too, along with the failures of 11909 in the same run.
 - A Raspberry Pi 5 (aarch64 Linux), with a Debug eval runner built for `aarch64-linux-musl` at `00cab95af8`. The inclusive case aborted and the exclusive case passed.
 
 **Where** (upstream `main` at `5fc587cf51`)

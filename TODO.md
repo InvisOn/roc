@@ -37,7 +37,7 @@ Last updated 2026-10-01. Branch `32-bit-backend` is merged with upstream
 
 ## Waiting on upstream
 
-- [ ] roc-lang/roc#11885 (carries the #11909 SysV zero-size fix). When it
+- [ ] upstream 11885 (carries the 11909 SysV zero-size fix). When it
       lands: merge upstream again; the x64musl cross-compile jobs and
       `eval-llvm (ubuntu)` should go green.
 
