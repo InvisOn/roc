@@ -2,7 +2,7 @@
 
 Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
-**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179), 32 (#12207), 10 (#12480), 13 (#12481), 19 (#12483), 11 (#12499), 33 (#12500), 35 (#12520) and 36 (#12531). Upstream fixed 21, 22, 28 and 34 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
+**Filed:** 01 (#11995), 04 (#12200), 05 (#12479), 06 (#12202), 08 (#12198), 09 (#12199), 17 (#12201), 29 (#12176), 30 (#12197), 31 (#12179), 32 (#12207), 10 (#12480), 13 (#12481), 19 (#12483), 11 (#12499), 33 (#12500), 35 (#12520), 36 (#12531) and 14 (#12532). Upstream fixed 21, 22, 28 and 34 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
 
 **Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
@@ -10,14 +10,13 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
 Proven bugs with a test come first, then bugs that only matter on 32-bit, then CI problems. Each line says why it sits where it does. The fork PR is the fix, tested on InvisOn/roc, which can be offered with the issue.
 
-1. **14**, `list_get_unsafe` truncates an i128 index. A wrong result on upstream today, with a failing test (run on `534956997e`). Fix: fork PR #6.
-2. **26**, stale line-number exclusions. A check that passes or fails for the wrong reason, with a script in the draft that proves the four stale entries. Fix: fork PR #5.
-3. **02**, the snapshot tool records real compile errors as "not implemented". It hides failures from the snapshot test. Fix: fork PR #7.
-4. **03**, no instruction cache flush before JIT code runs. Upstream gets away with it today mostly by luck. Fix: fork PR #8, not yet tested on aarch64, so test it there before filing.
-5. **07**, 32-bit host readiness. Matters only for a 32-bit target or host, and it is the biggest draft, so file it once the smaller ones have landed.
-6. **12**, abs64 relocation sized by the host. Matters only for a compiler running on a 32-bit machine. Fix: fork PR #3.
-7. **27**, minici artifact download fails now and then. Minor, a rerun passes.
-8. **23**, full-CI Linux jobs get killed. Upstream's own Nightly Gate shows it every night, so an issue adds little.
+1. **26**, stale line-number exclusions. A check that passes or fails for the wrong reason, with a script in the draft that proves the four stale entries. Fix: fork PR #5.
+2. **02**, the snapshot tool records real compile errors as "not implemented". It hides failures from the snapshot test. Fix: fork PR #7.
+3. **03**, no instruction cache flush before JIT code runs. Upstream gets away with it today mostly by luck. Fix: fork PR #8, not yet tested on aarch64, so test it there before filing.
+4. **07**, 32-bit host readiness. Matters only for a 32-bit target or host, and it is the biggest draft, so file it once the smaller ones have landed.
+5. **12**, abs64 relocation sized by the host. Matters only for a compiler running on a 32-bit machine. Fix: fork PR #3.
+6. **27**, minici artifact download fails now and then. Minor, a rerun passes.
+7. **23**, full-CI Linux jobs get killed. Upstream's own Nightly Gate shows it every night, so an issue adds little.
 
 Don't file these yet:
 
@@ -33,7 +32,6 @@ Before filing any of them, follow "Before filing" in the draft itself and check 
 | `03-icache-not-flushed-before-jit.md` | Needed for arm32. Without the flush, newly written code doesn't run reliably on 32-bit ARM. Our reference adds it. | no | yes: `ExecutableMemory.zig:404-408` calls `mprotect`, no flush | none for `ExecutableMemory`. #11193 and #11452 (merged) gave only the machine-code shim its flush | yes, `49bf1449b9`: the shim's flush moved from `src/machine_code_shim/instruction_cache.zig` to `src/backend/dev/instruction_cache.zig` so both share it, and `protectExecutable` calls it before `mprotect` (`ExecutableMemory.zig:409`), which flushes with the `cacheflush` syscall on 32-bit ARM; every error set listing `ExecutableMemory`'s errors gains `FlushInstructionCacheFailed` |
 | `07-32-bit-host-readiness.md` | A 64-bit machine compiling for arm32 is exactly where the two word sizes differ. Our reference fixes these places. | no | yes: `LirCodeGen.zig:8223, 8236, 14093, 14100, 14562, 14587`; `eval/mod.zig:18`; `compile_time_host.zig:39` stamp (could be added) | none. #9436 (closed) was the same habit in the LIR interpreter | yes: `f4af9e372d` uses the target's `word_size` for the Debug string alignment check, the erased-call descriptor array and the drop-pointer offset; `d69fb5eb7f` derives erased-callable payload offsets from the builtins structs scaled by the target word (`erased_layout`), with a compile-time check that every field is pointer-sized; `1344ce3159` makes `backendAvailable(.wasm)` false on 32-bit hosts |
 | `12-abs64-relocation-sized-by-host.md` | Matters only for a compiler running on arm32. Our reference doesn't change it. | no | yes: `Relocation.zig:329-337` branches on `@sizeOf(usize)` | none | no (`Relocation.zig:403-404`); matters to us only for a compiler running on arm32 |
-| `14-list-get-unsafe-truncates-i128-index.md` | None in particular. Found while reading the backend for word-size assumptions. | no | yes: its test fails on upstream `534956997e` (2026-10-21); `LirCodeGen.zig:2231` "just load the low 64 bits" | none | no (`LirCodeGen.zig:2279`, now "the low word") |
 | `15-u64-discriminant-load.md` | None in particular. Noticed while reading the backend. | no | probably not: the 8-byte load happens only for a `U64` target, and upstream always reads discriminants into `U32` locals; the refcount helper masks | none | no (`LirCodeGen.zig:13898`); unconfirmed |
 | `16-glibc-stub-ret-for-other-arches.md` | `arm32linux` uses the glibc stub, and `ret` is not a 32-bit ARM instruction. Our reference gives arm its own stub. | no | yes: `glibc_stub.zig:24, 93, 100` write `ret` for `.aarch64_be, .arm, .wasm32, .other` | none | yes, `627b4b7248`: `.arm` gets its own stub body, `mov r0, #0` / `bx lr` (`glibc_stub.zig:24, 103`); `.aarch64_be, .wasm32, .other` still write `ret` |
 | `20-llvm-range-iteration-abort.md` | It failed a job in our CI. arm32 doesn't use the LLVM backend, so it's unrelated to our code. | no | **probably fixed**: upstream's Nightly Gate 2026-10-19, `eval-llvm (macos-15)`: 17 failures, all `LlvmBackendUnavailable` (wide UTF decoding, a Fluxsort case), none of the range cases. Not rerun on the Pi 5 | none | not ours (upstream CI) |
@@ -60,6 +58,7 @@ Before filing any of them, follow "Before filing" in the draft itself and check 
 | 33: The deep "curried lambdas" eval test now needs three times the memory (removed) | It blocks our sync. The test now needs more memory than a 32-bit process can have, so it fails on arm32. | yes, #12500 (open) | — | — | — |
 | 35: The nested procedure path pool grows with the square of nesting depth (removed) | It blocks our sync. Since `55a9d652c1` the deep "closures nested as call arguments" test runs out of memory on arm32. | yes, #12520 (open) | — | — | — |
 | 36: `dev_object` snapshot hashes depend on the compiler build (removed) | It blocks our sync. Three of our `dev_object` snapshots fail minici after every merge since `16a3cb76e5`. | yes, #12531 (open) | — | — | — |
+| 14: `list_get_unsafe` quietly cuts an i128 or Dec index down to 64 bits (removed) | None in particular. Found while reading the backend for word-size assumptions. Fix offered as fork PR #6. | yes, #12532 (open) | — | — | — |
 
 Every draft is about upstream's code or CI. None is a bug in our reference branch; those were fixed there and are listed in the verification note's findings table.
 
