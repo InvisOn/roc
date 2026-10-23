@@ -57,9 +57,8 @@ stay out of upstream. They will change as upstream moves.
 | # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR |
 |---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none |
-| 1 | Upstream bug fixes from our drafts, one PR each, only those the maintainers want | where each bug is | small each | no | [#3](https://github.com/InvisOn/roc/pull/3), [#5](https://github.com/InvisOn/roc/pull/5), [#6](https://github.com/InvisOn/roc/pull/6), [#7](https://github.com/InvisOn/roc/pull/7), [#8](https://github.com/InvisOn/roc/pull/8), [#4](https://github.com/InvisOn/roc/pull/4) (closed) |
-| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) | dev backend: architecture choice | about 50 | no | [#9](https://github.com/InvisOn/roc/pull/9) |
-| 3 | Driver word size, part 1: sizes through `word` | dev backend: shared driver | about 2,000 | no | not yet |
+| 2 | Architecture dispatch (`isa.zig`, `binaryIs`), with the glibc stub's arm32 body (draft 16) and the instruction cache flush (draft 03) | dev backend: architecture choice, glibc stub, code in memory | about 100 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8) and closed [#4](https://github.com/InvisOn/roc/pull/4) |
+| 3 | Driver word size, part 1: sizes through `word`, with the host word-size fixes (drafts 07 and 12) | dev backend: shared driver, relocations | about 2,050 | no | not yet, will fold in [#3](https://github.com/InvisOn/roc/pull/3) |
 | 4 | Driver word size, part 2: emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet |
 | 5 | Driver word size, part 3: the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet |
 | 6 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet |
@@ -71,6 +70,11 @@ stay out of upstream. They will change as upstream moves.
 | 12 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet |
 | 13 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet |
 | 14 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet |
+
+There is no part 1 any more (2026-10-24). It was a row of separate upstream
+bug fixes. The drafts that matter to arm32 folded into parts 2 and 3, so the
+maintainers review them together with the change that needs them. The other
+drafts are not part of this plan.
 
 Parts 3 to 5 together are the biggest change to upstream's own code, about
 5,400 added and 2,800 removed lines in `LirCodeGen.zig`, plus about 1,000
@@ -100,8 +104,7 @@ takes its word size from the target and already produces 32-bit layouts for
 wasm32. All the arm32 work is after LIR, in the dev backend and what follows
 it.
 
-- **0 and 1** touch no pipeline stage of ours. Draft fixes land wherever
-  each bug is (the snapshot tool, the backend, the build scripts).
+- **0** touches no pipeline stage.
 - **2, architecture dispatch:** inside the dev backend. It is how the shared
   driver chooses the architecture's code, before any code is generated.
 - **3 to 5, word size:** the shared driver, `LirCodeGen.zig`. It turns each
@@ -146,22 +149,26 @@ A message to the maintainers (their usual channel, Claude drafts it):
 Nothing else starts until they answer. If they want a different order or
 size, this plan changes to match.
 
-### 1. Bug fixes
+### Folded drafts
 
-The drafts in `upstream-issue-drafts/` that are upstream bugs. File the
-issue first. Offer a PR only if they want one. Draft 14 is first (ready
-now), then 02 and 03.
+Since 2026-10-24 the arm32 drafts are part of the PRs that need them, not
+separate fixes. Each fork PR below is folded into its part when that part is
+cut, and is then closed.
 
-Fork PRs for review (against InvisOn/roc `main`, as of 2026-10-23):
+| Draft | Folds into | Fork PR | State | Checked with |
+|---|---|---|---|---|
+| 16, glibc stub writes `ret` for 32-bit ARM | 2 | [#4](https://github.com/InvisOn/roc/pull/4) | closed, commit kept | the stub assembles |
+| 03, no instruction cache flush before JIT code runs | 2 | [#8](https://github.com/InvisOn/roc/pull/8) | open | `build-ci` on x86_64 only, not yet on aarch64 |
+| 07, 32-bit host readiness | 3 | none yet | | |
+| 12, abs64 relocation sized by the host | 3 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test |
 
-| Draft | Fork PR | State | Checked with |
-|---|---|---|---|
-| 12 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test |
-| 16 | [#4](https://github.com/InvisOn/roc/pull/4) | closed | the stub assembles |
-| 26 | [#5](https://github.com/InvisOn/roc/pull/5) | open | `run-check-type-checker-patterns` |
-| 14 | [#6](https://github.com/InvisOn/roc/pull/6) | open | its death test (1/1 passed) |
-| 02 | [#7](https://github.com/InvisOn/roc/pull/7) | open | `run-check-snapshots` |
-| 03 | [#8](https://github.com/InvisOn/roc/pull/8) | open | `build-ci` on x86_64 only, not yet on aarch64 |
+Not part of the plan: 02, 14 (filed as #12532), 26 and the CI drafts. Their
+fork PRs ([#5](https://github.com/InvisOn/roc/pull/5) for 26,
+[#6](https://github.com/InvisOn/roc/pull/6) for 14,
+[#7](https://github.com/InvisOn/roc/pull/7) for 02) stay open on their own.
+
+If upstream merges the owner's glibc stub PR (#12513) first, draft 16 drops
+out of part 2.
 
 ### 2. Architecture dispatch
 
@@ -169,13 +176,21 @@ Fork PRs for review (against InvisOn/roc `main`, as of 2026-10-23):
 scattered `target.toCpuArch() == .x86_64` checks with one switch. Useful
 alone: it makes every two-way arch assumption visible.
 
+It also carries the two fixes where code gave one answer for "every other
+architecture": the glibc stub, which wrote the AArch64 `ret` for 32-bit ARM
+too (draft 16), and the instruction cache flush, which only x86 can skip
+(draft 03).
+
 ### 3 to 5. The driver for any word size
 
 From `LirCodeGen.zig` and the x86_64 and aarch64 code generators. Each part
 compiles and runs only the 64-bit targets, and includes the oracle proof.
 Splitting by area:
 - **3:** sizes, offsets and loops go through `word`, `word_size` and
-  `word_bits` instead of a fixed 8.
+  `word_bits` instead of a fixed 8. It also takes the host word-size fixes:
+  the places that use the compiler's own word size where the target's is
+  meant (draft 07), and the abs64 relocation that writes four bytes on a
+  32-bit host (draft 12).
 - **4:** the emit helpers move from the driver onto `self.codegen`, so each
   architecture supplies its own.
 - **5:** what is left: the width vocabulary (`wide64_reg_width`,
@@ -247,9 +262,8 @@ replace those too, as a separate proposal, if the maintainers want it.
 ### 13. arm32 as a host
 
 `HostSplice.zig`, `ExecutableMemory.zig`, the instruction cache flush, and
-the eval glue, so the compiler can run arm32 code it just generated. It
-adds the instruction cache flush that draft 03 is about. Whether that also
-covers aarch64 hosts is to be checked when this PR is cut.
+the eval glue, so the compiler can run arm32 code it just generated. The
+instruction cache flush itself lands earlier, in part 2.
 
 ### 14. Docs and the required lane
 
@@ -269,7 +283,7 @@ upstream wants to keep, and the CI lane made required.
 
 ## Timing
 
-If the maintainers review one PR a week, the 15 items take about 4 months.
+If the maintainers review one PR a week, the 14 items take about 4 months.
 Two a week, about 2 months. The order puts the parts most useful to
 upstream first, so stopping early still leaves something of value.
 
@@ -280,3 +294,6 @@ upstream first, so stopping early still leaves something of value.
 - 2026-10-22: part 12 changed: the C runtime files are built, not
   committed (security). Committed only if reproducible and checked in CI.
 - 2026-10-22: added where each part fits in the compiler pipeline.
+- 2026-10-24: part 1 removed. The arm32 drafts fold into parts 2 (16, 03)
+  and 3 (07, 12). The other drafts are not part of the plan. Each plan PR's
+  description carries the plan table (#, pull request, where it sits).
