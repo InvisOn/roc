@@ -20,4 +20,7 @@ changed code compared with upstream's.
 | [#9](https://github.com/InvisOn/roc/pull/9) Isa dispatch | yes | No new two-way target check in `LirCodeGen`, `FrameBuilder` or `CallingConvention` after the merge. The `builtin.cpu.arch` checks left are host checks in tests, which the PR leaves alone on purpose. | Rerun its checks after a rebase. |
 
 Next: once no heavy job runs, rebase each PR onto upstream `main`, apply the
-fixes above, and run each PR's "How to test" commands.
+fixes above, and run each PR's "How to test" commands. Since the folding the
+same day, #9 also takes #8's commit (with its fix above) and the glibc stub
+commit from closed #4, and is then rerun as one PR; #8 closes after that.
+#3 waits for the step 3 PR.
