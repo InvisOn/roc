@@ -1,5 +1,19 @@
 # Incremental Plan PR reviews
 
+## 2026-10-24, correction: #9's oracle did not check the eval cases
+
+The step-2 recheck said the relative oracle passed for #9 against
+`75d613ba5c`. Only the `dev_object` snapshot half of that is true. The oracle
+gives the hash mode (A0) to the upstream side only. #9's branch has no hash
+mode, and upstream's test harness takes an unknown flag as a filter, so its
+eval runner wrote no hashes. The oracle then read the hash file a sync run
+had left in the reused work tree, and compared upstream with that.
+
+The tool now deletes the old file before each run, stops if the runner
+writes none, and has `--apply-a0-to-merged` for PR branches. Sync merges
+were not affected: the reference branch has the hash mode. Run the oracle on
+#9 again after the fold.
+
 ## 2026-10-24, full nitpicky review posted on each PR
 
 Each PR now has a "How the code flows" section in its description and a

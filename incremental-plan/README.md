@@ -9,6 +9,9 @@ the backend by building it. This plan is how the work lands upstream. The
 two fit together: a Stepwise Rebuild step can be the work behind one of
 these pull requests.
 
+Where things stand, what to do next and how to set up another machine:
+`HANDOFF.md`. The tools it uses are in `tools/`.
+
 ## Why incremental
 
 - **Review size.** The reference adds about 23,000 lines (127 files). No
@@ -303,3 +306,6 @@ upstream first, so stopping early still leaves something of value.
 - 2026-10-24: part 3 folded into part 2. Part 2 is now the architecture
   dispatch plus the first word-size part, with drafts 16, 03, 07 and 12.
   The other part numbers stay as they were.
+- 2026-10-24: `HANDOFF.md` written for work on the desktop PC. The fold
+  into part 2 has not started. #9's earlier oracle pass did not cover the
+  eval cases (see `pr-review.md`).
