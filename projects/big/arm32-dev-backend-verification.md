@@ -1078,6 +1078,29 @@ Done 2026-09-29, locally (nothing pushed).
   qemu, on the Raspberry Pi 5 and on the Pi 3. The int app as arm32musl
   and arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/7f1955b3bd/` and `35eb6b1cee/`.
+- 2026-10-24, merges `a8b896639d` and `2bc2d94ec8` of upstream `main` at
+  `b9ec1d6645` and `9b119d59e4`, plus `606eaf8310`, pushed together. The
+  first merge takes upstream's FunctionRelocationKind, where each function
+  relocation carries its call encoding, chosen by the code generator. This
+  branch had passed the instruction set to applyRelocations instead. The
+  merge adds a third encoding, `arm32_call24` (A32 BL), emitted by the arm32
+  code generator's `emitCall`, and drops `isBlAt`. The second merge was
+  clean. Both merges failed minici's `run-test-zig-snapshot-tool` on
+  `dev_object_float_math`, `list_ops` and `dec_u128`: since upstream
+  `16a3cb76e5` the procedure order in a `dev_object` depends on the
+  compiler build (draft 36, filed upstream), so the hashes from the oracle's
+  pinned build never match a normal build. `606eaf8310` is a temporary fix
+  that changes only hash lines in four `dev_object` snapshots, taken from
+  this commit's own normal build. `sync_chain.sh` does the same on each merge
+  until upstream's fix lands. Checks: at `a8b896639d` and at `2bc2d94ec8`,
+  relative 64-bit oracle PASS. The arm32 eval corpus under qemu gives 2593
+  passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
+  `test/fx` 134/134 under qemu. At `606eaf8310`, minici under the 20 GiB cap:
+  98 passed, 1 skipped, then `run-test-strategy-differential` alone with
+  `--threads 8` passed (peak 15.3 GiB). `test/fx` 134/134 on the Raspberry
+  Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux on the Pi 3
+  prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/b9ec1d6645/` and `9b119d59e4/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
