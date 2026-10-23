@@ -6,6 +6,27 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
 **Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
+## Preferred filing order
+
+Proven bugs with a test come first, then bugs that only matter on 32-bit, then CI problems. Each line says why it sits where it does. The fork PR is the fix, tested on InvisOn/roc, which can be offered with the issue.
+
+1. **14**, `list_get_unsafe` truncates an i128 index. A wrong result on upstream today, with a failing test (run on `534956997e`). Fix: fork PR #6.
+2. **26**, stale line-number exclusions. A check that passes or fails for the wrong reason, with a script in the draft that proves the four stale entries. Fix: fork PR #5.
+3. **02**, the snapshot tool records real compile errors as "not implemented". It hides failures from the snapshot test. Fix: fork PR #7.
+4. **03**, no instruction cache flush before JIT code runs. Upstream gets away with it today mostly by luck. Fix: fork PR #8, not yet tested on aarch64, so test it there before filing.
+5. **07**, 32-bit host readiness. Matters only for a 32-bit target or host, and it is the biggest draft, so file it once the smaller ones have landed.
+6. **12**, abs64 relocation sized by the host. Matters only for a compiler running on a 32-bit machine. Fix: fork PR #3.
+7. **27**, minici artifact download fails now and then. Minor, a rerun passes.
+8. **23**, full-CI Linux jobs get killed. Upstream's own Nightly Gate shows it every night, so an issue adds little.
+
+Don't file these yet:
+
+- **16**, glibc stub writes `ret` for arm. Upstream PR #12513 (open) fixes it. File the issue only if that PR is closed without a fix.
+- **15**, U64 discriminant load. Probably not a bug, see the draft. Confirm it with a test first, or drop it.
+- **20**, **24** and **25**. Probably fixed (20, 24) or unknown (25). Rerun them on current `main` first, and drop the ones that pass.
+
+Before filing any of them, follow "Before filing" in the draft itself and check it on current `main`.
+
 | File | Why it matters to our arm32 work | Reported? | Still an issue? (2026-10-20, upstream `main` `5fc587cf51`, code reading) | Already upstream? (all issues and PRs searched 2026-10-20) | Fixed on our reference? (`d65fdf3ac1`) |
 |---|---|---|---|---|---|
 | `02-snapshot-tool-errors-as-not-implemented.md` | While arm32 code generation was unfinished, real arm32 compile errors were recorded as "not implemented" instead of failing. Our reference fixes it. | no | yes: `src/snapshot_tool/main.zig:4011`, `else \|_\|` still sets `supported = false` | none. #12199 (our 09) is a different snapshot-tool bug | yes, `d910f7aa39`: `processDevObjectSnapshot` already skips unsupported targets before compiling, so any compile error left is real; it now logs the error and fails the snapshot instead of recording `NOT_IMPLEMENTED` |
