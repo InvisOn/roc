@@ -1,0 +1,6 @@
+#!/bin/sh
+# For the relative oracle: both sides must be built as the same compiler
+# version, because the build's git revision reaches the generated code (the
+# proc identity in Debug checks). Everything else goes to the real git.
+if [ "$1" = rev-parse ] && [ "$2" = "--short=8" ] && [ "$3" = HEAD ]; then echo relorcl0; exit 0; fi
+exec /usr/bin/git "$@"
