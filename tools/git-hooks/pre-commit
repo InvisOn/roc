@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fork commit rules. The checker lives in .git/verify-tools/git-hooks/.
+exec python3 "$(git rev-parse --git-common-dir)/verify-tools/git-hooks/fork_rules.py" staged
