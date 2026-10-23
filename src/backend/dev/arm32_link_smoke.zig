@@ -73,7 +73,7 @@ pub fn buildObject(gpa: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     const puts_sym = try w.addExternalSymbol("puts");
     try w.addTextDataRelocation(table_addr_at, table_sym, .arm_movw_prel);
     try w.addTextDataRelocation(table_addr_at + 4, table_sym, .arm_movt_prel);
-    try w.addTextRelocation(call_at, puts_sym, -8);
+    try w.addTextRelocation(call_at, puts_sym, .arm32_call24);
     try w.addRodataRelocation(table_offset, message_sym, 0);
 
     var out: std.ArrayList(u8) = .empty;

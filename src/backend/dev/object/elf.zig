@@ -10,6 +10,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const invariant = @import("base").invariant;
+const FunctionRelocationKind = @import("../Relocation.zig").FunctionRelocationKind;
 const DataRelocationKind = @import("../Relocation.zig").DataRelocationKind;
 const object = @import("mod.zig");
 const DebugReloc = object.DebugReloc;
@@ -354,13 +355,24 @@ pub const ElfWriter = struct {
     }
 
     /// Add a relocation to the text section
-    pub fn addTextRelocation(self: *Self, offset: u64, symbol_idx: u32, addend: i64) Allocator.Error!void {
-        const reloc_type: u32 = switch (self.arch) {
-            .x86_64 => ELF.R_X86_64_PLT32,
-            .aarch64 => ELF.R_AARCH64_CALL26,
+    pub fn addTextRelocation(self: *Self, offset: u64, symbol_idx: u32, kind: FunctionRelocationKind) Allocator.Error!void {
+        std.debug.assert(self.arch == switch (kind) {
+            .x86_call_rel32 => Architecture.x86_64,
+            .aarch64_call26 => Architecture.aarch64,
+            .arm32_call24 => Architecture.arm,
+        });
+        const reloc_type: u32 = switch (kind) {
+            .x86_call_rel32 => ELF.R_X86_64_PLT32,
+            .aarch64_call26 => ELF.R_AARCH64_CALL26,
             // BL through R_ARM_CALL lets the linker turn it into BLX or add
             // an interworking veneer when the callee is Thumb.
-            .arm => ELF.R_ARM_CALL,
+            .arm32_call24 => ELF.R_ARM_CALL,
+        };
+        const addend: i64 = switch (kind) {
+            .x86_call_rel32 => -4,
+            .aarch64_call26 => 0,
+            // The A32 PC reads as the instruction's address plus 8.
+            .arm32_call24 => -8,
         };
 
         try self.text_relocs.append(self.allocator, .{
@@ -1132,7 +1144,7 @@ test "elf with external symbol" {
     const ext_idx = try writer.addExternalSymbol("external_func");
 
     // Add relocation for the call
-    try writer.addTextRelocation(1, ext_idx, -4);
+    try writer.addTextRelocation(1, ext_idx, .x86_call_rel32);
 
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
@@ -1203,7 +1215,7 @@ test "arm32 object is ELF32, EM_ARM, hard-float, with REL relocations and in-pla
     _ = try writer.addSymbol(.{ .name = "f", .section = .text, .offset = 0, .size = code.len, .is_global = true, .is_function = true });
     const data = try writer.addSymbol(.{ .name = "d", .section = .rodata, .offset = 0, .size = 4, .is_global = true, .is_function = false });
     const ext = try writer.addExternalSymbol("ext");
-    try writer.addTextRelocation(0, ext, -8);
+    try writer.addTextRelocation(0, ext, .arm32_call24);
     try writer.addTextDataRelocation(4, data, .arm_movw_prel);
     try writer.addTextDataRelocation(8, data, .arm_movt_prel);
     try writer.addRodataRelocation(4, data, 3);
