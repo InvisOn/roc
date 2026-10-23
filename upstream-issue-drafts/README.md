@@ -6,7 +6,9 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
 **Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
-## Preferred filing order
+**Not to be filed (owner, 2026-10-24):** the owner will not file the drafts that are here now (02, 03, 07, 12, 15, 16, 20, 23, 24, 25, 26, 27), and will likely fix them as part of their own arm32 implementation. They stay here as notes for that work. New problems still get a draft, under the same rules as before.
+
+## Preferred filing order (kept for reference)
 
 Proven bugs with a test come first, then bugs that only matter on 32-bit, then CI problems. Each line says why it sits where it does. The fork PR is the fix, tested on InvisOn/roc, which can be offered with the issue.
 
