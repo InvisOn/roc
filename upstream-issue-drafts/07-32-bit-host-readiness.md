@@ -8,7 +8,7 @@ Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`, by reading the code). It can't be seen on upstream's supported targets. |
+| Still an issue? | Yes (2026-10-24, upstream `main` at `9b119d59e4`, by reading the code). It can't be seen on upstream's supported targets. Upstream's 32-bit compile fixes (`03f133636a`) do not touch these places. |
 | Already upstream? | No issue or PR found (searched 2026-10-20). #9436 (closed) was the same mistake in the LIR interpreter. |
 | Fixed on our reference branch? | Yes, in `f4af9e372d`, `d69fb5eb7f` and `1344ce3159` (the wasm part). |
 | Before filing | Decide whether it is worth filing, since nothing upstream fails. If so, file it as a code-health note, not a bug. |
@@ -30,14 +30,13 @@ Today the compiler's machine and the target always have the same word size, so t
 
 A separate, related problem: `eval.backendAvailable(.wasm)` returns `true` on every machine. The wasm eval backend reserves a module's whole memory up front, which is 4 GiB for wasm32. A 32-bit process can't do that. On a 32-bit machine the wasm eval tests therefore fail, when they should be reported as unavailable.
 
-**Where** (upstream `main` at `5fc587cf51`)
+**Where** (upstream `main` at `9b119d59e4`)
 
-- Debug string check: `src/backend/dev/LirCodeGen.zig:8223` and `8236` (`@alignOf(usize) - 1`), in `emitDebugAssertValidStrLocal` (line 8154).
-- Erased-call descriptor array: `LirCodeGen.zig:14093` and `14100` (`@sizeOf(usize)`), in `generateErasedCall` (line 14064).
-- Erased-callable drop pointer: `LirCodeGen.zig:14562` and `14587` (offset `@sizeOf(usize)`, stored with an 8-byte `.w64` store), in `generatePackedErasedFn` (line 14358).
-- Erased-callable payload layout: `LirCodeGen.zig:14393`, `14411`, `14421`, `14429`, `14571`, `14581`, `14607` and `14622` (`@sizeOf` and `@offsetOf` of the `builtins.erased_callable` structs).
+- Debug string check: `src/backend/dev/LirCodeGen.zig:8406` and `8419` (`@alignOf(usize) - 1`), in `emitDebugAssertValidStrLocal` (line 8337).
+- Erased-call descriptor array: `LirCodeGen.zig:14288` and `14295` (`@sizeOf(usize)`), in `generateErasedCall` (line 14259).
+- Erased-callable drop pointer: `LirCodeGen.zig:14746` and `14771` (offset `@sizeOf(usize)`, stored with an 8-byte `.w64` store), in `generatePackedErasedFn` (line 14545).
+- Erased-callable payload layout: `LirCodeGen.zig:14595`, `14605`, `14613`, `14755`, `14765` and `14806` (`@sizeOf` and `@offsetOf` of the `builtins.erased_callable` structs). The capture prefix size now arrives as `erased_capture_prefix`, but the Debug check at line 1341 still compares it with the compiler machine's `hot_reload_capture_prefix_size`.
 - wasm eval availability: `src/eval/mod.zig:18` (`.interpreter, .wasm => true`), in `backendAvailable` (line 15).
-- Does not compile for a 32-bit machine (added 2026-10-23, upstream `main` at `55a9d652c1`): `src/backend/dev/ProcArtifact.zig:1049`, in `relocationOffset`, returns `relocation.getOffset()` (a `u64`) as `?usize`. `ObjectWriter.zig` already narrows the same value with `@intCast`. Added by `81fe0e217b`.
 
 **Why it matters**
 
