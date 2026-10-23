@@ -57,9 +57,9 @@ stay out of upstream. They will change as upstream moves.
 | # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR |
 |---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none |
-| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) and driver word size, part 1: sizes through `word`. With the glibc stub's arm32 body (draft 16), the instruction cache flush (draft 03) and the host word-size fixes (drafts 07 and 12) | dev backend: architecture choice and shared driver, plus glibc stub, code in memory, relocations | about 2,150 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8), [#3](https://github.com/InvisOn/roc/pull/3) and closed [#4](https://github.com/InvisOn/roc/pull/4) |
-| 4 | Driver word size, part 2: emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet |
-| 5 | Driver word size, part 3: the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet |
+| 2 | Architecture dispatch (`isa.zig`, `binaryIs`) and driver word size (1 of 3): sizes through `word`. With the glibc stub's arm32 body (draft 16), the instruction cache flush (draft 03) and the host word-size fixes (drafts 07 and 12) | dev backend: architecture choice and shared driver, plus glibc stub, code in memory, relocations | about 2,150 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8), [#3](https://github.com/InvisOn/roc/pull/3) and closed [#4](https://github.com/InvisOn/roc/pull/4) |
+| 4 | Driver word size (2 of 3): emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet |
+| 5 | Driver word size (3 of 3): the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet |
 | 6 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet |
 | 7 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet |
 | 8 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet |
@@ -173,7 +173,7 @@ fork PRs ([#5](https://github.com/InvisOn/roc/pull/5) for 26,
 If upstream merges the owner's glibc stub PR (#12513) first, draft 16 drops
 out of part 2.
 
-### 2. Architecture dispatch and word size, part 1
+### 2. Architecture dispatch and word size (1 of 3)
 
 `src/backend/dev/isa.zig`: `isaOf` and `Isa.binaryIs`. It replaces
 scattered `target.toCpuArch() == .x86_64` checks with one switch. Useful
