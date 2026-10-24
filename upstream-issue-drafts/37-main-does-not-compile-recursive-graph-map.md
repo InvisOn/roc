@@ -4,14 +4,14 @@
 
 > **Relevance to our arm32 work:** It blocks our sync. Our merge of upstream `5300d1ee60` does not build, so we merged only up to `414a19203e`, the last commit before the break.
 
-Not filed. For roc-lang/roc.
+Not filed, and no need to: upstream already has a fix open (PR 12557). Kept as a record of why our sync stopped at `414a19203e`.
 
 | | |
 |---|---|
-| Still an issue? | Yes at `44a0e31a28` (2026-10-24), by reading the code. Seen as a build error in our merge of `5300d1ee60`, which has upstream's `lir_image.zig` and `layout/store.zig` unchanged. Pure upstream not built yet. |
-| Already upstream? | Not searched yet. |
+| Still an issue? | Yes at `7e749fe156` (2026-10-24), by reading the code. Seen as a build error in our merge of `5300d1ee60`, which has upstream's `lir_image.zig` and `layout/store.zig` unchanged. Pure upstream not built yet. |
+| Already upstream? | Yes. PR 12557, "Fix the canonical Boxy sidecar's layout store after the recursive layout keys change", open since 2026-10-24. It sets `.interned_recursive_graphs = .empty` and adds `.recursive_layout_keys = .{}`. |
 | Fixed on our reference branch? | No. We left out the commits from `6d72ef4d1b` on instead. |
-| Before filing | Build pure upstream `main` (`zig build`) and paste the error. Check whether someone already fixed or reported it. |
+| Before filing | Don't file. Merge the rest of upstream once PR 12557 lands. |
 
 ---
 
