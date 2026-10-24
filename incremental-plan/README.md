@@ -287,6 +287,38 @@ upstream wants to keep, and the CI lane made required.
    review, edit and post it.
 5. Keep it rebased on `main` daily until it merges. Then cut the next one.
 
+## Ultrareviews
+
+We have 3 free ultrareviews (`/code-review ultra`, a multi-agent review in
+the cloud). Each one reviews the diff as it stands at that moment, so a run
+spent on a PR that still changes is mostly wasted. Run each one on a PR
+that is finished: its own nitpicky review is done and fixed, minici and the
+relative oracle pass, and it is about to be filed upstream. Run it from the
+PR's worktree (`/code-review ultra` reviews the local branch), or name the
+fork PR (`/code-review ultra <number>`).
+
+Spend them where a bug is subtle, our own tests are weak, and a mistake
+costs the most:
+
+1. **Step 2, architecture dispatch and word size (1 of 3).** It is the
+   first code upstream sees, it changes the shared driver that x86_64 and
+   aarch64 use, and steps 4 and 5 build on its patterns. The relative
+   oracle proves 64-bit output did not change, but not that the new word
+   vocabulary is right for 32 bits.
+2. **Step 5, the rest of `LirCodeGen.zig`'s 64-bit assumptions.** Width
+   mistakes here compile, pass every 64-bit test, and show up only as wrong
+   values on arm32. The oracle checks only that 64-bit output is unchanged.
+3. **Step 9, AAPCS32 calling convention.** ABI mistakes (argument
+   registers, stack alignment, how 64-bit values are split across register
+   pairs, returns by pointer) pass Roc-only tests and break only when Roc
+   code calls a C host or a C host calls Roc.
+
+Not worth a run: step 4 (a mechanical move that the oracle proves
+byte-identical), step 6 (the assembler oracle checks every encoding), and
+steps 12 to 14 (targets, docs and CI, which CI itself tests). If a step
+listed above turns out small and well covered when it is cut, give its run
+to step 8 (arm32 code generator) instead.
+
 ## Timing
 
 If the maintainers review one PR a week, the 13 items take about 4 months.
