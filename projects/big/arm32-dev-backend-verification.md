@@ -1591,3 +1591,14 @@ first added this appendix, made between the two rewrites).
   Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux on the Pi 3
   prints x64musl's 54 lines. Logs:
   `.git/verify-tools/upstream-sync/f6c6cfb3d2/`.
+- 2026-10-25, merge `503e6e4976` of upstream `main` at `cf42a741e8`. No
+  conflicts, and nothing in the backends changed: upstream's work here is in
+  type suffix diagnostics, Boxy wrapper descriptors and aliased host rows.
+  Checks at `503e6e4976`: the arm32 eval corpus under qemu gives 2593
+  passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
+  `test/fx` 134/134 under qemu. Relative 64-bit oracle PASS. Minici under
+  the 20 GiB cap: 98 passed, 1 skipped, then
+  `run-test-strategy-differential` alone with `--threads 8` passed (peak
+  14.5 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/cf42a741e8/`.
