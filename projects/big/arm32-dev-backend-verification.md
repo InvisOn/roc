@@ -1101,6 +1101,20 @@ Done 2026-09-29, locally (nothing pushed).
   Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux on the Pi 3
   prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/b9ec1d6645/` and `9b119d59e4/`.
+- 2026-10-24, merge `570fdd8619` of upstream `main` at `04d6133c76`, plus
+  `1b5fe68a79` (the `dev_object` hashes from this merge's own build, as for
+  the previous merges). No conflicts. Upstream now evaluates compile-time
+  values in the interpreter on hosts without a native code generator. arm32
+  has one on this branch, so compile-time evaluation stays native there, and
+  the merge only corrects the comment that listed 32-bit ARM as an
+  interpreter host. Checks at `570fdd8619`: relative 64-bit oracle PASS. The
+  arm32 eval corpus under qemu gives 2593 passed, 0 failed, 47 with a backend
+  skipped. Host effects 106/106. `test/fx` 134/134 under qemu. At
+  `1b5fe68a79`, minici under the 20 GiB cap: 98 passed, 1 skipped, then
+  `run-test-strategy-differential` alone with `--threads 8` passed (peak
+  15.8 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
+  Logs: `.git/verify-tools/upstream-sync/04d6133c76/`.
 - 2026-09-30, relative 64-bit oracle on the part 4 trial merge
   (`01abeb1b0c`, upstream `b2b9541c42`), `relative_oracle.py`: PASS. Eval
   dev-code hashes: 2,126 cases, none differ, none on one side only.
