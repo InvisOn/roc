@@ -27,6 +27,8 @@ build: `src/lir/lir_image.zig:1001` uses `Store.RecursiveGraphMap`, which the
 recursive layout keys change removed (draft 37). Until upstream fixes it,
 rebase onto `414a19203e`, the last good commit, not onto `upstream/main`.
 The sync machine merges only up to `414a19203e` for the same reason.
+Upstream PR 12557 (open, 2026-10-24) fixes it. Once it lands, rebase onto
+`upstream/main` again.
 
 Also from upstream today:
 
