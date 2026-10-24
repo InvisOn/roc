@@ -303,6 +303,30 @@ pub fn CodeGen(comptime target: RocTarget) type {
             return @truncate(@as(u64, @bitCast(value)));
         }
 
+        /// Load `value` with a MOVW/MOVT pair whose immediates `patchImm32`
+        /// can rewrite in place. Always both instructions, so the size does
+        /// not depend on the value. Returns the pair's offset.
+        pub fn emitPatchableImm32(self: *Self, dst: GeneralReg, value: u32) Allocator.Error!usize {
+            const start = self.currentOffset();
+            try self.emit.movw(dst, @truncate(value));
+            try self.emit.movt(dst, @truncate(value >> 16));
+            return start;
+        }
+
+        /// Rewrite the immediates of the pair `emitPatchableImm32` placed at
+        /// `site`. Each instruction holds its 16 bits as imm4:imm12.
+        pub fn patchImm32(code: []u8, site: usize, value: u32) void {
+            const imm_mask: u32 = 0x000F_0FFF;
+            for ([_]u32{ value & 0xffff, value >> 16 }, 0..) |half, index| {
+                const insn = code[site + index * 4 ..][0..4];
+                const old = std.mem.readInt(u32, insn, .little);
+                // MOVW is cond 0011 0000, MOVT is cond 0011 0100.
+                std.debug.assert((old >> 20) & 0xFF == @as(u32, if (index == 0) 0x30 else 0x34));
+                const imm = ((half >> 12) << 16) | (half & 0xFFF);
+                std.mem.writeInt(u32, insn, (old & ~imm_mask) | imm, .little);
+            }
+        }
+
         /// dst = base + offset, for any offset. Uses `dst` for the constant
         /// when it cannot be an immediate, so `dst` must differ from `base`
         /// in that case.
@@ -1083,6 +1107,23 @@ test "data addresses carry the movw/movt relocation pair" {
     try std.testing.expectEqual(@import("../Relocation.zig").DataRelocationKind.arm_movw_prel, lo.kind);
     try std.testing.expectEqual(@as(u64, 8), hi.offset);
     try std.testing.expectEqual(@import("../Relocation.zig").DataRelocationKind.arm_movt_prel, hi.kind);
+}
+
+test "a patchable immediate is always movw/movt and patches to a fresh load" {
+    var cg = MuslCodeGen.init(std.testing.allocator, .default);
+    defer cg.deinit();
+    try cg.emit.nop();
+    // 0 alone would be one MOV; the patchable load still takes both.
+    const site = try cg.emitPatchableImm32(.r5, 0);
+    try std.testing.expectEqual(@as(usize, 4), site);
+    MuslCodeGen.patchImm32(cg.emit.buf.items, site, 0xBEEF_1234);
+
+    var expected = MuslEmit.init(std.testing.allocator);
+    defer expected.deinit();
+    try expected.nop();
+    try expected.movw(.r5, 0x1234);
+    try expected.movt(.r5, 0xBEEF);
+    try expectCode(&cg, &expected);
 }
 
 test "internal code addresses are written as PC-relative movw/movt values" {
