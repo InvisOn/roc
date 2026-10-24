@@ -10,6 +10,10 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
 **New, for the owner to decide (after 2026-10-24):** 37, upstream `main` does not compile since the recursive layout keys change (`RecursiveGraphMap` removed but still used in `lir_image.zig`). It blocks our sync past `414a19203e`.
 
+**Also new (2026-10-24):** 38, static data and the wasm code generator lay out erased callables with the compiler host's constants (`static_data.zig:1404`, `WasmCodeGen.zig:2790` and others). Seems latent: the values agree today because of rounding, and for the wasm metadata offset because the compiler registers the offset it chose. Same family as 07.
+
+**Also new (2026-10-24):** 39, the LLVM backend crashes building wasm32v1 code that passes a vector ("scalar parameter split into 16 register pieces"). 40, a cached wasm32 dev build serves only one of a URL package's exports from its object pack. Both come from CLI tests that CI never runs, because CI filters `--include-llvm` tests to names with `[size]` or `[speed]`.
+
 ## Preferred filing order (kept for reference)
 
 Proven bugs with a test come first, then bugs that only matter on 32-bit, then CI problems. Each line says why it sits where it does. The fork PR is the fix, tested on InvisOn/roc, which can be offered with the issue.
