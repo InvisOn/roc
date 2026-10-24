@@ -1,6 +1,6 @@
 # Roc on 32-bit: upstream changes needed
 
-As of 2026-10-24, upstream `main` at `414a19203e`.
+As of 2026-10-25, upstream `main` at `f6c6cfb3d2`.
 
 Upstream Roc's dev backend assumes an 8-byte machine word, and in several
 places it takes the size of the target's data from the machine the compiler
@@ -95,6 +95,12 @@ reports `UnsupportedPlatform` for the case we tried.
 - `6ff41f43e6`: a compile-time value that a 32-bit target cannot hold (one a
   64-bit evaluation produced) is now reported as out of memory instead of
   being narrowed with an unchecked cast.
+
+- `8a64a61258`: the dev backend no longer truncates a 128-bit
+  `list_get_unsafe` index to its low word. A list index is a U64, and
+  anything else is a compiler invariant.
+- `3c394026d0`: a U8 or I8 result is stored as one byte with no extension
+  shifts first. The shift counts that assumed a 64-bit register are gone.
 
 ## Not an upstream problem
 
