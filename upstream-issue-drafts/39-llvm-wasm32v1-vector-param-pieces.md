@@ -8,10 +8,10 @@ Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-24, upstream at `414a19203e`, by running the CLI test below). Upstream `main` (`98dcdbfb2f`) doesn't build (draft 37), but it changes nothing in the LLVM or wasm backends after `414a19203e`. Also fails at `3bb8f2ec6c`. |
+| Still an issue? | Yes (2026-10-25, upstream `main` at `cf42a741e8`, by running the CLI test below on pure upstream). Same panic, at the same lines. Also failed at `414a19203e` and `3bb8f2ec6c`. |
 | Already upstream? | No issue or PR found (searched 2026-10-24 for "register pieces", "scalar parameter split" and "wasm32v1 vector"). |
 | Fixed on our reference branch? | No. It has the same `max_scalar_pieces = 2` and the same check (`MonoLlvmCodeGen.zig:13870` and `13884` there), and the same test. |
-| Before filing | Recheck on current `main` once it builds again (PR 12557). |
+| Before filing | Ready. Rechecked on current `main` (searched again 2026-10-25 for "register pieces" and "wasm32v1 vector": nothing). |
 
 ---
 
@@ -27,12 +27,14 @@ src/backend/llvm/MonoLlvmCodeGen.zig:13884:64 in scalarFromCAbiParams
 src/backend/llvm/MonoLlvmCodeGen.zig:2646:65 in unpackFastProcArgs
 src/backend/llvm/MonoLlvmCodeGen.zig:2932:40 in compileProcBody
 src/backend/llvm/MonoLlvmCodeGen.zig:1756:37 in compileAllProcSpecs
-src/cli/main.zig:11192:48 in rocBuildWasmLlvm
+src/backend/llvm/MonoLlvmCodeGen.zig:1095:37 in buildEntrypointModule
+src/backend/llvm/MonoLlvmCodeGen.zig:1052:39 in generateEntrypointModule
+src/cli/main.zig:11035:61 in compileLlvmAppObject
 ```
 
 The same app builds with `--opt=dev` for wasm32v1, and with `--opt=size` for wasm32.
 
-**Where** (upstream at `414a19203e`)
+**Where** (upstream at `cf42a741e8`)
 
 - `src/backend/llvm/MonoLlvmCodeGen.zig:13868-13870`: `max_scalar_pieces = 2`, documented as "a 16-byte value in 8-byte pieces".
 - `src/backend/llvm/MonoLlvmCodeGen.zig:13884`, `scalarFromCAbiParams`: the invariant that fires when a parameter's ABI placement has more pieces than that.
@@ -45,7 +47,7 @@ Any wasm32v1 program that passes vectors between functions can't be built with `
 
 **How to reproduce**
 
-Through the CLI test (run on upstream at `414a19203e` with Zig 0.17.0):
+Through the CLI test (run on upstream at `cf42a741e8` with Zig 0.17.0):
 
 ```sh
 zig build run-test-cli -- --include-llvm --filter "wasm32v1 builds lower vector"
