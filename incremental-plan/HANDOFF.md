@@ -20,6 +20,25 @@ fast-forwarded to it.
 - Upstream PR 12546 fixes 12531. It is open and not merged yet. When it
   merges, `dev_object` hashes no longer depend on the compiler build.
 
+## Warning: upstream `main` does not compile (2026-10-24)
+
+Since `6d72ef4d1b` (and still at `44a0e31a28`), upstream `main` fails to
+build: `src/lir/lir_image.zig:1001` uses `Store.RecursiveGraphMap`, which the
+recursive layout keys change removed (draft 37). Until upstream fixes it,
+rebase onto `414a19203e`, the last good commit, not onto `upstream/main`.
+The sync machine merges only up to `414a19203e` for the same reason.
+
+Also from upstream today:
+
+- Upstream fixed draft 14 (fork PR #6, the `list_get_unsafe` index width)
+  in `8a64a61258`. PR #6 can be closed once you've checked it.
+- Upstream fixed draft 19 (the byte-store shifts) in `5300d1ee60`, and
+  draft 10 (recursive keys in loaded images) in `6d72ef4d1b`.
+- Boxy calls now pass layout numbers as patchable runtime references
+  (`emitRuntimeRefInto`, `addRuntimeLayoutArg`). Every code generator needs
+  `emitPatchableImm32` and `patchImm32`. The reference branch adds the arm32
+  pair (MOVW/MOVT) in its merge of `414a19203e`.
+
 ## Who does what
 
 - **Desktop PC:** the Incremental Plan PRs (this page).
@@ -97,7 +116,8 @@ branches. Run it again on #9 after the fold.
 
 Work in `.workspaces/pr-isa`.
 
-1. **Rebase** `dispatch/isa` onto `upstream/main`.
+1. **Rebase** `dispatch/isa` onto `upstream/main` (but see the warning
+   above: use `414a19203e` until upstream builds again).
 2. **#8, instruction cache flush** (`5aa8ffecbf`). Cherry-pick it. It no
    longer compiles: upstream added `finishWriteExecutablePrefix`
    (`src/backend/dev/ExecutableMemory.zig`, about line 274), which calls
