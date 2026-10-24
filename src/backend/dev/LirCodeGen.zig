@@ -14785,7 +14785,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 return try self.scalarRetReg();
             }
 
-            const payload_size = if (self.store.runtime_contract == .boxy) builtins.erased_callable.compilerPayloadSize(base_capture_size) else builtins.erased_callable.payloadSize(base_capture_size);
+            const payload_size: u32 = if (self.store.runtime_contract == .boxy) erased_layout.capture_offset + metadata_offset + erased_layout.compiler_metadata_size else erased_layout.capture_offset + base_capture_size;
             const heap_ptr_slot: i32 = self.codegen.allocStackSlot(8);
 
             {
