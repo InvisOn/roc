@@ -7,6 +7,7 @@
 //! Used by: `compileProcSpec`
 
 const std = @import("std");
+const isaOf = @import("isa.zig").isaOf;
 const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
 
@@ -55,8 +56,9 @@ pub const FramePointerPolicy = enum {
 /// Callers: compileProcSpec, x86_64/CodeGen, aarch64/CodeGen
 pub fn DeferredFrameBuilder(comptime EmitType: type) type {
     const roc_target = EmitType.roc_target;
-    const is_x86_64 = roc_target.toCpuArch() == .x86_64;
-    const is_aarch64 = roc_target.toCpuArch() == .aarch64 or roc_target.toCpuArch() == .aarch64_be;
+    const isa = isaOf(roc_target);
+    const is_x86_64 = isa.binaryIs(.x86_64);
+    const is_aarch64 = isa.binaryIs(.aarch64);
     const is_windows = roc_target.isWindows();
 
     const GeneralReg = EmitType.GeneralReg;
