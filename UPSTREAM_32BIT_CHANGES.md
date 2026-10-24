@@ -1,6 +1,6 @@
 # Roc on 32-bit: upstream changes needed
 
-As of 2026-10-24, upstream `main` at `9b119d59e4`.
+As of 2026-10-24, upstream `main` at `414a19203e`.
 
 Upstream Roc's dev backend assumes an 8-byte machine word, and in several
 places it takes the size of the target's data from the machine the compiler
@@ -20,8 +20,10 @@ with the dev backend, or run on a 32-bit machine.
    and machine-specific pieces (jump stubs, setjmp/longjmp, cache flushing)
    that exist only for x86_64 and aarch64.
 
-Goal 1 comes first. Goal 2 also needs goal 1: a compiler on a 32-bit machine
-evaluates code at compile time with a dev backend for that same machine.
+Goal 1 comes first. Goal 2 no longer strictly needs goal 1. Since
+`c6154cb220`, a compiler whose machine has no dev backend evaluates
+compile-time values in the interpreter instead. A dev backend for the
+compiler's own machine still makes that evaluation native.
 
 None of these changes alters the code generated for today's 64-bit targets.
 On the arm32 branch where they were made, two compilers pinned to the same
@@ -43,6 +45,7 @@ version produce byte-identical x86_64 and aarch64 output.
 | `src/backend/dev/CallingConvention.zig:384, 646, 708` | Asserts an address argument (`.from_lea`) is 8 bytes. | Expect the target's word size. |
 | `src/backend/dev/Relocation.zig:238-252` | Chooses the width of an absolute-address patch (`abs64`) from the compiler machine's `usize`. | Use the width of the target's addresses. |
 | `src/snapshot_tool/main.zig:3908` | The `dev_object` snapshot check lists only the 64-bit architectures. | Ask the dev backend which targets it supports, so 32-bit snapshots are checked too. |
+| `src/backend/dev/LirCodeGen.zig:15708` | Loads each runtime layout value with `codegen.emitPatchableImm32` and later rewrites it with `patchImm32`. Only x86_64 and aarch64 provide them. | A 32-bit code generator needs both. On 32-bit ARM that is a MOVW/MOVT pair whose two 16-bit immediates are rewritten (our branch does this). |
 | `src/build/glibc_stub.zig:24, 93, 100` | Writes `ret` for 32-bit ARM, which has no such instruction. | Write `bx lr` for 32-bit ARM. |
 
 ## 2. The compiler running on a 32-bit computer
@@ -50,7 +53,7 @@ version produce byte-identical x86_64 and aarch64 output.
 | Location | What happens now | What it needs to do |
 |---|---|---|
 | `src/sljmp/linux.zig:6-11`, `src/sljmp/mod.zig:16` | setjmp/longjmp exist only for x86_64 and aarch64; other Linux machines hit a `@compileError`. The compile-time evaluator needs them to recover from a crash. | Add a 32-bit ARM version (saves R4-R11, SP, LR and D8-D15). |
-| `src/backend/dev/LirCodeGen.zig:23369-23373` | `host_lir_codegen_available` is false for `.arm`, so a 32-bit ARM compiler has no native code generator for compile-time evaluation. | True for `.arm` once section 1 is done. |
+| `src/backend/dev/LirCodeGen.zig:23490-23494` | `host_lir_codegen_available` is false for `.arm`. Since `c6154cb220` that sends compile-time evaluation to the interpreter (`compilerHostMustUseInterpreterForCtfe`, `src/eval/compile_time_finalization.zig:3880`), so it works but is not native. | True for `.arm` once section 1 is done, for native compile-time evaluation. |
 | `src/backend/dev/HostSplice.zig:409-420` (tests 434, 476, 532) | Writes a jump stub only for x86_64 and aarch64; the tests skip by naming those architectures. | Add a 32-bit ARM stub (`ldr pc, [pc, #-4]` followed by the target address); skip tests on `host_lir_codegen_available` instead. |
 | `src/machine_code_shim/main.zig:483-489, 643-668` | `HostArch` knows only x86, x86_64 and aarch64; jump-stub sizes exist only for those. | Add 32-bit ARM. |
 | `src/backend/dev/ExecutableMemory.zig:404-408` | Makes JIT memory executable with `mprotect` without flushing the instruction cache. Harmless on x86; ARM needs an explicit flush or it may run stale bytes. | Flush before making it executable. Upstream already has the flush (with a 32-bit ARM path) in `src/machine_code_shim/instruction_cache.zig:15-18`; `ExecutableMemory` should use it too. |
@@ -82,6 +85,16 @@ reports `UnsupportedPlatform` for the case we tried.
   compile break now shows up there.
 - `src/machine_code_shim/instruction_cache.zig:15-18`: the instruction-cache
   flush has a 32-bit ARM path (`cacheflush` syscall).
+
+- `src/eval/compile_time_finalization.zig:3880`: compile-time evaluation
+  falls back to the interpreter on any machine without a dev backend
+  (`c6154cb220`), which includes 32-bit ARM and 32-bit x86. Not tested on a
+  32-bit machine yet.
+- `be04ebd75e`: a relocation offset is narrowed to `usize`, so that code
+  compiles for 32-bit machines.
+- `6ff41f43e6`: a compile-time value that a 32-bit target cannot hold (one a
+  64-bit evaluation produced) is now reported as out of memory instead of
+  being narrowed with an unchecked cast.
 
 ## Not an upstream problem
 
