@@ -1374,10 +1374,10 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             erased_capture_prefix: u32,
             cpu_level: CpuLevel,
         ) Allocator.Error!Self {
-            if (builtin.mode == .debug and erased_capture_prefix != 0 and erased_capture_prefix != builtins.erased_callable.hot_reload_capture_prefix_size) {
+            if (builtin.mode == .debug and erased_capture_prefix != 0 and erased_capture_prefix != erased_layout.hot_reload_capture_prefix_size) {
                 base.invariant(
                     "Dev/codegen invariant violated: erased capture prefix {d} is neither zero nor the hot-reload prefix {d}",
-                    .{ erased_capture_prefix, builtins.erased_callable.hot_reload_capture_prefix_size },
+                    .{ erased_capture_prefix, erased_layout.hot_reload_capture_prefix_size },
                 );
             }
             var scratch_arg_locs = try base.Scratch(ValueLocation).init(allocator);
