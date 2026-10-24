@@ -8,6 +8,8 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
 **Not to be filed (owner, 2026-10-24):** the owner will not file the drafts that are here now (02, 03, 07, 12, 15, 16, 20, 23, 24, 25, 26, 27), and will likely fix them as part of their own arm32 implementation. They stay here as notes for that work. New problems still get a draft, under the same rules as before.
 
+**New, for the owner to decide (after 2026-10-24):** 37, upstream `main` does not compile since the recursive layout keys change (`RecursiveGraphMap` removed but still used in `lir_image.zig`). It blocks our sync past `414a19203e`.
+
 ## Preferred filing order (kept for reference)
 
 Proven bugs with a test come first, then bugs that only matter on 32-bit, then CI problems. Each line says why it sits where it does. The fork PR is the fix, tested on InvisOn/roc, which can be offered with the issue.
