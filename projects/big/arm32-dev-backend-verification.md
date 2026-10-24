@@ -1559,3 +1559,21 @@ first added this appendix, made between the two rewrites).
 | `15b62dd19d` | `05697f237e` |
 | `8e688d92f8` | `3f1f34ffde` |
 | `9bc2cce134` | `bf78911c01` |
+- 2026-10-24, merge `6260da8828` of upstream `main` at `414a19203e`, plus
+  `9957e1ae27` (the `dev_object` hashes copied from the oracle's pinned
+  build again, now that upstream keys checked modules by the program alone).
+  Upstream past `414a19203e` does not compile, so this merge stops there.
+  Upstream now loads runtime layout values through a patchable immediate.
+  arm32 gets `emitPatchableImm32`, which always emits a MOVW/MOVT pair, and
+  `patchImm32`, which rewrites both immediates, with a unit test. The
+  conflicts in `LirCodeGen.zig` keep the branch's word-size stores and add
+  upstream's runtime layout arguments. Checks at `6260da8828`: the arm32 eval
+  corpus under qemu gives 2593 passed, 0 failed, 47 with a backend skipped.
+  Host effects 106/106. `test/fx` 134/134 under qemu. Relative 64-bit oracle
+  PASS. At `9957e1ae27`, minici under the 20 GiB cap: 98 passed, 1 skipped,
+  then `run-test-strategy-differential` alone with `--threads 8` passed
+  (peak 15.1 GiB). `test/fx` 134/134 on the Raspberry Pi 5. On the Pi 3,
+  three `test/fx` runs beside minici lost the ssh connection during the copy
+  (`scp: Connection closed`). Run alone, the Pi 3 gave 134/134. The int app
+  as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines. Logs:
+  `.git/verify-tools/upstream-sync/414a19203e/`.
