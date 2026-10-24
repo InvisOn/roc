@@ -1577,3 +1577,17 @@ first added this appendix, made between the two rewrites).
   (`scp: Connection closed`). Run alone, the Pi 3 gave 134/134. The int app
   as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines. Logs:
   `.git/verify-tools/upstream-sync/414a19203e/`.
+- 2026-10-25, merge `f84787b815` of upstream `main` at `f6c6cfb3d2`: the
+  rest of upstream after `414a19203e`, now that upstream compiles again.
+  Upstream now treats a list index that is not a U64 as a compiler
+  invariant, and stores a byte without shifting it first. The branch had
+  changed both pieces of code to use the target word, and the merge takes
+  upstream's removals. The `dev_object` hashes need no change. Checks at
+  `f84787b815`: the arm32 eval corpus under qemu gives 2593 passed, 0
+  failed, 47 with a backend skipped. Host effects 106/106. `test/fx` 134/134
+  under qemu. Relative 64-bit oracle PASS. Minici under the 20 GiB cap: 98
+  passed, 1 skipped, then `run-test-strategy-differential` alone with
+  `--threads 8` passed (peak 14.3 GiB). `test/fx` 134/134 on the Raspberry
+  Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux on the Pi 3
+  prints x64musl's 54 lines. Logs:
+  `.git/verify-tools/upstream-sync/f6c6cfb3d2/`.
