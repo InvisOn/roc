@@ -17,18 +17,16 @@ fast-forwarded to it.
 - Of the files the fold changes, only `src/eval/test/lir_inline_test.zig`
   changed upstream, and that was a test appended at the end of the file. A
   conflict there, if any, is two tests side by side.
-- Upstream PR 12546 fixes 12531. It is open and not merged yet. When it
-  merges, `dev_object` hashes no longer depend on the compiler build.
+- Upstream PR 12546 fixed 12531 (merged as `8b2888516b`).
 
-## Warning: upstream `main` does not compile (2026-10-24)
+## Upstream `main` compiles again (2026-10-25)
 
-Since `6d72ef4d1b` (and still at `44a0e31a28`), upstream `main` fails to
-build: `src/lir/lir_image.zig:1001` uses `Store.RecursiveGraphMap`, which the
-recursive layout keys change removed (draft 37). Until upstream fixes it,
-rebase onto `414a19203e`, the last good commit, not onto `upstream/main`.
-The sync machine merges only up to `414a19203e` for the same reason.
-Upstream PR 12557 (open, 2026-10-24) fixes it. Once it lands, rebase onto
-`upstream/main` again.
+Upstream `main` did not compile from `6d72ef4d1b` until PR 12557 merged as
+`f6c6cfb3d2` (draft 37). Rebase onto `upstream/main` again. The sync
+machine merged `f6c6cfb3d2` as `f84787b815` and is running the checks.
+In that merge, both `LirCodeGen.zig` conflicts took upstream's side: the
+128-bit `list_get_unsafe` index cases and the byte-store shifts are gone,
+so a rebase hits the same two conflicts if `dispatch/isa` changed that code.
 
 Also from upstream today:
 
@@ -118,8 +116,8 @@ branches. Run it again on #9 after the fold.
 
 Work in `.workspaces/pr-isa`.
 
-1. **Rebase** `dispatch/isa` onto `upstream/main` (but see the warning
-   above: use `414a19203e` until upstream builds again).
+1. **Rebase** `dispatch/isa` onto `upstream/main` (it builds again since
+   `f6c6cfb3d2`).
 2. **#8, instruction cache flush** (`5aa8ffecbf`). Cherry-pick it. It no
    longer compiles: upstream added `finishWriteExecutablePrefix`
    (`src/backend/dev/ExecutableMemory.zig`, about line 274), which calls
