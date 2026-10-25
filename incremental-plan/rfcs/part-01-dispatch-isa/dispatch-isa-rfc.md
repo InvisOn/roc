@@ -314,8 +314,10 @@ zig build minici -j14
 ```
 
 Each passes. On `e65824d17e` the first ten passed in about 15 minutes, and
-`run-test-eval` gave 2593 passed, 47 skipped. Step 6 adds the unit tests at
-a 4-byte and an 8-byte word to `run-test-zig-module-backend`.
+`run-test-eval` gave 2593 passed, 47 skipped. Step 6 adds unit tests at a
+4-byte and an 8-byte word to `run-test-zig-module-builtins` (RocStr and
+RocList field offsets) and `run-test-zig-module-backend` (`intOverflowCheck`,
+`wordOfU128`).
 
 The relative oracle, from the main checkout (about an hour, up to 20 GB):
 
@@ -337,8 +339,10 @@ written in fold step 7.
 ## Recommendation
 
 - D1: fold all four fixes into #9 (accepted).
-- D2: the vocabulary and the four word-relative commits (accepted).
-- D3: rebase onto current `upstream/main` before step 6 (proposed).
+- D2: the vocabulary and the word-relative commits (accepted). Done as five
+  commits in step 6; the structural equality commit has no code left upstream.
+- D3: rebase onto current `upstream/main` before step 6 (accepted, done
+  2026-10-26 onto `629c3e0e2d`).
 
 The remaining fold steps:
 

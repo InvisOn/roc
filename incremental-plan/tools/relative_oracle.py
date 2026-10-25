@@ -107,6 +107,38 @@ A0_FOLLOWS = [
      "            .debug_materialized_out = options.debug_materialized_out,\n",
      "",
      "2766784b62"),
+    # 3b7831cbd9 made inspected lowering choose the specialization strategy
+    # (Boxy lowers through CompileTimeFinalization); A0's hash-mode helper
+    # must lower the same way. Applies after the entry above.
+    ("src/eval/inspected.zig",
+     "    return lir.CheckedPipeline.lowerCheckedModulesToLir(\n"
+     "        allocator,\n"
+     "        .{\n"
+     "            .root = check.CheckedArtifact.loweringView(root_module),\n"
+     "            .imports = import_views,\n"
+     "        },\n"
+     "        .{ .requests = root_module.root_requests.runtime_requests },\n"
+     "        .{\n"
+     "            .target_usize = target_usize,\n"
+     "            .specialization_strategy = options.specialization_strategy,\n"
+     "            .inline_mode = options.inline_mode,\n"
+     "            .list_in_place_map = options.list_in_place_map,\n"
+     "            .inline_expects = options.inline_expects,\n"
+     "            .tag_reachability = options.tag_reachability,\n"
+     "            .prove_ranges = options.prove_ranges,\n"
+     "        },\n"
+     "    );\n",
+     "    const modules: lir.CheckedPipeline.CheckedModuleSet = .{\n"
+     "        .root = check.CheckedArtifact.loweringView(root_module),\n"
+     "        .imports = import_views,\n"
+     "    };\n"
+     "    const roots: lir.CheckedPipeline.RootRequestSet = .{ .requests = root_module.root_requests.runtime_requests };\n"
+     "    const target = lowerToLirTarget(target_usize, options);\n"
+     "    return switch (target.specialization_strategy) {\n"
+     "        .lss => try lir.CheckedPipeline.lowerCheckedModulesToLir(allocator, modules, roots, target),\n"
+     "        .boxy => try CompileTimeFinalization.lowerBoxyRuntime(allocator, modules, roots, target),\n"
+     "    };\n",
+     "3b7831cbd9"),
 ]
 
 

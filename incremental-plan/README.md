@@ -20,7 +20,7 @@ and the write-ups of finished steps.
 
 - **Review size.** The reference adds about 23,000 lines (127 files). No
   maintainer can review that at once. Pieces of 300 to 2,000 lines can be.
-- **Upstream moves fast.** 215 commits landed in two days this week. A big
+- **Upstream moves fast.** 215 commits landed in two days in the week of 2026-10-19. A big
   branch rots while it waits. A small PR is reviewed and merged before it
   conflicts.
 - **Value early.** The first pull requests help upstream even if arm32
@@ -64,15 +64,15 @@ stay out of upstream. They will change as upstream moves.
 | # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR | Branch |
 |---|---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none | none |
-| 1 | Architecture dispatch (`isa.zig`, `binaryIs`) and driver word size (1 of 3): sizes through `word`. With the glibc stub's arm32 body (draft 16), the instruction cache flush (draft 03) and the host word-size fixes (drafts 07 and 12) | dev backend: architecture choice and shared driver, plus glibc stub, code in memory, relocations | about 2,150 | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8), [#3](https://github.com/InvisOn/roc/pull/3) and closed [#4](https://github.com/InvisOn/roc/pull/4) | `dispatch/isa` |
+| 1 | Architecture dispatch (`isa.zig`, `binaryIs`) and driver word size (1 of 3): sizes through `word`. With the glibc stub's arm32 body (draft 16), the instruction cache flush (draft 03) and the host word-size fixes (drafts 07 and 12) | dev backend: architecture choice and shared driver, plus glibc stub, code in memory, relocations | about 2,150 in the reference (see below) | no | [#9](https://github.com/InvisOn/roc/pull/9), folding in [#8](https://github.com/InvisOn/roc/pull/8), [#3](https://github.com/InvisOn/roc/pull/3) and closed [#4](https://github.com/InvisOn/roc/pull/4) | `dispatch/isa` |
 | 2 | Driver word size (2 of 3): emit helpers move onto each code generator | dev backend: shared driver | about 3,000 | no | not yet | `word-size/emit-helpers` |
 | 3 | Driver word size (3 of 3): the rest of `LirCodeGen.zig`'s 64-bit assumptions | dev backend: shared driver | about 2,000 | no | not yet | `word-size/driver-rest` |
 | 4 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet | `arm32/encoder` |
 | 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet | `arm32/elf32-objects` |
 | 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet | `arm32/codegen` |
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet | `arm32/aapcs32` |
-| 8 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | in 1, 2 and 3 | no | not yet | (in 1, 2 and 3) |
-| 9 | NEON SIMD | dev backend: shared driver | in 1, 2 and 3 | no | not yet | (in 1, 2 and 3) |
+| 8 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | not measured | no | not yet | several, by operation family |
+| 9 | NEON SIMD | dev backend: shared driver | not measured | no | not yet | several, by operation family |
 | 10 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet | `arm32/targets` |
 | 11 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet | `arm32/host` |
 | 12 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet | `arm32/docs` |
@@ -85,10 +85,14 @@ them, and the other drafts are not part of this plan. The other was the
 first word-size part, which joined the architecture dispatch, so the
 dispatch arrives together with the first change that needs it.
 
-Parts 1, 2 and 3 together are the biggest change to upstream's own code, about
-5,400 added and 2,800 removed lines in `LirCodeGen.zig`, plus about 1,000
-in the x86_64 and aarch64 code generators. That is why it is split in
-three, each proven byte-identical.
+Parts 1, 2 and 3 together are the biggest change to upstream's own code. In
+the reference they are about 5,400 added and 2,800 removed lines in
+`LirCodeGen.zig`, plus about 1,000 in the x86_64 and aarch64 code
+generators. That is why it is split in three, each proven byte-identical.
+On current upstream they are smaller, because upstream did much of the
+offset work itself and deleted code the reference changed: with fold steps
+1 to 6 done, `dispatch/isa` is +1,068/−804 lines over 23 files
+(`LirCodeGen.zig` +910/−757). Re-measure when a part is cut.
 
 ## Where each part fits in the compiler pipeline
 
@@ -166,10 +170,13 @@ cut, and is then closed.
 
 | Draft | Folds into | Fork PR | State | Checked with | Branch |
 |---|---|---|---|---|---|
-| 16, glibc stub writes `ret` for 32-bit ARM | 1 | [#4](https://github.com/InvisOn/roc/pull/4) | closed, commit kept | the stub assembles | `fix/glibc-stub-arm-returns` |
-| 03, no instruction cache flush before JIT code runs | 1 | [#8](https://github.com/InvisOn/roc/pull/8) | open | `build-ci` on x86_64 only, not yet on aarch64 | `fix/flush-jit-instruction-cache` |
-| 07, 32-bit host readiness | 1 | none yet | | | none yet |
-| 12, abs64 relocation sized by the host | 1 | [#3](https://github.com/InvisOn/roc/pull/3) | open | its unit test | `fix/abs64-relocation-width` |
+| 16, glibc stub writes `ret` for 32-bit ARM | 1 | [#4](https://github.com/InvisOn/roc/pull/4) | closed; in `dispatch/isa` | the stub assembles | `fix/glibc-stub-arm-returns` |
+| 03, no instruction cache flush before JIT code runs | 1 | [#8](https://github.com/InvisOn/roc/pull/8) | open; in `dispatch/isa` | `build-ci` on x86_64 only; an aarch64 device in fold step 7 | `fix/flush-jit-instruction-cache` |
+| 07, 32-bit host readiness | 1 | none (fold step 5) | in `dispatch/isa` | backend and eval tests, step 5 | `dispatch/isa` |
+| 12, abs64 relocation sized by the host | 1 | [#3](https://github.com/InvisOn/roc/pull/3) | open; in `dispatch/isa` | its unit test | `fix/abs64-relocation-width` |
+
+All four are already folded into `dispatch/isa` (fold steps 1 to 5). #8 and
+#3 close in fold step 8.
 
 Not part of the plan: 02, 14 (filed as 12532), 26 and the CI drafts. Their
 fork PRs ([#5](https://github.com/InvisOn/roc/pull/5) for 26,
@@ -195,15 +202,29 @@ too (draft 16), and the instruction cache flush, which only x86 can skip
 From `LirCodeGen.zig` and the x86_64 and aarch64 code generators. Each part
 compiles and runs only the 64-bit targets, and includes the oracle proof.
 Splitting by area:
-- **1 (with the dispatch):** sizes, offsets and loops go through `word`, `word_size` and
-  `word_bits` instead of a fixed 8. It also takes the host word-size fixes:
-  the places that use the compiler's own word size where the target's is
-  meant (draft 07), and the abs64 relocation that writes four bytes on a
-  32-bit host (draft 12).
-- **2:** the emit helpers move from the driver onto `self.codegen`, so each
-  architecture supplies its own.
-- **3:** what is left: the width vocabulary (`wide64_reg_width`,
-  `wide64_store_width`), i128 by-pointer paths, and the `isa` switches.
+- **1 (with the dispatch):** word-sized values go through `word` and
+  `word_bits`, and sizes and offsets through upstream's `target_ptr_size`,
+  instead of a fixed 8. Fold step 6 does this in five commits: RocStr and
+  RocList accesses, one-register integer arithmetic, low-level pointer
+  sites, integer conversions, bit counts. (The reference's structural
+  equality commit is not among them: upstream deleted that code.) Part 1
+  also takes the host word-size fixes: the places that use the compiler's
+  own word size where the target's is meant (draft 07), and the abs64
+  relocation that writes four bytes on a 32-bit host (draft 12).
+- **2:** needs re-planning before it is cut. The reference moved the emit
+  helpers from the driver onto `self.codegen`, so each architecture
+  supplies its own. Upstream has since gone the other way: the driver has
+  its own wrappers (`self.emitLoad`, `self.emitStore`) that choose the
+  architecture with `isa.binaryIs`. Moving them would reverse an upstream
+  choice, so what part 2 contains, and its size, are open.
+- **3:** what is left: the nine "Classify ..." commits (fold step 6,
+  option 1), the sites listed under "Word-sized sites left for part 3" in
+  `rfcs/part-01-dispatch-isa/step-6-word-size.md`, i128 by-pointer paths,
+  and the `isa` switches. It brings the width vocabulary
+  (`wide64_reg_width`, `wide64_store_width`) and uses it at every value
+  that is 64 bits on every target, so the raw `.w64` count in the driver
+  reaches zero. It also brings the Wide64 dispatch (plan D2), which must
+  land no later than the commit that lifts the 8-byte assert.
 No arm32 code yet. Upstream gains a driver whose word-size assumptions are
 explicit.
 
@@ -227,6 +248,11 @@ yet. The oracle checks it against the GNU assembler byte for byte.
 `src/layout/abi/arm32.zig`. From here `roc build --target=arm32musl
 --opt=dev` produces programs. The ABI shape tests (`test/fx/abi_call_shapes.roc`
 and the nested struct probe) come with 7.
+
+The driver's 8-byte assert is lifted here, and only together with arm32
+tests that cover every kind of site part 1 changed (the table "Tests that
+must cover step 6's sites" in `rfcs/part-01-dispatch-isa/step-6-word-size.md`).
+Until then nothing catches a word-sized site that goes back to `.w64`.
 
 ### 8 and 9. Wide values and SIMD
 
@@ -305,24 +331,24 @@ fork PR (`/code-review ultra <number>`).
 Spend them where a bug is subtle, our own tests are weak, and a mistake
 costs the most:
 
-1. **Step 1, architecture dispatch and word size (1 of 3).** It is the
+1. **Part 1, architecture dispatch and word size (1 of 3).** It is the
    first code upstream sees, it changes the shared driver that x86_64 and
-   aarch64 use, and steps 2 and 3 build on its patterns. The relative
+   aarch64 use, and parts 2 and 3 build on its patterns. The relative
    oracle proves 64-bit output did not change, but not that the new word
    vocabulary is right for 32 bits.
-2. **Step 3, the rest of `LirCodeGen.zig`'s 64-bit assumptions.** Width
+2. **Part 3, the rest of `LirCodeGen.zig`'s 64-bit assumptions.** Width
    mistakes here compile, pass every 64-bit test, and show up only as wrong
    values on arm32. The oracle checks only that 64-bit output is unchanged.
-3. **Step 7, AAPCS32 calling convention.** ABI mistakes (argument
+3. **Part 7, AAPCS32 calling convention.** ABI mistakes (argument
    registers, stack alignment, how 64-bit values are split across register
    pairs, returns by pointer) pass Roc-only tests and break only when Roc
    code calls a C host or a C host calls Roc.
 
-Not worth a run: step 2 (a mechanical move that the oracle proves
-byte-identical), step 4 (the assembler oracle checks every encoding), and
-steps 10 to 12 (targets, docs and CI, which CI itself tests). If a step
+Not worth a run: part 2 (a mechanical move that the oracle proves
+byte-identical), part 4 (the assembler oracle checks every encoding), and
+parts 10 to 12 (targets, docs and CI, which CI itself tests). If a part
 listed above turns out small and well covered when it is cut, give its run
-to step 6 (arm32 code generator) instead.
+to part 6 (arm32 code generator) instead.
 
 ## Timing
 
@@ -355,3 +381,12 @@ upstream first, so stopping early still leaves something of value.
 - 2026-10-25: added `templates/rfc.md`, a planning doc shape based on
   Roc's RFCs, with ADR-style decision blocks. Every branch and step gets
   one. It is required before a PR's topic is cut.
+- 2026-10-25: the part 1 RFC written (`rfcs/part-01-dispatch-isa/dispatch-isa-rfc.md`),
+  and the step write-ups moved into that directory.
+- 2026-10-26: `dispatch/isa` rebased onto upstream `629c3e0e2d` (branch
+  D3). Step 6 planned and done: five commits (RocStr and RocList
+  accesses, integer arithmetic, low-level pointers, conversions, bit
+  counts), not pushed. The structural
+  equality commit is dropped: upstream deleted that code. arm32 tests start
+  at part 6, not part 3, and the 8-byte assert is lifted only with them.
+  Part 2 needs re-planning (see "1, 2 and 3").

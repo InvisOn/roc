@@ -7,7 +7,8 @@ to set up and check the work.
 
 Upstream `main` was at `9b119d59e4` when this was written, and at
 `04d6133c76` later that day, when fork `main` was fast-forwarded to it. On
-2026-10-25 upstream `main` is at `629c3e0e2d`.
+2026-10-25 upstream `main` is at `629c3e0e2d`, and on 2026-10-26 at
+`26436de489` (28 commits past `dispatch/isa`'s base).
 
 ### Changes since `9b119d59e4`
 
@@ -119,7 +120,7 @@ The other machines: the Pi 5 (`<user>@<aarch64-device>`, aarch64) and the Pi 3
 
 | PR | Branch | Head | Base | State |
 |---|---|---|---|---|
-| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | local `e65824d17e`, pushed `127015276f` | local `3bb8f2ec6c` (45 behind on 2026-10-25), pushed `75d613ba5c` | Part 1. Fold steps 1 to 5 are done locally (10 signed commits), not pushed. Step 6 is next. |
+| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | local `0d8048aee4`, pushed `127015276f` | local `629c3e0e2d` (28 behind on 2026-10-26), pushed `75d613ba5c` | Part 1. Fold steps 1 to 6 are done locally (15 signed commits), not pushed. Step 7 is next. |
 | [#8](https://github.com/InvisOn/roc/pull/8) | `fix/flush-jit-instruction-cache` | `5aa8ffecbf` | `73df27a5bb` (653 behind) | Draft 03. Folds into #9, then closes. |
 | [#3](https://github.com/InvisOn/roc/pull/3) | `fix/abs64-relocation-width` | `9ee4d148e8` | `73df27a5bb` | Draft 12. Folds into #9, then closes. |
 | [#4](https://github.com/InvisOn/roc/pull/4) | `fix/glibc-stub-arm-returns` | `4dffc5b3ea` | `73df27a5bb` | Draft 16. Closed. Its commit folds into #9. The same commit is open upstream as your 12513. |
@@ -134,7 +135,8 @@ does not count for the eval cases. The PR branch has no hash mode, so its
 runner wrote nothing and the oracle compared a hash file left over from an
 earlier sync run. The `dev_object` snapshot half of that run was real. The
 oracle now deletes the old file and has `--apply-a0-to-merged` for PR
-branches. Run it again on #9 after the fold.
+branches. Step 6 ran it on the whole branch (`629c3e0e2d` against
+`0d8048aee4`); the result is in `rfcs/part-01-dispatch-isa/step-6-word-size.md`.
 
 ## Next: fold part 1 into #9
 
@@ -146,8 +148,9 @@ From step 6 on, each step also gets a planning doc made from
 `templates/rfc.md` before its code work starts.
 
 1. **Rebase** `dispatch/isa` onto `upstream/main` (it builds again since
-   `f6c6cfb3d2`). Done on `3bb8f2ec6c`, before upstream built again.
-   Rebase onto current `upstream/main` again before the checks in step 7.
+   `f6c6cfb3d2`). Done on `3bb8f2ec6c`, before upstream built again, and
+   again on `629c3e0e2d` on 2026-10-26, before step 6 (branch D3). Rebase
+   once more before the checks in step 7 if upstream has moved.
 2. **#8, instruction cache flush** (`5aa8ffecbf`). Cherry-pick it. It no
    longer compiles: upstream added `finishWriteExecutablePrefix`
    (`src/backend/dev/ExecutableMemory.zig`, about line 274), which calls
@@ -166,14 +169,13 @@ From step 6 on, each step also gets a planning doc made from
    as `erased_capture_prefix`, with a Debug check at `LirCodeGen.zig:1341`
    against the host-sized `hot_reload_capture_prefix_size`. That check
    needs the same fix.
-6. **Word size (1 of 3).** The source is the "A2" commits on the
-   reference branch. Decided (option 1): `bf9d0e0d49` and the four "Make
-   ... word-relative" commits go into #9, and the nine "Classify ..."
-   commits go to part 3 of the plan. Tests: snapshots after each commit,
-   the relative oracle once after the step's last commit, and unit tests
-   for the layout helpers at a 4-byte and an 8-byte word. The remaining
-   open decisions go in the step 6 planning doc
-   (`rfcs/part-01-dispatch-isa/`, from `templates/rfc.md`).
+6. **Word size (1 of 3).** Done 2026-10-26: five commits, from
+   `84c8a5e582` to `0d8048aee4` (RocStr and RocList accesses, integer
+   arithmetic, low-level pointers, conversions, bit counts). The plan is
+   `rfcs/part-01-dispatch-isa/step-6-word-size-plan.md`, the write-up
+   `step-6-word-size.md`, with the decisions made along the way, the
+   word-sized sites left for part 3, and the arm32 tests that must cover
+   step 6's sites before the 8-byte assert is lifted (part 6).
 7. **Check** (see below). Run #8's flush on the Pi 5 too. It has only run
    on x86_64, which never needs a flush.
 8. **Update #9's description.** Change section, the plan table
@@ -189,8 +191,10 @@ one's "How to test".
 ## Open decisions
 
 - **Which A2 commits make up word size (1 of 3).** Decided 2026-10-25:
-  option 1 (see fold step 6 above). The rest of this item is the record of
-  the choice. The plan says part 1
+  option 1, done in fold step 6 (see above and its write-up; `word_size`
+  below became upstream's `target_ptr_size`, and the structural equality
+  commit had no code left upstream). The rest of this item is the record
+  of the choice. The plan says part 1
   routes sizes, offsets and loops through `word`, `word_size` and
   `word_bits`. Part 3 takes the width vocabulary (`wide64_reg_width`,
   `wide64_store_width`), i128 by-pointer paths and the `isa` switches. The
@@ -245,7 +249,15 @@ python3 .workspaces/notes/incremental-plan/tools/relative_oracle.py \
 zig build minici
 ```
 
-The oracle must say `PASS` with 0 differences. If one `zig build minici`
+The oracle must say `PASS` with 0 differences.
+
+If A0's patch no longer applies to upstream, the oracle stops and leaves
+the conflicts in `.workspaces/relative-oracle/upstream`. Resolve them there,
+record the resolutions with `git -c rerere.enabled=true rerere` (before and
+after resolving), and rerun the oracle with rerere on for its git calls:
+`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=rerere.enabled GIT_CONFIG_VALUE_0=true`
+in front of the command. rerere replays only conflict hunks, so an edit A0's
+code needs outside them goes into `A0_FOLLOWS` in `relative_oracle.py`. If one `zig build minici`
 section fails, fix it and rerun only that section (for example
 `zig build run-test-zig-snapshot-tool`) until it passes, then run minici
 again.

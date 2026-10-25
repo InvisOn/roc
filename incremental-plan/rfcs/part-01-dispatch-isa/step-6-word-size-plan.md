@@ -11,6 +11,10 @@
 
 ## Abstract
 
+As done, the step differs from this plan in places (five commits of
+different content, no structural equality commit, upstream's names); see
+`step-6-word-size.md`, "Decisions made during the step".
+
 This step brings in the vocabulary the dev backend needs to work from the
 target's word size instead of assuming 8 bytes, and makes integer
 arithmetic, conversions, structural equality and bit counts use it. The
@@ -40,7 +44,7 @@ moved with 64-bit loads and stores"; commit 1 updates it.
 Commit: `e65824d17e`. Nothing can be run yet. The driver still asserts an
 8-byte word (`LirCodeGen.zig:503`), and with that removed it stops at
 `aarch64/CodeGen.zig:31`, because no arm32 code generator exists until
-part 3. The breakage is shown by reading:
+part 6. The breakage is shown by reading:
 
 `LirCodeGen.zig:2245-2248` zeroes an empty list:
 
@@ -60,7 +64,7 @@ when a 32-bit integer already fills the word.
 
 ## What this enables
 
-- **Follows directly:** part 3 (arm32 code generator) can instantiate the
+- **Follows directly:** part 6 (arm32 code generator) can instantiate the
   driver with a 4-byte word once it lifts the 8-byte assert. Its
   word-sized paths are already right.
 - **Follows directly:** the nine "Classify" commits (part 3) build on this
@@ -111,7 +115,7 @@ stays, and its doc comment says how it differs from `targetWordOffset`.
 
 The 8-byte assert (`LirCodeGen.zig:503`) is upstream's, not the
 reference's, and it stays through part 1. So every branch for a 4-byte
-word compiles in part 1 but never runs. Part 3 lifts the assert.
+word compiles in part 1 but never runs. Part 6 lifts the assert.
 
 ## Discussion
 
@@ -286,10 +290,10 @@ word compiles in part 1 but never runs. Part 3 lifts the assert.
 
 - **Likelihood:** High
 - **Impact:** Low
-- **How we'd notice:** nothing in part 1; part 3's arm32 tests.
+- **How we'd notice:** nothing in part 1; the arm32 tests from part 6 on.
 - **Mitigation:** the reference's later commits list what they caught;
   the reference check (branch doc, Testing) compares with `e0fa273ebf`.
-- **If it happens:** fixed in part 3, where it can be tested.
+- **If it happens:** fixed when part 6's arm32 tests find it.
 
 ### R3. Conflicts with upstream's newer driver code
 
