@@ -9040,7 +9040,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
         }
 
-        /// Generate integer binary operation
+        /// Integer binary operation on an integer that fits one register (at
+        /// most a word). Sub-word integers are computed in the full register
+        /// and narrowed.
         fn generateIntBinop(
             self: *Self,
             op: lir.LowLevel,
@@ -9053,9 +9055,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             const lhs_reg = try self.ensureInGeneralReg(lhs_loc);
 
             const narrow_signed_shift: u6 = switch (operand_layout) {
-                .i8 => 56,
-                .i16 => 48,
-                .i32 => 32,
+                .i8 => word_bits - 8,
+                .i16 => word_bits - 16,
+                .i32 => word_bits - 32,
                 .bool, .str, .u8, .u16, .u32, .u64, .i64, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => 0,
             };
             // Determine if this is an unsigned type (for division/modulo/comparisons)
@@ -9075,34 +9077,35 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             // For shift ops, the count is taken modulo the type's bit width.
             // Because the widths are powers of two, that means keeping the low
             // log2(width) bits of the count, which the shl/lsr pair below does by
-            // shifting the other bits out. A 64-bit register shift already masks
-            // the count modulo 64, so this only narrows it for smaller types.
+            // shifting the other bits out of the word. A word-sized type keeps
+            // log2(word_bits) bits, because not every instruction set's register
+            // shift masks the count itself.
             const shift_count_keep: u8 = switch (operand_layout) {
-                .u8, .i8 => 64 - 3,
-                .u16, .i16 => 64 - 4,
-                .u32, .i32 => 64 - 5,
-                .bool, .str, .u64, .i64, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => 64 - 6,
+                .u8, .i8 => word_bits - 3,
+                .u16, .i16 => word_bits - 4,
+                .u32, .i32 => word_bits - 5,
+                .bool, .str, .u64, .i64, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => comptime word_bits - std.math.log2_int(u32, word_bits),
             };
 
             if (narrow_signed_shift > 0 and !is_unsigned) {
                 if (plain_op == .num_shift_right_zf_by) {
-                    try self.emitShiftImm(.shl, .w64, lhs_reg, lhs_reg, narrow_signed_shift);
-                    try self.emitShiftImm(.shr, .w64, lhs_reg, lhs_reg, narrow_signed_shift);
+                    try self.emitShiftImm(.shl, word, lhs_reg, lhs_reg, narrow_signed_shift);
+                    try self.emitShiftImm(.shr, word, lhs_reg, lhs_reg, narrow_signed_shift);
                 } else {
-                    try self.emitShiftImm(.shl, .w64, lhs_reg, lhs_reg, narrow_signed_shift);
-                    try self.emitShiftImm(.sar, .w64, lhs_reg, lhs_reg, narrow_signed_shift);
+                    try self.emitShiftImm(.shl, word, lhs_reg, lhs_reg, narrow_signed_shift);
+                    try self.emitShiftImm(.sar, word, lhs_reg, lhs_reg, narrow_signed_shift);
                 }
 
                 if (is_shift_op) {
-                    try self.emitShiftImm(.shl, .w64, rhs_reg, rhs_reg, shift_count_keep);
-                    try self.emitShiftImm(.shr, .w64, rhs_reg, rhs_reg, shift_count_keep);
+                    try self.emitShiftImm(.shl, word, rhs_reg, rhs_reg, shift_count_keep);
+                    try self.emitShiftImm(.shr, word, rhs_reg, rhs_reg, shift_count_keep);
                 } else {
-                    try self.emitShiftImm(.shl, .w64, rhs_reg, rhs_reg, narrow_signed_shift);
-                    try self.emitShiftImm(.sar, .w64, rhs_reg, rhs_reg, narrow_signed_shift);
+                    try self.emitShiftImm(.shl, word, rhs_reg, rhs_reg, narrow_signed_shift);
+                    try self.emitShiftImm(.sar, word, rhs_reg, rhs_reg, narrow_signed_shift);
                 }
             } else if (is_shift_op) {
-                try self.emitShiftImm(.shl, .w64, rhs_reg, rhs_reg, shift_count_keep);
-                try self.emitShiftImm(.shr, .w64, rhs_reg, rhs_reg, shift_count_keep);
+                try self.emitShiftImm(.shl, word, rhs_reg, rhs_reg, shift_count_keep);
+                try self.emitShiftImm(.shr, word, rhs_reg, rhs_reg, shift_count_keep);
             }
 
             // Allocate result register
@@ -9111,9 +9114,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             switch (int_op) {
                 .num_plus => {
                     if (comptime isa.binaryIs(.aarch64)) {
-                        try self.codegen.emit.addsRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emit.addsRegRegReg(word, result_reg, lhs_reg, rhs_reg);
                     } else {
-                        try self.codegen.emitAdd(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitAdd(word, result_reg, lhs_reg, rhs_reg);
                     }
                     if (family_entry) |entry| {
                         if (entry.mode == .crash_on_overflow or entry.mode == .overflows) {
@@ -9132,9 +9135,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 },
                 .num_minus => {
                     if (comptime isa.binaryIs(.aarch64)) {
-                        try self.codegen.emit.subsRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emit.subsRegRegReg(word, result_reg, lhs_reg, rhs_reg);
                     } else {
-                        try self.codegen.emitSub(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitSub(word, result_reg, lhs_reg, rhs_reg);
                     }
                     if (family_entry) |entry| {
                         if (entry.mode == .crash_on_overflow or entry.mode == .overflows) {
@@ -9162,12 +9165,12 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                             self.freeGenerals(.{ lhs_reg, rhs_reg });
                             return .{ .general_reg = overflow_reg };
                         } else {
-                            try self.codegen.emitMul(.w64, result_reg, lhs_reg, rhs_reg);
+                            try self.codegen.emitMul(word, result_reg, lhs_reg, rhs_reg);
                         }
                     } else if (checked_op) |tag| {
                         try self.emitCheckedIntMul(tag, result_reg, lhs_reg, rhs_reg, operand_layout, is_unsigned);
                     } else {
-                        try self.codegen.emitMul(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitMul(word, result_reg, lhs_reg, rhs_reg);
                     }
                 },
                 .num_div_by, .num_div_trunc_by => {
@@ -9177,9 +9180,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                     // For integers, div and div_trunc are the same (integer division truncates)
                     if (is_unsigned) {
-                        try self.codegen.emitUDiv(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitUDiv(word, result_reg, lhs_reg, rhs_reg);
                     } else {
-                        try self.codegen.emitSDiv(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitSDiv(word, result_reg, lhs_reg, rhs_reg);
                     }
                 },
                 .num_rem_by => {
@@ -9189,9 +9192,9 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         rem_done_patch = try self.emitCheckedSignedMinRemainderZero(lhs_reg, rhs_reg, result_reg, operand_layout);
                     }
                     if (is_unsigned) {
-                        try self.codegen.emitUMod(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitUMod(word, result_reg, lhs_reg, rhs_reg);
                     } else {
-                        try self.codegen.emitSMod(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitSMod(word, result_reg, lhs_reg, rhs_reg);
                     }
                     if (rem_done_patch) |patch| try self.codegen.patchJump(patch, self.codegen.currentOffset());
                 },
@@ -9202,7 +9205,7 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         mod_done_patch = try self.emitCheckedSignedMinRemainderZero(lhs_reg, rhs_reg, result_reg, operand_layout);
                     }
                     if (is_unsigned) {
-                        try self.codegen.emitUMod(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitUMod(word, result_reg, lhs_reg, rhs_reg);
                     } else {
                         // Mathematical modulo: result has the sign of the divisor.
                         // Start with hardware remainder (sign of dividend), and add
@@ -9210,21 +9213,21 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                         // its sign differs from the divisor's sign.
                         const divisor_reg = try self.allocTempGeneral();
                         try self.emitMovRegReg(divisor_reg, rhs_reg);
-                        try self.codegen.emitSMod(.w64, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitSMod(word, result_reg, lhs_reg, rhs_reg);
                         const sign_check_reg = try self.allocTempGeneral();
                         try self.emitCmpImm(result_reg, 0);
                         const zero_patch = try self.emitJumpIfEqual();
 
                         if (comptime isa.binaryIs(.aarch64)) {
-                            try self.codegen.emit.eorRegRegReg(.w64, sign_check_reg, result_reg, divisor_reg);
+                            try self.codegen.emit.eorRegRegReg(word, sign_check_reg, result_reg, divisor_reg);
                         } else {
                             try self.emitMovRegReg(sign_check_reg, result_reg);
-                            try self.codegen.emit.xorRegReg(.w64, sign_check_reg, divisor_reg);
+                            try self.codegen.emit.xorRegReg(word, sign_check_reg, divisor_reg);
                         }
 
                         try self.emitCmpImm(sign_check_reg, 0);
                         const same_sign_patch = try self.codegen.emitCondJump(condCode(.greater_or_equal));
-                        try self.codegen.emitAdd(.w64, result_reg, result_reg, divisor_reg);
+                        try self.codegen.emitAdd(word, result_reg, result_reg, divisor_reg);
                         const done_patch = try self.codegen.emitJump();
 
                         const skip_adjust_offset = self.codegen.currentOffset();
@@ -9235,25 +9238,25 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                     }
                     if (mod_done_patch) |patch| try self.codegen.patchJump(patch, self.codegen.currentOffset());
                 },
-                .num_shift_left_by => try self.emitShiftReg(.shl, .w64, result_reg, lhs_reg, rhs_reg),
+                .num_shift_left_by => try self.emitShiftReg(.shl, word, result_reg, lhs_reg, rhs_reg),
                 // Signed types shift arithmetically (sign-filling); unsigned types
                 // shift logically (zero-filling).
                 .num_shift_right_by => if (is_unsigned)
-                    try self.emitShiftReg(.shr, .w64, result_reg, lhs_reg, rhs_reg)
+                    try self.emitShiftReg(.shr, word, result_reg, lhs_reg, rhs_reg)
                 else
-                    try self.emitShiftReg(.sar, .w64, result_reg, lhs_reg, rhs_reg),
-                .num_shift_right_zf_by => try self.emitShiftReg(.shr, .w64, result_reg, lhs_reg, rhs_reg),
-                .num_bitwise_and => try self.codegen.emitAnd(.w64, result_reg, lhs_reg, rhs_reg),
-                .num_bitwise_or => try self.codegen.emitOr(.w64, result_reg, lhs_reg, rhs_reg),
-                .num_bitwise_xor => try self.codegen.emitXor(.w64, result_reg, lhs_reg, rhs_reg),
+                    try self.emitShiftReg(.sar, word, result_reg, lhs_reg, rhs_reg),
+                .num_shift_right_zf_by => try self.emitShiftReg(.shr, word, result_reg, lhs_reg, rhs_reg),
+                .num_bitwise_and => try self.codegen.emitAnd(word, result_reg, lhs_reg, rhs_reg),
+                .num_bitwise_or => try self.codegen.emitOr(word, result_reg, lhs_reg, rhs_reg),
+                .num_bitwise_xor => try self.codegen.emitXor(word, result_reg, lhs_reg, rhs_reg),
                 // Comparison operations
                 .num_is_eq => {
-                    try self.codegen.emitCmp(.w64, result_reg, lhs_reg, rhs_reg, condCode(.equal));
+                    try self.codegen.emitCmp(word, result_reg, lhs_reg, rhs_reg, condCode(.equal));
                 },
-                .num_is_lt => try self.codegen.emitCmp(.w64, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.below) else condCode(.less)),
-                .num_is_lte => try self.codegen.emitCmp(.w64, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.below_or_equal) else condCode(.less_or_equal)),
-                .num_is_gt => try self.codegen.emitCmp(.w64, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.above) else condCode(.greater)),
-                .num_is_gte => try self.codegen.emitCmp(.w64, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.above_or_equal) else condCode(.greater_or_equal)),
+                .num_is_lt => try self.codegen.emitCmp(word, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.below) else condCode(.less)),
+                .num_is_lte => try self.codegen.emitCmp(word, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.below_or_equal) else condCode(.less_or_equal)),
+                .num_is_gt => try self.codegen.emitCmp(word, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.above) else condCode(.greater)),
+                .num_is_gte => try self.codegen.emitCmp(word, result_reg, lhs_reg, rhs_reg, if (is_unsigned) condCode(.above_or_equal) else condCode(.greater_or_equal)),
             }
 
             // Free operand registers if they were temporary
@@ -9270,18 +9273,23 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             operation: CheckedArithmetic.Operation,
             is_unsigned: bool,
         ) Allocator.Error!void {
-            switch (operand_layout) {
-                .u8, .u16, .u32, .i8, .i16, .i32 => try self.emitNarrowIntRangeFlag(flag_reg, result_reg, operand_layout),
-                .u64 => try self.emitSetCond(flag_reg, if (operation == .add) condCode(.unsigned_add_overflow) else condCode(.unsigned_sub_overflow)),
-                .i64 => try self.emitSetCond(flag_reg, condCode(.overflow)),
-                .bool, .str, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => {
-                    if (builtin.mode == .debug) std.debug.assert(!is_unsigned or operand_layout == .u128);
-                    base.invariant("LIR/codegen invariant violated: add/sub overflow flag requested for layout {d}", .{@backingInt(operand_layout)});
-                },
+            const check = intOverflowCheck(operand_layout, word_bits) orelse {
+                if (builtin.mode == .debug) std.debug.assert(!is_unsigned or operand_layout == .u128);
+                base.invariant("LIR/codegen invariant violated: add/sub overflow flag requested for layout {d}", .{@backingInt(operand_layout)});
+            };
+            switch (check) {
+                .narrow_range => try self.emitNarrowIntRangeFlag(flag_reg, result_reg, operand_layout),
+                .word_flags => try self.emitSetCond(flag_reg, if (!is_unsigned)
+                    condCode(.overflow)
+                else if (operation == .add)
+                    condCode(.unsigned_add_overflow)
+                else
+                    condCode(.unsigned_sub_overflow)),
             }
         }
 
-        /// The value range of a sub-64-bit integer layout; `min` is null for
+        /// The value range of an integer layout narrower than the target word
+        /// (`intOverflowCheck` says `.narrow_range`); `min` is null for
         /// unsigned layouts, whose results are checked only against `max`.
         fn narrowIntRange(operand_layout: layout.Idx) struct { min: ?i64, max: i64 } {
             return switch (operand_layout) {
@@ -9291,29 +9299,29 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 .i8 => .{ .min = std.math.minInt(i8), .max = std.math.maxInt(i8) },
                 .i16 => .{ .min = std.math.minInt(i16), .max = std.math.maxInt(i16) },
                 .i32 => .{ .min = std.math.minInt(i32), .max = std.math.maxInt(i32) },
-                .bool, .str, .u64, .i64, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => unreachable, // callers reach this only from .u8/.u16/.u32/.i8/.i16/.i32 prongs
+                .bool, .str, .u64, .i64, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => unreachable, // callers reach this only for layouts intOverflowCheck calls .narrow_range
             };
         }
 
-        /// Set `flag_reg` when the 64-bit `result_reg` lies outside the range
-        /// of the sub-64-bit integer layout.
+        /// Set `flag_reg` when the word-sized `result_reg` lies outside the
+        /// range of an integer layout narrower than the word.
         fn emitNarrowIntRangeFlag(self: *Self, flag_reg: GeneralReg, result_reg: GeneralReg, operand_layout: layout.Idx) Allocator.Error!void {
             const range = narrowIntRange(operand_layout);
             const min_value = range.min orelse {
                 const max_reg = try self.allocTempGeneral();
                 defer self.codegen.freeGeneral(max_reg);
                 try self.codegen.emitLoadImm(max_reg, range.max);
-                try self.codegen.emitCmp(.w64, flag_reg, result_reg, max_reg, condCode(.above));
+                try self.codegen.emitCmp(word, flag_reg, result_reg, max_reg, condCode(.above));
                 return;
             };
             const limit_reg, const high_flag = try self.allocTempGenerals(2);
             defer self.codegen.freeGeneral(limit_reg);
             defer self.codegen.freeGeneral(high_flag);
             try self.codegen.emitLoadImm(limit_reg, min_value);
-            try self.codegen.emitCmp(.w64, flag_reg, result_reg, limit_reg, condCode(.less));
+            try self.codegen.emitCmp(word, flag_reg, result_reg, limit_reg, condCode(.less));
             try self.codegen.emitLoadImm(limit_reg, range.max);
-            try self.codegen.emitCmp(.w64, high_flag, result_reg, limit_reg, condCode(.greater));
-            try self.codegen.emitOr(.w64, flag_reg, flag_reg, high_flag);
+            try self.codegen.emitCmp(word, high_flag, result_reg, limit_reg, condCode(.greater));
+            try self.codegen.emitOr(word, flag_reg, flag_reg, high_flag);
         }
 
         fn emitIntMulOverflowFlag(
@@ -9324,47 +9332,51 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             rhs_reg: GeneralReg,
             operand_layout: layout.Idx,
         ) Allocator.Error!void {
-            switch (operand_layout) {
-                .u8, .u16, .u32, .i8, .i16, .i32 => {
-                    try self.codegen.emitMul(.w64, result_reg, lhs_reg, rhs_reg);
+            const check = intOverflowCheck(operand_layout, word_bits) orelse
+                base.invariant("LIR/codegen invariant violated: multiply overflow flag requested for layout {d}", .{@backingInt(operand_layout)});
+            const shape = scalarIntShape(operand_layout) orelse
+                unreachable; // intOverflowCheck returned non-null, so the layout is an integer
+            switch (check) {
+                .narrow_range => {
+                    try self.codegen.emitMul(word, result_reg, lhs_reg, rhs_reg);
                     try self.emitNarrowIntRangeFlag(flag_reg, result_reg, operand_layout);
                 },
-                .i64 => if (comptime isa.binaryIs(.aarch64)) {
-                    const high_reg, const sign_reg = try self.allocTempGenerals(2);
-                    try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
-                    try self.codegen.emit.smulhRegRegReg(high_reg, lhs_reg, rhs_reg);
-                    try self.emitShiftImm(.sar, .w64, sign_reg, result_reg, 63);
-                    try self.codegen.emitCmp(.w64, flag_reg, high_reg, sign_reg, condCode(.not_equal));
-                    self.freeGenerals(.{ sign_reg, high_reg });
+                .word_flags => if (shape.signed) {
+                    if (comptime isa.binaryIs(.aarch64)) {
+                        const high_reg, const sign_reg = try self.allocTempGenerals(2);
+                        try self.codegen.emit.mulRegRegReg(word, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emit.smulhRegRegReg(high_reg, lhs_reg, rhs_reg);
+                        try self.emitShiftImm(.sar, word, sign_reg, result_reg, word_bits - 1);
+                        try self.codegen.emitCmp(word, flag_reg, high_reg, sign_reg, condCode(.not_equal));
+                        self.freeGenerals(.{ sign_reg, high_reg });
+                    } else {
+                        try self.codegen.emitMul(word, result_reg, lhs_reg, rhs_reg);
+                        try self.emitSetCond(flag_reg, condCode(.overflow));
+                    }
                 } else {
-                    try self.codegen.emitMul(.w64, result_reg, lhs_reg, rhs_reg);
-                    try self.emitSetCond(flag_reg, condCode(.overflow));
-                },
-                .u64 => if (comptime isa.binaryIs(.aarch64)) {
-                    const high_reg, const zero_reg = try self.allocTempGenerals(2);
-                    try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
-                    try self.codegen.emit.umulhRegRegReg(high_reg, lhs_reg, rhs_reg);
-                    try self.codegen.emitLoadImm(zero_reg, 0);
-                    try self.codegen.emitCmp(.w64, flag_reg, high_reg, zero_reg, condCode(.not_equal));
-                    self.freeGenerals(.{ zero_reg, high_reg });
-                } else {
-                    var rhs_temp: ?GeneralReg = null;
-                    const rhs_src = if (rhs_reg == .RAX and lhs_reg != .RAX) blk: {
-                        const temp = try self.allocTempGeneral();
-                        try self.codegen.emit.movRegReg(.w64, temp, rhs_reg);
-                        rhs_temp = temp;
-                        break :blk temp;
-                    } else rhs_reg;
-                    if (lhs_reg != .RAX) try self.codegen.emit.movRegReg(.w64, .RAX, lhs_reg);
-                    try self.codegen.emit.mulReg(.w64, rhs_src);
-                    try self.emitMovRegReg(result_reg, .RAX);
-                    // MUL sets OF exactly when the high half is nonzero. Read
-                    // it after preserving RAX so result_reg may safely be RDX.
-                    try self.emitSetCond(flag_reg, condCode(.overflow));
-                    if (rhs_temp) |temp| self.codegen.freeGeneral(temp);
-                },
-                .bool, .str, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => {
-                    base.invariant("LIR/codegen invariant violated: multiply overflow flag requested for layout {d}", .{@backingInt(operand_layout)});
+                    if (comptime isa.binaryIs(.aarch64)) {
+                        const high_reg, const zero_reg = try self.allocTempGenerals(2);
+                        try self.codegen.emit.mulRegRegReg(word, result_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emit.umulhRegRegReg(high_reg, lhs_reg, rhs_reg);
+                        try self.codegen.emitLoadImm(zero_reg, 0);
+                        try self.codegen.emitCmp(word, flag_reg, high_reg, zero_reg, condCode(.not_equal));
+                        self.freeGenerals(.{ zero_reg, high_reg });
+                    } else {
+                        var rhs_temp: ?GeneralReg = null;
+                        const rhs_src = if (rhs_reg == .RAX and lhs_reg != .RAX) blk: {
+                            const temp = try self.allocTempGeneral();
+                            try self.codegen.emit.movRegReg(word, temp, rhs_reg);
+                            rhs_temp = temp;
+                            break :blk temp;
+                        } else rhs_reg;
+                        if (lhs_reg != .RAX) try self.codegen.emit.movRegReg(word, .RAX, lhs_reg);
+                        try self.codegen.emit.mulReg(word, rhs_src);
+                        try self.emitMovRegReg(result_reg, .RAX);
+                        // MUL sets OF exactly when the high half is nonzero. Read
+                        // it after preserving RAX so result_reg may safely be RDX.
+                        try self.emitSetCond(flag_reg, condCode(.overflow));
+                        if (rhs_temp) |temp| self.codegen.freeGeneral(temp);
+                    }
                 },
             }
         }
@@ -9378,15 +9390,15 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
         ) Allocator.Error!void {
             const message = checkedOverflowMessage(op);
 
-            switch (operand_layout) {
-                .u8, .u16, .u32, .i8, .i16, .i32 => try self.emitNarrowIntRangeCheck(result_reg, operand_layout, message),
-                .u64 => try self.emitCrashOnCond(unsignedAddSubOverflowCond(op), message),
-                .i64 => try self.emitCrashOnCond(condCode(.overflow), message),
-                .bool, .str, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => {
-                    if (builtin.mode == .debug) {
-                        std.debug.assert(!is_unsigned or operand_layout == .u128);
-                    }
-                },
+            const check = intOverflowCheck(operand_layout, word_bits) orelse {
+                if (builtin.mode == .debug) {
+                    std.debug.assert(!is_unsigned or operand_layout == .u128);
+                }
+                return;
+            };
+            switch (check) {
+                .narrow_range => try self.emitNarrowIntRangeCheck(result_reg, operand_layout, message),
+                .word_flags => try self.emitCrashOnCond(if (is_unsigned) unsignedAddSubOverflowCond(op) else condCode(.overflow), message),
             }
         }
 
@@ -9480,43 +9492,40 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             is_unsigned: bool,
         ) Allocator.Error!void {
             const message = checkedOverflowMessage(op);
-            switch (operand_layout) {
-                .u8,
-                .u16,
-                .u32,
-                .i8,
-                .i16,
-                .i32,
-                => {
-                    try self.codegen.emitMul(.w64, result_reg, lhs_reg, rhs_reg);
+            const check = intOverflowCheck(operand_layout, word_bits) orelse
+                base.invariant("LIR/codegen invariant violated: checked multiply requested for layout {d}", .{@backingInt(operand_layout)});
+            switch (check) {
+                .narrow_range => {
+                    try self.codegen.emitMul(word, result_reg, lhs_reg, rhs_reg);
                     if (builtin.mode == .debug) std.debug.assert(is_unsigned == (narrowIntRange(operand_layout).min == null));
                     try self.emitNarrowIntRangeCheck(result_reg, operand_layout, message);
                 },
-                .i64 => try self.emitCheckedI64Mul(result_reg, lhs_reg, rhs_reg, message),
-                .u64 => try self.emitCheckedU64Mul(result_reg, lhs_reg, rhs_reg, message),
-                .bool, .str, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => base.invariant("LIR/codegen invariant violated: checked multiply requested for layout {d}", .{@backingInt(operand_layout)}),
+                .word_flags => if (is_unsigned)
+                    try self.emitCheckedUnsignedWordMul(result_reg, lhs_reg, rhs_reg, message)
+                else
+                    try self.emitCheckedSignedWordMul(result_reg, lhs_reg, rhs_reg, message),
             }
         }
 
-        fn emitCheckedI64Mul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
+        fn emitCheckedSignedWordMul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
             if (comptime isa.binaryIs(.aarch64)) {
                 const high_reg, const sign_reg = try self.allocTempGenerals(2);
-                try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
+                try self.codegen.emit.mulRegRegReg(word, result_reg, lhs_reg, rhs_reg);
                 try self.codegen.emit.smulhRegRegReg(high_reg, lhs_reg, rhs_reg);
-                try self.emitShiftImm(.sar, .w64, sign_reg, result_reg, 63);
+                try self.emitShiftImm(.sar, word, sign_reg, result_reg, word_bits - 1);
                 try self.emitCmpReg(high_reg, sign_reg);
                 try self.emitCrashOnCond(condCode(.not_equal), message);
                 self.freeGenerals(.{ sign_reg, high_reg });
             } else {
-                try self.codegen.emitMul(.w64, result_reg, lhs_reg, rhs_reg);
+                try self.codegen.emitMul(word, result_reg, lhs_reg, rhs_reg);
                 try self.emitCrashOnCond(condCode(.overflow), message);
             }
         }
 
-        fn emitCheckedU64Mul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
+        fn emitCheckedUnsignedWordMul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
             if (comptime isa.binaryIs(.aarch64)) {
                 const high_reg = try self.allocTempGeneral();
-                try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
+                try self.codegen.emit.mulRegRegReg(word, result_reg, lhs_reg, rhs_reg);
                 try self.codegen.emit.umulhRegRegReg(high_reg, lhs_reg, rhs_reg);
                 try self.emitCmpImm(high_reg, 0);
                 try self.emitCrashOnCond(condCode(.not_equal), message);
@@ -9525,18 +9534,18 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
                 var rhs_temp: ?GeneralReg = null;
                 const rhs_src = if (rhs_reg == .RAX and lhs_reg != .RAX) blk: {
                     const temp = try self.allocTempGeneral();
-                    try self.codegen.emit.movRegReg(.w64, temp, rhs_reg);
+                    try self.codegen.emit.movRegReg(word, temp, rhs_reg);
                     rhs_temp = temp;
                     break :blk temp;
                 } else rhs_reg;
                 if (lhs_reg != .RAX) {
-                    try self.codegen.emit.movRegReg(.w64, .RAX, lhs_reg);
+                    try self.codegen.emit.movRegReg(word, .RAX, lhs_reg);
                 }
-                try self.codegen.emit.mulReg(.w64, rhs_src);
+                try self.codegen.emit.mulReg(word, rhs_src);
                 try self.emitCmpImm(.RDX, 0);
                 try self.emitCrashOnCond(condCode(.not_equal), message);
                 if (result_reg != .RAX) {
-                    try self.codegen.emit.movRegReg(.w64, result_reg, .RAX);
+                    try self.codegen.emit.movRegReg(word, result_reg, .RAX);
                 }
                 if (rhs_temp) |temp| self.codegen.freeGeneral(temp);
             }
@@ -23563,6 +23572,63 @@ pub fn LirCodeGen(comptime target: RocTarget) type {
             }
         }
     };
+}
+
+/// Bit width and signedness of an integer of at most 64 bits.
+const ScalarIntShape = struct { bits: u7, signed: bool };
+
+/// The shape of an integer layout of at most 64 bits; null for every other
+/// layout.
+fn scalarIntShape(operand_layout: layout.Idx) ?ScalarIntShape {
+    return switch (operand_layout) {
+        .u8 => .{ .bits = 8, .signed = false },
+        .i8 => .{ .bits = 8, .signed = true },
+        .u16 => .{ .bits = 16, .signed = false },
+        .i16 => .{ .bits = 16, .signed = true },
+        .u32 => .{ .bits = 32, .signed = false },
+        .i32 => .{ .bits = 32, .signed = true },
+        .u64 => .{ .bits = 64, .signed = false },
+        .i64 => .{ .bits = 64, .signed = true },
+        .bool, .str, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => null,
+    };
+}
+
+/// How a one-register integer result is checked for overflow. An integer
+/// narrower than the word is computed in a full register, so its result is
+/// compared against its type's range; an integer as wide as the word fills
+/// the register, so the operation's flags (or a multiply's high product) say
+/// whether it overflowed.
+const IntOverflowCheck = enum { narrow_range, word_flags };
+
+/// The overflow check for `operand_layout` on a target whose words have
+/// `word_bits` bits; null for a layout that is not an integer of at most 64
+/// bits. It depends on the word: an I32 is `.narrow_range` at a 64-bit word
+/// and `.word_flags` at a 32-bit one. An integer wider than the word does
+/// not fit one register and never reaches the one-register path.
+fn intOverflowCheck(operand_layout: layout.Idx, word_bits: u32) ?IntOverflowCheck {
+    const shape = scalarIntShape(operand_layout) orelse return null;
+    if (shape.bits == word_bits) return .word_flags;
+    std.debug.assert(shape.bits < word_bits);
+    return .narrow_range;
+}
+
+test "intOverflowCheck range-checks below the word and uses flags at the word" {
+    const expectEqual = std.testing.expectEqual;
+    // A 64-bit word, as on x86_64 and aarch64.
+    try expectEqual(IntOverflowCheck.narrow_range, intOverflowCheck(.u8, 64).?);
+    try expectEqual(IntOverflowCheck.narrow_range, intOverflowCheck(.i16, 64).?);
+    try expectEqual(IntOverflowCheck.narrow_range, intOverflowCheck(.u32, 64).?);
+    try expectEqual(IntOverflowCheck.narrow_range, intOverflowCheck(.i32, 64).?);
+    try expectEqual(IntOverflowCheck.word_flags, intOverflowCheck(.u64, 64).?);
+    try expectEqual(IntOverflowCheck.word_flags, intOverflowCheck(.i64, 64).?);
+    // A 32-bit word: 32-bit integers fill the register.
+    try expectEqual(IntOverflowCheck.narrow_range, intOverflowCheck(.u8, 32).?);
+    try expectEqual(IntOverflowCheck.narrow_range, intOverflowCheck(.i16, 32).?);
+    try expectEqual(IntOverflowCheck.word_flags, intOverflowCheck(.u32, 32).?);
+    try expectEqual(IntOverflowCheck.word_flags, intOverflowCheck(.i32, 32).?);
+    // Not integers of at most 64 bits.
+    try expectEqual(@as(?IntOverflowCheck, null), intOverflowCheck(.u128, 64));
+    try expectEqual(@as(?IntOverflowCheck, null), intOverflowCheck(.f64, 32));
 }
 
 /// Native target used by host dev codegen and its runtime static-data tables.
