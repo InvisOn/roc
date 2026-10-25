@@ -14,7 +14,7 @@ for `.arm`, which it grouped with `.aarch64_be`, `.wasm32` and `.other`.
 On our base nothing generates the arm stub yet: `build.zig:72` lists only
 `x64glibc` and `arm64glibc` as glibc cross targets. The bug fires once
 `arm32linux` joins that list, as the reference branch does at
-`build.zig:78`, in plan step 12 (`arm32/targets`). From then on `zig build`
+`build.zig:78`, in plan part 10 (`arm32/targets`). From then on `zig build`
 assembles the arm stub for the prepared test hosts, and without this fix it
 fails.
 

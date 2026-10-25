@@ -2,7 +2,7 @@
 
 > **Upstream or ours:** Upstream. It fails the same way on upstream as on our branch.
 
-> **Relevance to our arm32 work:** None today. Object packs (a URL package's precompiled code, linked into a build) aren't wasm-specific, so once arm32 builds use URL packages, check this in step 12 (`arm32/targets`). Found while testing fold step 5 (fork PR #9), when a CLI test run with `--include-llvm` failed.
+> **Relevance to our arm32 work:** None today. Object packs (a URL package's precompiled code, linked into a build) aren't wasm-specific, so once arm32 builds use URL packages, check this in part 10 (`arm32/targets`). Found while testing fold step 5 (fork PR #9), when a CLI test run with `--include-llvm` failed.
 
 Not filed. For roc-lang/roc.
 

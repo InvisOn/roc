@@ -37,7 +37,7 @@ look. These commits make those places use the target's sizes, so the arm32
 steps start from correct offsets.
 
 The last two commits are about running the compiler's tests on a 32-bit
-machine (the Pi 3, step 13 `arm32/host`). bytebox reserves 4 GiB for a wasm
+machine (the Pi 3, part 11 `arm32/host`). bytebox reserves 4 GiB for a wasm
 module with no memory maximum, which a 32-bit process cannot hold, so every
 wasm test would fail there for a reason unrelated to the code under test.
 
@@ -249,7 +249,7 @@ output reserve nothing and still run everywhere.
 ## Open
 
 - The skip branches in `8ea2423294` and `e65824d17e` only run on a 32-bit
-  machine and have never been compiled. Step 13 builds them on the Pi 3.
+  machine and have never been compiled. Part 11 builds them on the Pi 3.
 - The `.w64` store widths next to the new target offsets change with the
   word-size steps.
 - Draft 38: static data and the wasm code generator use the host's

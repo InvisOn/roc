@@ -6,7 +6,7 @@ the one at the time of writing; it changes if the branch is rebased again.
 
 ## Why
 
-#9 is the plan's step 2. It was written against an older upstream, and the
+#9 is the plan's part 1. It was written against an older upstream, and the
 fold puts #8, #4 and #3 on top of it, so it has to sit on current upstream
 first.
 

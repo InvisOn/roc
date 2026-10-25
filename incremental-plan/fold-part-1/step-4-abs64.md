@@ -19,13 +19,13 @@ runs in the process that patches it: `HostSplice.zig:266` sets `image_base`
 from `@intFromPtr(image.ptr)` and then makes the image executable, and the
 machine-code shim runs code on its own machine. An `abs64` comes only from
 x86_64 or aarch64 code, so it is only ever patched on a 64-bit host. On a
-32-bit ARM host (the Pi 3, step 13 `arm32/host`) the code is arm32, which
+32-bit ARM host (the Pi 3, part 11 `arm32/host`) the code is arm32, which
 the reference branch patches with its own `abs32` kind, chosen by ISA
 (`Relocation.zig:198-200` there).
 
 So the change is about meaning, not a live crash. After it, the slot width
 comes only from the relocation kind: `abs64` is always eight bytes, and the
-four-byte case arm32 needs gets its own explicit `abs32` kind in step 7
+four-byte case arm32 needs gets its own explicit `abs32` kind in part 5
 (`arm32/elf32-objects`) instead of hiding under the `abs64` name, with a
 `BranchOutOfRange` check that was the wrong error for it.
 
@@ -89,5 +89,5 @@ test pins it, and fails on 32-bit x86 without this change.
 - #3 is closed at step 8.
 - The reference branch still has the old `patchAbsolutePointerOperand`
   with its four-byte branch (`Relocation.zig:310` there). The plan step
-  that brings in its relocation work (step 7) must keep `patchAbs64Operand`
+  that brings in its relocation work (part 5) must keep `patchAbs64Operand`
   and not bring the old branch back.

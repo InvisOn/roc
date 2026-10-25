@@ -5,9 +5,9 @@ itself is in `README.md`. The review findings for each fork PR are in
 `pr-review.md`. This page says where things stand, what to do next, and how
 to set up and check the work.
 
-Upstream `main` was at `9b119d59e4` when this was written. Updated the
-same day: upstream `main` is now `04d6133c76`, and fork `main` has been
-fast-forwarded to it.
+Upstream `main` was at `9b119d59e4` when this was written, and at
+`04d6133c76` later that day, when fork `main` was fast-forwarded to it. On
+2026-10-25 upstream `main` is at `629c3e0e2d`.
 
 ### Changes since `9b119d59e4`
 
@@ -95,7 +95,7 @@ The other machines: the Pi 5 (`<user>@<aarch64-device>`, aarch64) and the Pi 3
 
 | PR | Branch | Head | Base | State |
 |---|---|---|---|---|
-| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | `127015276f` | `75d613ba5c` (61 behind) | Step 2. Only the dispatch commit so far. The fold has not started. |
+| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | local `e65824d17e`, pushed `127015276f` | local `3bb8f2ec6c` (45 behind on 2026-10-25), pushed `75d613ba5c` | Part 1. Fold steps 1 to 5 are done locally (10 signed commits), not pushed. Step 6 is next. |
 | [#8](https://github.com/InvisOn/roc/pull/8) | `fix/flush-jit-instruction-cache` | `5aa8ffecbf` | `73df27a5bb` (653 behind) | Draft 03. Folds into #9, then closes. |
 | [#3](https://github.com/InvisOn/roc/pull/3) | `fix/abs64-relocation-width` | `9ee4d148e8` | `73df27a5bb` | Draft 12. Folds into #9, then closes. |
 | [#4](https://github.com/InvisOn/roc/pull/4) | `fix/glibc-stub-arm-returns` | `4dffc5b3ea` | `73df27a5bb` | Draft 16. Closed. Its commit folds into #9. The same commit is open upstream as your 12513. |
@@ -104,7 +104,7 @@ The other machines: the Pi 5 (`<user>@<aarch64-device>`, aarch64) and the Pi 3
 | [#7](https://github.com/InvisOn/roc/pull/7) | `fix/snapshot-dev-object-errors` | `f9e096039e` | `73df27a5bb` | Draft 02. Not part of the plan. |
 
 Every open PR has a "How the code flows" section and a posted review (links
-in `pr-review.md`). #9's step-2 recheck on `75d613ba5c` passed the build,
+in `pr-review.md`). #9's recheck on `75d613ba5c` (when it was part 2) passed the build,
 checks, backend tests, the `isaOf` test and snapshots. Its oracle result
 does not count for the eval cases. The PR branch has no hash mode, so its
 runner wrote nothing and the oracle compared a hash file left over from an
@@ -112,12 +112,17 @@ earlier sync run. The `dev_object` snapshot half of that run was real. The
 oracle now deletes the old file and has `--apply-a0-to-merged` for PR
 branches. Run it again on #9 after the fold.
 
-## Next: fold step 2 into #9
+## Next: fold part 1 into #9
 
 Work in `.workspaces/pr-isa`.
 
+Every fold step gets a step doc in `fold-part-1/` once it is committed.
+From step 6 on, each step also gets a planning doc made from
+`templates/rfc.md` before its code work starts.
+
 1. **Rebase** `dispatch/isa` onto `upstream/main` (it builds again since
-   `f6c6cfb3d2`).
+   `f6c6cfb3d2`). Done on `3bb8f2ec6c`, before upstream built again.
+   Rebase onto current `upstream/main` again before the checks in step 7.
 2. **#8, instruction cache flush** (`5aa8ffecbf`). Cherry-pick it. It no
    longer compiles: upstream added `finishWriteExecutablePrefix`
    (`src/backend/dev/ExecutableMemory.zig`, about line 274), which calls
@@ -136,8 +141,13 @@ Work in `.workspaces/pr-isa`.
    as `erased_capture_prefix`, with a Debug check at `LirCodeGen.zig:1341`
    against the host-sized `hot_reload_capture_prefix_size`. That check
    needs the same fix.
-6. **Word size (1 of 3).** See "Open decisions" below. The source is the
-   "A2" commits on the reference branch.
+6. **Word size (1 of 3).** The source is the "A2" commits on the
+   reference branch. Decided (option 1): `4a7408a857` and the four "Make
+   ... word-relative" commits go into #9, and the nine "Classify ..."
+   commits go to part 3 of the plan. Tests: the relative oracle and
+   snapshots (in step 7), and unit tests for the layout helpers at a 4-byte
+   and an 8-byte word. The remaining open decisions go in the step 6
+   planning doc (`fold-part-1/`, from `templates/rfc.md`).
 7. **Check** (see below). Run #8's flush on the Pi 5 too. It has only run
    on x86_64, which never needs a flush.
 8. **Update #9's description.** Change section, the plan table
@@ -146,17 +156,17 @@ Work in `.workspaces/pr-isa`.
 9. **Review #9 again** for the new diff, and add a dated entry to
    `pr-review.md`.
 
-Then, off the plan: rebase #6. Upstream now has
-`unexpectedLocation("list_get_unsafe index", index_loc)`. Add `.stack_i128`
-and `.immediate_i128` to that prong. The death test then expects
-"list_get_unsafe index received a". Rebase #5 and #7 too, and run each one's
-"How to test".
+Then, off the plan: check #6 against upstream's fix of draft 14
+(`8a64a61258`, see above), then close it. Rebase #5 and #7, and run each
+one's "How to test".
 
 ## Open decisions
 
-- **Which A2 commits make up word size (1 of 3).** The plan says step 2
+- **Which A2 commits make up word size (1 of 3).** Decided 2026-10-25:
+  option 1 (see fold step 6 above). The rest of this item is the record of
+  the choice. The plan says part 1
   routes sizes, offsets and loops through `word`, `word_size` and
-  `word_bits`. Step 5 takes the width vocabulary (`wide64_reg_width`,
+  `word_bits`. Part 3 takes the width vocabulary (`wide64_reg_width`,
   `wide64_store_width`), i128 by-pointer paths and the `isa` switches. The
   A2 commits on `origin/claude/arm32-dev-backend-reference`, oldest first:
 
@@ -180,9 +190,9 @@ and `.immediate_i128` to that prong. The death test then expects
   Part of `4a7408a857` is already upstream: string and list field offsets
   now come from the builtins, scaled by the target word
   (`LirCodeGen.zig:506-522`). Only the `target_ptr_size == 8` assertion at
-  line 504 is left. The "Make ... word-relative" commits fit step 2. The
-  "Classify ..." commits name widths, and may fit step 5 better. The size
-  estimate for step 2 (about 2,150 lines) assumes all of A2 is in it.
+  line 504 is left. The "Make ... word-relative" commits fit part 1. The
+  "Classify ..." commits name widths, and may fit part 3 better. The size
+  estimate for part 1 (about 2,150 lines) assumes all of A2 is in it.
 - **#9 review findings** (optional). `FrameBuilder` and `CallingConvention`
   still branch two-way on cached `is_x86_64` and `is_aarch64`, so a new ISA
   is not caught there. `aarch64_be` maps silently to `aarch64`. `comptime`
