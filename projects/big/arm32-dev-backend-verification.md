@@ -952,7 +952,7 @@ Done 2026-09-29, locally (nothing pushed).
   Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints x64musl's
   54 lines.
   Logs: `.git/verify-tools/upstream-sync/f14c106815/`.
-- 2026-10-17, merge `e9c609414d` of upstream `main` at `c8fb3b1da2` (7
+- 2026-10-17, merge `bdf9a04ca4` of upstream `main` at `c8fb3b1da2` (7
   commits). No conflicts; no fix. Checks: relative 64-bit oracle PASS,
   nothing differs, no snapshot change; minici 96/96; arm32 eval corpus under
   qemu 2578 passed, 0 failed, 47 with a backend skipped; host effects
@@ -960,7 +960,7 @@ Done 2026-09-29, locally (nothing pushed).
   Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints x64musl's
   54 lines.
   Logs: `.git/verify-tools/upstream-sync/c8fb3b1da2/`.
-- 2026-10-18, merge `b47be6d45e` of upstream `main` at `ac741012c8` (62
+- 2026-10-18, merge `c70632dfe0` of upstream `main` at `ac741012c8` (62
   commits). Conflicts in three dev backend files: upstream now derives the
   RocStr/RocList offsets and sizes from the builtins (`d79554539c`), still
   for 8-byte words. `LirCodeGen.zig` keeps our word-size-aware code at all
@@ -969,14 +969,14 @@ Done 2026-09-29, locally (nothing pushed).
   takes upstream's target-word offsets and its `addListBytesLenCapMemArgs`
   name. The `ObjectFileCompiler.zig` test takes upstream's source files,
   with layouts sized for the target word. No other fix. The arm32 lines of
-  four `dev_object` snapshots changed; regenerated in `bd82afab07`. Checks:
+  four `dev_object` snapshots changed; regenerated in `741a8444af`. Checks:
   relative 64-bit oracle PASS, nothing differs; minici 96/96; arm32 eval
   corpus under qemu 2578 passed, 0 failed, 47 with a backend skipped; host
   effects 106/106; `test/fx` 133/133 under qemu, on the Raspberry Pi 5 and
   on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
   x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/ac741012c8/`.
-- 2026-10-18, merge `5d2d546125` of upstream `main` at `220b9b7941` (6
+- 2026-10-18, merge `5793ac0506` of upstream `main` at `220b9b7941` (6
   merged pull requests). No conflicts; no fix. Checks: relative 64-bit
   oracle PASS, nothing differs, no snapshot change; minici 96/96; arm32 eval
   corpus under qemu 2578 passed, 0 failed, 47 with a backend skipped; host
@@ -984,7 +984,7 @@ Done 2026-09-29, locally (nothing pushed).
   on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
   x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/220b9b7941/`.
-- 2026-10-19, merge `1334d5ac63` of upstream `main` at `97a45fb1c4` (6
+- 2026-10-19, merge `a71c2c0b76` of upstream `main` at `97a45fb1c4` (6
   merged pull requests). One conflict, in `src/cli/test/parallel_cli_runner.zig`:
   both sides added command-line options; kept both, ours (`--cross-run`,
   `--cross-runner`, `--cross-opt`) then upstream's `--shared-object-store`.
@@ -996,7 +996,7 @@ Done 2026-09-29, locally (nothing pushed).
   that stage alone passed 133/133; the int app as arm32musl and arm32linux
   on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/97a45fb1c4/`.
-- 2026-10-19, merge `6d4ab22683` of upstream `main` at `1df370f066` (3
+- 2026-10-19, merge `faa8d0b95b` of upstream `main` at `1df370f066` (3
   merged pull requests). No conflicts; no fix. Checks: relative 64-bit
   oracle PASS, nothing differs, no snapshot change; minici 96/96; arm32 eval
   corpus under qemu 2578 passed, 0 failed, 47 with a backend skipped; host
@@ -1004,8 +1004,8 @@ Done 2026-09-29, locally (nothing pushed).
   on the Pi 3; the int app as arm32musl and arm32linux on the Pi 3 prints
   x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/1df370f066/`.
-- 2026-10-20, merge `429e5bec83` of upstream `main` at `574a683ec5` (26
-  merged pull requests), then `3d0078e779`, one `dev_object` snapshot
+- 2026-10-20, merge `775347948c` of upstream `main` at `574a683ec5` (26
+  merged pull requests), then `4a45d21657`, one `dev_object` snapshot
   regenerated for upstream's output change. One conflict, in
   `src/lir/LIR.zig`: both sides added a test at the same place; kept both.
   No fix to compiler code. Checks: relative 64-bit oracle PASS, nothing
@@ -1021,7 +1021,7 @@ Done 2026-09-29, locally (nothing pushed).
   qemu-user gives a fixed 8 MiB. The qemu eval runs now pass `-s 64M`;
   rerun: 2578 passed, 0 failed, 47 with a backend skipped.
   Logs: `.git/verify-tools/upstream-sync/574a683ec5/`.
-- 2026-10-21, merge `d65fdf3ac1` of upstream `main` at `cf05860a7c` (9
+- 2026-10-21, merge `e44053abb1` of upstream `main` at `cf05860a7c` (9
   merged pull requests). One conflict, in `src/eval/inspected.zig`.
   Upstream added a switch on the lss and boxy options in code that we had
   moved into our `lowerCheckedRootLive` helper, so the switch now lives in
@@ -1034,7 +1034,7 @@ Done 2026-09-29, locally (nothing pushed).
   at the 24 GiB memory cap and used 38,441 CPU seconds. The qemu eval
   peaked at 4.3 GiB and used 22,335 CPU seconds.
   Logs: `.git/verify-tools/upstream-sync/cf05860a7c/`.
-- 2026-10-21, merge `69684181bc` of upstream `main` at `5fc587cf51` (1
+- 2026-10-21, merge `b1625d75c4` of upstream `main` at `5fc587cf51` (1
   merged pull request, no conflicts). No fix to compiler code. Checks:
   relative 64-bit oracle PASS, nothing differs. minici ran under a 20 GiB
   memory cap, down from 24 GiB. Sections 1 to 88 passed in one run. Then
@@ -1047,7 +1047,7 @@ Done 2026-09-29, locally (nothing pushed).
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
   lines.
   Logs: `.git/verify-tools/upstream-sync/5fc587cf51/`.
-- 2026-10-21, merge `2f5d8e3685` of upstream `main` at `73df27a5bb` (4
+- 2026-10-21, merge `e0fa273ebf` of upstream `main` at `73df27a5bb` (4
   merged pull requests, no conflicts). No fix to compiler code. Checks:
   relative 64-bit oracle PASS, nothing differs. minici under the 20 GiB
   cap: every section except `run-test-strategy-differential` passed (97
@@ -1058,7 +1058,7 @@ Done 2026-09-29, locally (nothing pushed).
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
   lines.
   Logs: `.git/verify-tools/upstream-sync/73df27a5bb/`.
-- 2026-10-23, merges `7a2882864c`, `dc62d644e1` and `7465e27d59` of
+- 2026-10-23, merges `71b8939962`, `d0846f6eb6` and `a9e9e98754` of
   upstream `main` at `534956997e`, `7f1955b3bd` and `35eb6b1cee` (10 merged
   pull requests), pushed together. The first two were not pushed alone:
   `534956997e` made the curried-lambdas eval case run out of memory on
@@ -1070,7 +1070,7 @@ Done 2026-09-29, locally (nothing pushed).
   `stackArgs()`, `Immediate128.get()` and `codegen.cpu_level`, and the
   removal of the baseline SIMD builtin path. 73 bare `unreachable`s gained a
   reason. Upstream `6de96ed3af` was not merged, because it does not compile
-  (draft 34). Checks at `7465e27d59`: relative 64-bit oracle PASS, nothing
+  (draft 34). Checks at `a9e9e98754`: relative 64-bit oracle PASS, nothing
   differs. minici under the 20 GiB cap: 98 passed, 1 skipped, then
   `run-test-strategy-differential` alone with `--threads 8` passed (peak
   16.6 GiB). The arm32 eval corpus under qemu gives 2592 passed, 0 failed,
@@ -1078,8 +1078,8 @@ Done 2026-09-29, locally (nothing pushed).
   qemu, on the Raspberry Pi 5 and on the Pi 3. The int app as arm32musl
   and arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/7f1955b3bd/` and `35eb6b1cee/`.
-- 2026-10-24, merges `a8b896639d` and `2bc2d94ec8` of upstream `main` at
-  `b9ec1d6645` and `9b119d59e4`, plus `606eaf8310`, pushed together. The
+- 2026-10-24, merges `f0c0a3264d` and `9b52bea45f` of upstream `main` at
+  `b9ec1d6645` and `9b119d59e4`, plus `3a807f3c88`, pushed together. The
   first merge takes upstream's FunctionRelocationKind, where each function
   relocation carries its call encoding, chosen by the code generator. This
   branch had passed the instruction set to applyRelocations instead. The
@@ -1089,28 +1089,28 @@ Done 2026-09-29, locally (nothing pushed).
   `dev_object_float_math`, `list_ops` and `dec_u128`: since upstream
   `16a3cb76e5` the procedure order in a `dev_object` depends on the
   compiler build (draft 36, filed upstream), so the hashes from the oracle's
-  pinned build never match a normal build. `606eaf8310` is a temporary fix
+  pinned build never match a normal build. `3a807f3c88` is a temporary fix
   that changes only hash lines in four `dev_object` snapshots, taken from
   this commit's own normal build. `sync_chain.sh` does the same on each merge
-  until upstream's fix lands. Checks: at `a8b896639d` and at `2bc2d94ec8`,
+  until upstream's fix lands. Checks: at `f0c0a3264d` and at `9b52bea45f`,
   relative 64-bit oracle PASS. The arm32 eval corpus under qemu gives 2593
   passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
-  `test/fx` 134/134 under qemu. At `606eaf8310`, minici under the 20 GiB cap:
+  `test/fx` 134/134 under qemu. At `3a807f3c88`, minici under the 20 GiB cap:
   98 passed, 1 skipped, then `run-test-strategy-differential` alone with
   `--threads 8` passed (peak 15.3 GiB). `test/fx` 134/134 on the Raspberry
   Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux on the Pi 3
   prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/b9ec1d6645/` and `9b119d59e4/`.
-- 2026-10-24, merge `570fdd8619` of upstream `main` at `04d6133c76`, plus
-  `1b5fe68a79` (the `dev_object` hashes from this merge's own build, as for
+- 2026-10-24, merge `1dbaaba85b` of upstream `main` at `04d6133c76`, plus
+  `c6249d0613` (the `dev_object` hashes from this merge's own build, as for
   the previous merges). No conflicts. Upstream now evaluates compile-time
   values in the interpreter on hosts without a native code generator. arm32
   has one on this branch, so compile-time evaluation stays native there, and
   the merge only corrects the comment that listed 32-bit ARM as an
-  interpreter host. Checks at `570fdd8619`: relative 64-bit oracle PASS. The
+  interpreter host. Checks at `1dbaaba85b`: relative 64-bit oracle PASS. The
   arm32 eval corpus under qemu gives 2593 passed, 0 failed, 47 with a backend
   skipped. Host effects 106/106. `test/fx` 134/134 under qemu. At
-  `1b5fe68a79`, minici under the 20 GiB cap: 98 passed, 1 skipped, then
+  `c6249d0613`, minici under the 20 GiB cap: 98 passed, 1 skipped, then
   `run-test-strategy-differential` alone with `--threads 8` passed (peak
   15.8 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
@@ -1325,265 +1325,265 @@ first added this appendix, made between the two rewrites).
 | `18faf2eabe` | `7b9a395773` |
 | `81fd7f7774` | `b0adf88812` |
 | `277feeecfd` | `5b17892dac` |
-| `db8d0e81d5` | `627b4b7248` |
-| `4f0b09e679` | `bdc976767a` |
-| `d94be6fc25` | `4a7408a857` |
-| `5fb339fda7` | `c1140085d8` |
-| `f4af9e372d` | `722823bb21` |
-| `d626657d87` | `a0438eb306` |
-| `470bb6ee0a` | `0d7ac71635` |
-| `d69fb5eb7f` | `bcce4ac18a` |
-| `637fa493d3` | `20ae00f156` |
-| `3a4703ceed` | `787c657a75` |
-| `b562917556` | `1081022320` |
-| `ab4042a3fb` | `6725f7be01` |
-| `6ea49faf81` | `dab7396781` |
-| `a7c1ed4d54` | `67a9276423` |
-| `760c5513f8` | `5221a28d09` |
-| `c5a9cd49cc` | `d51ce605f8` |
-| `c1afe28d34` | `1f97737f48` |
-| `835187afb3` | `f3f72e0ed4` |
-| `47046b4c8f` | `e14500f4e7` |
-| `b5b44ccdab` | `396ce0394f` |
-| `7499e08728` | `70c3bba0ee` |
-| `4d3de2e56e` | `201a1b1b65` |
-| `37cc054a58` | `203855803c` |
-| `727d84088f` | `cae9f2f3c1` |
-| `f2fb602f74` | `c0052b43ee` |
-| `506b0486f2` | `292d094530` |
-| `ac6b9ca982` | `8948d95b05` |
-| `4e5a27516c` | `5cdde17047` |
-| `ecf471509f` | `d2dfe75459` |
-| `ee8b2f33a6` | `0cb39ceefe` |
-| `88a75e3048` | `a7f025d121` |
-| `c64dbef7df` | `68e06a6b93` |
-| `955f916d65` | `5a863a8e8c` |
-| `b392284263` | `03b2c6a9fc` |
-| `bddcb8bc7b` | `e5879cc238` |
-| `f017e3b2a5` | `edb4717534` |
-| `a31e7a2a91` | `25e415ccae` |
-| `a50e40a165` | `8c260658b2` |
-| `77c761ec12` | `f29ae8c057` |
-| `d910f7aa39` | `8305576fd2` |
-| `2eb455507d` | `db79ac53b5` |
-| `06fcdaba4e` | `7f3b057420` |
-| `a02d04458f` | `c5eebaf7d4` |
-| `208ddcc06c` | `53d288c94c` |
-| `adf22c944a` | `e538b7bc39` |
-| `026674bcc7` | `be82664a94` |
-| `16d1ab893c` | `e02d2d162b` |
-| `607e5c1f38` | `3af763c7e0` |
-| `2e7c169071` | `be80f8e01f` |
-| `c36fd3b6ea` | `83cff8fada` |
-| `279a81e227` | `ff90a36ae8` |
-| `c7e0484875` | `13a1b942fc` |
-| `2ec8ae751e` | `6835cb2f8c` |
-| `e610fb5353` | `c1c8d1b2e6` |
-| `18000a923c` | `63961f1894` |
-| `49bf1449b9` | `fb7976d8b5` |
-| `e865de0a8a` | `8cbb432ee9` |
-| `c68e88c823` | `7eb742a392` |
-| `ad15c01f82` | `f894e50bde` |
-| `0bea1440e5` | `90bc08e4de` |
-| `1344ce3159` | `c0b0981ec2` |
-| `894650cd4e` | `48022dc95c` |
-| `5887997c63` | `106d5d3c38` |
-| `fc02e3fb45` | `476beb64c8` |
-| `74a5dfc19c` | `71980143bf` |
-| `f9cbc7c3d9` | `4512f897f2` |
-| `7dd3165833` | `fd338aa995` |
-| `7d3bca5f6e` | `104ba5fd0a` |
-| `6f12baef44` | `0cdc2c1d6d` |
-| `f3c70c60c0` | `a0e43ee1c4` |
-| `fd1cec553e` | `846844b1f5` |
-| `24eac62a86` | `a779137f11` |
-| `fdaa863dbf` | `af15eb4415` |
-| `0c66ab5b94` | `616fea5567` |
-| `43ed156943` | `90a5a91545` |
-| `6205c06435` | `bde3997fdd` |
-| `2def52effc` | `29de13ddb1` |
-| `677588b79e` | `2fdf7835ae` |
-| `b2067838b2` | `e5f50322c0` |
-| `1138ce4c33` | `f2ff96a457` |
-| `1dca9f9caf` | `fc541669cc` |
-| `b0ed747445` | `9c3014487b` |
-| `2a796cdc4e` | `17cffdbd94` |
-| `f993075b25` | `42294b7927` |
-| `5b75e32d18` | `4cbc3101a9` |
-| `ab9d92bf7d` | `a01767f102` |
-| `53953527cb` | `d8418d8b34` |
-| `e3457476ca` | `516a45882d` |
-| `e60908c7e6` | `e45c034756` |
-| `85e383503c` | `64c304ddb7` |
-| `73c1c2dcce` | `2fcb7a1e4d` |
-| `6eeba018af` | `441b0101b4` |
-| `aadf66a29b` | `d4e92483ff` |
-| `e76f346470` | `b7a6cdad3b` |
-| `23f92a21d7` | `f38ea3d0b8` |
-| `19b107385f` | `be4bb01577` |
-| `f4f3df06b7` | `c08c5d3300` |
-| `20682cb617` | `18b9ed3c66` |
-| `0cddd62336` | `e186d0deb1` |
-| `bda6c3ae02` | `74ab91a63f` |
-| `32cce70e56` | `7fcab3e362` |
-| `542226699a` | `cbc19a3052` |
-| `ac84d07e61` | `ceacf5a387` |
-| `22e6bacb49` | `e05f544687` |
-| `3af76e39f7` | `a1d41962eb` |
-| `34c7ae175d` | `1fc61754a5` |
-| `0c292eba67` | `e1994ab0f2` |
-| `c647709fb1` | `15c4e6ddeb` |
-| `afff000594` | `7c6f6b5320` |
-| `9c776bffee` | `58fafe4331` |
-| `09ff19ce95` | `ac88d35b42` |
-| `a2b03ed513` | `95dca978d6` |
-| `e49db73c32` | `a4cb2dff08` |
-| `f0bf11c0ee` | `5f87bb4a75` |
-| `0594362d90` | `c93bd22188` |
-| `3bec537eaa` | `b750c32b08` |
-| `d3f30c57e1` | `445309a11e` |
-| `34c69426a9` | `d1d5017931` |
-| `19c3d0b5c3` | `744bfa134c` |
-| `a7cd08bda6` | `5ee372a9ef` |
-| `652c699580` | `a13d56e87a` |
-| `f15b649dcb` | `7724d7fb8f` |
-| `13f8975ab5` | `3285f82733` |
-| `f7baba5b4e` | `dbceef577d` |
-| `76d831717b` | `e502eeea96` |
-| `5a2337c71a` | `bac5f322db` |
-| `70d614ff8f` | `d18fdf2139` |
-| `e41f44298d` | `75e27c6206` |
-| `faa09824d3` | `8cc6bc474b` |
-| `ee729af454` | `b27bcfc6f7` |
-| `4f70051381` | `5aae3c44c1` |
-| `7528728733` | `de638eeec8` |
-| `cd28ff621a` | `9e8a774bf4` |
-| `3ed5256712` | `6cf58c8fea` |
-| `5d15137d25` | `956c16520d` |
-| `22af835e08` | `83be07cd49` |
-| `c2707464ea` | `fe10870779` |
-| `f1fc227423` | `d84ca3d4da` |
-| `21fc34953a` | `ce8526c16a` |
-| `d48001b55f` | `938cab6e75` |
-| `76c3ec2869` | `efd0f8ff76` |
-| `5f495cda3e` | `28c4991305` |
-| `40b63b52c7` | `da6e35dbb6` |
-| `da28d4ab0e` | `f2b45b1881` |
-| `37edfcf447` | `1c637709f2` |
-| `094664f6c7` | `bb88feb465` |
-| `fb6855f1af` | `74bd257551` |
-| `934365af0a` | `40245c7821` |
-| `020c8f82d4` | `1369888de2` |
-| `c2e7586c23` | `ced45b1186` |
-| `1157e02315` | `4c95fe806e` |
-| `e15080eab2` | `e0d84748e8` |
-| `08986485f2` | `582292b18a` |
-| `81dfedfbe9` | `ce7ce7872f` |
-| `ab40715790` | `36788f8a62` |
-| `991b539c6b` | `1e6b2be34d` |
-| `5780b595c6` | `5a33395494` |
-| `ae36f5899f` | `3834ab9495` |
-| `bb37da3d49` | `3ca7777ece` |
-| `536ff3bb88` | `393a5b58b5` |
-| `95dac4f1f5` | `57cdb8fa4b` |
-| `7bb5344fb2` | `8a48f3b7b0` |
-| `61138eb334` | `6973763bb6` |
-| `0dce8ab814` | `98beb6bf12` |
-| `405a2e9d0f` | `e48dc0e162` |
-| `cc48a10602` | `bd7fcfff07` |
-| `91eb57a75c` | `f03d1fac16` |
-| `f22f27ab8d` | `e3607f61d8` |
-| `38bf6d9771` | `5d904e09aa` |
-| `ada46033dc` | `9cd87384e5` |
-| `05db6f15d3` | `15d17475c4` |
-| `4b22510855` | `d9d845a897` |
-| `eff7f7079a` | `af9bdba559` |
-| `a35404fb46` | `af9d8595a1` |
-| `64cc97dcbe` | `79de6d081c` |
-| `c956ebfe0d` | `992334c821` |
-| `82dcd124f8` | `f1f0b39722` |
-| `e1f05fbda6` | `b6aa833275` |
-| `35c4086fa4` | `223c3474d1` |
-| `83acdd92ff` | `103def8b44` |
-| `0395e6dc06` | `6765fc9ff6` |
-| `1c74be7383` | `25c958245b` |
-| `0f2a240a13` | `2f66ffd49c` |
-| `58efcbaf88` | `2ea97d9bd4` |
-| `6c7096a4f9` | `1c8da58c5b` |
-| `2ceea232c4` | `37d5abd957` |
-| `4bf8414679` | `f1f4b7f615` |
-| `12ab0cef94` | `ff6d64b109` |
-| `3f1d6edbe7` | `e875956794` |
-| `6965094ab4` | `ce6f7f03a0` |
-| `61381cf9e1` | `2428ad3c72` |
-| `d95641af48` | `e8a0c22d2b` |
-| `c0f5e69754` | `b519542087` |
-| `96104f35a7` | `1ae19981a6` |
-| `e063d597a9` | `de1f7d1f54` |
-| `58ded4fc90` | `db290a1782` |
-| `8e48fd63f2` | `212efe3951` |
-| `8245c89651` | `73f32416cd` |
-| `4f1cb485e5` | `db0ba7b27c` |
-| `1fbd4c9183` | `9929d3e402` |
-| `ad1a693eab` | `4d086f8375` |
-| `026a8804f2` | `865845bf34` |
-| `167e09f9f3` | `72564a3ab4` |
-| `562ee0e758` | `5c2dad8fbd` |
-| `41136b9e1b` | `9906275177` |
-| `e093dfb22b` | `4c475b91fd` |
-| `da340ac6d2` | `cef3e5457a` |
-| `7dbb23b81b` | `57c7a50521` |
-| `72e4dac969` | `2493e580bd` |
-| `552c1dce31` | `bd350e8fb1` |
-| `d1a24026c7` | `f2797f82eb` |
-| `363be77e97` | `02e34fbb18` |
-| `b0348678e6` | `909dfcfb6d` |
-| `9379d92b0e` | `fb5a1333ee` |
-| `d18279386b` | `4d4ce71324` |
-| `9ff2c31940` | `3967e04c87` |
-| `df2369dd19` | `2fd82adfe0` |
-| `d7e4a81cf8` | `c8bd4d6596` |
-| `cfa7876924` | `37f5003de6` |
-| `c6bd6fff86` | `8b450ec749` |
-| `2572eb5519` | `866428c8f8` |
-| `2d9817a4ce` | `ed9c65a3c8` |
-| `1a5f0b55ca` | `30ad024b01` |
-| `9bf94f9f23` | `b24f65ac0e` |
-| `a5b75d80d9` | `ec09852ff0` |
-| `3ddd1baac5` | `58650e3480` |
-| `a8fcb3a766` | `91fb139cd0` |
-| `506b602405` | `fb0716d669` |
-| `8929e0dbe9` | `27eb1d4b62` |
-| `31fd7d674d` | `ba7711b659` |
-| `b26cfe57fb` | `04cd3aedab` |
-| `15b62dd19d` | `05697f237e` |
-| `8e688d92f8` | `3f1f34ffde` |
-| `9bc2cce134` | `bf78911c01` |
-- 2026-10-24, merge `6260da8828` of upstream `main` at `414a19203e`, plus
-  `9957e1ae27` (the `dev_object` hashes copied from the oracle's pinned
+| `db8d0e81d5` | `4010c2a45e` |
+| `4f0b09e679` | `ea6d896995` |
+| `d94be6fc25` | `bf9d0e0d49` |
+| `5fb339fda7` | `c38adf988b` |
+| `f4af9e372d` | `cede2ab5b7` |
+| `d626657d87` | `93c546d7b5` |
+| `470bb6ee0a` | `a650f612e2` |
+| `d69fb5eb7f` | `2aecaa5529` |
+| `637fa493d3` | `596ea5a179` |
+| `3a4703ceed` | `6ecc6523e4` |
+| `b562917556` | `1732f08923` |
+| `ab4042a3fb` | `6a4fec0a76` |
+| `6ea49faf81` | `0676c747be` |
+| `a7c1ed4d54` | `75e30d5f49` |
+| `760c5513f8` | `da4cb4a451` |
+| `c5a9cd49cc` | `b2ec6583e4` |
+| `c1afe28d34` | `236042aa45` |
+| `835187afb3` | `6f03627f1b` |
+| `47046b4c8f` | `c4156ac121` |
+| `b5b44ccdab` | `3f71b5e51c` |
+| `7499e08728` | `e7d97b7d88` |
+| `4d3de2e56e` | `4ffefbf644` |
+| `37cc054a58` | `152574b40d` |
+| `727d84088f` | `b37bfed200` |
+| `f2fb602f74` | `a8b1e772eb` |
+| `506b0486f2` | `62d072a458` |
+| `ac6b9ca982` | `8ccdb4b15c` |
+| `4e5a27516c` | `32df01b596` |
+| `ecf471509f` | `f06e5c9e90` |
+| `ee8b2f33a6` | `a454292d45` |
+| `88a75e3048` | `83663abc8f` |
+| `c64dbef7df` | `b08b6baaad` |
+| `955f916d65` | `8c6dc18e1a` |
+| `b392284263` | `f21c75e651` |
+| `bddcb8bc7b` | `915f1df86b` |
+| `f017e3b2a5` | `bc15ab97c1` |
+| `a31e7a2a91` | `e1dea607dd` |
+| `a50e40a165` | `574af6146f` |
+| `77c761ec12` | `92eb8fabed` |
+| `d910f7aa39` | `3d98c5815b` |
+| `2eb455507d` | `4eb9306ca4` |
+| `06fcdaba4e` | `21de39cad8` |
+| `a02d04458f` | `266043d211` |
+| `208ddcc06c` | `003244f2f9` |
+| `adf22c944a` | `85ca1635de` |
+| `026674bcc7` | `e347addac9` |
+| `16d1ab893c` | `d011f9f7b4` |
+| `607e5c1f38` | `cef39ef7e6` |
+| `2e7c169071` | `a6a2700c9a` |
+| `c36fd3b6ea` | `b5ae746945` |
+| `279a81e227` | `0c36abc743` |
+| `c7e0484875` | `490f761245` |
+| `2ec8ae751e` | `1ef7472a4e` |
+| `e610fb5353` | `6ce25c5fe8` |
+| `18000a923c` | `729bbde477` |
+| `49bf1449b9` | `b12b83e407` |
+| `e865de0a8a` | `8d85a5f9f4` |
+| `c68e88c823` | `62d45164c5` |
+| `ad15c01f82` | `e1f25484a6` |
+| `0bea1440e5` | `41f7e003a9` |
+| `1344ce3159` | `be8a417829` |
+| `894650cd4e` | `1cc6ffba4d` |
+| `5887997c63` | `36d493b64f` |
+| `fc02e3fb45` | `38df823f66` |
+| `74a5dfc19c` | `22f1ada866` |
+| `f9cbc7c3d9` | `f5e15233b8` |
+| `7dd3165833` | `2ca59d37fa` |
+| `7d3bca5f6e` | `73e04bd0ad` |
+| `6f12baef44` | `d7ab6bf390` |
+| `f3c70c60c0` | `ef62636bc0` |
+| `fd1cec553e` | `407df74f11` |
+| `24eac62a86` | `13af95dbe6` |
+| `fdaa863dbf` | `28caa9e76b` |
+| `0c66ab5b94` | `0e0699913c` |
+| `43ed156943` | `fbd6a9b67a` |
+| `6205c06435` | `2d6e54b470` |
+| `2def52effc` | `4b7bbe0a32` |
+| `677588b79e` | `2c1214b658` |
+| `b2067838b2` | `a0a3094555` |
+| `1138ce4c33` | `ca0a124de5` |
+| `1dca9f9caf` | `3c363845ab` |
+| `b0ed747445` | `5d86bc97a0` |
+| `2a796cdc4e` | `1cb961fd6d` |
+| `f993075b25` | `214d834a19` |
+| `5b75e32d18` | `a47505b6f5` |
+| `ab9d92bf7d` | `58987fd4ce` |
+| `53953527cb` | `983aed0292` |
+| `e3457476ca` | `8f1f6d7fa7` |
+| `e60908c7e6` | `6037068400` |
+| `85e383503c` | `be787d571d` |
+| `73c1c2dcce` | `1c4a005c5d` |
+| `6eeba018af` | `26df446e6b` |
+| `aadf66a29b` | `446971d1cc` |
+| `e76f346470` | `e222792a20` |
+| `23f92a21d7` | `e61ff1841e` |
+| `19b107385f` | `cee8bf483b` |
+| `f4f3df06b7` | `1f574355a3` |
+| `20682cb617` | `ab1ef5d780` |
+| `0cddd62336` | `5ebe7248b3` |
+| `bda6c3ae02` | `a54156dc21` |
+| `32cce70e56` | `dbce3d3796` |
+| `542226699a` | `d1ab91982a` |
+| `ac84d07e61` | `1d8e1a5e96` |
+| `22e6bacb49` | `3eb946e559` |
+| `3af76e39f7` | `e493baaf17` |
+| `34c7ae175d` | `ae832e9cca` |
+| `0c292eba67` | `792af4384f` |
+| `c647709fb1` | `3439eec8e8` |
+| `afff000594` | `357ecb104b` |
+| `9c776bffee` | `3b5fa656c4` |
+| `09ff19ce95` | `50ab272b58` |
+| `a2b03ed513` | `1424bc46d5` |
+| `e49db73c32` | `95bfbf50ef` |
+| `f0bf11c0ee` | `1b98dc5b54` |
+| `0594362d90` | `4bc3ea575a` |
+| `3bec537eaa` | `9834411011` |
+| `d3f30c57e1` | `32ee9c6759` |
+| `34c69426a9` | `7218a5184f` |
+| `19c3d0b5c3` | `5a7b7b3f81` |
+| `a7cd08bda6` | `ec768c268f` |
+| `652c699580` | `3f1ffda5f5` |
+| `f15b649dcb` | `8527e07509` |
+| `13f8975ab5` | `18a7d4d5d0` |
+| `f7baba5b4e` | `23559409e8` |
+| `76d831717b` | `08c0e07a7f` |
+| `5a2337c71a` | `3fe9d4a14e` |
+| `70d614ff8f` | `5fa68108be` |
+| `e41f44298d` | `cc98fd67c1` |
+| `faa09824d3` | `e14cd6545d` |
+| `ee729af454` | `a7d39a252c` |
+| `4f70051381` | `981da0a626` |
+| `7528728733` | `a8167e4b97` |
+| `cd28ff621a` | `3cd9dd08db` |
+| `3ed5256712` | `30b8939d05` |
+| `5d15137d25` | `0b3ba253bd` |
+| `22af835e08` | `915ceb1e89` |
+| `c2707464ea` | `99db8ce63c` |
+| `f1fc227423` | `0d590be9b7` |
+| `21fc34953a` | `f419b28096` |
+| `d48001b55f` | `907acbbb69` |
+| `76c3ec2869` | `b469f7adc3` |
+| `5f495cda3e` | `a0e19631fe` |
+| `40b63b52c7` | `fca97a7333` |
+| `da28d4ab0e` | `46ef5dce7b` |
+| `37edfcf447` | `557f0f9360` |
+| `094664f6c7` | `051f6d8828` |
+| `fb6855f1af` | `8c323d0283` |
+| `934365af0a` | `a46ddacb69` |
+| `020c8f82d4` | `3d84453c90` |
+| `c2e7586c23` | `fe94c0384f` |
+| `1157e02315` | `f27dac8e06` |
+| `e15080eab2` | `6571aa032b` |
+| `08986485f2` | `bae4078e9b` |
+| `81dfedfbe9` | `6bd9e589e1` |
+| `ab40715790` | `9b01b16508` |
+| `991b539c6b` | `3ab6430609` |
+| `5780b595c6` | `f100fb4984` |
+| `ae36f5899f` | `7800df189b` |
+| `bb37da3d49` | `3e6190daf3` |
+| `536ff3bb88` | `549eb8be48` |
+| `95dac4f1f5` | `956c599310` |
+| `7bb5344fb2` | `111834511f` |
+| `61138eb334` | `0c78ab3a15` |
+| `0dce8ab814` | `86c93d4015` |
+| `405a2e9d0f` | `1f43140cf7` |
+| `cc48a10602` | `d65c43b21c` |
+| `91eb57a75c` | `4a306a7d8f` |
+| `f22f27ab8d` | `3471803a78` |
+| `38bf6d9771` | `9932374ff6` |
+| `ada46033dc` | `c055b02098` |
+| `05db6f15d3` | `c8edeaf977` |
+| `4b22510855` | `5171086a53` |
+| `eff7f7079a` | `55a5d38149` |
+| `a35404fb46` | `c55d55fc42` |
+| `64cc97dcbe` | `7539734323` |
+| `c956ebfe0d` | `d693408908` |
+| `82dcd124f8` | `b6fe3bbe4c` |
+| `e1f05fbda6` | `7d8f267387` |
+| `35c4086fa4` | `daba6160fa` |
+| `83acdd92ff` | `d4c031bf31` |
+| `0395e6dc06` | `0d86d23cfd` |
+| `1c74be7383` | `25272ede5d` |
+| `0f2a240a13` | `4a80358395` |
+| `58efcbaf88` | `3f84f9fe72` |
+| `6c7096a4f9` | `96e1aa8d41` |
+| `2ceea232c4` | `fe671dee70` |
+| `4bf8414679` | `3bc0133d0c` |
+| `12ab0cef94` | `f5f4a54989` |
+| `3f1d6edbe7` | `7c4f67dea5` |
+| `6965094ab4` | `5e8bebc36c` |
+| `61381cf9e1` | `07af289be0` |
+| `d95641af48` | `d7f6b7b43c` |
+| `c0f5e69754` | `a8a60a4b77` |
+| `96104f35a7` | `124d3a0bfd` |
+| `e063d597a9` | `4282219769` |
+| `58ded4fc90` | `e7687cebe8` |
+| `8e48fd63f2` | `390f4640ae` |
+| `8245c89651` | `f85b299fb6` |
+| `4f1cb485e5` | `db1e9aee81` |
+| `1fbd4c9183` | `c402b702ce` |
+| `ad1a693eab` | `d7b6dfd33a` |
+| `026a8804f2` | `23703ff263` |
+| `167e09f9f3` | `0b73876534` |
+| `562ee0e758` | `960a6f5510` |
+| `41136b9e1b` | `11ffa0fa57` |
+| `e093dfb22b` | `7658f9a10e` |
+| `da340ac6d2` | `1f9dcd4e8b` |
+| `7dbb23b81b` | `a0fd1527e0` |
+| `72e4dac969` | `612af84b38` |
+| `552c1dce31` | `75808ec05b` |
+| `d1a24026c7` | `427c29b998` |
+| `363be77e97` | `93db410e67` |
+| `b0348678e6` | `79b67b6435` |
+| `9379d92b0e` | `5cbd00e67f` |
+| `d18279386b` | `dc005f80b4` |
+| `9ff2c31940` | `50aaf81ec1` |
+| `df2369dd19` | `f48f89c013` |
+| `d7e4a81cf8` | `925e6244ad` |
+| `cfa7876924` | `e88594b650` |
+| `c6bd6fff86` | `9a0d7b844a` |
+| `2572eb5519` | `9c9c1bf6eb` |
+| `2d9817a4ce` | `c8dad69dc4` |
+| `1a5f0b55ca` | `3e490bc7d1` |
+| `9bf94f9f23` | `39c623c0f0` |
+| `a5b75d80d9` | `d8b84291cb` |
+| `3ddd1baac5` | `412c870fdc` |
+| `a8fcb3a766` | `c79d10649e` |
+| `506b602405` | `b565e39955` |
+| `8929e0dbe9` | `940f70451c` |
+| `31fd7d674d` | `7e54802752` |
+| `b26cfe57fb` | `f849c40b32` |
+| `15b62dd19d` | `ff22c0a962` |
+| `8e688d92f8` | `e014301eed` |
+| `9bc2cce134` | `6871d3aeb2` |
+- 2026-10-24, merge `869bd2525f` of upstream `main` at `414a19203e`, plus
+  `363a8d1f8d` (the `dev_object` hashes copied from the oracle's pinned
   build again, now that upstream keys checked modules by the program alone).
   Upstream past `414a19203e` does not compile, so this merge stops there.
   Upstream now loads runtime layout values through a patchable immediate.
   arm32 gets `emitPatchableImm32`, which always emits a MOVW/MOVT pair, and
   `patchImm32`, which rewrites both immediates, with a unit test. The
   conflicts in `LirCodeGen.zig` keep the branch's word-size stores and add
-  upstream's runtime layout arguments. Checks at `6260da8828`: the arm32 eval
+  upstream's runtime layout arguments. Checks at `869bd2525f`: the arm32 eval
   corpus under qemu gives 2593 passed, 0 failed, 47 with a backend skipped.
   Host effects 106/106. `test/fx` 134/134 under qemu. Relative 64-bit oracle
-  PASS. At `9957e1ae27`, minici under the 20 GiB cap: 98 passed, 1 skipped,
+  PASS. At `363a8d1f8d`, minici under the 20 GiB cap: 98 passed, 1 skipped,
   then `run-test-strategy-differential` alone with `--threads 8` passed
   (peak 15.1 GiB). `test/fx` 134/134 on the Raspberry Pi 5. On the Pi 3,
   three `test/fx` runs beside minici lost the ssh connection during the copy
   (`scp: Connection closed`). Run alone, the Pi 3 gave 134/134. The int app
   as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines. Logs:
   `.git/verify-tools/upstream-sync/414a19203e/`.
-- 2026-10-25, merge `f84787b815` of upstream `main` at `f6c6cfb3d2`: the
+- 2026-10-25, merge `04a0fb0ffc` of upstream `main` at `f6c6cfb3d2`: the
   rest of upstream after `414a19203e`, now that upstream compiles again.
   Upstream now treats a list index that is not a U64 as a compiler
   invariant, and stores a byte without shifting it first. The branch had
   changed both pieces of code to use the target word, and the merge takes
   upstream's removals. The `dev_object` hashes need no change. Checks at
-  `f84787b815`: the arm32 eval corpus under qemu gives 2593 passed, 0
+  `04a0fb0ffc`: the arm32 eval corpus under qemu gives 2593 passed, 0
   failed, 47 with a backend skipped. Host effects 106/106. `test/fx` 134/134
   under qemu. Relative 64-bit oracle PASS. Minici under the 20 GiB cap: 98
   passed, 1 skipped, then `run-test-strategy-differential` alone with
@@ -1591,10 +1591,10 @@ first added this appendix, made between the two rewrites).
   Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux on the Pi 3
   prints x64musl's 54 lines. Logs:
   `.git/verify-tools/upstream-sync/f6c6cfb3d2/`.
-- 2026-10-25, merge `503e6e4976` of upstream `main` at `cf42a741e8`. No
+- 2026-10-25, merge `512f527840` of upstream `main` at `cf42a741e8`. No
   conflicts, and nothing in the backends changed: upstream's work here is in
   type suffix diagnostics, Boxy wrapper descriptors and aliased host rows.
-  Checks at `503e6e4976`: the arm32 eval corpus under qemu gives 2593
+  Checks at `512f527840`: the arm32 eval corpus under qemu gives 2593
   passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
   `test/fx` 134/134 under qemu. Relative 64-bit oracle PASS. Minici under
   the 20 GiB cap: 98 passed, 1 skipped, then
