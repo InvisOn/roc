@@ -5101,6 +5101,17 @@ test "strConcat Immutable copies a shared big allocation" {
     try std.testing.expect(std.mem.eql(u8, base.asSlice(), "a string long enough to be heap allocated"));
 }
 
+test "RocStr.targetFieldOffset scales the fields by the target word" {
+    // The dev backend lays out RocStr for the target, not the compiler host,
+    // so these offsets must hold for a 4-byte word on any host.
+    try std.testing.expectEqual(@as(u32, 0), RocStr.targetFieldOffset(.bytes, 4));
+    try std.testing.expectEqual(@as(u32, 4), RocStr.targetFieldOffset(.capacity_or_alloc_ptr, 4));
+    try std.testing.expectEqual(@as(u32, 8), RocStr.targetFieldOffset(.length, 4));
+    try std.testing.expectEqual(@as(u32, 0), RocStr.targetFieldOffset(.bytes, 8));
+    try std.testing.expectEqual(@as(u32, 8), RocStr.targetFieldOffset(.capacity_or_alloc_ptr, 8));
+    try std.testing.expectEqual(@as(u32, 16), RocStr.targetFieldOffset(.length, 8));
+}
+
 test "default-platform RocStr view matches canonical RocStr layout" {
     // The freestanding default-platform runtimes cannot import this module, so
     // they read the RocStr encoding through `default_platform/roc_str_view.zig`.
