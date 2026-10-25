@@ -44,6 +44,25 @@ Also from upstream today:
   `emitPatchableImm32` and `patchImm32`. The reference branch adds the arm32
   pair (MOVW/MOVT) in its merge of `414a19203e`.
 
+## Step 5 will conflict with upstream `478cff9095` (2026-10-26)
+
+Upstream `478cff9095` rewrote the erased-callable code that step 5 changes
+(`772baf1e39`, the `erased_layout` helper, and `6f2b3a4efc`, sizing new
+payloads). When `dispatch/isa` moves to an upstream at or past
+`478cff9095`, expect conflicts in the same places.
+
+- Upstream now writes the closure metadata only when the program uses the
+  Boxy runtime (`self.store.runtime_contract == .boxy`). Keep upstream's
+  checks and put the word-sized `erased_layout` code inside them.
+- Upstream added a direct call of erased callables for programs without
+  the Boxy runtime. It loads the function pointer with 8-byte loads and a
+  store (`.w64`, `LirCodeGen.zig:14373-14377` on upstream). Step 5 must move
+  those to the target word size too, or arm32 builds break there.
+- The reference branch resolved this in its merge `f7c1244257`, which
+  passed every check. One difference: the reference branch still sizes new
+  payloads with `compilerPayloadSize` in the Boxy case. Keep step 5's
+  `erased_layout` version there.
+
 ## Who does what
 
 - **Desktop PC:** the Incremental Plan PRs (this page).
