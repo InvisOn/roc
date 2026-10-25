@@ -11,7 +11,10 @@ these pull requests.
 
 Where things stand, what to do next and how to set up another machine:
 `HANDOFF.md`. The tools it uses are in `tools/`. Each branch and step gets
-a planning doc made from `templates/rfc.md`.
+a planning doc made from `templates/rfc.md`. Everything for one branch is
+in its own directory, `rfcs/part-<NN>-<branch>/`: the branch doc
+`<branch>-rfc.md` (the branch name with `/` written as `-`), its step docs,
+and the write-ups of finished steps.
 
 ## Why incremental
 
@@ -280,8 +283,8 @@ upstream wants to keep, and the CI lane made required.
 
 1. Write the branch's planning doc from `templates/rfc.md`, and settle its
    decisions, before cutting the topic. Required for every PR.
-2. Cut the topic from the reference's final state, onto current upstream
-   `main`, in a fresh branch.
+2. Bring the topic onto current upstream `main` in a fresh branch, by
+   whatever method fits, and check it against the reference's final state.
 3. Make it match upstream's current style and rules.
 4. Run the full check: fast checks, the relative oracle, minici, and for
    arm32 parts qemu and the Pis.
@@ -347,7 +350,7 @@ upstream first, so stopping early still leaves something of value.
   2 to 1, 4 to 2, 5 to 3, 6 to 4, 7 to 5, 8 to 6, 9 to 7, 10 to 8, 11 to 9,
   12 to 10, 13 to 11, 14 to 12. The entries above use the old numbers.
 - 2026-10-25: fold steps 1 to 5 done on `dispatch/isa` (not pushed), each
-  with a step doc in `fold-part-1/`. Step 6 (word size 1 of 3) is next:
+  with a step doc in `rfcs/part-01-dispatch-isa/`. Step 6 (word size 1 of 3) is next:
   option 1 chosen, so the "Classify ..." commits move to part 3.
 - 2026-10-25: added `templates/rfc.md`, a planning doc shape based on
   Roc's RFCs, with ADR-style decision blocks. Every branch and step gets

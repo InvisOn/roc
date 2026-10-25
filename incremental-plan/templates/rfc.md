@@ -49,8 +49,11 @@ context to Background and trim command output to the lines that matter. -->
 
 ## Discussion
 
-> The constraints that narrow the choices (AGENTS.md rules, output unchanged,
-> review size, plan order).
+> The constraints that narrow the choices. The first is always "acceptable
+> upstream": judged as if a maintainer wrote it, following upstream's
+> current code and style, each commit building on its own, no
+> reference-branch leftovers, and every later reference fix included. Then
+> AGENTS.md rules, output unchanged, review size, plan order.
 > Aim: about 10 lines for a step, 15 for a branch.
 
 ### Alternatives considered

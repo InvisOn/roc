@@ -121,7 +121,8 @@ branches. Run it again on #9 after the fold.
 
 Work in `.workspaces/pr-isa`.
 
-Every fold step gets a step doc in `fold-part-1/` once it is committed.
+Every fold step gets a step doc in `rfcs/part-01-dispatch-isa/` once it is
+committed.
 From step 6 on, each step also gets a planning doc made from
 `templates/rfc.md` before its code work starts.
 
@@ -152,7 +153,7 @@ From step 6 on, each step also gets a planning doc made from
    commits go to part 3 of the plan. Tests: the relative oracle and
    snapshots (in step 7), and unit tests for the layout helpers at a 4-byte
    and an 8-byte word. The remaining open decisions go in the step 6
-   planning doc (`fold-part-1/`, from `templates/rfc.md`).
+   planning doc (`rfcs/part-01-dispatch-isa/`, from `templates/rfc.md`).
 7. **Check** (see below). Run #8's flush on the Pi 5 too. It has only run
    on x86_64, which never needs a flush.
 8. **Update #9's description.** Change section, the plan table
