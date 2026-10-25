@@ -5,11 +5,11 @@ at the time of writing.
 
 | Commit | Source | Subject |
 |---|---|---|
-| `9c6a25e452` | reference `722823bb21` | Size target data by the target's word in the dev backend driver |
-| `772baf1e39` | reference `bcce4ac18a` | Lay out erased-callable payloads by the target's word |
+| `9c6a25e452` | reference `cede2ab5b7` | Size target data by the target's word in the dev backend driver |
+| `772baf1e39` | reference `2aecaa5529` | Lay out erased-callable payloads by the target's word |
 | `7e4b27d5ff` | new | Check the hot-reload capture prefix against the target's layout |
 | `6f2b3a4efc` | new | Size new erased-callable payloads by the target's layout |
-| `8ea2423294` | reference `c0b0981ec2` | Report the wasm eval backend unavailable on 32-bit hosts |
+| `8ea2423294` | reference `be8a417829` | Report the wasm eval backend unavailable on 32-bit hosts |
 | `e65824d17e` | new | Skip CLI tests that instantiate wasm32 output on 32-bit hosts |
 
 The three reference commits keep their original author dates.
@@ -70,7 +70,7 @@ wasm test would fail there for a reason unrelated to the code under test.
   Upstream's names were kept.
 - The reference's `word_size` doesn't exist upstream. Upstream already has
   the same value as `target_ptr_size`, so that name is used.
-- `bcce4ac18a` also edited two `projects/big/` notes files. They were left
+- `2aecaa5529` also edited two `projects/big/` notes files. They were left
   out.
 - Upstream now passes the hot-reload prefix in as data
   (`self.erased_capture_prefix`, from LIR) where the reference used
@@ -84,7 +84,7 @@ wasm test would fail there for a reason unrelated to the code under test.
 
 ## Review findings and outcomes
 
-Pick 1 (`722823bb21`):
+Pick 1 (`cede2ab5b7`):
 
 - **REVIEW, applied:** the offsets now use the target word, but the stores
   next to them still write `.w64`. The message no longer implies 32-bit
@@ -93,7 +93,7 @@ Pick 1 (`722823bb21`):
 - **NIT, applied:** dropped `@intCast` around `target_ptr_size` in two
   `emitStore` calls.
 
-Pick 2 (`bcce4ac18a`):
+Pick 2 (`2aecaa5529`):
 
 - **REVIEW, applied as its own commit (`7e4b27d5ff`):** the Debug prefix
   check still compared against the host value.
@@ -108,7 +108,7 @@ Pick 2 (`bcce4ac18a`):
   `capture_offset`. Recorded as draft 38, which also covers the same habit
   in the wasm code generator.
 
-Pick 3 (`c0b0981ec2`):
+Pick 3 (`be8a417829`):
 
 - **REVIEW, applied as its own commit (`e65824d17e`):** the CLI tests also
   run bytebox. Only `setupGlueRuntimeWasm` instantiates modules; the two

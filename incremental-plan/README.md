@@ -55,7 +55,7 @@ a planning doc made from `templates/rfc.md`.
 ## The sequence
 
 Sizes are hand-written lines from the verified reference diff
-(`git diff 73df27a5bb 2f5d8e3685`), without our `projects/` notes, which
+(`git diff 73df27a5bb e0fa273ebf`), without our `projects/` notes, which
 stay out of upstream. They will change as upstream moves.
 
 | # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR | Branch |

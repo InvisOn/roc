@@ -60,7 +60,7 @@ zig test --dep roc_target -Mroot=src/backend/dev/arm32/encoding_oracle_tests.zig
 
 The second command runs every encoder test in seconds. Each crash names its
 hole. To compare with the reference after a hole:
-`git diff 2f5d8e3685 -- src/backend/dev/arm32/Emit.zig`.
+`git diff e0fa273ebf -- src/backend/dev/arm32/Emit.zig`.
 
 Test counts: to be measured. On the holes branch, with every hole open,
 669 passed and 198 crashed, and with all filled, 867 passed.

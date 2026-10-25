@@ -10,7 +10,7 @@ Not filed. For roc-lang/roc.
 |---|---|
 | Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`). The test below fails. |
 | Already upstream? | No issue or PR found (searched 2026-10-20). |
-| Fixed on our reference branch? | Yes, in `627b4b7248`, for arm only (`mov r0, #0` / `bx lr`). |
+| Fixed on our reference branch? | Yes, in `4010c2a45e`, for arm only (`mov r0, #0` / `bx lr`). |
 | Before filing | Nothing. |
 
 ---

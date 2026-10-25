@@ -20,7 +20,7 @@ in the session scratchpad `pkgs/`; baseline results there in `pkg-baseline.txt`.
 - Some test files and examples name packages or platforms by URL; the Pis need
   network access for those, or a copied package cache.
 
-## Baseline: x86_64, our build at merge `d65fdf3ac1` (upstream `cf05860a7c`), `roc test --opt=dev`
+## Baseline: x86_64, our build at merge `e44053abb1` (upstream `cf05860a7c`), `roc test --opt=dev`
 
 All use the new syntax (`|x|` lambdas, no `\x ->`).
 

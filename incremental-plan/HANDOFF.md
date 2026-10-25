@@ -21,9 +21,14 @@ Upstream `main` was at `9b119d59e4` when this was written, and at
 
 ## Upstream `main` compiles again (2026-10-25)
 
+Note: on 2026-10-25 the fork's history was rewritten to remove machine
+names, so every commit on `claude/arm32-dev-backend-reference` got a new
+hash. The hashes of our commits in this file are the new ones. Upstream
+hashes did not change.
+
 Upstream `main` did not compile from `6d72ef4d1b` until PR 12557 merged as
 `f6c6cfb3d2` (draft 37). Rebase onto `upstream/main` again. The sync
-machine merged `f6c6cfb3d2` as `f84787b815` and is running the checks.
+machine merged `f6c6cfb3d2` as `04a0fb0ffc`, and it passed every check.
 In that merge, both `LirCodeGen.zig` conflicts took upstream's side: the
 128-bit `list_get_unsafe` index cases and the byte-store shifts are gone,
 so a rebase hits the same two conflicts if `dispatch/isa` changed that code.
@@ -46,8 +51,8 @@ Also from upstream today:
   with upstream and fast-forwards fork `main`. It no longer touches the plan
   PR branches, so the two machines don't push to the same branches.
 - The merges up to upstream `9b119d59e4` are pushed. The reference branch
-  is at `a5666157e7`. They carry a temporary fix for upstream issue 12531
-  (`dev_object` hashes from a normal build, `606eaf8310`).
+  is at `54496c9614`. They carry a temporary fix for upstream issue 12531
+  (`dev_object` hashes from a normal build, `3a807f3c88`).
 
 ## Set up on a new machine
 
@@ -132,9 +137,9 @@ From step 6 on, each step also gets a planning doc made from
    12513 first, drop this piece.
 4. **#3, abs64 width** (`9ee4d148e8`). Cherry-pick it.
 5. **Draft 07, host word size.** Cut from the reference branch:
-   - `722823bb21` Fix target data sized by the host's usize in the dev backend driver
-   - `bcce4ac18a` Fix erased-callable payloads laid out with the host's word size
-   - `c0b0981ec2` Report the wasm eval backend unavailable on 32-bit hosts
+   - `cede2ab5b7` Fix target data sized by the host's usize in the dev backend driver
+   - `2aecaa5529` Fix erased-callable payloads laid out with the host's word size
+   - `be8a417829` Report the wasm eval backend unavailable on 32-bit hosts
 
    Draft 07 (`upstream-issue-drafts/07-32-bit-host-readiness.md`) lists
    where each site is on `9b119d59e4`. The capture prefix is now passed in
@@ -142,7 +147,7 @@ From step 6 on, each step also gets a planning doc made from
    against the host-sized `hot_reload_capture_prefix_size`. That check
    needs the same fix.
 6. **Word size (1 of 3).** The source is the "A2" commits on the
-   reference branch. Decided (option 1): `4a7408a857` and the four "Make
+   reference branch. Decided (option 1): `bf9d0e0d49` and the four "Make
    ... word-relative" commits go into #9, and the nine "Classify ..."
    commits go to part 3 of the plan. Tests: the relative oracle and
    snapshots (in step 7), and unit tests for the layout helpers at a 4-byte
@@ -172,22 +177,22 @@ one's "How to test".
 
   | Commit | Subject |
   |---|---|
-  | `4a7408a857` | Derive the word size and RocStr/RocList field offsets from the target |
-  | `c1140085d8` | Classify list element access and copies as word operations |
-  | `a0438eb306` | Classify string and refcount helpers as word operations |
-  | `1081022320` | Classify list helpers and pointer-moving helpers as word operations |
-  | `6725f7be01` | Classify Boxy descriptor and dictionary references as word operations |
-  | `dab7396781` | Make one-register integer arithmetic word-relative and classify low-level pointer sites |
-  | `67a9276423` | Make integer conversions word-relative and name the Wide64 register width |
-  | `5221a28d09` | Classify i128 halves and unary integer operations, copy i128 by words |
-  | `d51ce605f8` | Make structural equality word-relative |
-  | `1f97737f48` | Count call registers in words and classify return pairs |
-  | `f3f72e0ed4` | Classify refcount, string and list helper sites |
-  | `e14500f4e7` | Classify value-location, parameter, erased-call and entry sites |
-  | `70c3bba0ee` | Make scalar bit counts word-relative |
-  | `203855803c` | Classify the SIMD lowering's width sites, completing A2's classification |
+  | `bf9d0e0d49` | Derive the word size and RocStr/RocList field offsets from the target |
+  | `c38adf988b` | Classify list element access and copies as word operations |
+  | `93c546d7b5` | Classify string and refcount helpers as word operations |
+  | `1732f08923` | Classify list helpers and pointer-moving helpers as word operations |
+  | `6a4fec0a76` | Classify Boxy descriptor and dictionary references as word operations |
+  | `0676c747be` | Make one-register integer arithmetic word-relative and classify low-level pointer sites |
+  | `75e30d5f49` | Make integer conversions word-relative and name the Wide64 register width |
+  | `da4cb4a451` | Classify i128 halves and unary integer operations, copy i128 by words |
+  | `b2ec6583e4` | Make structural equality word-relative |
+  | `236042aa45` | Count call registers in words and classify return pairs |
+  | `6f03627f1b` | Classify refcount, string and list helper sites |
+  | `c4156ac121` | Classify value-location, parameter, erased-call and entry sites |
+  | `e7d97b7d88` | Make scalar bit counts word-relative |
+  | `152574b40d` | Classify the SIMD lowering's width sites, completing A2's classification |
 
-  Part of `4a7408a857` is already upstream: string and list field offsets
+  Part of `bf9d0e0d49` is already upstream: string and list field offsets
   now come from the builtins, scaled by the target word
   (`LirCodeGen.zig:506-522`). Only the `target_ptr_size == 8` assertion at
   line 504 is left. The "Make ... word-relative" commits fit part 1. The

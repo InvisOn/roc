@@ -33,9 +33,9 @@ own.
 ## The pinned base
 
 - **Upstream base:** `73df27a5bb`.
-- **Reference snapshot:** `2f5d8e3685`, the reference's merge of that commit.
+- **Reference snapshot:** `e0fa273ebf`, the reference's merge of that commit.
   It passed every check (oracle, minici, qemu, Pi 5, Pi 3) and is pushed.
-- So `git diff 73df27a5bb 2f5d8e3685` is exactly our work: 127 files,
+- So `git diff 73df27a5bb e0fa273ebf` is exactly our work: 127 files,
   +23,274 / -3,230 lines. Every step takes its files from this diff.
 - Moving to a newer base happens only between steps, when I choose. Claude
   rebases the remaining steps for me.

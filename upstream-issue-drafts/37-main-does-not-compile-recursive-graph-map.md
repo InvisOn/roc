@@ -11,7 +11,7 @@ Not filed, and no need to: upstream fixed it in PR 12557, merged as `f6c6cfb3d2`
 | Still an issue? | Yes at `7e749fe156` (2026-10-24), by reading the code. Seen as a build error in our merge of `5300d1ee60`, which has upstream's `lir_image.zig` and `layout/store.zig` unchanged. Pure upstream not built yet. |
 | Already upstream? | Yes. PR 12557, "Fix the canonical Boxy sidecar's layout store after the recursive layout keys change", merged as `f6c6cfb3d2`. It sets `.interned_recursive_graphs = .empty` and adds `.recursive_layout_keys = .{}`. |
 | Fixed on our reference branch? | No. We left out the commits from `6d72ef4d1b` on instead. |
-| Before filing | Don't file. Fixed upstream. Our sync merged `f6c6cfb3d2` as `f84787b815`. |
+| Before filing | Don't file. Fixed upstream. Our sync merged `f6c6cfb3d2` as `04a0fb0ffc`. |
 
 ---
 

@@ -195,8 +195,8 @@ cannot lie").
 
 ## Setup (done 2026-10-02)
 
-- Tag `arm32-reference` is on the verified reference tip `ee5664f6a5`
-  (upstream `220b9b7941`, 2026-10-18). Until then it was `83be07cd49`
+- Tag `arm32-reference` is on the verified reference tip `7dd4ba7003`
+  (upstream `220b9b7941`, 2026-10-18). Until then it was `915ceb1e89`
   (`22af835e08` before the 2026-10-17 history rewrite).
 - Branch `arm32-holes` starts at that tag, in the worktree `../roc-by-hand`.
   It stays on that commit; it does not need to follow upstream. Both are
@@ -214,8 +214,8 @@ cannot lie").
 - 2026-10-18: the stage 1 commit is `dd330ea86a` (it was `381ecf805e`;
   recreated on the rewritten reference without the Claude trailers, same
   files). Branch and tag pushed to the fork; I start on the second PC.
-- 2026-10-18: rebuilt on the current reference `ee5664f6a5` before I
-  started: stage 1 commit `9e314c109a`. The same thirteen holes; three stubs
+- 2026-10-18: rebuilt on the current reference `7dd4ba7003` before I
+  started: stage 1 commit `ac58370345`. The same thirteen holes; three stubs
   sat where Zig renamed `@intFromEnum` to `@backingInt`. Checked: compiles;
   669 passed, 2 skipped, 198 crashed, every crash naming a hole, all
   thirteen hit.

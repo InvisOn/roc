@@ -8,7 +8,7 @@ line for every later step.
 
 ## Files from the reference snapshot
 
-Take these from `git diff 73df27a5bb 2f5d8e3685`:
+Take these from `git diff 73df27a5bb e0fa273ebf`:
 
 - **Targets:** `src/target/mod.zig` (the `arm32musl` and `arm32linux`
   entries), `src/cli/main.zig` (accepting them with `--opt=dev`).
@@ -77,7 +77,7 @@ Test counts: to be measured (eval under qemu: 0 of about 2,580 pass).
 
 > Read `stepwise-rebuild/README.md` and `stepwise-rebuild/step-00-harness.md` on
 > the `notes` branch of InvisOn/roc. Build step 0 on the stepwise-rebuild branch:
-> cut its files from `git diff 73df27a5bb 2f5d8e3685`, write the stub, and
+> cut its files from `git diff 73df27a5bb e0fa273ebf`, write the stub, and
 > tidy the hw_checks driver into a script. Propose each commit, I write
 > it. Then measure the counts and update the step file.
 
