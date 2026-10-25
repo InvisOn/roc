@@ -223,7 +223,7 @@ The constraints:
 
 ### D3. Which upstream commit #9 sits on
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-26, alternative 1)
 - **Context:** The branch sits on `3bb8f2ec6c`, from before upstream stopped
   compiling. Upstream compiles again and is 45 commits further
   (`629c3e0e2d`); `LirCodeGen.zig` has moved (the 8-byte assert from line

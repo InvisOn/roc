@@ -150,10 +150,11 @@ From step 6 on, each step also gets a planning doc made from
 6. **Word size (1 of 3).** The source is the "A2" commits on the
    reference branch. Decided (option 1): `bf9d0e0d49` and the four "Make
    ... word-relative" commits go into #9, and the nine "Classify ..."
-   commits go to part 3 of the plan. Tests: the relative oracle and
-   snapshots (in step 7), and unit tests for the layout helpers at a 4-byte
-   and an 8-byte word. The remaining open decisions go in the step 6
-   planning doc (`rfcs/part-01-dispatch-isa/`, from `templates/rfc.md`).
+   commits go to part 3 of the plan. Tests: snapshots after each commit,
+   the relative oracle once after the step's last commit, and unit tests
+   for the layout helpers at a 4-byte and an 8-byte word. The remaining
+   open decisions go in the step 6 planning doc
+   (`rfcs/part-01-dispatch-isa/`, from `templates/rfc.md`).
 7. **Check** (see below). Run #8's flush on the Pi 5 too. It has only run
    on x86_64, which never needs a flush.
 8. **Update #9's description.** Change section, the plan table
