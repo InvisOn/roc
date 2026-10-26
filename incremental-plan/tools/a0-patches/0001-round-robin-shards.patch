@@ -1,0 +1,122 @@
+Hash eval cases in round-robin shards (applied by relative_oracle.py after A0)
+
+A0's --write-dev-code-hashes split the cases into contiguous blocks, one per
+shard. The expensive "issue 11698" cases sit together at the end of the
+corpus, so the last shard took 957 s while the other 15 took 288-322 s.
+Shard k now takes cases k, k + n, k + 2n, ..., and the parent puts the lines
+back in case order. Measured on 8e9e512e0f: 474 s instead of 957 s, output
+byte-identical (also at 1, 3 and 7 shards on a 26-case subset); peak memory
+13.8 GB instead of 9.0 GB, since the heavy cases now run at the same time.
+
+diff --git a/src/eval/test/parallel_runner.zig b/src/eval/test/parallel_runner.zig
+index ac8ef0a8a6..176606b2d4 100644
+--- a/src/eval/test/parallel_runner.zig
++++ b/src/eval/test/parallel_runner.zig
+@@ -2306,21 +2306,24 @@ fn devCodeHashLines(gpa: std.mem.Allocator, cases: []const DevCodeHashCase, out:
+     }
+ }
+ 
+-/// Hash lines for `cases`, split into contiguous shards computed by forked
+-/// children and concatenated in shard order, so the output is identical to a
+-/// sequential run.
++/// Hash lines for `cases`, computed by forked children and put back in case
++/// order, so the output is identical to a sequential run. Shard `k` takes cases
++/// `k`, `k + shard_count`, `k + 2 * shard_count`, ...: the expensive cases sit
++/// together in the corpus, and contiguous blocks left one shard with most of
++/// them.
+ fn devCodeHashLinesSharded(gpa: std.mem.Allocator, cases: []const DevCodeHashCase, shard_count: usize, out: *std.ArrayListUnmanaged(u8)) RunnerError!void {
+     if (comptime !has_fork or coverage_mode or eval_no_fork) {
+         return devCodeHashLines(gpa, cases, out);
+     }
+ 
+-    const Shard = struct { pid: posix.pid_t, read_fd: posix.fd_t, first: usize, end: usize };
++    const Shard = struct { pid: posix.pid_t, read_fd: posix.fd_t, lines: std.ArrayListUnmanaged(u8) = .empty, next: usize = 0 };
+     const shards = try gpa.alloc(Shard, shard_count);
+-    defer gpa.free(shards);
++    defer {
++        for (shards) |*shard| shard.lines.deinit(gpa);
++        gpa.free(shards);
++    }
+ 
+     for (shards, 0..) |*shard, k| {
+-        const first = cases.len * k / shard_count;
+-        const end = cases.len * (k + 1) / shard_count;
+         const fds = harness.pipe() catch {
+             std.debug.print("error: pipe failed for dev code hash shard {d}\n", .{k});
+             std.process.exit(1);
+@@ -2331,8 +2334,17 @@ fn devCodeHashLinesSharded(gpa: std.mem.Allocator, cases: []const DevCodeHashCas
+         };
+         if (pid == 0) {
+             harness.closeFd(fds[0]);
++            const child_gpa = base.defaultGpa();
++            var mine: std.ArrayListUnmanaged(DevCodeHashCase) = .empty;
++            var i = k;
++            while (i < cases.len) : (i += shard_count) {
++                mine.append(child_gpa, cases[i]) catch |err| {
++                    std.debug.print("error: dev code hash shard {d}: {s}\n", .{ k, @errorName(err) });
++                    std.c._exit(2);
++                };
++            }
+             var lines: std.ArrayListUnmanaged(u8) = .empty;
+-            devCodeHashLines(base.defaultGpa(), cases[first..end], &lines) catch |err| {
++            devCodeHashLines(child_gpa, mine.items, &lines) catch |err| {
+                 std.debug.print("error: dev code hash shard {d}: {s}\n", .{ k, @errorName(err) });
+                 std.c._exit(2);
+             };
+@@ -2341,13 +2353,13 @@ fn devCodeHashLinesSharded(gpa: std.mem.Allocator, cases: []const DevCodeHashCas
+             std.c._exit(0);
+         }
+         harness.closeFd(fds[1]);
+-        shard.* = .{ .pid = pid, .read_fd = fds[0], .first = first, .end = end };
++        shard.* = .{ .pid = pid, .read_fd = fds[0] };
+     }
+ 
+     // Each child only writes, so draining the shards in order cannot deadlock:
+     // a later child blocked on a full pipe waits for its turn here.
+     var failed = false;
+-    for (shards, 0..) |shard, k| {
++    for (shards, 0..) |*shard, k| {
+         var buf: [16 * 1024]u8 = undefined;
+         while (true) {
+             const n = harness.posixRead(shard.read_fd, &buf) catch {
+@@ -2355,18 +2367,37 @@ fn devCodeHashLinesSharded(gpa: std.mem.Allocator, cases: []const DevCodeHashCas
+                 break;
+             };
+             if (n == 0) break;
+-            try out.appendSlice(gpa, buf[0..n]);
++            try shard.lines.appendSlice(gpa, buf[0..n]);
+         }
+         harness.closeFd(shard.read_fd);
+         const wait = harness.waitpid(shard.pid, 0);
+         if (!posix.W.IFEXITED(wait.status) or posix.W.EXITSTATUS(wait.status) != 0) {
+-            std.debug.print("error: dev code hash shard {d} (cases {d}..{d}) did not exit cleanly; first case: {s}\n", .{
+-                k, shard.first, shard.end, if (shard.first < shard.end) cases[shard.first].name else "<none>",
++            std.debug.print("error: dev code hash shard {d} (every {d}th case from {d}) did not exit cleanly; first case: {s}\n", .{
++                k, shard_count, k, if (k < cases.len) cases[k].name else "<none>",
+             });
+             failed = true;
+         }
+     }
+     if (failed) std.process.exit(1);
++
++    // Every case wrote exactly one line, so case `i` is the next line of shard
++    // `i % shard_count`.
++    for (0..cases.len) |i| {
++        const shard = &shards[i % shard_count];
++        const rest = shard.lines.items[shard.next..];
++        const len = (std.mem.findScalar(u8, rest, '\n') orelse {
++            std.debug.print("error: dev code hash shard {d} has no line for case {d} ({s})\n", .{ i % shard_count, i, cases[i].name });
++            std.process.exit(1);
++        }) + 1;
++        try out.appendSlice(gpa, rest[0..len]);
++        shard.next += len;
++    }
++    for (shards, 0..) |shard, k| {
++        if (shard.next != shard.lines.items.len) {
++            std.debug.print("error: dev code hash shard {d} wrote more lines than it had cases\n", .{k});
++            std.process.exit(1);
++        }
++    }
+ }
+ 
+ /// Compute the hash file for `tests` and write it or compare it with `path`.

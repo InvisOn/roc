@@ -182,6 +182,16 @@ field access, so commit 1 leaves them at `.w64`. Each still assumes an
   (`count * 8`), the hidden-local slots (`* 8`), and the erased-call
   argument stride (`call_arg_stride = 24`). The reference's "Classify"
   commits, part 3.
+- **Erased-callable calls:** the function that calls an erased callable
+  saves the closure pointer in an 8-byte slot (`closure_ptr_slot`) and
+  reloads it at `.w64` in four places. Upstream's direct call for programs
+  without the Boxy runtime (`478cff9095`, added after step 6) adds three
+  more `.w64` accesses: it reloads the closure pointer, loads the function
+  pointer from the closure's first word (`Payload.callable_fn_ptr`), and
+  saves it in an 8-byte `fn_slot`. All are pointers, so all become `word`,
+  with `target_ptr_size` slots and the named offset. The reference's
+  erased-call "Classify" commit (`c4156ac121`), part 3. Decided in fold
+  step 7 (option 3 of three).
 - **128-bit bit counts:** `generateBitCount128` counts an i128 as two
   64-bit halves with the word-sized helpers (`emitPopcountWord`,
   `emitClzWord`, `emitCtzWord`). Right at an 8-byte word; at a 4-byte word
