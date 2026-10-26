@@ -249,8 +249,10 @@ pub const HostSplice = struct {
             total += @max(item.bytes.len, 1);
         }
         // Static data starts on its own page, so it stays writable while
-        // everything before it becomes executable.
-        const executable_len = std.mem.alignForward(usize, total, std.heap.page_size_min);
+        // everything before it becomes executable. The page is the running
+        // kernel's: `page_size_min` is only a lower bound, and aarch64 Linux
+        // may use 16 KiB pages.
+        const executable_len = std.mem.alignForward(usize, total, std.heap.pageSize());
         if (self.static_data) |layout| {
             self.static_data_offset = executable_len;
             binder.static_data_start = executable_len;
