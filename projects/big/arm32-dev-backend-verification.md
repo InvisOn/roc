@@ -1665,3 +1665,23 @@ first added this appendix, made between the two rewrites).
   15.3 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
   lines. Logs: `.git/verify-tools/upstream-sync/26436de489/`.
+- 2026-10-27, merge `4bf9dc3c6d` of upstream `main` at `0296dff2d3`. No
+  conflicts. Upstream changed only `.github/workflows/ci_manager.yml`, adding
+  a FreeBSD and NetBSD hello world. Checks at `4bf9dc3c6d`: the arm32 eval
+  corpus under qemu gives 2593 passed, 0 failed, 47 with a backend skipped.
+  Host effects 106/106. `test/fx` 134/134 under qemu. Relative 64-bit oracle
+  PASS. Its minici and Pi runs are the ones at `030c2a2fac` below, which
+  contains it: the owner asked for nothing on the Pis before 09:00, and the
+  next upstream merge was ready by then. Logs:
+  `.git/verify-tools/upstream-sync/0296dff2d3/`.
+- 2026-10-27, merge `030c2a2fac` of upstream `main` at `3c0fffe7bd`. No
+  conflicts, and nothing in the backends changed: upstream's work here is in
+  the type checker (a method conflict retires the definition). Checks at
+  `030c2a2fac`: the arm32 eval corpus under qemu gives 2593 passed, 0
+  failed, 47 with a backend skipped. Host effects 106/106. `test/fx` 134/134
+  under qemu. Relative 64-bit oracle PASS. Minici under the 20 GiB cap: 98
+  passed, 1 skipped, then `run-test-strategy-differential` alone with
+  `--threads 8` passed (peak 15.0 GiB). `test/fx` 134/134 on the Raspberry
+  Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux on the Pi 3
+  prints x64musl's 54 lines. Logs:
+  `.git/verify-tools/upstream-sync/3c0fffe7bd/`.
