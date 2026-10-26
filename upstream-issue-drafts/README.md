@@ -2,15 +2,13 @@
 
 Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
-**Filed:** 01 (11995), 04 (12200), 05 (12479), 06 (12202), 08 (12198), 09 (12199), 17 (12201), 29 (12176), 30 (12197), 31 (12179), 32 (12207), 10 (12480), 13 (12481), 19 (12483), 11 (12499), 33 (12500), 35 (12520), 36 (12531) and 14 (12532). Upstream fixed 21, 22, 28 and 34 before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
+**Filed:** 01 (11995), 04 (12200), 05 (12479), 06 (12202), 08 (12198), 09 (12199), 17 (12201), 29 (12176), 30 (12197), 31 (12179), 32 (12207), 10 (12480), 13 (12481), 19 (12483), 11 (12499), 33 (12500), 35 (12520), 36 (12531) and 14 (12532). Upstream fixed 21, 22, 28, 34 and 37 (PR 12557, `f6c6cfb3d2`) before we filed them. Once a draft is filed or fixed, it is removed from this folder. Older versions are in this branch's history.
 
 **Last checked:** 2026-10-20, against upstream `main` at `5fc587cf51`. All drafts were checked by reading the code, plus upstream's Nightly Gate run of 2026-10-19 for the CI drafts. All of upstream's issues and PRs were searched. "By reading the code" means nobody ran anything, unless a draft says a test was run. Earlier checks: 2026-10-17 at `43b87451c5`, 2026-10-10 at `faecf66d88`, and first on 2026-10-02 at `d16a6598e4`.
 
 **Not to be filed (owner, 2026-10-24):** the owner will not file the drafts that are here now (02, 03, 07, 12, 15, 16, 20, 23, 24, 25, 26, 27), and will likely fix them as part of their own arm32 implementation. They stay here as notes for that work. New problems still get a draft, under the same rules as before.
 
-**New, for the owner to decide (after 2026-10-24):** 37, upstream `main` does not compile since the recursive layout keys change (`RecursiveGraphMap` removed but still used in `lir_image.zig`). It blocks our sync past `414a19203e`.
-
-**Also new (2026-10-24):** 38, static data and the wasm code generator lay out erased callables with the compiler host's constants (`static_data.zig:1404`, `WasmCodeGen.zig:2790` and others). Seems latent: the values agree today because of rounding, and for the wasm metadata offset because the compiler registers the offset it chose. Same family as 07.
+**New, for the owner to decide (2026-10-24):** 38, static data and the wasm code generator lay out erased callables with the compiler host's constants (`static_data.zig:1404`, `WasmCodeGen.zig:2790` and others). Seems latent: the values agree today because of rounding, and for the wasm metadata offset because the compiler registers the offset it chose. Same family as 07.
 
 **Also new (2026-10-24):** 39, the LLVM backend crashes building wasm32v1 code that passes a vector ("scalar parameter split into 16 register pieces"). 40, a cached wasm32 dev build serves only one of a URL package's exports from its object pack. Both come from CLI tests that CI never runs, because CI filters `--include-llvm` tests to names with `[size]` or `[speed]`.
 
