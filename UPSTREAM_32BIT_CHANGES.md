@@ -1,6 +1,6 @@
 # Roc on 32-bit: upstream changes needed
 
-As of 2026-10-25, upstream `main` at `f6c6cfb3d2`.
+As of 2026-10-26, upstream `main` at `26436de489`.
 
 Upstream Roc's dev backend assumes an 8-byte machine word, and in several
 places it takes the size of the target's data from the machine the compiler
@@ -40,6 +40,7 @@ version produce byte-identical x86_64 and aarch64 output.
 | `src/backend/dev/LirCodeGen.zig:14288, 14295` | Sizes and indexes the erased-call descriptor array by `@sizeOf(usize)`. | Use the target's word size. |
 | `src/backend/dev/LirCodeGen.zig:14746, 14771` | Stores the erased-callable drop pointer at offset `@sizeOf(usize)` with an 8-byte store (`.w64`). | Target word size for both the offset and the store. |
 | `src/backend/dev/LirCodeGen.zig:14595-14613, 14755-14806` | Lays out erased-callable payloads with `@sizeOf`/`@offsetOf` of the builtins structs as compiled for the compiler's machine. | Derive each offset from the target word; those structs hold only pointers, so on 32-bit every offset halves. |
+| `src/backend/dev/LirCodeGen.zig:14373-14377` | The direct call of an erased callable (for programs without the Boxy runtime) reads the function pointer into an 8-byte slot with 8-byte loads and a store (`.w64`). | Use the target's word size for the slot, the loads and the store. |
 | `src/backend/dev/LirCodeGen.zig:22311-22316` | `entrypointParamSlotSize` multiplies the register count by a literal 8. | Multiply by the target's word size. |
 | `src/backend/dev/LirCodeGen.zig`, whole file | 811 8-byte loads/stores (`.w64`); fixed 8s in 90 `, 8)` and 41 `* 8` expressions; 12 uses of 56 as the small-string length shift. | Review each: most mean "one word", some really mean 64 bits (an `I64`, an `F64`, half of an `I128`), which on 32-bit take two registers. This is the bulk of the work. |
 | `src/backend/dev/CallingConvention.zig:384, 646, 708` | Asserts an address argument (`.from_lea`) is 8 bytes. | Expect the target's word size. |
