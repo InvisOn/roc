@@ -1613,3 +1613,55 @@ first added this appendix, made between the two rewrites).
   14.7 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/629c3e0e2d/`.
+- 2026-10-26, merge `003490c786` of upstream `main` at `54283d46d5`. No
+  conflicts, and nothing in the backends changed: upstream's work here
+  reports cache canonicalization warnings. Checks at `003490c786`: the
+  arm32 eval corpus under qemu gives 2593 passed, 0 failed, 47 with a
+  backend skipped. Host effects 106/106. `test/fx` 134/134 under qemu.
+  Relative 64-bit oracle PASS. Minici under the 20 GiB cap: 98 passed, 1
+  skipped, then `run-test-strategy-differential` alone with `--threads 8`
+  passed (peak 14.6 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on
+  the Pi 3. The int app as arm32musl and arm32linux on the Pi 3 prints
+  x64musl's 54 lines. Logs: `.git/verify-tools/upstream-sync/54283d46d5/`.
+- 2026-10-26, merge `c54a19b239` of upstream `main` at `72704da992`. No
+  conflicts. Upstream lets musl and glibc builds share native procedure
+  artifacts; its new `NativeProcDomain.zig` already lists `arm32linux` and
+  `arm32musl`, so nothing changed for arm32. Checks at `c54a19b239`: the
+  arm32 eval corpus under qemu gives 2593 passed, 0 failed, 47 with a
+  backend skipped. Host effects 106/106. `test/fx` 134/134 under qemu.
+  Relative 64-bit oracle PASS. Minici under the 20 GiB cap: 98 passed, 1
+  skipped, then `run-test-strategy-differential` alone with `--threads 8`
+  passed (peak 15.5 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on
+  the Pi 3. The int app as arm32musl and arm32linux on the Pi 3 prints
+  x64musl's 54 lines. Logs: `.git/verify-tools/upstream-sync/72704da992/`.
+- 2026-10-26, merge `f7c1244257` of upstream `main` at `478cff9095`, which
+  adds a direct call of erased callables for programs without the Boxy
+  runtime and speeds up native link preparation. Two conflicts. In
+  `LirCodeGen.zig`, upstream now writes erased-callable metadata only for
+  Boxy programs: the merge keeps upstream's checks with our word-sized
+  `erased_layout` code inside them. In `src/cli/main.zig`, upstream moved
+  the native build's scratch directory: the merge takes upstream's code and
+  moves our `--keep-temp` handling to the new place. Upstream's new direct
+  call loaded the function pointer with 8-byte loads and a store through
+  helpers our branch replaced, so the merge did not build: those three now
+  use the target word. Checks at `f7c1244257`: the arm32 eval corpus under
+  qemu gives 2593 passed, 0 failed, 47 with a backend skipped. Host effects
+  106/106. `test/fx` 134/134 under qemu. Relative 64-bit oracle PASS.
+  Minici under the 20 GiB cap: 98 passed, 1 skipped, then
+  `run-test-strategy-differential` alone with `--threads 8` passed (peak
+  15.2 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
+  lines. Logs: `.git/verify-tools/upstream-sync/478cff9095/`.
+- 2026-10-26, merge `2fd118a4d9` of upstream `main` at `26436de489`. One
+  conflict, in `.github/workflows/ci_zig.yml`: upstream moved its arm64
+  hello-world job to `ci_manager.yml`, and the merge keeps our arm32 qemu
+  steps. The moved job tests `src/machine_code_shim/instruction_cache.zig`,
+  which our branch moved to `src/backend/dev/`, so the merge points it
+  there. Checks at `2fd118a4d9`: the arm32 eval corpus under qemu gives
+  2593 passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
+  `test/fx` 134/134 under qemu. Relative 64-bit oracle PASS. Minici under
+  the 20 GiB cap: 98 passed, 1 skipped, then
+  `run-test-strategy-differential` alone with `--threads 8` passed (peak
+  15.3 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
+  lines. Logs: `.git/verify-tools/upstream-sync/26436de489/`.
