@@ -1711,3 +1711,17 @@ first added this appendix, made between the two rewrites).
   Raspberry Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux
   on the Pi 3 prints x64musl's 54 lines. Logs:
   `.git/verify-tools/upstream-sync/de79a0f6f7/`.
+- 2026-10-28, merge `efd2bb5e98` of upstream `main` at `8921d694c0`. No
+  conflicts. Upstream's work here is mostly in the wasm backend (stack room),
+  LLVM code generation, the CLI linker and builtin opacity. Upstream changed
+  the output of one dev_object snapshot, and `c61cd5d695` follows it in
+  `test/snapshots/dev_object_list_ops.md`: the relative oracle shows the
+  merged tip's x86_64 and aarch64 output equals upstream's. Checks at
+  `c61cd5d695`: the arm32 eval corpus under qemu gives 2593 passed, 0
+  failed, 47 with a backend skipped. Host effects 106/106. `test/fx`
+  134/134 under qemu. Relative 64-bit oracle PASS. Minici under the 20 GiB
+  cap: 98 passed, 1 skipped, then `run-test-strategy-differential` alone
+  with `--threads 8` passed (peak 15.4 GiB). `test/fx` 134/134 on the
+  Raspberry Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux
+  on the Pi 3 prints x64musl's 54 lines. Logs:
+  `.git/verify-tools/upstream-sync/8921d694c0/`.
