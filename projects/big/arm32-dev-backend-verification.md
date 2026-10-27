@@ -1696,3 +1696,18 @@ first added this appendix, made between the two rewrites).
   15.3 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
   int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54 lines.
   Logs: `.git/verify-tools/upstream-sync/7de4d5c8b1/`.
+- 2026-10-28, merge `7ee24676f0` of upstream `main` at `de79a0f6f7`. One
+  conflict, in `src/cli/test/parallel_cli_runner.zig`: upstream added an
+  `llvm_only` option and a `backends()` helper, and the merge keeps them
+  beside our cross-target options. The call that builds the cases uses
+  upstream's `backends()` and keeps our check that a cross target selecting
+  no cases exits 1. Upstream's other work here is in ARC (releasing an
+  unread join parameter), range proofs and try rows. Checks at
+  `7ee24676f0`: the arm32 eval corpus under qemu gives 2593 passed, 0
+  failed, 47 with a backend skipped. Host effects 106/106. `test/fx`
+  134/134 under qemu. Relative 64-bit oracle PASS. Minici under the 20 GiB
+  cap: 98 passed, 1 skipped, then `run-test-strategy-differential` alone
+  with `--threads 8` passed (peak 15.4 GiB). `test/fx` 134/134 on the
+  Raspberry Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux
+  on the Pi 3 prints x64musl's 54 lines. Logs:
+  `.git/verify-tools/upstream-sync/de79a0f6f7/`.
