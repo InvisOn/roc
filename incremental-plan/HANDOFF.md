@@ -137,10 +137,11 @@ The other machines: the Pi 5 (`<user>@<aarch64-device>`, aarch64) and the Pi 3
 
 | PR | Branch | Head | Base | State |
 |---|---|---|---|---|
-| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | local `8e9e512e0f`, pushed `127015276f` | local `26436de489` (rebased in step 7 on 2026-10-26; the old head is `backup/dispatch-isa-pre-rebase2-2026-10-26`), pushed `75d613ba5c` | Part 1. Fold steps 1 to 6 are done locally (15 signed commits), not pushed. Step 7 is in progress: sub-steps 1 (rebase) and 2 (full set, minici, oracle) are done. |
+| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | local `15e8146634`, pushed `127015276f` | local `26436de489` (rebased in step 7 on 2026-10-26; the heads before the rebase and before the `exit_group` change are `backup/dispatch-isa-pre-rebase2-2026-10-26` and `backup/dispatch-isa-pre-exit-group-2026-10-26`), pushed `75d613ba5c` | Part 1. Fold steps 1 to 6 are done locally (15 signed commits), not pushed. Step 7: sub-steps 1 to 5 (rebase, checks, reference check, both ARM devices) are done; the write-up and the force-push remain. |
+| [#10](https://github.com/InvisOn/roc/pull/10) | `fix/runtime-page-size` | `b1df3f9f18` | `3c0fffe7bd` | Dev static data on 16 KiB-page kernels (draft 42). Not part of the plan; not for upstream. |
 | [#8](https://github.com/InvisOn/roc/pull/8) | `fix/flush-jit-instruction-cache` | `5aa8ffecbf` | `73df27a5bb` (653 behind) | Draft 03. Folds into #9, then closes. |
 | [#3](https://github.com/InvisOn/roc/pull/3) | `fix/abs64-relocation-width` | `9ee4d148e8` | `73df27a5bb` | Draft 12. Folds into #9, then closes. |
-| [#4](https://github.com/InvisOn/roc/pull/4) | `fix/glibc-stub-arm-returns` | `4dffc5b3ea` | `73df27a5bb` | Draft 16. Closed. Its commit folds into #9. The same commit is open upstream as your 12513. |
+| [#4](https://github.com/InvisOn/roc/pull/4) | `fix/glibc-stub-arm-returns` | `4dffc5b3ea` | `73df27a5bb` | Draft 16. Closed. Its commit folds into #9. Open upstream as your 12513, which still exits `abort` with `exit` (1); the commit in #9 now uses `exit_group` (248). |
 | [#5](https://github.com/InvisOn/roc/pull/5) | `fix/stale-check-exclusions` | `80360119bf` | `73df27a5bb` | Draft 26. Not part of the plan. |
 | [#6](https://github.com/InvisOn/roc/pull/6) | `fix/list-get-unsafe-i128-index` | `36e90a6776` | `73df27a5bb` | Draft 14 (filed as 12532). Not part of the plan. Conflicts with upstream. |
 | [#7](https://github.com/InvisOn/roc/pull/7) | `fix/snapshot-dev-object-errors` | `f9e096039e` | `73df27a5bb` | Draft 02. Not part of the plan. |
@@ -154,8 +155,9 @@ earlier sync run. The `dev_object` snapshot half of that run was real. The
 oracle now deletes the old file and has `--apply-a0-to-merged` for PR
 branches. Step 6 ran it on the whole branch (`629c3e0e2d` against
 `0d8048aee4`); the result is in `rfcs/part-01-dispatch-isa/step-6-word-size.md`.
-Step 7 ran it on the rebased branch (`26436de489` against `8e9e512e0f`),
-twice, both PASS; the results are in
+Step 7 ran it on the rebased branch three times, all PASS: twice on
+`8e9e512e0f` and once on `15e8146634` (after the `exit_group` change),
+each against `26436de489`; the results are in
 `rfcs/part-01-dispatch-isa/step-7-checks.md`.
 
 ## Next: fold part 1 into #9
@@ -218,6 +220,40 @@ one's "How to test".
   to decide: which project, where the step goes in the plan (after the
   part that makes arm32 a host, or as its own part), and its pass rule.
   Add it to the README's plan when decided.
+- **Reminder: investigate why a Debug eval runner for 32-bit ARM does not
+  link** (asked for 2026-10-26). `zig build build-test-eval-runner
+  -Dtarget=arm-linux-musleabihf` compiles, then LLD fails with
+  "InputSection too large for range extension thunk": the runner links
+  LLVM, and the Debug image's one `.text` section is larger than an A32
+  B/BL branch (about ±32 MB) and its thunks can bridge. Seen in fold step
+  7 at upstream `26436de489`; the reference recorded the same in
+  `projects/big/arm32-dev-backend-issues.md` and built ReleaseFast or
+  ReleaseSafe runners instead, as step 7 now does (ReleaseSafe). Matters
+  for parts 6 and 11, where a Debug runner on the device would give the
+  best diagnostics. Things to look at: function sections (so the linker
+  can place thunks between functions), Thumb-2, building the runner
+  without LLVM for a device run, and what upstream's cross-compile CI
+  lane does.
+- **Fork PR [#10](https://github.com/InvisOn/roc/pull/10)**, branch
+  `fix/runtime-page-size` (`b1df3f9f18`, on the fork's `main` at upstream
+  `3c0fffe7bd`): two lines that align `HostSplice`'s executable prefix to
+  the running kernel's page size. Without it every compile-time
+  evaluation segfaults on aarch64 Linux with 16 KiB pages, such as the
+  aarch64 device's default kernel (upstream issue draft 42). Fold step
+  7's aarch64 runs used it. Not part of any plan part. Decided
+  2026-10-27: a fork PR, and nothing filed upstream.
+- **The ARM devices keep `~/step7`** (the runners, logs and queue scripts
+  from fold step 7) until #9 merges (decided 2026-10-27). Run nothing on
+  the devices without the owner's say-so.
+- **Reminder: after Cortex-A, do Cortex-M** (asked for 2026-10-26). The
+  arm32 work targets Cortex-A: `armv7-a`, A32 instructions, NEON and
+  VFPv3, Linux user space (`arm-linux-musleabihf`, the 32-bit ARM device
+  in 32-bit mode). Cortex-M is a different job: Thumb only (T32; ARMv6-M
+  has only a small Thumb subset), no A32 encoder to reuse as is, no NEON,
+  a single-precision FPU at most (often none, so soft-float calls), no
+  MMU or OS (bare metal or an RTOS, so no JIT memory and no Linux
+  syscalls), and kilobytes to a few megabytes of memory. Plan it as its
+  own track once the Cortex-A parts are merged.
 - **Which A2 commits make up word size (1 of 3).** Decided 2026-10-25:
   option 1, done in fold step 6 (see above and its write-up; `word_size`
   below became upstream's `target_ptr_size`, and the structural equality

@@ -12,6 +12,10 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
 **Also new (2026-10-24):** 39, the LLVM backend crashes building wasm32v1 code that passes a vector ("scalar parameter split into 16 register pieces"). 40, a cached wasm32 dev build serves only one of a URL package's exports from its object pack. Both come from CLI tests that CI never runs, because CI filters `--include-llvm` tests to names with `[size]` or `[speed]`.
 
+**New (2026-10-26):** 41, generated exit code mixes `exit` and `exit_group`: the glibc stub's `abort` and the LLVM backend's x86_64 `_start` call `exit`, while the aarch64 `_start` and the default Linux runtime call `exit_group`. Found in fold step 7's reference check; `dispatch/isa` (fork PR #9 after its next push) now uses `exit_group` for the 32-bit ARM stub.
+
+**Also new (2026-10-26):** 42, compile-time evaluation segfaults on aarch64 Linux with 16 KiB pages: `HostSplice.link` aligns the static data to `page_size_min`, so making the code executable also protects the start of the static data. Found on the aarch64 device in fold step 7; fix in fork PR #10 (`b1df3f9f18`). Not to be filed for now (owner, 2026-10-27).
+
 ## Preferred filing order (kept for reference)
 
 Proven bugs with a test come first, then bugs that only matter on 32-bit, then CI problems. Each line says why it sits where it does. The fork PR is the fix, tested on InvisOn/roc, which can be offered with the issue.

@@ -249,9 +249,14 @@ output reserve nothing and still run everywhere.
 ## Open
 
 - The skip branches in `8ea2423294` and `e65824d17e` only run on a 32-bit
-  machine and have never been compiled. Part 11 builds them on the Pi 3.
-- The `.w64` store widths next to the new target offsets change with the
-  word-size steps.
+  machine. The eval runner's (`8ea2423294`, now `8bae7bca7b`) ran on the
+  32-bit ARM device in fold step 7 (2026-10-26): the wasm backend reported
+  unavailable at the head, where the base failed every wasm case with
+  `WasmExecFailed`. The CLI test skips (`e65824d17e`, now `a56bd61b9e`)
+  are still unrun; part 11 runs them on that device.
+- The `.w64` store widths next to the new target offsets did not change in
+  fold step 6 (word size 1 of 3); fold step 7 put them on step 6's "left
+  for part 3" list (`generatePackedErasedFn`).
 - Draft 38: static data and the wasm code generator use the host's
   erased-callable constants.
 - Drafts 39 and 40: two upstream CLI tests fail with `--include-llvm`, and

@@ -192,6 +192,13 @@ field access, so commit 1 leaves them at `.w64`. Each still assumes an
   with `target_ptr_size` slots and the named offset. The reference's
   erased-call "Classify" commit (`c4156ac121`), part 3. Decided in fold
   step 7 (option 3 of three).
+- **Building an erased callable:** `generatePackedErasedFn` keeps all 16
+  of its loads and stores at `.w64`: the procedure address, the
+  `on_drop` and hot-reload drop functions, the reuse pointer and the heap
+  pointer, in stack slots and in the new payload. Step 5 moved their
+  offsets to the target word, not their widths. All are pointers, so all
+  become `word`. The reference's "Classify" commits (`93c546d7b5`,
+  `c4156ac121`), part 3. Found by fold step 7's reference check.
 - **128-bit bit counts:** `generateBitCount128` counts an i128 as two
   64-bit halves with the word-sized helpers (`emitPopcountWord`,
   `emitClzWord`, `emitCtzWord`). Right at an 8-byte word; at a 4-byte word
