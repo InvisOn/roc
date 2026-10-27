@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const base = @import("base");
+const instruction_cache = @import("instruction_cache.zig");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const coff = @import("object/coff.zig");
@@ -191,13 +192,13 @@ pub const ExecutableMemory = struct {
 
     /// Allocate executable memory and copy the given code into it.
     /// The code bytes should already have any relocations applied.
-    pub fn init(code: []const u8) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!Self {
+    pub fn init(code: []const u8) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!Self {
         return initWithEntryOffset(code, 0);
     }
 
     /// Allocate executable memory with a specific entry offset.
     /// Use this when procedures are compiled before the main expression.
-    pub fn initWithEntryOffset(code: []const u8, entry_offset: usize) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!Self {
+    pub fn initWithEntryOffset(code: []const u8, entry_offset: usize) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!Self {
         return initWithEntryOffsetAndUnwindInfo(code, entry_offset, &.{});
     }
 
@@ -205,7 +206,7 @@ pub const ExecutableMemory = struct {
         code: []const u8,
         entry_offset: usize,
         functions: []const coff.FunctionInfo,
-    ) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, UnsupportedPlatform, UnwindRegistrationFailed })!Self {
+    ) (Allocator.Error || error{ EmptyCode, MmapFailed, VirtualAllocFailed, MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform, UnwindRegistrationFailed })!Self {
         if (code.len == 0) {
             return error.EmptyCode;
         }
@@ -264,14 +265,14 @@ pub const ExecutableMemory = struct {
     }
 
     /// Mark a writable allocation returned by `initWritable` executable.
-    pub fn finishWrite(self: *Self) error{ MprotectFailed, VirtualProtectFailed, UnsupportedPlatform }!void {
+    pub fn finishWrite(self: *Self) error{ MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform }!void {
         try protectExecutable(self.memory);
     }
 
     /// Mark the first `executable_len` bytes of a writable allocation
     /// returned by `initWritable` executable, and leave the page-aligned rest
     /// writable data.
-    pub fn finishWriteExecutablePrefix(self: *Self, executable_len: usize) error{ MprotectFailed, VirtualProtectFailed, UnsupportedPlatform }!void {
+    pub fn finishWriteExecutablePrefix(self: *Self, executable_len: usize) error{ MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform }!void {
         std.debug.assert(std.mem.isAligned(executable_len, std.heap.page_size_min) and executable_len <= self.memory.len);
         try protectExecutable(self.memory[0..executable_len]);
     }
@@ -401,7 +402,11 @@ fn allocateMemory(size: usize) (Allocator.Error || error{ MmapFailed, VirtualAll
 }
 
 /// Make the memory executable
-fn protectExecutable(memory: []align(std.heap.page_size_min) u8) error{ MprotectFailed, VirtualProtectFailed, UnsupportedPlatform }!void {
+fn protectExecutable(memory: []align(std.heap.page_size_min) u8) error{ MprotectFailed, VirtualProtectFailed, FlushInstructionCacheFailed, UnsupportedPlatform }!void {
+    // Changing permissions does not synchronize the instruction cache on
+    // every architecture (aarch64 and 32-bit ARM in particular), so publish
+    // the written instructions first.
+    try instruction_cache.flush(memory);
     switch (comptime classifyMemoryOs(builtin.os.tag)) {
         .posix => {
             const prot: std.posix.PROT = .{ .READ = true, .EXEC = true };

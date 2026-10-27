@@ -8905,6 +8905,7 @@ fn customWasmLinkedObjectPack(
     timer: *harness.Timer,
     timeout_ms: u64,
 ) ?TestResult {
+    if (!host_can_instantiate_test_wasm) return .{ .status = .skip, .phase = .setup, .duration_ns = timer.read(), .message = skip_test_wasm_message };
     const roc_file = "test/wasm/linked_object_pack/App.roc";
     const expected = "sum of squares to 10: 385\n506\nU8x16(20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20)";
     // At least `describe`, `double_lanes`, and `sum_squares_from`, which the
@@ -9046,6 +9047,7 @@ fn customWasm32v1VectorLowering(
     timer: *harness.Timer,
     timeout_ms: u64,
 ) ?TestResult {
+    if (!host_can_instantiate_test_wasm) return .{ .status = .skip, .phase = .setup, .duration_ns = timer.read(), .message = skip_test_wasm_message };
     const expected = "(U8x16(144, 144, 144, 2, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144), U8x16(255, 255, 255, 2, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255), U16x8(24464, 24464, 24464, 24464, 24464, 24464, 24464, 24464), 1, \"width is 16\")";
     for ([_][]const u8{ "wasm32", "wasm32v1" }) |target_name| {
         for ([_][]const u8{ "dev", "size", "speed" }) |opt| {
@@ -12024,6 +12026,7 @@ fn customIssue12029WasmBoxyTailCalls(
     timer: *harness.Timer,
     timeout_ms: u64,
 ) ?TestResult {
+    if (!host_can_instantiate_test_wasm) return .{ .status = .skip, .phase = .setup, .duration_ns = timer.read(), .message = skip_test_wasm_message };
     const output_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "boxy-tail-calls.wasm" }) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate wasm output path: {}", .{err});
     defer allocator.free(output_path);
@@ -15908,6 +15911,15 @@ const GlueRuntimeWasmHostContext = struct {
 
 var glue_runtime_wasm_host_context: GlueRuntimeWasmHostContext = .{};
 
+/// Whether this process can instantiate the wasm32 modules these tests build.
+/// bytebox reserves a module's whole linear memory when it instantiates it.
+/// The test platforms declare no memory maximum, so the reservation is
+/// wasm32's full 4 GiB, which a 32-bit process cannot hold (bytebox reports
+/// `Uninstantiable64BitLimitsOn32BitArch`). Decoding a module reserves
+/// nothing, so tests that only validate wasm output still run on every host.
+const host_can_instantiate_test_wasm = @sizeOf(usize) >= 8;
+const skip_test_wasm_message = "running wasm32 output under bytebox needs a 64-bit host";
+
 fn setupGlueRuntimeWasm(io: std.Io, allocator: Allocator, wasm_path: []const u8) GlueRuntimeWasmSetupError!GlueRuntimeWasmInterface {
     const wasm_data = try std.Io.Dir.cwd().readFileAlloc(io, wasm_path, allocator, .limited(256 * 1024 * 1024));
 
@@ -16024,7 +16036,9 @@ fn runGlueRuntimeCase(
         .native => nativeGlueTarget() orelse {
             return .{ .status = .skip, .phase = .setup, .duration_ns = timer.read(), .message = "glue runtime native contracts do not support this host target" };
         },
-        .wasm32 => null,
+        .wasm32 => if (host_can_instantiate_test_wasm) null else {
+            return .{ .status = .skip, .phase = .setup, .duration_ns = timer.read(), .message = skip_test_wasm_message };
+        },
     };
 
     // Zig 0.17 rejects `@Vector` fields in `extern struct`/`extern union`

@@ -73,6 +73,7 @@ pub const Error = Allocator.Error || lir.CheckedPipeline.LowerResourceError || s
     EmptyCode,
     VirtualAllocFailed,
     MprotectFailed,
+    FlushInstructionCacheFailed,
     VirtualProtectFailed,
     InvalidHandle,
     CompilationFailed,

@@ -2184,6 +2184,17 @@ test "RocList empty list creation" {
     try std.testing.expect(empty_list.isEmpty());
 }
 
+test "RocList.targetFieldOffset scales the fields by the target word" {
+    // The dev backend lays out RocList for the target, not the compiler host,
+    // so these offsets must hold for a 4-byte word on any host.
+    try std.testing.expectEqual(@as(u32, 0), RocList.targetFieldOffset(.bytes, 4));
+    try std.testing.expectEqual(@as(u32, 4), RocList.targetFieldOffset(.length, 4));
+    try std.testing.expectEqual(@as(u32, 8), RocList.targetFieldOffset(.capacity_or_alloc_ptr, 4));
+    try std.testing.expectEqual(@as(u32, 0), RocList.targetFieldOffset(.bytes, 8));
+    try std.testing.expectEqual(@as(u32, 8), RocList.targetFieldOffset(.length, 8));
+    try std.testing.expectEqual(@as(u32, 16), RocList.targetFieldOffset(.capacity_or_alloc_ptr, 8));
+}
+
 test "default-platform RocList view matches canonical RocList layout" {
     const View = @import("roc_str_view").RocList;
 
