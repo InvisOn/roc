@@ -15,7 +15,7 @@ Prepare the dev backend's shared driver for 32-bit ARM (1 of 3)
 
 The dev backend can generate machine code for two kinds of CPU: x86_64 and aarch64. Both are 64-bit. This PR gets its shared code ready for a third kind, 32-bit ARM, which comes later in the plan.
 
-**What "32-bit ARM" means here:** the 32-bit mode of Arm processors, as on ARMv7-A processors and on 64-bit Arm processors running 32-bit code. Arm's own name for that 32-bit mode is AArch32. It has two instruction sets, A32 and Thumb (T32). The backend will generate both: A32 first, then Thumb in parts 10 and 11. Roc's targets for it are `arm32musl` and `arm32linux`.
+**What "32-bit ARM" means here:** the 32-bit mode of Arm processors, as on ARMv7-A processors and on 64-bit Arm processors running 32-bit code. Arm's own name for that 32-bit mode is AArch32. It has two instruction sets, A32 and Thumb (T32). The backend generates A32 only, not Thumb. Roc's targets for it are `arm32musl` and `arm32linux`.
 
 Two things stand in the way, and this PR starts on both:
 
@@ -113,11 +113,9 @@ Part 1 of the Incremental Plan. For review here first, not for upstream yet. It 
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) |
 | 8 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver |
 | 9 | NEON SIMD | dev backend: shared driver |
-| 10 | T32 (Thumb-2) encoder and its assembler oracle | dev backend: instruction encoder |
-| 11 | Thumb code generation, Thumb relocations and A32/Thumb calls | dev backend: per-architecture code generator, calls, object file |
-| 12 | arm32 targets, platforms, runtime files, CI lane (A32 and Thumb) | CLI target (start) and linking (end) |
-| 13 | arm32 as a host (running code in-process) | output: code in memory |
-| 14 | Docs, and turning the CI lane from optional to required | none |
+| 10 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) |
+| 11 | arm32 as a host (running code in-process) | output: code in memory |
+| 12 | Docs, and turning the CI lane from optional to required | none |
 
 ## How to test
 

@@ -234,11 +234,12 @@ one's "How to test".
   7 at upstream `26436de489`; the reference recorded the same in
   `projects/big/arm32-dev-backend-issues.md` and built ReleaseFast or
   ReleaseSafe runners instead, as step 7 now does (ReleaseSafe). Matters
-  for parts 6 and 13, where a Debug runner on the device would give the
+  for parts 6 and 11, where a Debug runner on the device would give the
   best diagnostics. Things to look at: function sections (so the linker
-  can place thunks between functions), Thumb-2, building the runner
-  without LLVM for a device run, and what upstream's cross-compile CI
-  lane does.
+  can place thunks between functions), building the runner without LLVM
+  for a device run, and what upstream's cross-compile CI lane does. (Not
+  Thumb: the oversized code is LLVM's output for the compiler itself, and
+  Thumb's `BL` reaches less far, ±16 MB against ±32 MB.)
 - **Fork PR [#10](https://github.com/InvisOn/roc/pull/10)**, branch
   `fix/runtime-page-size` (`b1df3f9f18`, on the fork's `main` at upstream
   `3c0fffe7bd`): two lines that align `HostSplice`'s executable prefix to
@@ -258,9 +259,14 @@ one's "How to test".
   a single-precision FPU at most (often none, so soft-float calls), no
   MMU or OS (bare metal or an RTOS, so no JIT memory and no Linux
   syscalls), and kilobytes to a few megabytes of memory. Plan it as its
-  own track once the Cortex-A parts are merged. Thumb itself is now in the
-  plan (parts 10 and 11, decided 2026-10-27), so the Cortex-M track builds
-  on it; ARMv6-M's smaller Thumb subset is still extra work.
+  own track once the Cortex-A parts are merged, together with Thumb (T32)
+  itself, which is not in the current plan (decided 2026-10-27, see the
+  README and `thumb-plan-review.md`). ARMv6-M's smaller Thumb subset is
+  extra work on top.
+- **The proposal to the maintainers (part 0) is not recorded as sent.** The
+  README says nothing else starts until they answer, but #9 is nearly
+  ready (found by the Thumb review, 2026-10-27). Decide whether to send
+  part 0 before #9 goes upstream.
 - **Which A2 commits make up word size (1 of 3).** Decided 2026-10-25:
   option 1, done in fold step 6 (see above and its write-up; `word_size`
   below became upstream's `target_ptr_size`, and the structural equality
