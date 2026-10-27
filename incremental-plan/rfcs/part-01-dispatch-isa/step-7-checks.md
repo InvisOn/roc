@@ -5,7 +5,8 @@ The step's checks are complete; only sub-step 7 (the force-push and closing
 D3 accepted 2026-10-26).
 
 Branch `dispatch/isa`, 15 commits, rebased onto upstream `26436de489`;
-head `15e8146634` after the reference check's `exit_group` change.
+head `1bc3981a38`: `15e8146634` after the reference check's `exit_group`
+change, then one commit message reworded in step 8 (same content).
 
 | Sub-step | State |
 |---|---|
@@ -15,7 +16,7 @@ head `15e8146634` after the reference check's `exit_group` change.
 | 4. aarch64 device | done: 10 runs and the unit tests passed (with a separate 16 KiB-page fix) |
 | 5. 32-bit ARM device | done: every difference from the base is step 5's; ReleaseSafe runners |
 | 6. This write-up | in progress |
-| 7. Force-push #9; close #8 and #3 | pending, after the checks |
+| 7. Force-push #9; close #8 and #3 | done 2026-10-27 |
 
 ## 1. Rebase
 
@@ -74,6 +75,12 @@ with unchanged content. Head `8e9e512e0f` became `15e8146634`; the old head
 is kept as `backup/dispatch-isa-pre-exit-group-2026-10-26`. All 15 commits
 are signed and keep their author dates, and the only content change
 against the old head is that one line.
+
+In step 8 the stub commit's message was reworded to match (it still said
+`exit(1)`): `ba3824ab2f` became `3d73760a5b`, and the eleven commits after
+it got new hashes with unchanged content (head `1bc3981a38`; the old head
+is `backup/dispatch-isa-pre-reword-2026-10-27`). The checks below ran on
+`15e8146634`; `1bc3981a38` has exactly the same content.
 
 ## 2. Checks on the rebased branch
 
@@ -347,20 +354,21 @@ the code. Failures at both head and base do not count.
 - The Pi 3 runs found three upstream problems on 32-bit hosts (the
   interpreter's `roc_crashed` invariant, its segfaults, and the closures
   cases running out of the device's memory). Decided 2026-10-27: draft
-  them when the plan reaches 32-bit hosts (part 11); the logs are kept
+  them when the plan reaches 32-bit hosts (part 13; part 11 before the
+  2026-10-27 renumbering); the logs are kept
   with the timings.
 - The 16 KiB-page fix is fork PR #10 (`b1df3f9f18`, rebased onto the
   fork's `main`, upstream `3c0fffe7bd`); nothing filed upstream (decided
   2026-10-27).
 - Both devices keep `~/step7` until #9 merges (decided 2026-10-27). The
   throwaway branch `step7/head-page-fix` and its worktree are deleted.
-- Close #8 and #3 after #9 is force-pushed with the rebased branch, each
-  with a comment linking its commit in #9 (decided 2026-10-26). This ends
-  step 7, after its checks.
+- Done 2026-10-27: #9 force-pushed with lease (`127015276f` to
+  `15e8146634`, then `1bc3981a38` after the reword); #8 and #3 closed, each
+  with a comment linking its commit in #9 (`200333a587`, `8b9b055402`).
 - The owner to look at GitHub Actions on the fork (the repository's
   Settings -> Actions and the account's billing page), since the API does
   not show why nothing has run since 2026-10-08.
 - Step 5's write-up said its 32-bit host branches "have never been
   compiled". Updated 2026-10-27: the eval runner's branch ran on the
   32-bit ARM device in sub-step 5 and works; the CLI test skips are still
-  unrun (part 11).
+  unrun (part 13).

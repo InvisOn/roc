@@ -44,7 +44,7 @@ and the write-ups of finished steps.
   code, what it adds to CI time, and what maintainers will have to keep
   working.
 - **No unverifiable binaries.** The C runtime files arm32 programs link
-  against are built from the pinned Zig, not committed (see part 10). If
+  against are built from the pinned Zig, not committed (see part 12). If
   the maintainers want them committed, they must be byte-reproducible and
   checked in CI. The Zig ABI workaround is named where it appears.
 - **Test commands in every PR.** Each description ends with a "How to
@@ -73,17 +73,33 @@ stay out of upstream. They will change as upstream moves.
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet | `arm32/aapcs32` |
 | 8 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver | not measured | no | not yet | several, by operation family |
 | 9 | NEON SIMD | dev backend: shared driver | not measured | no | not yet | several, by operation family |
-| 10 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet | `arm32/targets` |
-| 11 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet | `arm32/host` |
-| 12 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet | `arm32/docs` |
+| 10 | T32 (Thumb-2) encoder and its assembler oracle | dev backend: instruction encoder | not measured (estimated 3,000 to 4,500) | no | not yet | `arm32/t32-encoder` |
+| 11 | Thumb code generation, Thumb relocations and A32/Thumb calls | dev backend: per-architecture code generator, calls, object file | not measured (estimated 1,500 to 3,100) | no | not yet | `arm32/thumb-codegen` |
+| 12 | arm32 targets, platforms, runtime files, CI lane (A32 and Thumb) | CLI target (start) and linking (end) | about 500 (estimated 600 to 700 with Thumb) | no | not yet | `arm32/targets` |
+| 13 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet | `arm32/host` |
+| 14 | Docs, and turning the CI lane from optional to required | none | about 1,400 (estimated 1,600 with Thumb) | no | not yet | `arm32/docs` |
 
-The parts were renumbered 0 to 12 on 2026-10-25 (see Progress for the old
-numbers). Two earlier parts folded into part 1 on 2026-10-24. One was a row
-of separate upstream bug fixes: the drafts that matter to arm32 are now in
-part 1, so the maintainers review them together with the change that needs
-them, and the other drafts are not part of this plan. The other was the
-first word-size part, which joined the architecture dispatch, so the
-dispatch arrives together with the first change that needs it.
+The parts were renumbered 0 to 12 on 2026-10-25, and 0 to 14 on 2026-10-27
+when Thumb (T32) joined the plan (see Progress for the old numbers). Two
+earlier parts folded into part 1 on 2026-10-24. One was a row of separate
+upstream bug fixes: the drafts that matter to arm32 are now in part 1, so
+the maintainers review them together with the change that needs them, and
+the other drafts are not part of this plan. The other was the first
+word-size part, which joined the architecture dispatch, so the dispatch
+arrives together with the first change that needs it.
+
+**Thumb (T32).** 32-bit ARM has two instruction sets: A32 and Thumb (T32).
+Decided 2026-10-27 (option A2 of three: against adding Thumb into each part
+from the start, or leaving it out of the plan): parts 4 to 9 stay A32 only,
+taken from the reference as before, and are designed so Thumb can be added
+(the encoder behind an interface, encoding choices out of the shared code).
+Parts 10 and 11 then add Thumb. The reference generates A32 only, but
+already calls Thumb code correctly (`BX`/`BLX`, `R_ARM_CALL` so the linker
+can add interworking veneers), and its encoding oracle's approach
+(comparing each encoding with the GNU assembler's) carries over to T32,
+with a Thumb mode added to the script. Thumb gives smaller code and is the
+only instruction set Cortex-M has; Cortex-M itself needs more than Thumb
+(see HANDOFF's reminder).
 
 Parts 1, 2 and 3 together are the biggest change to upstream's own code. In
 the reference they are about 5,400 added and 2,800 removed lines in
@@ -102,14 +118,14 @@ source -> parse -> canonicalize -> type check          (front end, unchanged)
        -> LIR, with the target's word size              (unchanged, already 32-bit ready)
        -> dev backend:
             LirCodeGen.zig, the shared driver            [1, 2, 3, 8, 9]
-              -> per-architecture CodeGen               [1, 6]
-                   -> instruction encoder               [4]
-              -> calls: C ABI and frames                [7]
+              -> per-architecture CodeGen               [1, 6, 11]
+                   -> instruction encoder               [4, 10]
+              -> calls: C ABI and frames                [7, 11]
        -> output, one of:
-            object file (ELF32, relocations, DWARF)      [5]
-              -> link with the platform and C runtime   [10]
+            object file (ELF32, relocations, DWARF)      [5, 11]
+              -> link with the platform and C runtime   [12]
               -> executable
-            code in memory, run by the compiler itself   [11]
+            code in memory, run by the compiler itself   [13]
 ```
 
 Everything up to and including LIR already works for a 32-bit target: LIR
@@ -135,12 +151,14 @@ it.
 - **8 and 9, wide values and SIMD:** in the shared driver, where LIR
   operations on 64-bit, 128-bit and vector values are lowered. On arm32
   they need word pairs, four words and NEON registers.
-- **10, targets and platforms:** at both ends. The CLI accepts the target at
+- **10 and 11, Thumb:** the T32 encoder beside part 4's, then the code
+  generator, the object writer and calls learning Thumb.
+- **12, targets and platforms:** at both ends. The CLI accepts the target at
   the start, and linking at the end needs the platform and C runtime files.
-- **11, host:** a second output path. Instead of an object file, the compiler
+- **13, host:** a second output path. Instead of an object file, the compiler
   writes the code into executable memory and runs it itself, which the
   eval tests and compile-time evaluation use.
-- **12, docs:** none.
+- **14, docs:** none.
 
 ## Each pull request
 
@@ -156,7 +174,7 @@ A message to the maintainers (their usual channel, Claude drafts it):
 - what we ask: yes or no to arm32 as a dev backend target, and their
   preferences (CI lane, how big a PR may be)
 - the runtime files: we propose building them instead of committing them
-  (part 10), and offer the same for the 32 runtime binaries upstream already
+  (part 12), and offer the same for the 32 runtime binaries upstream already
   commits for x64 and arm64
 
 Nothing else starts until they answer. If they want a different order or
@@ -235,6 +253,10 @@ explicit.
 step `run-check-arm32-encoding-oracle`. Self-contained: nothing calls it
 yet. The oracle checks it against the GNU assembler byte for byte.
 
+For Thumb later (part 10): the encoder sits behind an interface the code
+generator calls, so a T32 encoder can stand beside it, and the oracle takes
+the instruction set as a parameter.
+
 ### 5. Objects
 
 `object/elf.zig` (`write32`), `Relocation.zig` (ARM branches and movw/movt),
@@ -245,7 +267,9 @@ yet. The oracle checks it against the GNU assembler byte for byte.
 
 `arm32/CodeGen.zig`, `arm32/Call.zig`, the arm32 parts of
 `FrameBuilder.zig` and `CallingConvention.zig`, and
-`src/layout/abi/arm32.zig`. From here `roc build --target=arm32musl
+`src/layout/abi/arm32.zig`. For Thumb later (part 11), the code generator
+asks the encoder for each instruction and does not assume A32's encodings,
+ranges or conditional execution. From here `roc build --target=arm32musl
 --opt=dev` produces programs. The ABI shape tests (`test/fx/abi_call_shapes.roc`
 and the nested struct probe) come with 7.
 
@@ -260,11 +284,30 @@ The Wide64 lowering, i128 as four words, and the NEON block, each in a few
 PRs by operation family. Each one makes a known set of eval cases pass
 under qemu.
 
-### 10. Targets, platforms and CI
+### 10. The T32 encoder
+
+A T32 (Thumb-2) encoder in `arm32/`, beside the A32 encoder from part 4,
+behind the same interface: 16- and 32-bit instructions, Thumb immediates, and IT
+blocks for conditional execution. The encoding oracle checks it against the
+GNU assembler in Thumb mode, byte for byte. Self-contained, like part 4:
+nothing generates Thumb code yet. The reference has none of it.
+
+### 11. Thumb code generation
+
+The code generator learns to emit Thumb: choosing an instruction's
+encoding, Thumb's shorter branch and literal ranges, and IT blocks. The
+object writer gains the Thumb relocations (`R_ARM_THM_CALL`,
+`R_ARM_THM_JUMP24`, Thumb `MOVW`/`MOVT`), and calls between A32 and Thumb
+code (`BLX`/`BX`, Thumb addresses with bit 0 set) work both ways. Calls
+from our A32 code to Thumb-compiled C already work (the reference handles
+them); this adds generating Thumb ourselves. How a target chooses A32 or
+Thumb is decided in part 11's planning doc.
+
+### 12. Targets, platforms and CI
 
 The `arm32musl` and `arm32linux` targets, the test runner options
 (`--cross-target`, `--cross-run`), the `fx` and `int` platform entries, and
-an optional qemu CI lane.
+an optional qemu CI lane that runs the eval corpus as A32 and as Thumb.
 
 **The C runtime files.** Programs built for these targets link against the
 musl `crt1.o` and `libc.a` and the glibc `Scrt1.o`. The reference commits
@@ -294,13 +337,13 @@ So, in order of preference:
 Upstream commits 32 such files for x64 and arm64. Option 1 could later
 replace those too, as a separate proposal, if the maintainers want it.
 
-### 11. arm32 as a host
+### 13. arm32 as a host
 
 `HostSplice.zig`, `ExecutableMemory.zig`, the instruction cache flush, and
 the eval glue, so the compiler can run arm32 code it just generated. The
 instruction cache flush itself lands earlier, in part 1.
 
-### 12. Docs and the required lane
+### 14. Docs and the required lane
 
 `src/backend/dev/arm32/DESIGN.md`, `GUIDE.md`, `TOOLS.md`, trimmed to what
 upstream wants to keep, and the CI lane made required.
@@ -345,14 +388,16 @@ costs the most:
    code calls a C host or a C host calls Roc.
 
 Not worth a run: part 2 (a mechanical move that the oracle proves
-byte-identical), part 4 (the assembler oracle checks every encoding), and
-parts 10 to 12 (targets, docs and CI, which CI itself tests). If a part
-listed above turns out small and well covered when it is cut, give its run
-to part 6 (arm32 code generator) instead.
+byte-identical), parts 4 and 10 (the assembler oracle checks every A32 and
+T32 encoding), and parts 12 to 14 (targets, docs and CI, which CI itself
+tests). If a part listed above turns out small and well covered when it is
+cut, give its run to part 11 (Thumb code generation and A32/Thumb calls)
+first, then part 6 (arm32 code generator). Whether part 11 needs a run of
+its own is decided when it is planned (2026-10-27).
 
 ## Timing
 
-If the maintainers review one PR a week, the 13 items take about 4 months.
+If the maintainers review one PR a week, the 15 items take about 4 months.
 Two a week, about 2 months. The order puts the parts most useful to
 upstream first, so stopping early still leaves something of value.
 
@@ -390,3 +435,8 @@ upstream first, so stopping early still leaves something of value.
   equality commit is dropped: upstream deleted that code. arm32 tests start
   at part 6, not part 3, and the 8-byte assert is lifted only with them.
   Part 2 needs re-planning (see "1, 2 and 3").
+- 2026-10-27: Thumb (T32) joins the plan as parts 10 (T32 encoder) and 11
+  (Thumb code generation, relocations and A32/Thumb calls), after the A32
+  parts (option A2). Parts renumbered 0 to 14. Old to new: 0 to 9 stay,
+  10 to 12, 11 to 13, 12 to 14. Documents written before this date use the
+  old numbers.

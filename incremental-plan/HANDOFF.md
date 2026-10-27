@@ -137,10 +137,10 @@ The other machines: the Pi 5 (`<user>@<aarch64-device>`, aarch64) and the Pi 3
 
 | PR | Branch | Head | Base | State |
 |---|---|---|---|---|
-| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | local `15e8146634`, pushed `127015276f` | local `26436de489` (rebased in step 7 on 2026-10-26; the heads before the rebase and before the `exit_group` change are `backup/dispatch-isa-pre-rebase2-2026-10-26` and `backup/dispatch-isa-pre-exit-group-2026-10-26`), pushed `75d613ba5c` | Part 1. Fold steps 1 to 6 are done locally (15 signed commits), not pushed. Step 7: sub-steps 1 to 5 (rebase, checks, reference check, both ARM devices) are done; the write-up and the force-push remain. |
+| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | `1bc3981a38` (pushed 2026-10-27) | `26436de489` (rebased in step 7 on 2026-10-26; earlier heads: `backup/dispatch-isa-pre-rebase2-2026-10-26`, `backup/dispatch-isa-pre-exit-group-2026-10-26`, `backup/dispatch-isa-pre-reword-2026-10-27`) | Part 1. Fold steps 1 to 7 done; 15 signed commits pushed. Step 8 (title and description) is next. |
 | [#10](https://github.com/InvisOn/roc/pull/10) | `fix/runtime-page-size` | `b1df3f9f18` | `3c0fffe7bd` | Dev static data on 16 KiB-page kernels (draft 42). Not part of the plan; not for upstream. |
-| [#8](https://github.com/InvisOn/roc/pull/8) | `fix/flush-jit-instruction-cache` | `5aa8ffecbf` | `73df27a5bb` (653 behind) | Draft 03. Folds into #9, then closes. |
-| [#3](https://github.com/InvisOn/roc/pull/3) | `fix/abs64-relocation-width` | `9ee4d148e8` | `73df27a5bb` | Draft 12. Folds into #9, then closes. |
+| [#8](https://github.com/InvisOn/roc/pull/8) | `fix/flush-jit-instruction-cache` | `5aa8ffecbf` | `73df27a5bb` | Draft 03. Closed 2026-10-27: folded into #9 as `200333a587`. |
+| [#3](https://github.com/InvisOn/roc/pull/3) | `fix/abs64-relocation-width` | `9ee4d148e8` | `73df27a5bb` | Draft 12. Closed 2026-10-27: folded into #9 as `8b9b055402`. |
 | [#4](https://github.com/InvisOn/roc/pull/4) | `fix/glibc-stub-arm-returns` | `4dffc5b3ea` | `73df27a5bb` | Draft 16. Closed. Its commit folds into #9. Open upstream as your 12513, which still exits `abort` with `exit` (1); the commit in #9 now uses `exit_group` (248). |
 | [#5](https://github.com/InvisOn/roc/pull/5) | `fix/stale-check-exclusions` | `80360119bf` | `73df27a5bb` | Draft 26. Not part of the plan. |
 | [#6](https://github.com/InvisOn/roc/pull/6) | `fix/list-get-unsafe-i128-index` | `36e90a6776` | `73df27a5bb` | Draft 14 (filed as 12532). Not part of the plan. Conflicts with upstream. |
@@ -156,7 +156,9 @@ oracle now deletes the old file and has `--apply-a0-to-merged` for PR
 branches. Step 6 ran it on the whole branch (`629c3e0e2d` against
 `0d8048aee4`); the result is in `rfcs/part-01-dispatch-isa/step-6-word-size.md`.
 Step 7 ran it on the rebased branch three times, all PASS: twice on
-`8e9e512e0f` and once on `15e8146634` (after the `exit_group` change),
+`8e9e512e0f` and once on `15e8146634` (after the `exit_group` change;
+the same content as the pushed head `1bc3981a38`, which only rewords a
+commit message),
 each against `26436de489`; the results are in
 `rfcs/part-01-dispatch-isa/step-7-checks.md`.
 
@@ -198,12 +200,15 @@ From step 6 on, each step also gets a planning doc made from
    `step-6-word-size.md`, with the decisions made along the way, the
    word-sized sites left for part 3, and the arm32 tests that must cover
    step 6's sites before the 8-byte assert is lifted (part 6).
-7. **Check** (see below). Run #8's flush on the Pi 5 too. It has only run
-   on x86_64, which never needs a flush. Step 7 ends by force-pushing #9
-   with the rebased branch, then closing #8 and #3, each with a comment
-   linking its commit in #9 (decided 2026-10-26).
-8. **Update #9's description.** Change section, the plan table
-   (`plan_table.py`), "How the code flows", "How to test".
+7. **Check.** Done 2026-10-27 (`rfcs/part-01-dispatch-isa/step-7-checks.md`):
+   the full set, minici and the oracle pass, the reference check is done,
+   and the flush passed on the Pi 5 (and step 5's 32-bit skip on the Pi 3).
+   #9 force-pushed with lease (head `1bc3981a38`); #8 and #3 closed, each
+   with a comment linking its commit in #9.
+8. **Update #9's title and description.** Change section, the plan table
+   (`plan_table.py`), "How the code flows", "How to test". In progress: the
+   draft is `rfcs/part-01-dispatch-isa/step-8-pr9-description.md`; title
+   "Prepare the dev backend's shared driver for 32-bit ARM (1 of 3)".
 9. **Review #9 again** for the new diff, and add a dated entry to
    `pr-review.md`.
 
@@ -229,7 +234,7 @@ one's "How to test".
   7 at upstream `26436de489`; the reference recorded the same in
   `projects/big/arm32-dev-backend-issues.md` and built ReleaseFast or
   ReleaseSafe runners instead, as step 7 now does (ReleaseSafe). Matters
-  for parts 6 and 11, where a Debug runner on the device would give the
+  for parts 6 and 13, where a Debug runner on the device would give the
   best diagnostics. Things to look at: function sections (so the linker
   can place thunks between functions), Thumb-2, building the runner
   without LLVM for a device run, and what upstream's cross-compile CI
@@ -253,7 +258,9 @@ one's "How to test".
   a single-precision FPU at most (often none, so soft-float calls), no
   MMU or OS (bare metal or an RTOS, so no JIT memory and no Linux
   syscalls), and kilobytes to a few megabytes of memory. Plan it as its
-  own track once the Cortex-A parts are merged.
+  own track once the Cortex-A parts are merged. Thumb itself is now in the
+  plan (parts 10 and 11, decided 2026-10-27), so the Cortex-M track builds
+  on it; ARMv6-M's smaller Thumb subset is still extra work.
 - **Which A2 commits make up word size (1 of 3).** Decided 2026-10-25:
   option 1, done in fold step 6 (see above and its write-up; `word_size`
   below became upstream's `target_ptr_size`, and the structural equality

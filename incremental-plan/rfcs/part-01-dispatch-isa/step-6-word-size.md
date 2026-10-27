@@ -220,7 +220,8 @@ Part 1 can't run code at a 4-byte word, so nothing here catches a site
 that goes back to `.w64`: on 64-bit targets `word` is `.w64`. The guard is
 arm32 tests that exercise each kind of site, running in CI. They become
 possible once arm32 programs build (parts 6 and 7) and run in CI from
-part 10. The 8-byte assert may only be lifted together with tests that
+part 12 (part 10 before the 2026-10-27 renumbering). The 8-byte assert
+may only be lifted together with tests that
 cover every row:
 
 | Kind of site in step 6 | Example | Test that must cover it |
