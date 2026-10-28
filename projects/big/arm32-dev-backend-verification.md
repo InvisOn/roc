@@ -1725,3 +1725,14 @@ first added this appendix, made between the two rewrites).
   Raspberry Pi 5 and on the Pi 3. The int app as arm32musl and arm32linux
   on the Pi 3 prints x64musl's 54 lines. Logs:
   `.git/verify-tools/upstream-sync/8921d694c0/`.
+- 2026-10-28, merge `996a7bcc31` of upstream `main` at `bad769be8e`. No
+  conflicts. Upstream's work here is in the type checker (hidden infinite
+  types) and in `src/static_data.zig` (the alignment of the static data
+  blob). Checks at `996a7bcc31`: the arm32 eval corpus under qemu gives
+  2593 passed, 0 failed, 47 with a backend skipped. Host effects 106/106.
+  `test/fx` 134/134 under qemu. Relative 64-bit oracle PASS. Minici under
+  the 20 GiB cap: 98 passed, 1 skipped, then
+  `run-test-strategy-differential` alone with `--threads 8` passed (peak
+  15.0 GiB). `test/fx` 134/134 on the Raspberry Pi 5 and on the Pi 3. The
+  int app as arm32musl and arm32linux on the Pi 3 prints x64musl's 54
+  lines. Logs: `.git/verify-tools/upstream-sync/bad769be8e/`.
