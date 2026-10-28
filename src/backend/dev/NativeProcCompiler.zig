@@ -171,7 +171,7 @@ fn Job(comptime CG: type) type {
                 source.erased_arg_desc_params,
                 source.boxy_worker_procs,
                 source.erased_capture_prefix,
-                source.cpu_level,
+                source.codegen.cpu_level,
             );
             defer cg.deinit();
             cg.borrowStackPlanIndexes(try laneStackPlanIndexes(worker));

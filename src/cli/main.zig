@@ -711,7 +711,9 @@ const EmbeddedTargetObjects = struct {
     };
 
     fn cross(comptime target: RocTarget, comptime default_platform: DefaultPlatform) EmbeddedTargetObjects {
-        const name = @tagName(target);
+        // arm32linux's objects are built for the glibc ABI, under the name
+        // `build.zig` gives them.
+        const name = if (target == .arm32linux) "arm32glibc" else @tagName(target);
         const dir = "targets/" ++ name ++ "/";
         const ext = if (target.isWindows()) ".obj" else ".o";
         var objects: EmbeddedTargetObjects = .{
@@ -778,6 +780,7 @@ const EmbeddedTargetObjects = struct {
             .arm64mingw,
             .x64openbsd,
             => |target| comptime cross(target, .runtime),
+            inline .arm32musl, .arm32linux => |target| comptime cross(target, .runtime_and_compiler_rt),
             .wasm32 => comptime cross(.wasm32, .none),
             .x64linux => comptime linuxAlias(cross(.x64glibc, .runtime_and_compiler_rt)),
             .arm64linux => comptime linuxAlias(cross(.arm64glibc, .runtime_and_compiler_rt)),
@@ -797,8 +800,6 @@ const EmbeddedTargetObjects = struct {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
             .wasm32v1,
             => native,
         };
@@ -2294,6 +2295,8 @@ fn entrypointAbiDigestFromLirData(
         layout.abi.aarch64Target(target.toOsTag())
     else if (cpu_arch == .x86_64)
         if (target.toOsTag() == .windows) .x86_64_windows else .x86_64_sysv
+    else if (cpu_arch == .arm)
+        .arm32
     else if (cpu_arch == .wasm32)
         .wasm32
     else
@@ -10975,6 +10978,7 @@ fn llvmOptimizationLevel(opt: cli_args.OptLevel) builder.OptimizationLevel {
 fn devBackendPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
     if (target_arch == .x86_64) return "x64 Backend";
     if (target_arch == .aarch64) return "arm64 Backend";
+    if (target_arch == .arm) return "arm32 Backend";
     if (target_arch == .wasm32) return "wasm32 Bytecode Generation";
     base.invariant(
         "dev code-generation timing invariant violated: unsupported architecture {s}",
@@ -10985,6 +10989,7 @@ fn devBackendPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
 fn devInstructionGenerationPhaseName(target_arch: std.Target.Cpu.Arch) []const u8 {
     if (target_arch == .x86_64) return "x64 Instruction Generation";
     if (target_arch == .aarch64) return "arm64 Instruction Generation";
+    if (target_arch == .arm) return "arm32 Instruction Generation";
     if (target_arch == .wasm32) return "wasm32 Bytecode Generation";
     return devBackendPhaseName(target_arch);
 }
@@ -11037,6 +11042,8 @@ test "dev backend timing labels name the backend and emitted instruction format"
     try std.testing.expectEqualStrings("wasm32 Bytecode Generation", devBackendPhaseName(.wasm32));
     try std.testing.expectEqualStrings("x64 Instruction Generation", devInstructionGenerationPhaseName(.x86_64));
     try std.testing.expectEqualStrings("arm64 Instruction Generation", devInstructionGenerationPhaseName(.aarch64));
+    try std.testing.expectEqualStrings("arm32 Backend", devBackendPhaseName(.arm));
+    try std.testing.expectEqualStrings("arm32 Instruction Generation", devInstructionGenerationPhaseName(.arm));
 }
 
 fn noTargetLibcallsForLlvmBuild(target: RocTarget) bool {
@@ -11909,7 +11916,7 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
         return error.UnsupportedCrossCompilation;
     }
 
-    if (target_arch != .x86_64 and target_arch != .aarch64 and target_arch != .wasm32) {
+    if (target_arch != .wasm32 and !backend.devSupportsTarget(target)) {
         try ctx.io.stderr().print(
             "Error: The native object backend does not support the '{s}' architecture.\n",
             .{@tagName(target_arch)},
@@ -12018,7 +12025,8 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
     const build_scratch_dir = createUniqueTempDir(ctx) catch |err| {
         return ctx.fail(.{ .temp_dir_failed = .{ .err = err } });
     };
-    defer compile.CacheCleanup.deleteTempDir(ctx.io.std_io, build_scratch_dir);
+    if (args.keep_temp) try reportKeptTempDir(ctx, build_scratch_dir);
+    defer if (!args.keep_temp) compile.CacheCleanup.deleteTempDir(ctx.io.std_io, build_scratch_dir);
     var link_objects = link_artifacts.Objects.init(ctx.coreCtx(), ctx.arena, if (object_store) |store| store.root else null, build_scratch_dir) catch return error.NativeCompilationFailed;
     defer link_objects.deinit();
     var program_probe: ?ProgramOutputProbe = null;
@@ -19039,6 +19047,7 @@ fn handleProcessFileError(err: ProcessFileError, stderr: anytype, path: []const 
         error.FileNotFound,
         error.FileSystem,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.InputOutput,
         error.InvalidBatchScriptArg,
         error.InvalidExe,
@@ -19198,6 +19207,7 @@ fn requireReportableCheckFailure(err: CheckFileWithBuildEnvPreservedError) error
         error.FileNotFound,
         error.FileSystem,
         error.FileTooBig,
+        error.FlushInstructionCacheFailed,
         error.InputOutput,
         error.Internal,
         error.InvalidDependency,

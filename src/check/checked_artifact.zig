@@ -647,6 +647,7 @@ pub const CompileTimeFinalizer = struct {
         EmptyCode,
         MmapFailed,
         MprotectFailed,
+        FlushInstructionCacheFailed,
         UnsupportedPlatform,
         UnwindRegistrationFailed,
         VirtualAllocFailed,

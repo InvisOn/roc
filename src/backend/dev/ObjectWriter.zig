@@ -103,12 +103,12 @@ pub fn generateIndexedObjectFileWithDebug(
 
     switch (roc_target.classifyOs(os_tag)) {
         .linux, .freebsd, .openbsd, .netbsd => {
-            const elf_arch: object.elf.Architecture = if (cpu_arch == .x86_64)
-                .x86_64
-            else if (cpu_arch == .aarch64)
-                .aarch64
-            else
-                return error.UnsupportedTarget;
+            const elf_arch: object.elf.Architecture = switch (roc_target.classifyCpuArch(cpu_arch)) {
+                .x86_64 => .x86_64,
+                .aarch64 => .aarch64,
+                .arm => .arm,
+                .aarch64_be, .wasm32, .other => return error.UnsupportedTarget,
+            };
             var elf = try object.ElfWriter.init(allocator, elf_arch, elfOsabi(os_tag));
             defer elf.deinit();
 

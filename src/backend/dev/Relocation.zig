@@ -4,6 +4,7 @@
 //! patched during linking to refer to the correct addresses.
 
 const std = @import("std");
+const Isa = @import("isa.zig").Isa;
 
 /// Producer-selected encoding of a linked function call.
 pub const FunctionRelocationKind = enum(u8) {
@@ -13,6 +14,9 @@ pub const FunctionRelocationKind = enum(u8) {
     /// Offset names the BL instruction. Its signed 26-bit immediate counts
     /// four-byte words relative to the instruction address.
     aarch64_call26,
+    /// Offset names the A32 BL instruction. Its signed 24-bit immediate
+    /// counts four-byte words relative to the instruction address plus 8.
+    arm32_call24,
 };
 
 /// Machine encoding used for a data-address relocation in generated code.
@@ -21,6 +25,25 @@ pub const DataRelocationKind = enum {
     rel32,
     page21,
     pageoff12,
+    /// A 32-bit absolute address (arm32 pointer-sized data).
+    abs32,
+    /// The low half of an arm32 `movw`/`movt`/`add rX, pc, rX` address
+    /// sequence: `movw` at the relocation offset, whose value is
+    /// S - (P + 16) because the `add` reads PC as its own address + 8.
+    arm_movw_prel,
+    /// The high half of that sequence: `movt` at the relocation offset, four
+    /// bytes after the `movw`, so its value is (S - (P + 12)) >> 16.
+    arm_movt_prel,
+
+    /// The addend a PC-relative arm32 `movw`/`movt` relocation carries, from
+    /// the position of its instruction within the address sequence.
+    pub fn armMovAddend(self: DataRelocationKind) i32 {
+        return switch (self) {
+            .arm_movw_prel => -16,
+            .arm_movt_prel => -12,
+            .abs64, .rel32, .page21, .pageoff12, .abs32 => unreachable, // called only for arm_movw_prel and arm_movt_prel, from patchArmMovPrel and the matching ELF prongs
+        };
+    }
 };
 
 /// A number the Boxy runtime reads its sidecar tables by, loaded into a
@@ -137,6 +160,7 @@ pub const ApplyRelocationsError = error{
 /// For x86_64 call instructions, this patches the 4-byte relative offset
 /// after the E8 opcode.
 pub fn applyRelocations(
+    comptime isa: Isa,
     code: []u8,
     code_base_addr: usize,
     relocations: []const Relocation,
@@ -152,11 +176,14 @@ pub fn applyRelocations(
     };
 
     const box = ResolverBox{ .resolver = resolver };
-    return applyRelocationsWithContext(code, code_base_addr, relocations, &box, ResolverBox.resolve);
+    return applyRelocationsWithContext(isa, code, code_base_addr, relocations, &box, ResolverBox.resolve);
 }
 
 /// Apply relocations using a resolver that receives explicit caller context.
+/// `isa` is the instruction set `code` was generated for; it decides how each
+/// relocation site is encoded.
 pub fn applyRelocationsWithContext(
+    comptime isa: Isa,
     code: []u8,
     code_base_addr: usize,
     relocations: []const Relocation,
@@ -182,7 +209,11 @@ pub fn applyRelocationsWithContext(
                 // referenced bytes must outlive that code—the caller owns
                 // that lifetime.
                 const target_addr = @intFromPtr(local_reloc.data.ptr);
-                try patchLinkedDataRelocation(code, code_base_addr, local_reloc.offset, target_addr, .abs64);
+                const pointer_kind: DataRelocationKind = switch (isa) {
+                    .x86_64, .aarch64 => .abs64,
+                    .arm32 => .abs32,
+                };
+                try patchLinkedDataRelocation(code, code_base_addr, local_reloc.offset, target_addr, pointer_kind);
             },
         }
     }
@@ -196,7 +227,22 @@ fn patchLinkedFunctionRelocation(code: []u8, code_base_addr: usize, reloc_offset
             return patchX86Rel32Operand(code, reloc_offset, code_base_addr + reloc_offset + 4, target_addr);
         },
         .aarch64_call26 => return patchAarch64Call26(code, reloc_offset, code_base_addr + reloc_offset, target_addr),
+        .arm32_call24 => return patchArm32Call24(code, reloc_offset, code_base_addr + reloc_offset, target_addr),
     }
+}
+
+/// Point an A32 `bl` at `target_addr`. The 24-bit word displacement is
+/// relative to the instruction's address plus 8 (the A32 PC offset).
+fn patchArm32Call24(code: []u8, inst_offset: usize, inst_addr: usize, target_addr: usize) ApplyRelocationsError!void {
+    if (inst_offset + 4 > code.len) return error.InvalidOffset;
+    const inst = std.mem.readInt(u32, code[inst_offset..][0..4], .little);
+    std.debug.assert((inst & 0x0F00_0000) == 0x0B00_0000);
+    const rel_bytes = @as(i128, @intCast(target_addr)) - (@as(i128, @intCast(inst_addr)) + 8);
+    if ((rel_bytes & 0b11) != 0) return error.MisalignedBranchTarget;
+    const rel_words = rel_bytes >> 2;
+    if (!fitsSignedBits(rel_words, 24)) return error.BranchOutOfRange;
+    const imm24: u24 = @bitCast(@as(i24, @intCast(rel_words)));
+    std.mem.writeInt(u32, code[inst_offset..][0..4], (inst & 0xFF00_0000) | imm24, .little);
 }
 
 fn patchLinkedDataRelocation(
@@ -216,7 +262,33 @@ fn patchLinkedDataRelocation(
         },
         .page21 => return patchAarch64AdrpRelocation(code, reloc_offset, code_base_addr + reloc_offset, target_addr),
         .pageoff12 => return patchAarch64PageOffset12Relocation(code, reloc_offset, target_addr),
+        .abs32 => return patchAbsolute32Operand(code, reloc_offset, target_addr),
+        .arm_movw_prel, .arm_movt_prel => return patchArmMovPrel(code, reloc_offset, code_base_addr + reloc_offset, target_addr, kind),
     }
+}
+
+fn patchAbsolute32Operand(code: []u8, operand_offset: usize, target_addr: usize) ApplyRelocationsError!void {
+    if (operand_offset + 4 > code.len) return error.InvalidOffset;
+    if (target_addr > std.math.maxInt(u32)) return error.BranchOutOfRange;
+    std.mem.writeInt(u32, code[operand_offset..][0..4], @intCast(target_addr), .little);
+}
+
+/// Resolve one instruction of an arm32 PC-relative `movw`/`movt` address
+/// sequence: write the relevant 16 bits of S + A - P into its imm4:imm12
+/// fields (bits 19:16 and 11:0).
+fn patchArmMovPrel(code: []u8, inst_offset: usize, inst_addr: usize, target_addr: usize, kind: DataRelocationKind) ApplyRelocationsError!void {
+    if (inst_offset + 4 > code.len) return error.InvalidOffset;
+    const value = @as(i128, @intCast(target_addr)) + kind.armMovAddend() - @as(i128, @intCast(inst_addr));
+    if (!fitsSignedBits(value, 32)) return error.BranchOutOfRange;
+    const bits: u32 = @bitCast(@as(i32, @intCast(value)));
+    const imm16: u32 = switch (kind) {
+        .arm_movw_prel => bits & 0xFFFF,
+        .arm_movt_prel => bits >> 16,
+        .abs64, .rel32, .page21, .pageoff12, .abs32 => unreachable, // patchLinkedDataRelocation calls this only for arm_movw_prel and arm_movt_prel
+    };
+    var inst = std.mem.readInt(u32, code[inst_offset..][0..4], .little);
+    inst = (inst & 0xFFF0F000) | ((imm16 >> 12) << 16) | (imm16 & 0xFFF);
+    std.mem.writeInt(u32, code[inst_offset..][0..4], inst, .little);
 }
 
 fn patchX86Rel32Operand(code: []u8, operand_offset: usize, next_instr_addr: usize, target_addr: usize) ApplyRelocationsError!void {
@@ -367,7 +439,7 @@ test "applyRelocations patches x86_64 linked_function call" {
         .{ .linked_function = .{ .offset = 1, .name = "callee", .kind = .x86_call_rel32 } },
     };
 
-    try applyRelocations(&code, code_base, &relocs, resolver);
+    try applyRelocations(.x86_64, &code, code_base, &relocs, resolver);
 
     const patched = std.mem.readInt(i32, code[1..5], .little);
     try std.testing.expectEqual(@as(i32, 27), patched); // 0x1020 - (0x1000 + 5)
@@ -389,11 +461,32 @@ test "applyRelocations patches aarch64 linked_function bl" {
         .{ .linked_function = .{ .offset = 0, .name = "callee", .kind = .aarch64_call26 } },
     };
 
-    try applyRelocations(&code, code_base, &relocs, resolver);
+    try applyRelocations(.aarch64, &code, code_base, &relocs, resolver);
 
     const inst = std.mem.readInt(u32, &code, .little);
     try std.testing.expectEqual(@as(u32, 0b100101), inst >> 26);
     try std.testing.expectEqual(@as(u32, 4), inst & 0x03FF_FFFF); // 16-byte delta / 4
+}
+
+test "applyRelocations patches arm32 linked_function bl" {
+    // bl #0 at 0x1000, target 0x2008: displacement (0x2008 - 0x1008) / 4.
+    var code = [_]u8{ 0xFE, 0xFF, 0xFF, 0xEB };
+    const relocs = [_]Relocation{.{ .linked_function = .{ .offset = 0, .name = "target", .kind = .arm32_call24 } }};
+    const resolver = struct {
+        fn resolve(name: []const u8) ?usize {
+            return if (std.mem.eql(u8, name, "target")) 0x2008 else null;
+        }
+    }.resolve;
+    try applyRelocations(.arm32, &code, 0x1000, &relocs, resolver);
+    try std.testing.expectEqual(@as(u32, 0xEB00_0400), std.mem.readInt(u32, &code, .little));
+    // A backward target encodes a negative displacement.
+    const back = struct {
+        fn resolve(_: []const u8) ?usize {
+            return 0x0800;
+        }
+    }.resolve;
+    try applyRelocations(.arm32, &code, 0x1000, &relocs, back);
+    try std.testing.expectEqual(@as(u32, 0xEBFF_FDFE), std.mem.readInt(u32, &code, .little));
 }
 
 test "applyRelocations patches linked_data absolute pointer operand" {
@@ -411,7 +504,7 @@ test "applyRelocations patches linked_data absolute pointer operand" {
         .{ .linked_data = .{ .offset = 4, .name = "global_data" } },
     };
 
-    try applyRelocations(&code, 0, &relocs, resolver);
+    try applyRelocations(.x86_64, &code, 0, &relocs, resolver);
     try std.testing.expectEqual(target_addr, readPointerFromCode(code[4..]));
 }
 
@@ -423,7 +516,7 @@ test "applyRelocations patches local_data pointer and stores bytes" {
         .{ .local_data = .{ .offset = 0, .data = &bytes } },
     };
 
-    try applyRelocations(&code, 0, &relocs, testNullResolver);
+    try applyRelocations(.x86_64, &code, 0, &relocs, testNullResolver);
 
     const ptr_value = readPointerFromCode(code[0..]);
     try std.testing.expect(ptr_value != 0);
@@ -456,4 +549,29 @@ test "aarch64 signed branch and page displacements preserve exact units" {
     }
     std.mem.writeInt(u32, &code, 0x90000000, .little);
     try std.testing.expectError(error.BranchOutOfRange, patchAarch64AdrpRelocation(&code, 0, 0, 0x100000000));
+}
+
+test "arm32 movw/movt PC-relative relocations resolve the address sequence" {
+    // movw r4, #0; movt r4, #0; add r4, pc, r4
+    var code = [_]u8{
+        0x00, 0x40, 0x00, 0xE3,
+        0x00, 0x40, 0x40, 0xE3,
+        0x04, 0x40, 0x8F, 0xE0,
+    };
+    const base: usize = 0x10000;
+    const target: usize = 0x2345678;
+    try patchLinkedDataRelocation(&code, base, 0, target, .arm_movw_prel);
+    try patchLinkedDataRelocation(&code, base, 4, target, .arm_movt_prel);
+    const movw = std.mem.readInt(u32, code[0..4], .little);
+    const movt = std.mem.readInt(u32, code[4..8], .little);
+    const lo = ((movw >> 4) & 0xF000) | (movw & 0xFFF);
+    const hi = ((movt >> 4) & 0xF000) | (movt & 0xFFF);
+    // The add at base+8 reads PC as base+16; r4 must end up as the target.
+    try std.testing.expectEqual(@as(u32, @intCast(target - (base + 16))), (hi << 16) | lo);
+}
+
+test "arm32 abs32 relocation writes a 32-bit address" {
+    var code: [4]u8 = @splat(0);
+    try patchLinkedDataRelocation(&code, 0, 0, 0x89ABCDEF, .abs32);
+    try std.testing.expectEqual(@as(u32, 0x89ABCDEF), std.mem.readInt(u32, &code, .little));
 }

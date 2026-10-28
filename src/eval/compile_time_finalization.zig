@@ -3901,7 +3901,7 @@ fn reportLiteralRootExpectFailure(
 
 /// Compile-time evaluation runs natively only where this compiler has a
 /// native code generator for its own host and can execute what it emits; on
-/// any other host (freestanding, wasm32, 32-bit ARM or x86) the interpreter
+/// any other host (freestanding, wasm32 or 32-bit x86) the interpreter
 /// evaluates at the host's width, and a target of another width receives the
 /// completed values re-encoded at its own layouts.
 fn compilerHostMustUseInterpreterForCtfe() bool {

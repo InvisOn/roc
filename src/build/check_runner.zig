@@ -210,13 +210,13 @@ const CheckTypeCheckerPatternsStep = struct {
         .{ .file = "cir_to_lir.zig", .start = 110, .end = 115 },
         // inspected.zig resolves a type module's import statement from the caller's
         // module name, which arrives as text from outside this module's ident store.
-        .{ .file = "inspected.zig", .start = 226, .end = 232 },
+        .{ .file = "inspected.zig", .start = 227, .end = 233 },
         // inspected.zig trims the trailing newline off a rendered report. This is
         // presentation text on its way out, not a type-checker comparison.
-        .{ .file = "inspected.zig", .start = 2474, .end = 2474 },
+        .{ .file = "inspected.zig", .start = 2475, .end = 2475 },
         // inspected.zig converts a NUL-terminated dylib path from the linker into a
         // slice. Path bytes, not identifiers.
-        .{ .file = "inspected.zig", .start = 3264, .end = 3275 },
+        .{ .file = "inspected.zig", .start = 3265, .end = 3276 },
         // inspected_run.zig dispatches on a hosted function's ABI symbol, which is
         // matched by name at the host boundary and has no Ident.Idx.
         .{ .file = "inspected_run.zig", .start = 109, .end = 109 },
@@ -297,8 +297,8 @@ const CheckEnumFromIntZeroStep = struct {
 
         if (violations.items.len > 0) {
             printViolationReport(
-                "FORBIDDEN PATTERN: @fromBackingInt(0) or @enumFromInt(0)",
-                \\Using @fromBackingInt(0) or its legacy spelling @enumFromInt(0) is forbidden.
+                "FORBIDDEN PATTERN: @fromBackingInt(0) or @fromBackingInt(0)",
+                \\Using @fromBackingInt(0) or its legacy spelling @fromBackingInt(0) is forbidden.
                 \\
                 \\WHY THIS RULE EXISTS:
                 \\  Converting zero into an enum hides bugs and makes them harder to debug. It creates
@@ -327,7 +327,7 @@ const CheckEnumFromIntZeroStep = struct {
 
             return fail(
                 "Found {d} zero integer to enum conversions. Using placeholder values like this has consistently led to bugs in this code base. " ++
-                    "Do not use @fromBackingInt(0) or @enumFromInt(0), and do not uncritically replace it with another placeholder like .first. " ++
+                    "Do not use @fromBackingInt(0) or @fromBackingInt(0), and do not uncritically replace it with another placeholder like .first. " ++
                     "If you want it to be uninitialized and are very confident it will be overwritten before it is ever read, then use `undefined`. " ++
                     "Otherwise, take a step back and rethink how this code works; there should be a way to implement this in a way that does not use hardcoded placeholder indices like 0! " ++
                     "See above for details.",

@@ -166,10 +166,35 @@ static inline uint8_t* roc_erased_callable_capture_ptr(RocErasedCallable callabl
 
 // Reflected Roc Types
 
+typedef struct AnonStruct1bb74c73afb8adcb AnonStruct1bb74c73afb8adcb;
 typedef struct Builder Builder;
 typedef struct HostTree HostTree;
 typedef struct Host Host;
 typedef struct Padded Padded;
+
+#if UINTPTR_MAX == UINT64_MAX
+struct AnonStruct1bb74c73afb8adcb {
+    int32_t a;
+    int32_t b;
+    int32_t c;
+};
+ROC_STATIC_ASSERT(sizeof(AnonStruct1bb74c73afb8adcb) == 12, "AnonStruct1bb74c73afb8adcb size mismatch");
+ROC_STATIC_ASSERT(ROC_ALIGNOF(AnonStruct1bb74c73afb8adcb) == 4, "AnonStruct1bb74c73afb8adcb alignment mismatch");
+ROC_STATIC_ASSERT(offsetof(AnonStruct1bb74c73afb8adcb, a) == 0, "AnonStruct1bb74c73afb8adcb.a offset mismatch");
+ROC_STATIC_ASSERT(offsetof(AnonStruct1bb74c73afb8adcb, b) == 4, "AnonStruct1bb74c73afb8adcb.b offset mismatch");
+ROC_STATIC_ASSERT(offsetof(AnonStruct1bb74c73afb8adcb, c) == 8, "AnonStruct1bb74c73afb8adcb.c offset mismatch");
+#else
+struct AnonStruct1bb74c73afb8adcb {
+    int32_t a;
+    int32_t b;
+    int32_t c;
+};
+ROC_STATIC_ASSERT(sizeof(AnonStruct1bb74c73afb8adcb) == 12, "AnonStruct1bb74c73afb8adcb size mismatch");
+ROC_STATIC_ASSERT(ROC_ALIGNOF(AnonStruct1bb74c73afb8adcb) == 4, "AnonStruct1bb74c73afb8adcb alignment mismatch");
+ROC_STATIC_ASSERT(offsetof(AnonStruct1bb74c73afb8adcb, a) == 0, "AnonStruct1bb74c73afb8adcb.a offset mismatch");
+ROC_STATIC_ASSERT(offsetof(AnonStruct1bb74c73afb8adcb, b) == 4, "AnonStruct1bb74c73afb8adcb.b offset mismatch");
+ROC_STATIC_ASSERT(offsetof(AnonStruct1bb74c73afb8adcb, c) == 8, "AnonStruct1bb74c73afb8adcb.c offset mismatch");
+#endif
 
 #if UINTPTR_MAX == UINT64_MAX
 struct Builder {
@@ -320,6 +345,8 @@ ROC_STATIC_ASSERT(offsetof(Padded, a) == 8, "Padded.a offset mismatch");
 
 // Platform Type Aliases
 
+typedef AnonStruct1bb74c73afb8adcb AbiTripleFrom;
+typedef AnonStruct1bb74c73afb8adcb AbiTwoI32TripleArg2;
 typedef HostTree HostTreeNode;
 
 // Hosted Function Infrastructure
@@ -331,34 +358,130 @@ typedef void (*HostedFn)(void);
 
 // Hosted Function Count
 
-#define HOSTED_FUNCTION_COUNT 22
+#define HOSTED_FUNCTION_COUNT 30
 
 
-#define HOSTED_IDX_BUILDER_PRINT_VALUE 0
-#define HOSTED_IDX_HOST_BOXED_ADD 1
-#define HOSTED_IDX_HOST_BOXED_DROP_REPORT 2
-#define HOSTED_IDX_HOST_BOXED_NESTED_RECORD 3
-#define HOSTED_IDX_HOST_BOXED_RECURSIVE_TREE 4
-#define HOSTED_IDX_HOST_BOXED_WITH_BOXED_CAPTURE 5
-#define HOSTED_IDX_HOST_CALL_BOXED 6
-#define HOSTED_IDX_HOST_CALL_BOXED_TRANSITION 7
-#define HOSTED_IDX_HOST_GET_GREETING 8
-#define HOSTED_IDX_HOST_RELEASE_STORED_BOXED 9
-#define HOSTED_IDX_HOST_RESET_BOXED_DROP_REPORT 10
-#define HOSTED_IDX_HOST_ROUNDTRIP_BOXED 11
-#define HOSTED_IDX_HOST_BOXED_TRANSITION 12
-#define HOSTED_IDX_HOST_STORE_BOXED 13
-#define HOSTED_IDX_HOST_STORE_SEED 14
-#define HOSTED_IDX_HOST_TAKE_SEED 15
-#define HOSTED_IDX_HOST_STORED_BOXED_CALL 16
-#define HOSTED_IDX_HOST_SUM_STR_BYTES 17
-#define HOSTED_IDX_PADDED_CHECK 18
-#define HOSTED_IDX_STDERR_LINE 19
-#define HOSTED_IDX_STDIN_LINE 20
-#define HOSTED_IDX_STDOUT_LINE 21
+#define HOSTED_IDX_ABI_F64_BITS 0
+#define HOSTED_IDX_ABI_F64_F32_F64 1
+#define HOSTED_IDX_ABI_F64_FROM_BITS 2
+#define HOSTED_IDX_ABI_I32_I64 3
+#define HOSTED_IDX_ABI_NINE_F64 4
+#define HOSTED_IDX_ABI_THREE_I32_I64 5
+#define HOSTED_IDX_ABI_TRIPLE_FROM 6
+#define HOSTED_IDX_ABI_TWO_I32_TRIPLE 7
+#define HOSTED_IDX_BUILDER_PRINT_VALUE 8
+#define HOSTED_IDX_HOST_BOXED_ADD 9
+#define HOSTED_IDX_HOST_BOXED_DROP_REPORT 10
+#define HOSTED_IDX_HOST_BOXED_NESTED_RECORD 11
+#define HOSTED_IDX_HOST_BOXED_RECURSIVE_TREE 12
+#define HOSTED_IDX_HOST_BOXED_WITH_BOXED_CAPTURE 13
+#define HOSTED_IDX_HOST_CALL_BOXED 14
+#define HOSTED_IDX_HOST_CALL_BOXED_TRANSITION 15
+#define HOSTED_IDX_HOST_GET_GREETING 16
+#define HOSTED_IDX_HOST_RELEASE_STORED_BOXED 17
+#define HOSTED_IDX_HOST_RESET_BOXED_DROP_REPORT 18
+#define HOSTED_IDX_HOST_ROUNDTRIP_BOXED 19
+#define HOSTED_IDX_HOST_BOXED_TRANSITION 20
+#define HOSTED_IDX_HOST_STORE_BOXED 21
+#define HOSTED_IDX_HOST_STORE_SEED 22
+#define HOSTED_IDX_HOST_TAKE_SEED 23
+#define HOSTED_IDX_HOST_STORED_BOXED_CALL 24
+#define HOSTED_IDX_HOST_SUM_STR_BYTES 25
+#define HOSTED_IDX_PADDED_CHECK 26
+#define HOSTED_IDX_STDERR_LINE 27
+#define HOSTED_IDX_STDIN_LINE 28
+#define HOSTED_IDX_STDOUT_LINE 29
 
 // Argument Structures
 
+
+/**
+ * Arguments for Abi.f64_bits!
+ * Roc signature: F64 => I64
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    double arg0;
+} AbiF64BitsArgs;
+
+/**
+ * Arguments for Abi.f64_f32_f64!
+ * Roc signature: F64, F32, F64 => F64
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    double arg0;
+    float arg1;
+    double arg2;
+} AbiF64F32F64Args;
+
+/**
+ * Arguments for Abi.f64_from_bits!
+ * Roc signature: I64 => F64
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    int64_t arg0;
+} AbiF64FromBitsArgs;
+
+/**
+ * Arguments for Abi.i32_i64!
+ * Roc signature: I32, I64 => I64
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    int32_t arg0;
+    int64_t arg1;
+} AbiI32I64Args;
+
+/**
+ * Arguments for Abi.nine_f64!
+ * Roc signature: F64, F64, F64, F64, F64, F64, F64, F64, F64 => F64
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    double arg0;
+    double arg1;
+    double arg2;
+    double arg3;
+    double arg4;
+    double arg5;
+    double arg6;
+    double arg7;
+    double arg8;
+} AbiNineF64Args;
+
+/**
+ * Arguments for Abi.three_i32_i64!
+ * Roc signature: I32, I32, I32, I64 => I64
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    int32_t arg0;
+    int32_t arg1;
+    int32_t arg2;
+    int64_t arg3;
+} AbiThreeI32I64Args;
+
+/**
+ * Arguments for Abi.triple_from!
+ * Roc signature: I32 => { a : I32, b : I32, c : I32 }
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    int32_t arg0;
+} AbiTripleFromArgs;
+
+/**
+ * Arguments for Abi.two_i32_triple!
+ * Roc signature: I32, I32, { a : I32, b : I32, c : I32 } => I64
+ * Refcounted fields are owned by the hosted function.
+ */
+typedef struct {
+    int32_t arg0;
+    int32_t arg1;
+    AnonStruct1bb74c73afb8adcb arg2;
+} AbiTwoI32TripleArgs;
 
 /**
  * Arguments for Builder.print_value!
@@ -575,6 +698,30 @@ void roc_crashed(const uint8_t* bytes, size_t len);
 
 // Hosted Symbols
 
+/* Abi.f64_bits!: F64 => I64 */
+extern int64_t roc_abi_f64_bits(double arg0);
+
+/* Abi.f64_f32_f64!: F64, F32, F64 => F64 */
+extern double roc_abi_f64_f32_f64(double arg0, float arg1, double arg2);
+
+/* Abi.f64_from_bits!: I64 => F64 */
+extern double roc_abi_f64_from_bits(int64_t arg0);
+
+/* Abi.i32_i64!: I32, I64 => I64 */
+extern int64_t roc_abi_i32_i64(int32_t arg0, int64_t arg1);
+
+/* Abi.nine_f64!: F64, F64, F64, F64, F64, F64, F64, F64, F64 => F64 */
+extern double roc_abi_nine_f64(double arg0, double arg1, double arg2, double arg3, double arg4, double arg5, double arg6, double arg7, double arg8);
+
+/* Abi.three_i32_i64!: I32, I32, I32, I64 => I64 */
+extern int64_t roc_abi_three_i32_i64(int32_t arg0, int32_t arg1, int32_t arg2, int64_t arg3);
+
+/* Abi.triple_from!: I32 => { a : I32, b : I32, c : I32 } */
+extern AnonStruct1bb74c73afb8adcb roc_abi_triple_from(int32_t arg0);
+
+/* Abi.two_i32_triple!: I32, I32, { a : I32, b : I32, c : I32 } => I64 */
+extern int64_t roc_abi_two_i32_triple(int32_t arg0, int32_t arg1, AnonStruct1bb74c73afb8adcb arg2);
+
 /* Builder.print_value!: Builder => {} */
 extern void roc_builder_print_value(Builder arg0);
 
@@ -655,28 +802,36 @@ extern void roc_main(void);
  * Store each implementation cast to HostedFn.
  */
 typedef struct {
-    HostedFn builder_print_value_bang;  /* index 0, C name: builder_print_value */
-    HostedFn host_boxed_add_bang;  /* index 1, C name: host_boxed_add */
-    HostedFn host_boxed_drop_report_bang;  /* index 2, C name: host_boxed_drop_report */
-    HostedFn host_boxed_nested_record_bang;  /* index 3, C name: host_boxed_nested_record */
-    HostedFn host_boxed_recursive_tree_bang;  /* index 4, C name: host_boxed_recursive_tree */
-    HostedFn host_boxed_with_boxed_capture_bang;  /* index 5, C name: host_boxed_with_boxed_capture */
-    HostedFn host_call_boxed_bang;  /* index 6, C name: host_call_boxed */
-    HostedFn host_call_boxed_transition_bang;  /* index 7, C name: host_call_boxed_transition */
-    HostedFn host_get_greeting_bang;  /* index 8, C name: host_get_greeting */
-    HostedFn host_release_stored_boxed_bang;  /* index 9, C name: host_release_stored_boxed */
-    HostedFn host_reset_boxed_drop_report_bang;  /* index 10, C name: host_reset_boxed_drop_report */
-    HostedFn host_roundtrip_boxed_bang;  /* index 11, C name: host_roundtrip_boxed */
-    HostedFn host_boxed_transition_bang;  /* index 12, C name: host_boxed_transition */
-    HostedFn host_store_boxed_bang;  /* index 13, C name: host_store_boxed */
-    HostedFn host_store_seed_bang;  /* index 14, C name: host_store_seed */
-    HostedFn host_take_seed_bang;  /* index 15, C name: host_take_seed */
-    HostedFn host_stored_boxed_call_bang;  /* index 16, C name: host_stored_boxed_call */
-    HostedFn host_sum_str_bytes_bang;  /* index 17, C name: host_sum_str_bytes */
-    HostedFn padded_check_bang;  /* index 18, C name: padded_check */
-    HostedFn stderr_line_bang;  /* index 19, C name: stderr_line */
-    HostedFn stdin_line_bang;  /* index 20, C name: stdin_line */
-    HostedFn stdout_line_bang;  /* index 21, C name: stdout_line */
+    HostedFn abi_f64_bits_bang;  /* index 0, C name: abi_f64_bits */
+    HostedFn abi_f64_f32_f64_bang;  /* index 1, C name: abi_f64_f32_f64 */
+    HostedFn abi_f64_from_bits_bang;  /* index 2, C name: abi_f64_from_bits */
+    HostedFn abi_i32_i64_bang;  /* index 3, C name: abi_i32_i64 */
+    HostedFn abi_nine_f64_bang;  /* index 4, C name: abi_nine_f64 */
+    HostedFn abi_three_i32_i64_bang;  /* index 5, C name: abi_three_i32_i64 */
+    HostedFn abi_triple_from_bang;  /* index 6, C name: abi_triple_from */
+    HostedFn abi_two_i32_triple_bang;  /* index 7, C name: abi_two_i32_triple */
+    HostedFn builder_print_value_bang;  /* index 8, C name: builder_print_value */
+    HostedFn host_boxed_add_bang;  /* index 9, C name: host_boxed_add */
+    HostedFn host_boxed_drop_report_bang;  /* index 10, C name: host_boxed_drop_report */
+    HostedFn host_boxed_nested_record_bang;  /* index 11, C name: host_boxed_nested_record */
+    HostedFn host_boxed_recursive_tree_bang;  /* index 12, C name: host_boxed_recursive_tree */
+    HostedFn host_boxed_with_boxed_capture_bang;  /* index 13, C name: host_boxed_with_boxed_capture */
+    HostedFn host_call_boxed_bang;  /* index 14, C name: host_call_boxed */
+    HostedFn host_call_boxed_transition_bang;  /* index 15, C name: host_call_boxed_transition */
+    HostedFn host_get_greeting_bang;  /* index 16, C name: host_get_greeting */
+    HostedFn host_release_stored_boxed_bang;  /* index 17, C name: host_release_stored_boxed */
+    HostedFn host_reset_boxed_drop_report_bang;  /* index 18, C name: host_reset_boxed_drop_report */
+    HostedFn host_roundtrip_boxed_bang;  /* index 19, C name: host_roundtrip_boxed */
+    HostedFn host_boxed_transition_bang;  /* index 20, C name: host_boxed_transition */
+    HostedFn host_store_boxed_bang;  /* index 21, C name: host_store_boxed */
+    HostedFn host_store_seed_bang;  /* index 22, C name: host_store_seed */
+    HostedFn host_take_seed_bang;  /* index 23, C name: host_take_seed */
+    HostedFn host_stored_boxed_call_bang;  /* index 24, C name: host_stored_boxed_call */
+    HostedFn host_sum_str_bytes_bang;  /* index 25, C name: host_sum_str_bytes */
+    HostedFn padded_check_bang;  /* index 26, C name: padded_check */
+    HostedFn stderr_line_bang;  /* index 27, C name: stderr_line */
+    HostedFn stdin_line_bang;  /* index 28, C name: stdin_line */
+    HostedFn stdout_line_bang;  /* index 29, C name: stdout_line */
 } HostedFunctions;
 
 

@@ -7,6 +7,8 @@ const Impl = if (builtin.cpu.arch == .x86_64)
     X86_64
 else if (builtin.cpu.arch == .aarch64)
     AArch64
+else if (builtin.cpu.arch == .arm)
+    Arm
 else
     @compileError("Unsupported Linux architecture for setjmp/longjmp");
 
@@ -119,6 +121,47 @@ const AArch64 = struct {
             \\ldp d14, d15, [x0, #160]
             \\mov w0, w1
             \\ret
+        );
+    }
+
+    const setjmpFn: *const fn (*Self.JmpBuf) callconv(.c) c_int = @ptrCast(&setjmpImpl);
+    const longjmpFn: *const fn (*Self.JmpBuf, c_int) callconv(.c) noreturn = @ptrCast(&longjmpImpl);
+
+    pub inline fn setjmp(env: *Self.JmpBuf) c_int {
+        return setjmpFn(env);
+    }
+
+    pub inline fn longjmp(env: *Self.JmpBuf, val: c_int) noreturn {
+        longjmpFn(env, val);
+    }
+};
+
+const Arm = struct {
+    const Self = @This();
+
+    /// Linux AAPCS32 (hard-float) state: R4-R11, SP, LR, then D8-D15.
+    pub const JmpBuf = [26]u32;
+
+    fn setjmpImpl() callconv(.naked) void {
+        // SP cannot appear in an STM register list, so it goes through R12.
+        asm volatile (
+            \\mov r12, sp
+            \\stmia r0!, {r4-r11, r12, lr}
+            \\vstmia r0, {d8-d15}
+            \\mov r0, #0
+            \\bx lr
+        );
+    }
+
+    fn longjmpImpl() callconv(.naked) void {
+        asm volatile (
+            \\movs r2, r1
+            \\moveq r2, #1
+            \\ldmia r0!, {r4-r11, r12, lr}
+            \\vldmia r0, {d8-d15}
+            \\mov sp, r12
+            \\mov r0, r2
+            \\bx lr
         );
     }
 

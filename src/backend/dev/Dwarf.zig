@@ -15,6 +15,8 @@ const LineEntry = @import("LirCodeGen.zig").LineEntry;
 /// One field inside a debug section that must be relocated to another object
 /// section plus an explicit addend.
 pub const Reloc = @import("object/mod.zig").DebugReloc;
+/// Width of a target address: `.eight` on 64-bit targets, `.four` on 32-bit.
+pub const AddressWidth = @import("object/mod.zig").DebugRelocWidth;
 
 /// One subprogram entry for `.debug_info`.
 pub const ProcEntry = struct {
@@ -70,9 +72,13 @@ const DW_LANG_Roc = 0x0049;
 /// Serializes the three DWARF sections. `source_files` supplies the file
 /// table (entries match `SourceLoc.file` indices), `line_entries` must be in
 /// ascending code-offset order, and `code_size` is the total text size.
+/// `address_width` is the target's address size: it sizes every
+/// `DW_FORM_addr` value, the `DW_LNE_set_address` operand, the unit header's
+/// `address_size`, and the relocations against `.text`.
 pub fn build(
     gpa: Allocator,
     producer: []const u8,
+    address_width: AddressWidth,
     source_files: []const []const u8,
     line_entries: []const LineEntry,
     procs: []const ProcEntry,
@@ -83,12 +89,12 @@ pub fn build(
     var info_relocs: std.ArrayList(Reloc) = .empty;
     errdefer info_relocs.deinit(gpa);
 
-    const debug_line = try buildLineSection(gpa, source_files, line_entries, code_size, &line_relocs);
+    const debug_line = try buildLineSection(gpa, address_width, source_files, line_entries, code_size, &line_relocs);
     errdefer gpa.free(debug_line);
     const debug_abbrev = try buildAbbrevSection(gpa);
     errdefer gpa.free(debug_abbrev);
     const cu_name = if (source_files.len > 0) source_files[0] else "roc";
-    const debug_info = try buildInfoSection(gpa, producer, cu_name, procs, code_size, &info_relocs);
+    const debug_info = try buildInfoSection(gpa, address_width, producer, cu_name, procs, code_size, &info_relocs);
     errdefer gpa.free(debug_info);
 
     return .{
@@ -134,8 +140,24 @@ fn appendInt(buf: *std.ArrayList(u8), gpa: Allocator, comptime T: type, value: T
     try buf.appendSlice(gpa, &bytes);
 }
 
+fn addressBytes(width: AddressWidth) u8 {
+    return switch (width) {
+        .four => 4,
+        .eight => 8,
+    };
+}
+
+/// Append a target address of `width` bytes.
+fn appendAddress(buf: *std.ArrayList(u8), gpa: Allocator, width: AddressWidth, value: u64) Allocator.Error!void {
+    switch (width) {
+        .four => try appendInt(buf, gpa, u32, @intCast(value)),
+        .eight => try appendInt(buf, gpa, u64, value),
+    }
+}
+
 fn buildLineSection(
     gpa: Allocator,
+    address_width: AddressWidth,
     source_files: []const []const u8,
     line_entries: []const LineEntry,
     code_size: u64,
@@ -171,15 +193,15 @@ fn buildLineSection(
 
     // Line program: one sequence covering the whole text section.
     try buf.append(gpa, 0); // extended opcode
-    try appendUleb(&buf, gpa, 9);
+    try appendUleb(&buf, gpa, 1 + @as(u64, addressBytes(address_width)));
     try buf.append(gpa, DW_LNE_set_address);
     try relocs.append(gpa, .{
         .section_offset = @intCast(buf.items.len),
         .target = .text,
-        .width = .eight,
+        .width = address_width,
         .addend = 0,
     });
-    try appendInt(&buf, gpa, u64, 0);
+    try appendAddress(&buf, gpa, address_width, 0);
 
     var address: u64 = 0;
     var file: u64 = 1;
@@ -284,6 +306,7 @@ fn buildAbbrevSection(gpa: Allocator) Allocator.Error![]u8 {
 
 fn buildInfoSection(
     gpa: Allocator,
+    address_width: AddressWidth,
     producer: []const u8,
     cu_name: []const u8,
     procs: []const ProcEntry,
@@ -302,7 +325,7 @@ fn buildInfoSection(
         .addend = 0,
     });
     try appendInt(&buf, gpa, u32, 0); // debug_abbrev_offset
-    try buf.append(gpa, 8); // address_size
+    try buf.append(gpa, addressBytes(address_width)); // address_size
 
     // Compile unit DIE.
     try appendUleb(&buf, gpa, 1);
@@ -314,10 +337,10 @@ fn buildInfoSection(
     try relocs.append(gpa, .{
         .section_offset = @intCast(buf.items.len),
         .target = .text,
-        .width = .eight,
+        .width = address_width,
         .addend = 0,
     });
-    try appendInt(&buf, gpa, u64, 0); // low_pc
+    try appendAddress(&buf, gpa, address_width, 0); // low_pc
     try appendInt(&buf, gpa, u64, code_size); // high_pc (length form)
     try relocs.append(gpa, .{
         .section_offset = @intCast(buf.items.len),
@@ -334,10 +357,10 @@ fn buildInfoSection(
         try relocs.append(gpa, .{
             .section_offset = @intCast(buf.items.len),
             .target = .text,
-            .width = .eight,
+            .width = address_width,
             .addend = proc.code_start,
         });
-        try appendInt(&buf, gpa, u64, 0); // low_pc
+        try appendAddress(&buf, gpa, address_width, 0); // low_pc
         try appendInt(&buf, gpa, u64, proc.code_size); // high_pc (length form)
         if (proc.loc.hasLocation()) {
             try appendUleb(&buf, gpa, @as(u64, proc.loc.file) + 1);
@@ -353,6 +376,10 @@ fn buildInfoSection(
 }
 
 test "DWARF sections expose every linker-owned reference" {
+    inline for (.{ AddressWidth.eight, AddressWidth.four }) |width| try expectLinkerOwnedReferences(width);
+}
+
+fn expectLinkerOwnedReferences(comptime width: AddressWidth) (Allocator.Error || error{ TestExpectedEqual, TestUnexpectedResult })!void {
     const gpa = std.testing.allocator;
     const files = [_][]const u8{"main"};
     const entries = [_]LineEntry{
@@ -362,7 +389,7 @@ test "DWARF sections expose every linker-owned reference" {
     const procs = [_]ProcEntry{
         .{ .name = "roc_proc_0", .code_start = 0, .code_size = 32, .loc = .{ .file = 0, .line = 3, .column = 1 } },
     };
-    var sections = try build(gpa, "roc test", &files, &entries, &procs, 32);
+    var sections = try build(gpa, "roc test", width, &files, &entries, &procs, 32);
     defer sections.deinit(gpa);
 
     try std.testing.expect(sections.debug_line.len > 0);
@@ -370,7 +397,7 @@ test "DWARF sections expose every linker-owned reference" {
     try std.testing.expect(sections.debug_info.len > 0);
     try std.testing.expectEqual(@as(usize, 1), sections.line_relocs.len);
     try std.testing.expectEqual(.text, sections.line_relocs[0].target);
-    try std.testing.expectEqual(.eight, sections.line_relocs[0].width);
+    try std.testing.expectEqual(width, sections.line_relocs[0].width);
     try std.testing.expectEqual(@as(usize, 4), sections.info_relocs.len);
     try std.testing.expectEqual(Reloc{
         .section_offset = 6,
@@ -379,11 +406,13 @@ test "DWARF sections expose every linker-owned reference" {
         .addend = 0,
     }, sections.info_relocs[0]);
     try std.testing.expectEqual(.text, sections.info_relocs[1].target);
-    try std.testing.expectEqual(.eight, sections.info_relocs[1].width);
+    try std.testing.expectEqual(width, sections.info_relocs[1].width);
     try std.testing.expectEqual(.debug_line, sections.info_relocs[2].target);
     try std.testing.expectEqual(.four, sections.info_relocs[2].width);
     try std.testing.expectEqual(.text, sections.info_relocs[3].target);
-    try std.testing.expectEqual(.eight, sections.info_relocs[3].width);
+    try std.testing.expectEqual(width, sections.info_relocs[3].width);
+    // The unit header declares the address size.
+    try std.testing.expectEqual(addressBytes(width), sections.debug_info[10]);
     // unit_length covers the rest of each section exactly.
     try std.testing.expectEqual(
         sections.debug_line.len - 4,
@@ -402,7 +431,7 @@ test "DWARF subprograms without a source location omit their declaration" {
     const procs = [_]ProcEntry{
         .{ .name = "roc_generated", .code_start = 0, .code_size = 16, .loc = base.SourceLoc.none },
     };
-    var sections = try build(gpa, "roc test", &files, &entries, &procs, 16);
+    var sections = try build(gpa, "roc test", .eight, &files, &entries, &procs, 16);
     defer sections.deinit(gpa);
 
     // The last DIE before the children terminator: abbrev code, name,
