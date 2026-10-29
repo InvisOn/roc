@@ -77,7 +77,7 @@ In a few places the backend measured the target's memory with the compiler's own
 ## Not done yet
 
 - The backend still refuses any target whose word isn't 8 bytes (`LirCodeGen.zig:506`), so no 32-bit target can be built yet. That check goes in part 6, together with the 32-bit ARM tests.
-- About 540 places still use a fixed 8 bytes: calls, values spread over several registers, erased calls, and the two halves of 128-bit integers. Parts 2 and 3 handle most of them. Arguments passed in memory belong to part 7 (the 32-bit ARM calling convention), and 64-bit values in two 32-bit registers to part 8.
+- About 540 places still use a fixed 8 bytes: calls, values spread over several registers, erased calls, and the two halves of 128-bit integers. Parts 2 and 3 handle most of them. Arguments passed in memory belong to part 7 (the 32-bit ARM calling convention), and 64-bit values in two 32-bit registers to part 10.
 
 ## How the code flows
 
@@ -111,10 +111,10 @@ Part 1 of the Incremental Plan. For review here first, not for upstream yet. It 
 | 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file |
 | 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator |
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) |
-| 8 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver |
-| 9 | NEON SIMD | dev backend: shared driver |
-| 10 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) |
-| 11 | arm32 as a host (running code in-process) | output: code in memory |
+| 8 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) |
+| 9 | arm32 as a host (running code in-process) | output: code in memory |
+| 10 | 64-bit and 128-bit values on 32-bit registers | dev backend: shared driver |
+| 11 | NEON SIMD | dev backend: shared driver |
 | 12 | Docs, and turning the CI lane from optional to required | none |
 
 ## How to test

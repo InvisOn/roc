@@ -354,7 +354,7 @@ the code. Failures at both head and base do not count.
 - The Pi 3 runs found three upstream problems on 32-bit hosts (the
   interpreter's `roc_crashed` invariant, its segfaults, and the closures
   cases running out of the device's memory). Decided 2026-10-27: draft
-  them when the plan reaches 32-bit hosts (part 11); the logs are kept
+  them when the plan reaches 32-bit hosts (part 9); the logs are kept
   with the timings.
 - The 16 KiB-page fix is fork PR #10 (`b1df3f9f18`, rebased onto the
   fork's `main`, upstream `3c0fffe7bd`); nothing filed upstream (decided
@@ -370,4 +370,4 @@ the code. Failures at both head and base do not count.
 - Step 5's write-up said its 32-bit host branches "have never been
   compiled". Updated 2026-10-27: the eval runner's branch ran on the
   32-bit ARM device in sub-step 5 and works; the CLI test skips are still
-  unrun (part 11).
+  unrun (part 9).

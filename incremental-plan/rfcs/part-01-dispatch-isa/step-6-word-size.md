@@ -202,9 +202,9 @@ field access, so commit 1 leaves them at `.w64`. Each still assumes an
 - **128-bit bit counts:** `generateBitCount128` counts an i128 as two
   64-bit halves with the word-sized helpers (`emitPopcountWord`,
   `emitClzWord`, `emitCtzWord`). Right at an 8-byte word; at a 4-byte word
-  an i128 is four words. Part 8 (i128 as four words).
+  an i128 is four words. Part 10 (i128 as four words).
 - **Values that are 64 bits on every target** stay `.w64` by design (plan
-  D2): U64 indices, i128 halves, F64 bits. Their 32-bit lowering is part 8.
+  D2): U64 indices, i128 halves, F64 bits. Their 32-bit lowering is part 10.
 - **Name the 64-bit width in part 3.** Part 3 brings the reference's
   `wide64_reg_width` and `wide64_store_width` (plan D2): `.w64` at an
   8-byte word, and at a 4-byte word a compile error worded as an invariant
@@ -220,8 +220,8 @@ Part 1 can't run code at a 4-byte word, so nothing here catches a site
 that goes back to `.w64`: on 64-bit targets `word` is `.w64`. The guard is
 arm32 tests that exercise each kind of site, running in CI. They become
 possible once arm32 programs build (parts 6 and 7) and run in CI from
-part 10. The 8-byte assert may only be lifted together with tests that
-cover every row:
+part 8, which follows directly. The 8-byte assert may only be lifted
+together with tests that cover every row:
 
 | Kind of site in step 6 | Example | Test that must cover it |
 |---|---|---|

@@ -37,7 +37,7 @@ look. These commits make those places use the target's sizes, so the arm32
 steps start from correct offsets.
 
 The last two commits are about running the compiler's tests on a 32-bit
-machine (the Pi 3, part 11 `arm32/host`). bytebox reserves 4 GiB for a wasm
+machine (the Pi 3, part 9 `arm32/host`). bytebox reserves 4 GiB for a wasm
 module with no memory maximum, which a 32-bit process cannot hold, so every
 wasm test would fail there for a reason unrelated to the code under test.
 
@@ -253,7 +253,7 @@ output reserve nothing and still run everywhere.
   32-bit ARM device in fold step 7 (2026-10-26): the wasm backend reported
   unavailable at the head, where the base failed every wasm case with
   `WasmExecFailed`. The CLI test skips (`e65824d17e`, now `6cd2d68e6d`)
-  are still unrun; part 11 (arm32 as a host) runs them on that device.
+  are still unrun; part 9 (arm32 as a host) runs them on that device.
 - The `.w64` store widths next to the new target offsets did not change in
   fold step 6 (word size 1 of 3); fold step 7 put them on step 6's "left
   for part 3" list (`generatePackedErasedFn`).

@@ -16,6 +16,8 @@ Drafts of issues for roc-lang/roc, one per problem found during the arm32 work.
 
 **Also new (2026-10-26):** 42, compile-time evaluation segfaults on aarch64 Linux with 16 KiB pages: `HostSplice.link` aligns the static data to `page_size_min`, so making the code executable also protects the start of the static data. Found on the aarch64 device in fold step 7; fix in fork PR #10 (`b1df3f9f18`). Not to be filed for now (owner, 2026-10-27).
 
+**Changed (2026-10-28):** 03 is to be filed after all, as an issue; its fix (the instruction cache flush, `200333a587`) goes into the shared-driver PR. The draft is updated against `main` at `bad769be8e` and is reviewed with the owner before filing.
+
 ## Preferred filing order (kept for reference)
 
 Proven bugs with a test come first, then bugs that only matter on 32-bit, then CI problems. Each line says why it sits where it does. The fork PR is the fix, tested on InvisOn/roc, which can be offered with the issue.

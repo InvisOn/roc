@@ -137,7 +137,8 @@ The other machines: the Pi 5 (`<user>@<aarch64-device>`, aarch64) and the Pi 3
 
 | PR | Branch | Head | Base | State |
 |---|---|---|---|---|
-| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | `1bc3981a38` (pushed 2026-10-27) | `26436de489` (rebased in step 7 on 2026-10-26; earlier heads: `backup/dispatch-isa-pre-rebase2-2026-10-26`, `backup/dispatch-isa-pre-exit-group-2026-10-26`, `backup/dispatch-isa-pre-reword-2026-10-27`) | Part 1. Fold steps 1 to 7 done; 15 signed commits pushed. Step 8 (title and description) is next. |
+| [#9](https://github.com/InvisOn/roc/pull/9) | `dispatch/isa` | `1bc3981a38` (pushed 2026-10-27) | `26436de489` (rebased in step 7 on 2026-10-26; earlier heads: `backup/dispatch-isa-pre-rebase2-2026-10-26`, `backup/dispatch-isa-pre-exit-group-2026-10-26`, `backup/dispatch-isa-pre-reword-2026-10-27`) | Part 1. Fold steps 1 to 7 done; 15 signed commits pushed. Since 2026-10-28 it is the source for `shared-driver/isa-word-size`, and will close when that has its own fork PR. |
+| not yet | `shared-driver/isa-word-size` (worktree `.workspaces/pr-shared-driver`) | `bad769be8e` (no commits yet) | upstream `main` `bad769be8e`, rebased whenever `main` moves | Parts 1 to 3 as one PR (decided 2026-10-28). #9's commits are being reviewed one by one into it; decisions in `rfcs/part-02-03-word-size/word-size-2-3-plan.md`. Not pushed. |
 | [#10](https://github.com/InvisOn/roc/pull/10) | `fix/runtime-page-size` | `b1df3f9f18` | `3c0fffe7bd` | Dev static data on 16 KiB-page kernels (draft 42). Not part of the plan; not for upstream. |
 | [#8](https://github.com/InvisOn/roc/pull/8) | `fix/flush-jit-instruction-cache` | `5aa8ffecbf` | `73df27a5bb` | Draft 03. Closed 2026-10-27: folded into #9 as `200333a587`. |
 | [#3](https://github.com/InvisOn/roc/pull/3) | `fix/abs64-relocation-width` | `9ee4d148e8` | `73df27a5bb` | Draft 12. Closed 2026-10-27: folded into #9 as `8b9b055402`. |
@@ -234,7 +235,7 @@ one's "How to test".
   7 at upstream `26436de489`; the reference recorded the same in
   `projects/big/arm32-dev-backend-issues.md` and built ReleaseFast or
   ReleaseSafe runners instead, as step 7 now does (ReleaseSafe). Matters
-  for parts 6 and 11, where a Debug runner on the device would give the
+  for parts 6 and 9, where a Debug runner on the device would give the
   best diagnostics. Things to look at: function sections (so the linker
   can place thunks between functions), building the runner without LLVM
   for a device run, and what upstream's cross-compile CI lane does. (Not
