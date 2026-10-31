@@ -272,7 +272,7 @@ pub const ExecutableMemory = struct {
     /// returned by `initWritable` executable, and leave the page-aligned rest
     /// writable data.
     pub fn finishWriteExecutablePrefix(self: *Self, executable_len: usize) error{ MprotectFailed, VirtualProtectFailed, UnsupportedPlatform }!void {
-        std.debug.assert(std.mem.isAligned(executable_len, std.heap.page_size_min) and executable_len <= self.memory.len);
+        std.debug.assert(std.mem.isAligned(executable_len, std.heap.pageSize()) and executable_len <= self.memory.len);
         try protectExecutable(self.memory[0..executable_len]);
     }
 
