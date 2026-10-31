@@ -3,11 +3,11 @@
 - **Status:** Draft
 - **Scope:** Branch (plan rows 1 to 3, one PR since 2026-10-28)
 - **Plan row:** 1–3, the shared driver for any backend
-- **Branch:** `shared-driver/isa-word-size` (worktree `.workspaces/pr-shared-driver`)
+- **Branch:** `isa-word-size` (worktree `.workspaces/pr-isa-word-size`); step 1 alone is `isa-switch`, fork #11, upstream PR 12740
 - **Fork PR:** not yet (new; replaces #9)
 - **Parent:** none
-- **Base:** upstream `main` at `bad769be8e` (2026-10-28), rebased onto `main` whenever it moves. The measurements below were taken on `dispatch/isa` at `1bc3981a38` (upstream `26436de489`)
-- **Head:** `bad769be8e` (empty: no commits yet)
+- **Base:** upstream `main` at `f7bef6b38f` (2026-11-01), rebased onto `main` whenever it moves. The measurements below were taken on `dispatch/isa` at `1bc3981a38` (upstream `26436de489`)
+- **Head:** `d0dce2c444` (step 1 replayed on the base)
 
 ## Abstract
 
@@ -547,3 +547,17 @@ and minici ran on `bad769be8e` and are redone on the new base.
 - **4a:** every `!host_lir_codegen_available` skip guard in `LirCodeGen`'s
   tests is one line (`if (comptime !host_lir_codegen_available) return
   error.SkipZigTest;`), as the owner's edit.
+
+### Decided 2026-11-01: step 1 upstream on its own, later steps on `isa-word-size`
+
+Partly supersedes 2026-10-28 (the branch name, and parts 1 to 3 as one PR).
+
+- Step 1 went upstream as its own PR: branch `isa-switch`, one commit
+  `5cd707b9b8`, fork PR #11, upstream PR 12740 (opened by the owner).
+- Steps 2 onward go on a new branch `isa-word-size` (worktree
+  `.workspaces/pr-isa-word-size`), cut from upstream `main` at
+  `f7bef6b38f`, with step 1 cherry-picked on top (`d0dce2c444`, rerere
+  off) so the next steps can build on it. It is rebased onto `main`
+  whenever `main` moves; once PR 12740 merges, that rebase drops the
+  duplicate step 1 commit.
+- `shared-driver/isa-word-size` (`10c3438d94`, no commits) is retired.

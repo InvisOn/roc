@@ -33,9 +33,14 @@ experiments are in `overnight-2026-10-29-report.md`. Read `AGENTS.md` and
   (`gh pr checks 12740 --repo roc-lang/roc`). When the fork's Actions is
   back: close and reopen PR #11, or
   `gh workflow run ci_zig.yml --repo InvisOn/roc --ref isa-switch`.
-- `shared-driver/isa-word-size` is still at `10c3438d94` with no commits;
-  the work now lives on `isa-switch`. Whether later steps go on new branches
-  and PRs (one PR per step, as #11) or onto one shared branch is not decided.
+- **Later steps go on a new branch `isa-word-size`, cut from `main`**
+  (owner's decision, 2026-11-01). Upstream `main` is now `f7bef6b38f`.
+  `isa-switch` stays as it is for PR 12740. The old
+  `shared-driver/isa-word-size` (`10c3438d94`, no commits) is replaced by
+  `isa-word-size` and is no longer used.
+- Step 1 (`5cd707b9b8`) is not in `main` yet, so a branch cut from `main`
+  does not contain it. Steps 2 onward build on step 1. How
+  `isa-word-size` gets step 1 until PR 12740 merges is not decided.
 
 ## Checks step 1 passed
 
@@ -60,14 +65,15 @@ that.
 1. Work in the `binaryIs` form: worktree `.workspaces/pr-shared-driver-binaryis`,
    branch `scratch/shared-driver-binaryis` (2 signed commits on
    `9eb3762719`: `04f208c2fe` commit 1 replayed, `fc1227ca1b` all step 1
-   edits in `binaryIs` form).
+   edits in `binaryIs` form). Before commit 2, move it onto `f7bef6b38f`,
+   the base of `isa-word-size`, or its regenerated trees will not match.
 2. Take the next #9 commit with rerere off:
    `git -c rerere.enabled=false cherry-pick -S <commit>`. If it conflicts,
    stop and tell the owner.
 3. Apply the step's decided fixes as scripted, count-checked edits in the
    `binaryIs` form; commit (signed, scratch). Owner edits to the generated
    tree must be carried here too, or the next regeneration drops them.
-4. Regenerate: in the PR worktree, `git checkout <scratch commit> -- .`, run
+4. Regenerate: in the PR worktree (branch `isa-word-size`), `git checkout <scratch commit> -- .`, run
    `python3 -I <notes>/incremental-plan/rfcs/part-02-03-word-size/overnight-2026-10-29/to_switch.py .`,
    `git add -A`. The converter stops on any shape it does not know and
    checks that no `binaryIs`, cached flag or true/false switch is left.
