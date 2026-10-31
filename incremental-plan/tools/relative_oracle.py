@@ -114,9 +114,12 @@ class Decl:
 # Run it from the main checkout, not a worktree.
 REPO: str = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
 TOOLS: str = os.path.dirname(os.path.abspath(__file__))
-# "Add byte-identity oracles for the dev backend's 64-bit output (A0)"
-# (5ee8a07527 before the 2026-10-17 rewrite).
-A0_COMMIT: str = "ef81f19e4b"
+# "Add byte-identity oracles for the dev backend's 64-bit output (A0)",
+# applied to upstream 10c3438d94 with its conflicts resolved by explicit
+# rules, no rerere (tag scratch/a0-on-10c3438d94; local only).
+# Earlier: ef81f19e4b (bases up to 0c440e5f31; its conflicts there were left
+# to rerere), and 5ee8a07527 before the 2026-10-17 rewrite.
+A0_COMMIT: str = "1f461d76df"
 # Fixes to A0's own code, applied after A0 and A0_FOLLOWS, in name order.
 A0_PATCHES: list[str] = sorted(glob.glob(os.path.join(TOOLS, "a0-patches", "*.patch")))
 SIXTY_FOUR_BIT: re.Pattern[str] = re.compile(r"^(x64|arm64)[a-z0-9]*=")

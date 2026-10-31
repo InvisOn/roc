@@ -521,3 +521,29 @@ and minici ran on `bad769be8e` and are redone on the new base.
   the last step.
 - **Change 4 (a):** a note only (README, parts 6 and 9). Step 1 changes no
   behaviour.
+
+### Decided 2026-10-31: step 1's oracle base and review fixes
+
+- **Base:** upstream `main` moved to `10c3438d94` (89 commits); the branch
+  was fast-forwarded and step 1 regenerated there (no conflicts; the change
+  is identical to the `0c440e5f31` one apart from line positions).
+- **A0 refreshed for the new base (option 1).** A0's three-way apply
+  conflicts in five files on the new base; rerere's replay had also carried
+  an edit outside a conflict hunk (`inspected.zig`). The oracle now applies
+  `1f461d76df` (tag `scratch/a0-on-10c3438d94`, local only): A0 with each
+  conflict resolved by an explicit rule, no rerere. `A0_DECLS`,
+  `A0_FOLLOWS` and `a0-patches` still apply after it.
+- **H1:** that commit is made with `git commit-tree -S`, which skips the
+  fork-rules hook (A0's `eval.blake3` holds six upstream test names with
+  issue numbers). Local only, never pushed.
+- **Review fixes:** a one-line comment at `use_swar` and `aarch64_sret`
+  ("Not a cached isa test: every arm names that backend's answer."); the
+  design.md section is "Dev Backend Instruction Sets" (no "And Word Size").
+- **3a, host checks in `LirCodeGen`'s tests, in step 1:** the 41 skip and
+  run guards (`builtin.cpu.arch == .x86_64 or ... .aarch64`) use
+  `host_lir_codegen_available`; the 2 host-dependent stack offsets switch
+  on `isaOf(host_lir_codegen_target)`. The owner put the skip guard of
+  "dev stores an I8 result as its own byte" on one line.
+- **4a:** every `!host_lir_codegen_available` skip guard in `LirCodeGen`'s
+  tests is one line (`if (comptime !host_lir_codegen_available) return
+  error.SkipZigTest;`), as the owner's edit.
