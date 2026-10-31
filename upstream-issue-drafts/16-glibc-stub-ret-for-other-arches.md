@@ -8,8 +8,8 @@ Not filed. For roc-lang/roc.
 
 | | |
 |---|---|
-| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`). The test below fails. |
-| Already upstream? | No issue or PR found (searched 2026-10-20). |
+| Still an issue? | Yes (2026-10-20, upstream `main` at `5fc587cf51`; the code is unchanged at `f7bef6b38f`, 2026-11-01). The test below fails. |
+| Already upstream? | PR 12513 fixed `.arm` only; closed unmerged 2026-10-25, its author plans to include it in their next PR (checked 2026-11-01). No issue. |
 | Fixed on our reference branch? | Yes, in `4010c2a45e`, for arm only (`mov r0, #0` / `bx lr`). |
 | Before filing | Nothing. |
 
