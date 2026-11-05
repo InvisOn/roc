@@ -17,6 +17,21 @@ length) and a value that is 64 bits on every target (a U64, half of an i128).
 On x86_64 and aarch64 both are 8 bytes, so no test or oracle can tell them
 apart; a misclassified site shows only once a 32-bit backend runs.
 
+## Files
+
+| File | Holds |
+|---|---|
+| `LirCodeGen.tsv` | every `.w64` in `LirCodeGen` |
+| `CallingConvention.tsv`, `FrameBuilder.tsv` | every `.w64` there |
+| `LirCodeGen-calls.tsv` | calls of helpers without a width |
+| `LirCodeGen-args.tsv` | integer arguments to builtins |
+| `LirCodeGen-eights.tsv` | literal 8 offsets, strides, sizes |
+| `LirCodeGen-layouts.tsv` | `@offsetOf`, `@sizeOf`, `@alignOf` |
+
+Scripts: `w64_sites.py` lists sites (`.w64`, `--calls`, `--pattern`) with
+their context; `classify*.py` hold the kinds; `brace_check.py` and
+`check_args.py` cross-check contexts and argument kinds.
+
 ## Method
 
 1. `w64_sites.py <file>` lists every `.w64` with its function and context:
@@ -139,12 +154,49 @@ The address helpers are `emitLeaStack` 15, `emitAddUsizeImm` 10,
 scalar 43, isa 35, chunk 5, size-8 1. Every `emitSaturatingSub` site mixes a
 word length with a U64 operand (item 7 below).
 
-Still implicit, not classified: the arguments passed to builtins through the
-call builder, which has no width either (`addImmArg` 150, `addLeaArg` 88,
-`addRegArg` 78, `addMemArg` 54, `addListBytesLenCapMemArgs` 16,
-`addF64RegArg` 4 calls in `LirCodeGen`). On a 32-bit target a `u64`
-builtin parameter takes two registers or a stack pair, so these belong
-with the calling convention (item 5 below).
+### Arguments to builtins
+
+The call builder has no width either: each integer argument takes one
+register or one stack slot. `LirCodeGen-args.tsv` classifies the 486
+non-test arguments by the parameter they fill, from the callee's Zig
+signature (`builtins/dev_wrappers.zig`, `boxy_runtime/exports.zig`,
+`builtins/in_process_host.zig`): u64 and i64 are 64, usize, isize and
+pointers word, u32, u8, bool, i32 and UpdateMode narrow. Float arguments go
+in float registers and are not listed. `classify_args.py` holds the kinds;
+`check_args.py` lines each builder's arguments up with its target's
+parameters wherever the target is named directly (a `.name` builtin, a
+`LowLevelBuiltins` lookup table entry, or a boxy runtime name) and no
+argument is added under a branch: 112 arguments checked, 0 mismatches. The
+other 74 builders name their target through a variable (`builtin_fn`) or add
+arguments under branches and were read against the signatures.
+
+| Method | word | 64 | narrow | other |
+|---|---|---|---|---|
+| `addImmArg` | 36 | 5 | 108 | mixed 1 |
+| `addRegArg` | 16 | 59 | 3 | |
+| `addMemArg` | 34 | 17 | 0 | |
+| `addWordArg` | 46 | 1 | 0 | |
+| pointer and RocStr/RocList-word methods | 158 | 0 | 0 | |
+| `addMemArgAt`, `addStackMemArgAt` | 0 | 0 | 0 | piece 2 |
+
+All 486: word 290, narrow 111, 64 82, piece 2, mixed 1. The pointer and
+word methods are `addLeaArg` 84, `addBytesArg` 22, `addStrBytesLenCapMemArgs`
+21, `addListBytesLenCapMemArgs` 16, `addTargetArg` 13 and two `At` variants.
+The 64-bit arguments are i128 and Dec halves, hasher seeds and values, SIMD
+vector halves, and Roc U64 operands (indexes, starts, lengths, counts,
+capacities, spares). Findings:
+
+- The builtin side assumes 8-byte words in places: `str_equal_static_small`
+  takes RocStr's three words as `word0`, `word1`, `word2: u64`, and
+  `str_static_small_word_eq` and its caseless twin take one as `word: u64`.
+- `list_concat` takes `update_modes: u64` for a value of two bits.
+- `callListBuiltin` forwards its callers' `.mem` and `.imm` values (12668,
+  12669). Every `.mem` value is a U64 operand, so 12668 is 64. The `.imm`
+  values are mixed: alignments and update modes are narrow, element sizes
+  are words, and two are 64-bit: `list_concat`'s update modes (2475) and the
+  zero start and length of an empty sublist window (8003).
+- `addWordArg` passes "the word an `opaque_ptr` local holds", but at 17983 the
+  local is a list index for `roc_desc_list_item_addr(..., index: u64)`.
 
 Checked and word-neutral: the RocStr and RocList constants
 (`SEAMLESS_SLICE_TAG` 1, its mask `~1`, `capacity_shift` 1, and
@@ -155,33 +207,49 @@ size arms, F32 bits, discriminants, or 4-byte copy tails; none is a word.
 
 ## Word-size assumptions that are not `.w64`
 
-Found while reading; not yet inventoried site by site.
+Items 2, 3 and 8 are inventoried site by site (`LirCodeGen-eights.tsv`,
+`LirCodeGen-layouts.tsv`, and the list under 8); the others are single sites
+or small groups described here.
 
 1. **The gate:** `LirCodeGen.zig:351`, `comptime std.debug.assert(target_ptr_size == 8)`.
-2. **`+8` and `* 8` offsets:** 102 in `LirCodeGen`, mostly next to piece,
-   64 and chunk sites. Some are word strides written as 8:
-   `placeCallArguments` loads a RocStr or RocList at `+8` and `+16`
-   (19835 to 19837) instead of `target_ptr_size` multiples; the RocStr copy
-   at 3527 steps `word * 8`; `emitLocalArray` (17452),
-   `generateCachedComposition` (17714, 17738) and `generateDyn`'s dictionary
-   lookup (17952) index word arrays by `* 8`; `generateTailCall` advances its
-   stack-argument staging by `word_offset += 8` (14226, 14243).
-3. **Target memory laid out with the compiler's own Zig types:** `@offsetOf`
-   and `@sizeOf` on `Request`, `VariantInput`, `boxy_runtime.TypeDesc`,
-   `boxy_runtime.compose.*`, `builtins.erased_callable.HotReloadCaptureHeader`,
-   `Layout`, `ResultLayout`, `dev_wrappers.StrDropPrefixCaselessAsciiLayout`,
-   and `@sizeOf(usize)` (6) and `@sizeOf(isize)` (1). These follow the
-   compiler host's word, not the target's. (`@sizeOf` on the driver's own
-   data, such as `ValueLocation` or `FrozenCallArg`, is fine.) The wasm
-   backend already lays out the same request structs for its 32-bit target
-   with `wasm32FieldOffset` and `wasm32StructSize`
-   (`backend/wasm/WasmCodeGen.zig:8849`, `:8864`).
+2. **Literal 8s** (`LirCodeGen-eights.tsv`, `classify_offsets.py`; the
+   lister's `--pattern` mode finds `± 8`, `* 8` and `8 *`): 105 lines. 64 51
+   (the high half of a 16-byte value at `+ 8`, and `ListOpRequest.n`'s u64
+   stride), piece 19 (argument and return pieces, 8-byte stack argument
+   slots, `generateCAbiCall`'s padding), bits 12 (bytes times 8 bits),
+   word 9, isa 5, compiler 5 (buffers for the compiler's own data), chunk 2,
+   scalar 1, narrow 1. The 9 word lines are word strides written as 8:
+   `placeCallArguments` loads RocStr or RocList words at `+ 8` and `+ 16`
+   (19836, 19837) instead of `target_ptr_size` multiples; the RocStr copy at
+   3526 steps `word * 8`; `emitLocalArray` (17443, 17452),
+   `generateCachedComposition` (17714, 17724, 17738), `generateDyn`'s
+   variant payloads (17899) and dictionary lookup (17952) index word arrays
+   by `* 8`. `generateTailCall` also advances its stack-argument staging by
+   `word_offset += 8` (piece). Of the literal 16s, only 19837 is a word
+   stride; the rest are aarch64's 16-byte frame record or 16-byte vectors.
+   Stack slots of 8 and 16 bytes (`allocStackSlot(8)` 61, `(16)` 29) are at
+   least as large as what they hold at either word, so they stay correct.
+3. **Target memory laid out with the compiler's own Zig types**
+   (`LirCodeGen-layouts.tsv`, `classify_layouts.py`): 58 `@offsetOf`,
+   `@sizeOf` and `@alignOf` lines. host-layout 32: `ListOpRequest`
+   (after its two u32s), `FieldInput`, `DeclaredFieldInput`, `VariantInput`,
+   `CompositionEntry`, `HotReloadCaptureHeader`, the erased callable payload's
+   second word at `@sizeOf(usize)`, pointer alignment as `@alignOf(usize)`,
+   and item 4's cell; these follow the compiler's word, not the target's.
+   narrow 13: the u32-only builtin layout structs (`StrSplitFirstLayout`,
+   `StrFromUtf8Layout`, `NumPrefixParseLayout` and the like),
+   `TypeDesc.size` and `.alignment`, and `ListOpRequest.op` and
+   `.unique_args`, all before any pointer. compiler 13: buffers and the
+   in-process allocator helpers. The wasm backend already lays out the same
+   request structs for its 32-bit target with `wasm32FieldOffset` and
+   `wasm32StructSize` (`backend/wasm/WasmCodeGen.zig:8849`, `:8864`).
 4. **`emitOwnPendingCell`** defines `const word = @sizeOf(u64)` for a cell
    whose size, `builtins.native_callable.pending_words`, is itself
    `@sizeOf(Pending) / @sizeOf(usize)` on the compiler host.
 5. **`CallingConvention`:** stack arguments use fixed 8-byte slots
    (`CallingConvention.zig:309`, `:345`), and aggregates split into pieces of
-   at most 8 bytes (`:316`).
+   at most 8 bytes (`:316`). The arguments the driver passes through it are
+   in "Arguments to builtins" above.
 6. **RocStr's small-string bit:** `str_small_bit` is an `i64` asserted to be
    `minInt(i64)` (`LirCodeGen.zig:363`); on a 4-byte word the length word's
    sign bit is bit 31.
@@ -193,10 +261,14 @@ Found while reading; not yet inventoried site by site.
    bounds decision. The other way round, results read from a word field
    but typed U64 in Roc (`List.len` at 1918 and 18280 to 18282, the
    capacity at 1946) must be zero-extended to 64 bits.
-8. **Other files:** `@sizeOf(usize)` in `RunImage` (9), `HostSplice` (9),
-   `Relocation` (6), `StaticDataImage` (5) and `StaticDataPool` (4); each is
-   either the compiler host's word (running code in-process) or the target's,
-   to be sorted.
+8. **`@sizeOf(usize)` in other dev backend files:** 33, of which 22 are in
+   tests. The 11 others all patch or check pointer slots on the machine that
+   runs the code, where the compiler's own word is right: `HostSplice` 319
+   and 321 and `StaticDataImage` 235 (in-process images), `Relocation` 255
+   and 261 (absolute pointers in in-process code), and `RunImage` 385 and 651
+   and `StaticDataPool` 200, 203, 320 and 486 (the run image and its static
+   data pool, which the compiler's shim maps on the same machine). This
+   assumes the shim runs at the compiler's word size.
 
 ## Related, not word size
 

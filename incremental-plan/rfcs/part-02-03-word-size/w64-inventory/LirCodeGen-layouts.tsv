@@ -1,0 +1,59 @@
+line	function	context	kind	code
+3405	generateLowLevel	shared	narrow	const layout_slot = self.codegen.allocStackSlot(@sizeOf(if (split_op == .str_split_first) dev_wrappers.StrSplitFirstLayout else dev_wrappers.StrSplitLastLayout));
+3451	generateLowLevel	shared	narrow	const layout_slot = self.codegen.allocStackSlot(@sizeOf(dev_wrappers.StrDropPrefixCaselessAsciiLayout));
+3664	generateLowLevel	shared	narrow	const layout_slot = self.codegen.allocStackSlot(@sizeOf(ResultLayout));
+3673	generateLowLevel	shared	narrow	try self.emitStore(.w32, frame_ptr, layout_slot + @offsetOf(ResultLayout, field[0]), layout_reg);
+8392	emitDebugAssertValidStrLocal	shared	host-layout	try self.codegen.emitLoadImm(ptr_reg, @alignOf(usize) - 1);
+8405	emitDebugAssertValidStrLocal	shared	host-layout	try self.codegen.emitLoadImm(tmp_reg, @alignOf(usize) - 1);
+10156	generateNumFromStrPrefix	shared	narrow	const layout_slot = self.codegen.allocStackSlot(@sizeOf(Layout));
+10159	generateNumFromStrPrefix	shared	narrow	try self.emitStore(.w32, frame_ptr, layout_slot + @offsetOf(Layout, "err_offset"), layout_reg);
+10161	generateNumFromStrPrefix	shared	narrow	try self.emitStore(.w32, frame_ptr, layout_slot + @offsetOf(Layout, "rest_offset"), layout_reg);
+10163	generateNumFromStrPrefix	shared	narrow	try self.emitStore(.w32, frame_ptr, layout_slot + @offsetOf(Layout, "value_offset"), layout_reg);
+13960	generateCall	shared	compiler	var args_sfa_buffer: [8 * (@sizeOf(ValueLocation) + @sizeOf(layout.Idx))]u8 align(@alignOf(usize)) = undefined;
+14196	generateTailCall	shared	compiler	var frozen_sfa_buffer: [8 * @sizeOf(FrozenCallArg)]u8 align(@alignOf(FrozenCallArg)) = undefined;
+14454	generateErasedCall	shared	compiler	var args_sfa_buffer: [8 * (@sizeOf(ValueLocation) + @sizeOf(layout.Idx))]u8 align(@alignOf(usize)) = undefined;
+14532	emitOwnPendingCell	shared	host-layout	const word = @sizeOf(u64);
+14659	generatePackedErasedFn	shared	host-layout	capture_src_slot + @as(i32, @intCast(@offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "code_ref"))),
+14667	generatePackedErasedFn	shared	host-layout	capture_src_slot + @as(i32, @intCast(@offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "original_on_drop"))),
+14787	generatePackedErasedFn	shared	host-layout	try self.emitStore(.w64, heap_ptr, @intCast(@sizeOf(usize)), hot_drop_reg);
+14796	generatePackedErasedFn	shared	host-layout	@intCast(builtins.erased_callable.capture_offset + @offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "code_ref")),
+14806	generatePackedErasedFn	shared	host-layout	@intCast(builtins.erased_callable.capture_offset + @offsetOf(builtins.erased_callable.HotReloadCaptureHeader, "original_on_drop")),
+14812	generatePackedErasedFn	shared	host-layout	try self.emitStore(.w64, heap_ptr, @intCast(@sizeOf(usize)), on_drop_reg);
+17380	LirCodeGen	shared	narrow	const desc_size_offset: i32 = @offsetOf(boxy_runtime.TypeDesc, "size");
+17381	LirCodeGen	shared	narrow	const desc_alignment_offset: i32 = @offsetOf(boxy_runtime.TypeDesc, "alignment");
+17718	generateCachedComposition	shared	host-layout	try self.emitLoad(.w64, current, entry, @offsetOf(boxy_runtime.compose.CompositionEntry, "result"));
+17732	generateCachedComposition	shared	narrow	try self.emitLoad(.w32, reg, reg, @offsetOf(boxy_runtime.TypeDesc, "size"));
+17814	generateDyn	shared	host-layout	const entry_size: i32 = @sizeOf(boxy_runtime.compose.FieldInput);
+17820	generateDyn	shared	host-layout	try self.emitStore(.w64, frame_ptr, entry + @offsetOf(boxy_runtime.compose.FieldInput, "name"), reg);
+17822	generateDyn	shared	host-layout	try self.emitStore(.w64, frame_ptr, entry + @offsetOf(boxy_runtime.compose.FieldInput, "desc"), reg);
+17840	generateDyn	shared	host-layout	const entry_size: i32 = @sizeOf(boxy_runtime.compose.DeclaredFieldInput);
+17855	generateDyn	shared	host-layout	try self.emitStore(.w64, frame_ptr, entry + @offsetOf(boxy_runtime.compose.DeclaredFieldInput, "name"), reg);
+17857	generateDyn	shared	host-layout	try self.emitStore(.w64, frame_ptr, entry + @offsetOf(boxy_runtime.compose.DeclaredFieldInput, "desc"), reg);
+17859	generateDyn	shared	host-layout	try self.emitStore(.w32, frame_ptr, entry + @offsetOf(boxy_runtime.compose.DeclaredFieldInput, "is_padding"), reg);
+17888	generateDyn	shared	host-layout	const entry_size: i32 = @sizeOf(VariantInput);
+17896	generateDyn	shared	host-layout	try self.emitStore(.w64, frame_ptr, entry + @offsetOf(VariantInput, "name"), reg);
+17898	generateDyn	shared	host-layout	try self.emitStore(.w32, frame_ptr, entry + @offsetOf(VariantInput, "payload_count"), reg);
+17900	generateDyn	shared	host-layout	try self.emitStore(.w64, frame_ptr, entry + @offsetOf(VariantInput, "payloads"), reg);
+18313	generateDynElemLowLevel	shared	host-layout	const req = self.codegen.allocStackSlot(@sizeOf(Request));
+18317	generateDynElemLowLevel	shared	narrow	try self.emitStore(.w32, frame_ptr, req + @offsetOf(Request, "op"), reg);
+18319	generateDynElemLowLevel	shared	narrow	try self.emitStore(.w32, frame_ptr, req + @offsetOf(Request, "unique_args"), reg);
+18321	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "elem"), reg);
+18324	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, field), reg);
+18344	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, field), reg);
+18351	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "n") + @as(i32, @intCast(n * 8)), reg);
+18362	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "n"), reg);
+18364	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "n") + 8, reg);
+18376	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "out"), reg);
+18380	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "ret_desc"), reg);
+18390	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "out"), reg);
+18392	generateDynElemLowLevel	shared	host-layout	try self.emitStore(.w64, frame_ptr, req + @offsetOf(Request, "out_value"), reg);
+19752	placeCallArguments	shared	compiler	var frozen_sfa_buffer: [8 * @sizeOf(FrozenCallArg)]u8 align(@alignOf(FrozenCallArg)) = undefined;
+20786	generateStmt	shared	compiler	var sfa_buffer: [64 * @sizeOf(StmtWork)]u8 align(@alignOf(usize)) = undefined;
+21605	generateStrMatchWithSource	shared	compiler	var capture_sfa_buffer: [8 * @sizeOf(?i32)]u8 align(@alignOf(?i32)) = undefined;
+22109	verifyStaticStringBytes	shared	compiler	if (data_addr % @alignOf(isize) != 0) {
+22112	verifyStaticStringBytes	shared	compiler	const refcount_ptr: *const isize = @ptrCast(@alignCast(str_bytes.ptr - @sizeOf(isize)));
+23704	metaBytes	shared	compiler	return @max(alignment, @alignOf(usize));
+23714	rocAlloc	shared	compiler	const size_ptr: *usize = @ptrFromInt(@intFromPtr(alloc_base) + meta - @sizeOf(usize));
+23722	rocDealloc	shared	compiler	const total_ptr: *const usize = @ptrFromInt(@intFromPtr(ptr) - @sizeOf(usize));
+23732	rocRealloc	shared	compiler	const old_total_ptr: *const usize = @ptrFromInt(@intFromPtr(ptr) - @sizeOf(usize));
+23741	rocRealloc	shared	compiler	const new_total_ptr: *usize = @ptrFromInt(@intFromPtr(new_base) + meta - @sizeOf(usize));

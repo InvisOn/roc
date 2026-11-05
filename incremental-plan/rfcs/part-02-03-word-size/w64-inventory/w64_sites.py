@@ -7,6 +7,10 @@ Usage: python3 -I w64_sites.py <file.zig> --calls name1,name2,...
 Lists the call sites of those functions instead (not their definitions),
 same columns, `helper` being the callee and `code` the whole call on one
 line.
+
+Usage: python3 -I w64_sites.py <file.zig> --pattern <regex>
+Lists every non-comment line matching the regex, same columns, `helper`
+being `-`.
 context is `x86_64` / `aarch64` when the site is inside that arm of a
 `switch (isa)`, `fn:<name>` when the enclosing function's name names one
 instruction set, else `shared`.
@@ -127,6 +131,15 @@ def whole_call(i, start):
         k += 1
         text = " " + lines[k].strip()
 
+
+if len(sys.argv) > 3 and sys.argv[2] == "--pattern":
+    pat = re.compile(sys.argv[3])
+    for i, s in enumerate(lines):
+        if s.strip().startswith("//") or not pat.search(s):
+            continue
+        func, ctx = site_context(i)
+        print(f"{i + 1}\t{func}\t-\t{ctx}\t{s.strip()}")
+    sys.exit(0)
 
 if len(sys.argv) > 3 and sys.argv[2] == "--calls":
     names = sys.argv[3].split(",")
