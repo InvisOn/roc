@@ -1,0 +1,32 @@
+line	function	context	kind	code
+187	init	x86_64 (comptime switch)	isa	try self.emit.movMemReg(.w64, CC_EMIT.BASE_PTR, self.r12_save_offset.?, .R12);
+504	emitArgInst	shared	word	if (dst != reg) try self.emit.movRegReg(.w64, dst, reg);
+510	emitArgInst	aarch64	isa	try self.emit.addRegRegImm12(.w64, dst, lea.base, @intCast(lea.offset));
+512	emitArgInst	aarch64	isa	try self.emit.subRegRegImm12(.w64, dst, lea.base, @intCast(-lea.offset));
+516	emitArgInst	aarch64	isa	try self.emit.addRegRegReg(.w64, dst, lea.base, dst);
+547	emitLoadPromoted	aarch64	isa	.none => try self.emit.ldrRegMemSoff(.w64, dst, base, offset),
+556	emitLoadPromoted	x86_64	isa	.none => try self.emit.movRegMem(.w64, dst, base, offset),
+574	storeNarrowedAarch64	fn:storeNarrowedAarch64	isa	8 => try self.emit.strRegMemSoff(.w64, reg, CC_EMIT.STACK_PTR, stack_offset),
+590	adjustStackPointerAarch64	fn:adjustStackPointerAarch64	isa	.down => try self.emit.subRegRegImm12Shifted(.w64, CC_EMIT.STACK_PTR, CC_EMIT.STACK_PTR, imm, shifted),
+591	adjustStackPointerAarch64	fn:adjustStackPointerAarch64	isa	.up => try self.emit.addRegRegImm12Shifted(.w64, CC_EMIT.STACK_PTR, CC_EMIT.STACK_PTR, imm, shifted),
+612	emitStackArgAarch64	fn:emitStackArgAarch64	isa	try self.emit.addRegRegImm12(.w64, CC_EMIT.SCRATCH_REG, lea.base, @intCast(lea.offset));
+614	emitStackArgAarch64	fn:emitStackArgAarch64	isa	try self.emit.subRegRegImm12(.w64, CC_EMIT.SCRATCH_REG, lea.base, @intCast(-lea.offset));
+617	emitStackArgAarch64	fn:emitStackArgAarch64	isa	try self.emit.addRegRegReg(.w64, CC_EMIT.SCRATCH_REG, lea.base, CC_EMIT.SCRATCH_REG);
+619	emitStackArgAarch64	fn:emitStackArgAarch64	isa	try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.STACK_PTR, stack_offset);
+641	emitStackArgAarch64	fn:emitStackArgAarch64	isa	try self.emit.ldrRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, mem.base, mem.offset);
+642	emitStackArgAarch64	fn:emitStackArgAarch64	isa	try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.STACK_PTR, stack_offset);
+656	emitStackArgX86	fn:emitStackArgX86	isa	8 => .w64,
+706	saveScratchIfConflict	x86_64-tail	isa	try self.emit.movMemReg(.w64, CC_EMIT.BASE_PTR, save_offset, CC_EMIT.SCRATCH_REG);
+738	stabilizeDeferredMemorySources	aarch64	isa	try self.emit.ldrRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, mem.base, mem.offset);
+739	stabilizeDeferredMemorySources	aarch64	isa	try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.BASE_PTR, save_offset);
+742	stabilizeDeferredMemorySources	x86_64	isa	try self.emit.movRegMem(.w64, CC_EMIT.SCRATCH_REG, mem.base, mem.offset);
+743	stabilizeDeferredMemorySources	x86_64	isa	try self.emit.movMemReg(.w64, CC_EMIT.BASE_PTR, save_offset, CC_EMIT.SCRATCH_REG);
+761	stabilizeDeferredMemorySources	aarch64	isa	try self.emit.addRegRegImm12(.w64, CC_EMIT.SCRATCH_REG, lea.base, @intCast(lea.offset));
+763	stabilizeDeferredMemorySources	aarch64	isa	try self.emit.subRegRegImm12(.w64, CC_EMIT.SCRATCH_REG, lea.base, @intCast(-lea.offset));
+766	stabilizeDeferredMemorySources	aarch64	isa	try self.emit.addRegRegReg(.w64, CC_EMIT.SCRATCH_REG, lea.base, CC_EMIT.SCRATCH_REG);
+775	stabilizeDeferredMemorySources	aarch64	isa	try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.BASE_PTR, save_offset);
+778	stabilizeDeferredMemorySources	x86_64	isa	try self.emit.movMemReg(.w64, CC_EMIT.BASE_PTR, save_offset, CC_EMIT.SCRATCH_REG);
+858	moveTree	shared	word	try self.emit.movRegReg(.w64, CC_EMIT.SCRATCH_REG, src_reg);
+901	beginCall	x86_64	isa	try self.emit.subRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+940	finishCall	x86_64	isa	try self.emit.addRegImm32(.w64, CC_EMIT.STACK_PTR, std.math.cast(i32, total_space) orelse return error.OutOfMemory);
+945	finishCall	x86_64	isa	try self.emit.movRegMem(.w64, .R12, CC_EMIT.BASE_PTR, offset);
