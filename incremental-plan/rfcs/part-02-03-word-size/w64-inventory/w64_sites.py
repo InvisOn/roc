@@ -2,6 +2,11 @@
 
 Usage: python3 -I w64_sites.py <file.zig>
 Prints TSV: line, function, helper, context, code.
+
+Usage: python3 -I w64_sites.py <file.zig> --calls name1,name2,...
+Lists the call sites of those functions instead (not their definitions),
+same columns, `helper` being the callee and `code` the whole call on one
+line.
 context is `x86_64` / `aarch64` when the site is inside that arm of a
 `switch (isa)`, `fn:<name>` when the enclosing function's name names one
 instruction set, else `shared`.
@@ -63,15 +68,16 @@ for i, s in enumerate(lines):
             tail[k] = empty[0][0][0]
             k += 1
 
-for i, s in enumerate(lines):
-    if not re.search(r"\.w64\b", s) or s.strip().startswith("//"):
-        continue
+def site_context(i):
     anc = ancestors(i)
     func = "?"
     for j in anc:
         m = fn_re.match(lines[j])
         if m:
             func = m.group(1)
+            break
+        if lines[j].startswith("test \""):
+            func = "test"
             break
     ctx = "shared"
     chain = [i] + anc
@@ -100,6 +106,43 @@ for i, s in enumerate(lines):
         ctx = tail[i] + "-tail"
     if ctx == "shared" and arch_fn_re.search(func):
         ctx = "fn:" + func
+    return func, ctx
+
+
+def whole_call(i, start):
+    """The call starting at lines[i][start:], joined onto one line."""
+    text = lines[i][start:]
+    depth = 0
+    out = ""
+    k = i
+    while True:
+        for ch in text:
+            out += ch
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return " ".join(out.split())
+        k += 1
+        text = " " + lines[k].strip()
+
+
+if len(sys.argv) > 3 and sys.argv[2] == "--calls":
+    names = sys.argv[3].split(",")
+    call_re = re.compile(r"\b(" + "|".join(map(re.escape, names)) + r")\(")
+    for i, s in enumerate(lines):
+        if s.strip().startswith("//") or fn_re.match(s):
+            continue
+        for m in call_re.finditer(s):
+            func, ctx = site_context(i)
+            print(f"{i + 1}\t{func}\t{m.group(1)}\t{ctx}\t{whole_call(i, m.start())}")
+    sys.exit(0)
+
+for i, s in enumerate(lines):
+    if not re.search(r"\.w64\b", s) or s.strip().startswith("//"):
+        continue
+    func, ctx = site_context(i)
     for m in re.finditer(r"\.w64\b", s):
         hm = None
         for h in helper_re.finditer(s):

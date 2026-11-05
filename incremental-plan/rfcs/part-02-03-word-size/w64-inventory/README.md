@@ -104,18 +104,47 @@ Where most sites are:
 
 ## Widths no `.w64` names
 
-The inventory sees only a written `.w64`. Two kinds of width are implicit:
+The `.w64` list sees only a written `.w64`. A shared helper that takes no
+width, and whose instruction-set arms use `.w64`, gives every caller 64 bits
+whatever the caller's value is; `codegen.emitLoadImm(reg, i64)` does the same
+for immediates. A whole register is one word on every target, so such a call
+is correct for a word or a narrow value and wrong only where the value is 64
+bits. `LirCodeGen-calls.tsv` therefore classifies the call sites of these
+helpers by the value they work on, with one more kind:
 
-1. **Shared helpers without a width parameter** whose instruction-set arms use
-   `.w64`, so every caller gets 64 bits whatever its value is. By driver call
-   sites: `emitCmpImm` 50, `materializeVectorConstant` 21, `emitLeaStack` 15,
-   `emitSaturatingSub` 8, `emitSetCond` 7, `emitAddImm` 7, `emitAddPtrImmAny`
-   7, `emitSubStackPtr` 3, `emitAddStackPtr` 2, `emitTailBlockAddress` 2,
-   `storeDiscriminant` 2, `loadAndMaskDiscriminant` 1. Each caller's value is a
-   word, a 64-bit value or a narrow scalar, and is not classified here.
-2. **Immediates:** the driver calls `codegen.emitLoadImm(reg, i64)` 222 times.
-   The immediate carries no width, including 64-bit masks such as
-   `emitPopcount64`'s constants.
+- **narrow**: at most 32 bits on every target: a Bool, a flag, a shift or loop
+  count, a u32 field, a small mask. Fits one register anywhere; no change.
+
+The helpers are found by `w64_sites.py --calls` and classified by
+`classify_calls.py` (same checks as `classify.py`; `test` blocks left out).
+The list of helpers came from two searches: helpers whose instruction-set
+arms hold `.w64` and that take no width, and helpers that pass a caller's
+integer to an immediate instruction. `materializeVectorConstant`,
+`loadAndMaskDiscriminant` and `storeDiscriminant` are not listed by caller:
+their callers pass no width-dependent value, and their own sites are listed.
+
+| Callee | word | 64 | scalar | narrow | other |
+|---|---|---|---|---|---|
+| `emitLoadImm` | 67 | 63 | 27 | 29 | isa 30, chunk 2, size-8 1 |
+| `emitCmpImm` | 20 | 5 | 8 | 14 | isa 2 |
+| `emitCmpRegImm64` | 0 | 6 | 8 | 0 | |
+| `emitSaturatingSub` | 0 | 8 | 0 | 0 | |
+| `emitSetCond` | 0 | 0 | 0 | 5 | isa 2 |
+| `emitAddImm` | 3 | 0 | 0 | 0 | chunk 3, isa 1 |
+| address helpers | 39 | 0 | 0 | 0 | |
+
+The address helpers are `emitLeaStack` 15, `emitAddUsizeImm` 10,
+`emitAddPtrImmAny` 7, `emitSubStackPtr` 3, `emitAddStackPtr` 2 and
+`emitTailBlockAddress` 2. All 343 sites: word 129, 64 82, narrow 48,
+scalar 43, isa 35, chunk 5, size-8 1. Every `emitSaturatingSub` site mixes a
+word length with a U64 operand (item 7 below).
+
+Still implicit, not classified: the arguments passed to builtins through the
+call builder, which has no width either (`addImmArg` 150, `addLeaArg` 88,
+`addRegArg` 78, `addMemArg` 54, `addListBytesLenCapMemArgs` 16,
+`addF64RegArg` 4 calls in `LirCodeGen`). On a 32-bit target a `u64`
+builtin parameter takes two registers or a stack pair, so these belong
+with the calling convention (item 5 below).
 
 Checked and word-neutral: the RocStr and RocList constants
 (`SEAMLESS_SLICE_TAG` 1, its mask `~1`, `capacity_shift` 1, and
