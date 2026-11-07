@@ -65,65 +65,65 @@ def lines(kind, *ns):
         LINE[n] = kind
 
 # Shared-looking sites that run for one instruction set only.
-lines(ISA, 10648)   # emitPopcount64: only when use_swar is false (x86_64 above v1)
-lines(ISA, 17709)   # generateCachedComposition: `else` of `if (comptime target.toCpuArch() == .aarch64)`
+lines(ISA, 10649)   # emitPopcount64: only when use_swar is false (x86_64 above v1)
+lines(ISA, 17710)   # generateCachedComposition: `else` of `if (comptime target.toCpuArch() == .aarch64)`
 
 # generateLowLevel
-lines(W, 1918, 1944, 1945, 1946, 1949, 2073, 2074, 2075, 2148, 2149, 2265, 2269,
-      2275, 2280, 2339, 2340, 2367, 2370, 2375, 2378, 2398, 2399, 2408, 2413, 2417,
-      2418, 2435, 2436, 2459, 2460, 2461, 2463, 2464, 2465, 3734, 3735, 3766, 3767,
-      4542, 4549, 4796, 4799)
-lines(B64, 2133, 2249)          # U64 index operand (num_from_le_bytes, List.get)
-lines(B64, 2326)                # list_item_size_at_most's U64 bound
-lines(SCALAR, 2673, 2674, 2698, 2699, 2750, 2751, 2777, 2778, 2819, 2820, 3060,
-      3061, 3063, 3064, 3141, 3142, 3163, 3164, 3184, 3185, 3231, 3232, 4185, 4215,
-      4499, 4500)
-lines(B64, 2973, 3070, 3074, 3075, 3078, 3131, 3132, 3222, 3223, 4176, 4177, 4200,
-      4201, 4206, 4207)
-lines(PIECE, 3527, 3528)        # RocStr words at a hard-coded `word * 8`
+lines(W, 1919, 1945, 1946, 1947, 1950, 2074, 2075, 2076, 2149, 2150, 2266, 2270,
+      2276, 2281, 2340, 2341, 2368, 2371, 2376, 2379, 2399, 2400, 2409, 2414, 2418,
+      2419, 2436, 2437, 2460, 2461, 2462, 2464, 2465, 2466, 3735, 3736, 3767, 3768,
+      4543, 4550, 4797, 4800)
+lines(B64, 2134, 2250)          # U64 index operand (num_from_le_bytes, List.get)
+lines(B64, 2327)                # list_item_size_at_most's U64 bound
+lines(SCALAR, 2674, 2675, 2699, 2700, 2751, 2752, 2778, 2779, 2820, 2821, 3061,
+      3062, 3064, 3065, 3142, 3143, 3164, 3165, 3185, 3186, 3232, 3233, 4186, 4216,
+      4500, 4501)
+lines(B64, 2974, 3071, 3075, 3076, 3079, 3132, 3133, 3223, 3224, 4177, 4178, 4201,
+      4202, 4207, 4208)
+lines(PIECE, 3528, 3529)        # RocStr words at a hard-coded `word * 8`
 
 # copyBytesToStackOffset: immediates by destination size
-lines(S8, 16723, 16757, 16812)
-lines(B64, 16725, 16728, 16751, 16753)
-lines(W, 16732, 16733, 16734)
+lines(S8, 16724, 16758, 16813)
+lines(B64, 16726, 16729, 16752, 16754)
+lines(W, 16733, 16734, 16735)
 
 # U64 operands (start, length, index, ListOpRequest.n) in otherwise word functions
-lines(B64, 7891, 7892, 7899, 7900)              # callListSublist start and length
-lines(B64, 15723, 15724)                        # emitZstSublist start and length
-lines(B64, 15739)                               # emitZstDropAt index
-lines(B64, 18350, 18351, 18361, 18362, 18363, 18364)  # generateDynElemLowLevel: n
-lines(B64, 18092, 18093)                        # generateDyn: hasher seed
-lines(B64, 18282)                               # List.len result (U64) stored to its slot
-lines(SCALAR, 18307)                            # map_can_reuse result (Bool)
+lines(B64, 7892, 7893, 7900, 7901)              # callListSublist start and length
+lines(B64, 15724, 15725)                        # emitZstSublist start and length
+lines(B64, 15740)                               # emitZstDropAt index
+lines(B64, 18351, 18352, 18362, 18363, 18364, 18365)  # generateDynElemLowLevel: n
+lines(B64, 18093, 18094)                        # generateDyn: hasher seed
+lines(B64, 18283)                               # List.len result (U64) stored to its slot
+lines(SCALAR, 18308)                            # map_can_reuse result (Bool)
 
 # Exceptions inside otherwise one-kind functions
-lines(W, 6692)                                  # emitSimdClmulBaseline: loop count
-lines(B64, 11334, 11335)                        # generateNumAbs: i128 halves
-lines(SCALAR, 10851, 10855)                     # getI128Parts: the value before widening
-lines(SCALAR, 13051, 13059)                     # rc helper: discriminant read wide, masked
-lines(B64, 13579)                               # discriminant whose layout is u64
-lines(SCALAR, 14243)                            # generateTailCall: value loaded at its size
-lines(PIECE, 14285)                             # generateTailCall: argument registers
-lines(B64, 15354, 15373)                        # moveToReg: i128 low half, F64 bits
-lines(SCALAR, 15350)                            # moveToReg: stack value
-lines(SCALAR, 16027)                            # ensureOnStack: immediate
-lines(B64, 16039, 16041)                        # ensureOnStack: i128 immediate
-lines(B64, 16076, 16101)                        # ensureInGeneralReg: i128 low half, F64 bits
-lines(SCALAR, 18518)                            # ensureValueOnStackForRc: immediate
-lines(B64, 19512, 19514, 19675)                 # freezeCallArg: i128 immediate, F64 bits
-lines(SCALAR, 19670, 19679)                     # freezeCallArg: immediate, stack value
-lines(B64, 19825, 19826)                        # placeCallArguments: i128 halves
-lines(W, 19835, 19836, 19837)                   # placeCallArguments: RocStr/RocList words
-lines(B64, 19318, 19319)                        # saveCallReturnValue: i128/Dec return
-lines(W, 19339, 19340, 19341, 19354, 19355, 19356, 19395)
-lines(W, 20166)                                 # bindProcParams: pointer argument
-lines(W, 20264, 20265, 20266, 20289, 20290, 20291)    # RocList/RocStr return words
-lines(B64, 20299, 20300, 20303, 20304, 20410, 20411, 20414, 20415, 20453, 20454,
-      20468, 20469)                             # i128/Dec return halves
-lines(SCALAR, 15538, 15563)                     # spillArgToStack: immediate, other value
-lines(B64, 15545, 15547)                        # spillArgToStack: i128 immediate
-lines(W, 15517, 15550, 15556)                   # spillArgToStack: one whole register
-lines(PIECE, 22874, 22953)                      # C ABI integer pieces
+lines(W, 6693)                                  # emitSimdClmulBaseline: loop count
+lines(B64, 11335, 11336)                        # generateNumAbs: i128 halves
+lines(SCALAR, 10852, 10856)                     # getI128Parts: the value before widening
+lines(SCALAR, 13052, 13060)                     # rc helper: discriminant read wide, masked
+lines(B64, 13580)                               # discriminant whose layout is u64
+lines(SCALAR, 14244)                            # generateTailCall: value loaded at its size
+lines(PIECE, 14286)                             # generateTailCall: argument registers
+lines(B64, 15355, 15374)                        # moveToReg: i128 low half, F64 bits
+lines(SCALAR, 15351)                            # moveToReg: stack value
+lines(SCALAR, 16028)                            # ensureOnStack: immediate
+lines(B64, 16040, 16042)                        # ensureOnStack: i128 immediate
+lines(B64, 16077, 16102)                        # ensureInGeneralReg: i128 low half, F64 bits
+lines(SCALAR, 18519)                            # ensureValueOnStackForRc: immediate
+lines(B64, 19513, 19515, 19676)                 # freezeCallArg: i128 immediate, F64 bits
+lines(SCALAR, 19671, 19680)                     # freezeCallArg: immediate, stack value
+lines(B64, 19826, 19827)                        # placeCallArguments: i128 halves
+lines(W, 19836, 19837, 19838)                   # placeCallArguments: RocStr/RocList words
+lines(B64, 19319, 19320)                        # saveCallReturnValue: i128/Dec return
+lines(W, 19340, 19341, 19342, 19355, 19356, 19357, 19396)
+lines(W, 20167)                                 # bindProcParams: pointer argument
+lines(W, 20265, 20266, 20267, 20290, 20291, 20292)    # RocList/RocStr return words
+lines(B64, 20300, 20301, 20304, 20305, 20411, 20412, 20415, 20416, 20454, 20455,
+      20469, 20470)                             # i128/Dec return halves
+lines(SCALAR, 15539, 15564)                     # spillArgToStack: immediate, other value
+lines(B64, 15546, 15548)                        # spillArgToStack: i128 immediate
+lines(W, 15518, 15551, 15557)                   # spillArgToStack: one whole register
+lines(PIECE, 22887, 22966)                      # C ABI integer pieces
 
 twice = [n for n, c in seen.items() if c > 1]
 if twice:

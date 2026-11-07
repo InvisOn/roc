@@ -25,28 +25,28 @@ def lines(kind, *ns):
 
 # 64: `+ 8` to the high half of a 16-byte value (i128, Dec, a SIMD vector), or
 # the stride of ListOpRequest.n, a [3]u64
-lines(B64, 3075, 3078, 3132, 3223, 4177, 4207, 6699, 6746, 8556, 8569, 8589,
-      8596, 8597, 8604, 8605, 8900, 9540, 9803, 9817, 10364, 10372, 10382, 10400,
-      10429, 10440, 10530, 10539, 10556, 10564, 10601, 10608, 10835, 11335, 11529,
-      15547, 16041, 16650, 16665, 16728, 16753, 19319, 19514, 19826, 20300, 20304,
-      20411, 20415, 20454, 20469, 18351, 18364)
+lines(B64, 3076, 3079, 3133, 3224, 4178, 4208, 6700, 6747, 8557, 8570, 8590,
+      8597, 8598, 8605, 8606, 8901, 9541, 9804, 9818, 10365, 10373, 10383, 10401,
+      10430, 10441, 10531, 10540, 10557, 10565, 10602, 10609, 10836, 11336, 11530,
+      15548, 16042, 16651, 16666, 16729, 16754, 19320, 19515, 19827, 20301, 20305,
+      20412, 20416, 20455, 20470, 18352, 18365)
 # word: a word stride or size written as 8
-lines(W, 3526,              # RocStr word copy, `word * 8`
-      17443, 17452,         # emitLocalArray: one word per local
-      17714,                # CompositionEntry operands (usize)
-      17724, 17738,         # composition operand words
-      17899,                # VariantInput payload pointers
-      17952,                # dictionary method table (pointers)
-      19836)                # RocStr/RocList second word at `+ 8`
+lines(W, 3527,              # RocStr word copy, `word * 8`
+      17444, 17453,         # emitLocalArray: one word per local
+      17715,                # CompositionEntry operands (usize)
+      17725, 17739,         # composition operand words
+      17900,                # VariantInput payload pointers
+      17953,                # dictionary method table (pointers)
+      19837)                # RocStr/RocList second word at `+ 8`
 # piece: register-sized argument and return pieces, 8-byte stack slots
-lines(PIECE, 14285, 14903, 15507, 15521, 15531, 19264, 19331, 19453, 19501, 19728,
-      19844, 19861, 19933, 19946, 20192, 20197, 20204, 20209, 22573)
-lines(CHUNK, 17181, 17189)  # copyChunked's 8-byte steps
-lines(SCALAR, 13037)        # bound for an 8-byte discriminant read (see 13051)
-lines(NARROW, 3412)         # third u32 of a layout argument struct
-lines(BITS, 360, 5069, 5077, 5090, 9868, 11611, 13056, 13334, 13344, 13584, 16769,
-      21837)
-lines(COMPILER, 13960, 14196, 14454, 19752, 21605)
+lines(PIECE, 14286, 14904, 15508, 15522, 15532, 19265, 19332, 19454, 19502, 19729,
+      19845, 19862, 19934, 19947, 20193, 20198, 20205, 20210, 22586)
+lines(CHUNK, 17182, 17190)  # copyChunked's 8-byte steps
+lines(SCALAR, 13038)        # bound for an 8-byte discriminant read (see 13051)
+lines(NARROW, 3413)         # third u32 of a layout argument struct
+lines(BITS, 361, 5070, 5078, 5091, 9869, 11612, 13057, 13335, 13345, 13585, 16770,
+      21838)
+lines(COMPILER, 13961, 14197, 14455, 19753, 21606)
 
 twice = [n for n, c in seen.items() if c > 1]
 if twice:

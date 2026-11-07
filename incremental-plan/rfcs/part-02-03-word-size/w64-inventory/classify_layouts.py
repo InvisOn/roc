@@ -28,22 +28,22 @@ def lines(kind, *ns):
 
 # u32-only builtin layout structs; TypeDesc.size and .alignment (offsets 0
 # and 4); ListOpRequest.op (enum(u32)) and .unique_args (offsets 0 and 4)
-lines(NARROW, 3405, 3451, 3664, 3673, 10156, 10159, 10161, 10163, 17380, 17381,
-      17732, 18317, 18319)
+lines(NARROW, 3406, 3452, 3665, 3674, 10157, 10160, 10162, 10164, 17381, 17382,
+      17733, 18318, 18320)
 lines(HOST,
-      8392, 8405,                                # pointer alignment as @alignOf(usize)
-      14532,                                     # emitOwnPendingCell's word = @sizeOf(u64)
-      14659, 14667, 14796, 14806,                # HotReloadCaptureHeader (two pointers)
-      14787, 14812,                              # erased callable payload word 1 at @sizeOf(usize)
-      17718,                                     # CompositionEntry.result (usize)
-      17814, 17820, 17822,                       # FieldInput (two pointers)
-      17840, 17855, 17857, 17859,                # DeclaredFieldInput (pointers, then u32)
-      17888, 17896, 17898, 17900,                # VariantInput (pointer, u32, pointer)
-      18313, 18321, 18324, 18344, 18351, 18362, 18364, 18376, 18380, 18390,
-      18392)                                     # ListOpRequest after its two u32s
-lines(COMPILER, 13960, 14196, 14454, 19752, 20786, 21605,   # stack-fallback buffers
-      22109, 22112,                              # checks the compiler's static string bytes
-      23704, 23714, 23722, 23732, 23741)         # in-process allocator helpers
+      8393, 8406,                                # pointer alignment as @alignOf(usize)
+      14533,                                     # emitOwnPendingCell's word = @sizeOf(u64)
+      14660, 14668, 14797, 14807,                # HotReloadCaptureHeader (two pointers)
+      14788, 14813,                              # erased callable payload word 1 at @sizeOf(usize)
+      17719,                                     # CompositionEntry.result (usize)
+      17815, 17821, 17823,                       # FieldInput (two pointers)
+      17841, 17856, 17858, 17860,                # DeclaredFieldInput (pointers, then u32)
+      17889, 17897, 17899, 17901,                # VariantInput (pointer, u32, pointer)
+      18314, 18322, 18325, 18345, 18352, 18363, 18365, 18377, 18381, 18391,
+      18393)                                     # ListOpRequest after its two u32s
+lines(COMPILER, 13961, 14197, 14455, 19753, 20787, 21606,   # stack-fallback buffers
+      22110, 22113,                              # checks the compiler's static string bytes
+      23750, 23760, 23768, 23778, 23787)         # in-process allocator helpers
 
 twice = [n for n, c in seen.items() if c > 1]
 if twice:

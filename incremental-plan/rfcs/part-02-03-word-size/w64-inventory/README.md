@@ -1,7 +1,11 @@
 # `.w64` inventory of the dev backend's shared driver
 
-Measured on upstream `main` `a2609ca2aa` (2026-11-05), branch `isa-word-size`.
-Line numbers are that commit's.
+Measured on upstream `main` `a2609ca2aa` (2026-11-05) and moved to
+`ad3a5d2830` (2026-11-06), branch `isa-word-size`. Line numbers are
+`ad3a5d2830`'s. `rebase_lines.py` moves the classify scripts' line numbers
+to a new base through `git diff`; it stops on any classified line that
+changed. Moving to `ad3a5d2830` changed no kind; it added one site, an
+aarch64 expect-site literal (`start + 8`, isa).
 
 ## The problem
 
@@ -11,7 +15,7 @@ RocStr and RocList offsets for either word (`targetFieldOffset`), the wasm32
 backend targets a 4-byte word, and the LLVM backend reads the word from the
 target (`ptrBitWidth()`; not checked further here). The dev backend's shared driver
 (`LirCodeGen`, `FrameBuilder`, `CallingConvention`) assumes an 8-byte word,
-and `LirCodeGen.zig:351` asserts it. Nearly every width in it is written
+and `LirCodeGen.zig:352` asserts it. Nearly every width in it is written
 `.w64`, which hides two different meanings: a target word (a pointer, a
 length) and a value that is 64 bits on every target (a U64, half of an i128).
 On x86_64 and aarch64 both are 8 bytes, so no test or oracle can tell them
@@ -42,7 +46,7 @@ their context; `classify*.py` hold the kinds; `brace_check.py` and
    run for one instruction set only and are marked `isa` by hand in
    `classify.py`: `emitPopcount64`'s POPCNT (behind `use_swar`, which a
    `switch (isa)` computes) and the `else` of a brace-less
-   `if (comptime target.toCpuArch() == .aarch64)` at 17709.
+   `if (comptime target.toCpuArch() == .aarch64)` at 17710.
 2. Every shared site was read and given a kind in `classify.py` (a default per
    function plus per-line exceptions). The script stops on any shared site
    without a kind, on a line given two kinds, and on an exception that matches
@@ -190,12 +194,12 @@ capacities, spares). Findings:
   takes RocStr's three words as `word0`, `word1`, `word2: u64`, and
   `str_static_small_word_eq` and its caseless twin take one as `word: u64`.
 - `list_concat` takes `update_modes: u64` for a value of two bits.
-- `callListBuiltin` forwards its callers' `.mem` and `.imm` values (12668,
-  12669). Every `.mem` value is a U64 operand, so 12668 is 64. The `.imm`
+- `callListBuiltin` forwards its callers' `.mem` and `.imm` values (12669,
+  12670). Every `.mem` value is a U64 operand, so 12669 is 64. The `.imm`
   values are mixed: alignments and update modes are narrow, element sizes
-  are words, and two are 64-bit: `list_concat`'s update modes (2475) and the
-  zero start and length of an empty sublist window (8003).
-- `addWordArg` passes "the word an `opaque_ptr` local holds", but at 17983 the
+  are words, and two are 64-bit: `list_concat`'s update modes (2476) and the
+  zero start and length of an empty sublist window (8004).
+- `addWordArg` passes "the word an `opaque_ptr` local holds", but at 17984 the
   local is a list index for `roc_desc_list_item_addr(..., index: u64)`.
 
 Checked and word-neutral: the RocStr and RocList constants
@@ -211,7 +215,7 @@ Items 2, 3 and 8 are inventoried site by site (`LirCodeGen-eights.tsv`,
 `LirCodeGen-layouts.tsv`, and the list under 8); the others are single sites
 or small groups described here.
 
-1. **The gate:** `LirCodeGen.zig:351`, `comptime std.debug.assert(target_ptr_size == 8)`.
+1. **The gate:** `LirCodeGen.zig:352`, `comptime std.debug.assert(target_ptr_size == 8)`.
 2. **Literal 8s** (`LirCodeGen-eights.tsv`, `classify_offsets.py`; the
    lister's `--pattern` mode finds `± 8`, `* 8` and `8 *`): 105 lines. 64 51
    (the high half of a 16-byte value at `+ 8`, and `ListOpRequest.n`'s u64
@@ -220,12 +224,12 @@ or small groups described here.
    word 9, isa 5, compiler 5 (buffers for the compiler's own data), chunk 2,
    scalar 1, narrow 1. The 9 word lines are word strides written as 8:
    `placeCallArguments` loads RocStr or RocList words at `+ 8` and `+ 16`
-   (19836, 19837) instead of `target_ptr_size` multiples; the RocStr copy at
-   3526 steps `word * 8`; `emitLocalArray` (17443, 17452),
-   `generateCachedComposition` (17714, 17724, 17738), `generateDyn`'s
-   variant payloads (17899) and dictionary lookup (17952) index word arrays
+   (19837, 19838) instead of `target_ptr_size` multiples; the RocStr copy at
+   3527 steps `word * 8`; `emitLocalArray` (17444, 17453),
+   `generateCachedComposition` (17715, 17725, 17739), `generateDyn`'s
+   variant payloads (17900) and dictionary lookup (17953) index word arrays
    by `* 8`. `generateTailCall` also advances its stack-argument staging by
-   `word_offset += 8` (piece). Of the literal 16s, only 19837 is a word
+   `word_offset += 8` (piece). Of the literal 16s, only 19838 is a word
    stride; the rest are aarch64's 16-byte frame record or 16-byte vectors.
    Stack slots of 8 and 16 bytes (`allocStackSlot(8)` 61, `(16)` 29) are at
    least as large as what they hold at either word, so they stay correct.
@@ -251,7 +255,7 @@ or small groups described here.
    at most 8 bytes (`:316`). The arguments the driver passes through it are
    in "Arguments to builtins" above.
 6. **RocStr's small-string bit:** `str_small_bit` is an `i64` asserted to be
-   `minInt(i64)` (`LirCodeGen.zig:363`); on a 4-byte word the length word's
+   `minInt(i64)` (`LirCodeGen.zig:364`); on a 4-byte word the length word's
    sign bit is bit 31.
 7. **U64 operands:** list indexes (`List.get`, `num_from_le_bytes`, drop-at),
    `List.sublist`'s start and length, and `list_item_size_at_most`'s bound are
@@ -259,13 +263,13 @@ or small groups described here.
    every target. On a 32-bit target, code that combines them with a word
    length or uses them in address arithmetic must narrow them, with a
    bounds decision. The other way round, results read from a word field
-   but typed U64 in Roc (`List.len` at 1918 and 18280 to 18282, the
-   capacity at 1946) must be zero-extended to 64 bits.
+   but typed U64 in Roc (`List.len` at 1919 and 18281 to 18283, the
+   capacity at 1947) must be zero-extended to 64 bits.
 8. **`@sizeOf(usize)` in other dev backend files:** 33, of which 22 are in
    tests. The 11 others all patch or check pointer slots on the machine that
    runs the code, where the compiler's own word is right: `HostSplice` 319
-   and 321 and `StaticDataImage` 235 (in-process images), `Relocation` 255
-   and 261 (absolute pointers in in-process code), and `RunImage` 385 and 651
+   and 321 and `StaticDataImage` 235 (in-process images), `Relocation` 266
+   and 272 (absolute pointers in in-process code), and `RunImage` 401 and 668
    and `StaticDataPool` 200, 203, 320 and 486 (the run image and its static
    data pool, which the compiler's shim maps on the same machine). This
    assumes the shim runs at the compiler's word size.
@@ -273,12 +277,18 @@ or small groups described here.
 ## Related, not word size
 
 - Four `if (comptime target.toCpuArch() == .aarch64)` choices in `LirCodeGen`
-  (15293, 17646, 17705, 19213) reached `main` after step 1 (upstream PR
+  (15294, 17647, 17706, 19214) reached `main` after step 1 (upstream PR
   12740, merge `12b9763ec3`, which had none); they were written on
   2026-10-27 to 10-30, alongside step 1. `design.md` "Dev Backend
   Instruction Sets" rules them out (a choice must be an exhaustive
   `switch (isa)`).
-  `mod.zig:63` and `ObjectFileCompiler.zig:344` compare the architecture
-  too.
+  `mod.zig:64` (`loader_host`, x86_64 or aarch64 since `ad3a5d2830`) and
+  `ObjectFileCompiler.zig:344` (asserts x86_64 or aarch64) compare the
+  architecture too.
+- **Unit images** (fast dev linking, `UnitImage.zig`, `UnitImageLoader.zig`;
+  about 2,900 new lines in `ad3a5d2830`) place code into dev executables with
+  `abs64` relocations (22) and many `u64` fields. They are target data
+  outside the shared driver and are not inventoried here; a 32-bit target
+  needs its own relocation widths there.
 - The driver names x86_64 and aarch64 registers directly (about 152 and 86
   uses in `LirCodeGen`).
