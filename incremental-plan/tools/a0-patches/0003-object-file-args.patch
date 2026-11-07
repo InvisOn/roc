@@ -1,0 +1,21 @@
+Call compileToObjectFile with its current arguments (applied by relative_oracle.py after A0)
+
+Upstream a80ea57a73 ("Delete the old boxy lowering implementation") removed
+compileToObjectFile's three boxy parameters (erased argument descriptor
+offsets and params, worker procs), so A0's devObjectHashes no longer
+compiled ("member function expected 6 argument(s), found 9"). The call now
+passes the same six arguments as upstream's dev_object snapshot path
+(snapshot_tool/main.zig). Applies after 0002-thread-io.patch.
+
+--- a/src/eval/inspected.zig
++++ b/src/eval/inspected.zig
+@@ -1820,9 +1820,6 @@
+             &entrypoints,
+             static_data,
+             store.getProcSpecs(),
+-            lowered.lir_result.boxy_erased_arg_desc_offsets.items,
+-            lowered.lir_result.boxy_erased_arg_desc_params.items,
+-            lowered.lir_result.boxy_worker_procs.items,
+             target,
+         )) |result| {
+             defer result.allocator.free(result.object_bytes);

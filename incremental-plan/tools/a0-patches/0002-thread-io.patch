@@ -1,0 +1,92 @@
+Pass an Io down A0's dev-code hash path (applied by relative_oracle.py after A0)
+
+Upstream 7304f6d9b8 (2026-11-03) gave parseAndCanonicalizeInspectedProgram
+an `io: std.Io` parameter, so A0's devObjectHashes no longer compiled
+("expected 5 argument(s), found 4" at inspected.zig). The hash path now
+takes the runner's Io from runDevCodeHashes down to the call, as upstream's
+other callers do (compileInspectedProgram, compileProgram). Applies after
+0001-round-robin-shards.patch. Output unchanged: io is only forwarded.
+
+--- a/src/eval/inspected.zig
++++ b/src/eval/inspected.zig
+@@ -1769,6 +1769,7 @@
+ /// keys that the object path's layout digests require.
+ pub fn devObjectHashes(
+     allocator: Allocator,
++    io: std.Io,
+     source_kind: SourceKind,
+     source: []const u8,
+     imports: []const ModuleSource,
+@@ -1776,7 +1777,7 @@
+     out: []DevObjectHash,
+ ) Error!void {
+     std.debug.assert(targets.len == out.len);
+-    var resources = try parseAndCanonicalizeInspectedProgram(allocator, source_kind, source, imports);
++    var resources = try parseAndCanonicalizeInspectedProgram(allocator, io, source_kind, source, imports);
+     defer cleanupParseAndCanonical(allocator, resources);
+ 
+     const import_views = try allocator.alloc(check.CheckedArtifact.ImportedModuleView, resources.import_artifacts.len);
+--- a/src/eval/test/parallel_runner.zig
++++ b/src/eval/test/parallel_runner.zig
+@@ -2272,13 +2272,14 @@
+ /// Append one line: `<name>\t<target>=<hash or error.Name>...`.
+ fn appendDevCodeHashLine(
+     allocator: std.mem.Allocator,
++    io: std.Io,
+     out: *std.ArrayListUnmanaged(u8),
+     name: []const u8,
+     tc: TestCase,
+ ) RunnerError!void {
+     try out.appendSlice(allocator, name);
+     var hashes: [dev_code_hash_targets.len]helpers.DevObjectHash = undefined;
+-    helpers.devObjectHashes(allocator, tc.source_kind, tc.source, tc.imports, &dev_code_hash_targets, &hashes) catch |err| {
++    helpers.devObjectHashes(allocator, io, tc.source_kind, tc.source, tc.imports, &dev_code_hash_targets, &hashes) catch |err| {
+         try out.print(allocator, "\tcompile={s}\n", .{@errorName(err)});
+         return;
+     };
+@@ -2299,13 +2300,13 @@
+ };
+ 
+ /// Hash lines for `cases`, in order.
+-fn devCodeHashLines(gpa: std.mem.Allocator, cases: []const DevCodeHashCase, out: *std.ArrayListUnmanaged(u8)) RunnerError!void {
++fn devCodeHashLines(io: std.Io, gpa: std.mem.Allocator, cases: []const DevCodeHashCase, out: *std.ArrayListUnmanaged(u8)) RunnerError!void {
+     var arena = collections.SingleThreadArena.init(gpa);
+     defer arena.deinit();
+     for (cases) |case| {
+         _ = arena.reset(.retain_capacity);
+         var line: std.ArrayListUnmanaged(u8) = .empty;
+-        try appendDevCodeHashLine(arena.allocator(), &line, case.name, case.tc);
++        try appendDevCodeHashLine(arena.allocator(), io, &line, case.name, case.tc);
+         try out.appendSlice(gpa, line.items);
+     }
+ }
+@@ -2315,9 +2316,9 @@
+ /// `k`, `k + shard_count`, `k + 2 * shard_count`, ...: the expensive cases sit
+ /// together in the corpus, and contiguous blocks left one shard with most of
+ /// them.
+-fn devCodeHashLinesSharded(gpa: std.mem.Allocator, cases: []const DevCodeHashCase, shard_count: usize, out: *std.ArrayListUnmanaged(u8)) RunnerError!void {
++fn devCodeHashLinesSharded(io: std.Io, gpa: std.mem.Allocator, cases: []const DevCodeHashCase, shard_count: usize, out: *std.ArrayListUnmanaged(u8)) RunnerError!void {
+     if (comptime !has_fork or coverage_mode or eval_no_fork) {
+-        return devCodeHashLines(gpa, cases, out);
++        return devCodeHashLines(io, gpa, cases, out);
+     }
+ 
+     const Shard = struct { pid: posix.pid_t, read_fd: posix.fd_t, lines: std.ArrayListUnmanaged(u8) = .empty, next: usize = 0 };
+@@ -2348,7 +2349,7 @@
+                 };
+             }
+             var lines: std.ArrayListUnmanaged(u8) = .empty;
+-            devCodeHashLines(child_gpa, mine.items, &lines) catch |err| {
++            devCodeHashLines(io, child_gpa, mine.items, &lines) catch |err| {
+                 std.debug.print("error: dev code hash shard {d}: {s}\n", .{ k, @errorName(err) });
+                 std.c._exit(2);
+             };
+@@ -2434,7 +2435,7 @@
+     const cpu_count = std.Thread.getCpuCount() catch 1;
+     const shard_count = @max(1, @min(max_threads orelse cpu_count, cases.items.len));
+     std.debug.print("computing {d} dev code hashes in {d} shards\n", .{ cases.items.len, shard_count });
+-    try devCodeHashLinesSharded(gpa, cases.items, shard_count, &out);
++    try devCodeHashLinesSharded(io, gpa, cases.items, shard_count, &out);
+     const count = cases.items.len;
+ 
+     switch (request.mode) {
