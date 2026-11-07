@@ -198,8 +198,8 @@ byte-identical.
    "Dev Backend Instruction Sets", with the names and rules 2 and 7 (see
    "The `design.md` paragraph"). No uses yet.
 2. **Word-sized values use `word_width`:** the eight helpers that hide a
-   width take `comptime width`, and the five `anytype` ones get the typed
-   parameter (D2); the word, piece and chunk `.w64`s in
+   width take `comptime width`, and the five `anytype` ones and
+   `emitStoreToPtr` get the typed parameter (D2); the word, piece and chunk `.w64`s in
    `LirCodeGen` and `CallingConvention`, the word, narrow and chunk helper
    calls, their literal 8s as `target_ptr_size`, and `str_small_bit` as a
    `word_bits` integer (D6); `design.md` rule 3. About 560 lines.
@@ -308,6 +308,12 @@ matches its TSV row stops the script.
   take `anytype` today (5 signature lines, their callers unchanged): on a 32-bit target a raw `.w64` then fails to
   coerce at the caller's line, not inside the helper. Same number of
   lines.
+- **Found in commit 2** (2026-11-08): `emitStoreToPtr` took its own
+  `StoreWidth = enum { w32, w64 }`, so its callers' `.w64` (8 of kind 64,
+  2 size-8, 1 word, 2 isa) compiled on every target and could not take a
+  width name. It takes `comptime width: widths.RegisterWidth` as well and
+  passes it through; `StoreWidth` is removed. Byte-identical: each arm
+  emitted exactly the width it was given. About 12 lines.
 
 ### D3. Builtin arguments with a 64-bit parameter
 
