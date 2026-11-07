@@ -122,8 +122,10 @@ describes code that does not exist yet.
 
 The finished paragraph, with the commit that adds each part:
 
-> **[commit 1]** The shared driver also serves every word size, and names each
-> register width by the kind of value, from `backend/dev/widths.zig`: `word_width` for a target word
+> **[commit 1]** The shared driver also serves every word size, and defines a
+> name for each register width by the kind of value, in
+> `backend/dev/widths.zig` (**[commit 5]** "names each register width by the
+> kind of value, from `backend/dev/widths.zig`"): `word_width` for a target word
 > (pointers, lengths, sizes, addresses), `wide64_width` for a value that is
 > 64 bits on every target (U64, I64, F64 bits, an i128 or Dec half), and
 > `scalar_width` for an integer of up to 8 bytes held in one register whose
@@ -212,6 +214,9 @@ byte-identical.
    `design.md` rule 4.
 5. **Scalars use `scalar_width`:** the scalar sites, the register bit counts
    as `scalar_bits`, and the scalar helper calls; `design.md` rule 6.
+   It also changes the paragraph's "defines a name for each register width"
+   (commit 1) to "names each register width": commit 5 renames the last
+   sites, so only from then on does the driver use the names everywhere.
    About 190 lines.
 6. **Runtime structs laid out for the target's word** (D4): the
    target-layout function, its comptime check against `@offsetOf` on
