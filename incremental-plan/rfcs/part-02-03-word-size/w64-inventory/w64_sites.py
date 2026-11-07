@@ -38,7 +38,9 @@ def ancestors(i):
         s = lines[j]
         if s.strip() and not s.strip().startswith("//") and not s.strip().startswith(")") and indent(s) < cur:
             out.append(j)
-            cur = indent(s)
+            # `} else {` closes a block opened at its own indent: go on to
+            # that opener (an `if`, or a `.x86_64 => if` arm), not past it.
+            cur = indent(s) + 1 if s.strip().startswith("}") else indent(s)
         j -= 1
     return out
 

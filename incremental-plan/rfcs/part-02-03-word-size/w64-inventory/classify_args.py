@@ -109,4 +109,5 @@ for row in open(sys.argv[1], encoding="utf-8"):
 unused = sorted(set(LINE) - used)
 if unused:
     sys.exit(f"entries that match no shared site: {unused}")
+print("line\tfunction\tcallee\tcontext\tkind\tcode")
 print("\n".join(out))

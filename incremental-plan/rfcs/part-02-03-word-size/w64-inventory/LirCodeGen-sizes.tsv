@@ -1,0 +1,172 @@
+line	function	context	kind	code
+201	decToIntTruncBits	shared	neutral	.dec_to_i8_trunc, .dec_to_u8_trunc => 8,
+203	decToIntTruncBits	shared	neutral	.dec_to_i32_trunc, .dec_to_u32_trunc => 32,
+204	decToIntTruncBits	shared	neutral	.dec_to_i64_trunc, .dec_to_u64_trunc => 64,
+351	LirCodeGen	shared	neutral	const target_ptr_size: u32 = target.ptrBitWidth() / 8;
+352	LirCodeGen	shared	word	comptime std.debug.assert(target_ptr_size == 8);
+1014	LirCodeGen	shared	size-8	qword = 3, // 8 bytes: U64, I64, F64, pointers (default)
+1021	fromByteCount	shared	size-8	else => .qword,
+1030	byteCount	shared	size-8	.qword => 8,
+1070	of	shared	64	return .{ .low = @truncate(bits), .high = @truncate(bits >> 64) };
+1074	get	shared	64	return @bitCast((@as(u128, self.high) << 64) | self.low);
+1091	LirCodeGen	shared	scalar	size: ValueSize = .qword,
+1847	stabilize	shared	64	const size: ValueSize = if (float.width == .f32) .dword else .qword;
+2155	generateLowLevel	shared	size-8	if (width <= 8) {
+2423	generateLowLevel	shared	size-8	if (elem_size <= 8) {
+2673	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - src_bits;
+2698	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - src_bits;
+2749	generateLowLevel	shared	reg-bits	if (dst_bits < 64) {
+2750	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - dst_bits;
+2776	generateLowLevel	shared	reg-bits	if (src_bits < 64) {
+2777	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - src_bits;
+2819	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - src_bits;
+2976	generateLowLevel	shared	64	return .{ .stack = .{ .offset = stack_offset, .size = .qword, .layout_idx = .f64 } };
+3058	generateLowLevel	shared	reg-bits	if (src_bits < 64) {
+3059	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - src_bits;
+3140	generateLowLevel	shared	reg-bits	if (dst_bits < 64) {
+3141	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - dst_bits;
+3162	generateLowLevel	shared	reg-bits	if (src_bits < 64) {
+3163	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - src_bits;
+3183	generateLowLevel	shared	reg-bits	if (src_bits < 64) {
+3184	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - src_bits;
+3230	generateLowLevel	shared	reg-bits	if (dst_bits < 64) {
+3231	generateLowLevel	shared	reg-bits	const shift_amount: u8 = 64 - dst_bits;
+5041	materializeVectorConstant	shared	64	const high: u64 = @truncate(bits >> 64);
+5067	simdLaneIndexBytes	shared	neutral	const lane_bytes: u8 = @intCast(kind.laneBits() / 8);
+5084	simdReverseByteIndices	shared	neutral	const lane_bytes: usize = @intCast(kind.laneBits() / 8);
+5097	simdParityByteIndices	shared	neutral	const lane_bytes: usize = @intCast(kind.laneBits() / 8);
+5116	simdNarrowByteIndices	shared	neutral	const source_lane_bytes: usize = @intCast(source_kind.laneBits() / 8);
+5117	simdNarrowByteIndices	shared	neutral	const destination_lane_bytes: usize = @intCast(destination_kind.laneBits() / 8);
+5153	emitSimdSplatFromGeneral	x86_64	isa	try self.codegen.emit.movVectorFromGeneral(dst, src, kind.laneBits() == 64);
+5160	emitSimdSplatFromGeneral	x86_64	isa	8 => {
+5252	generateSimdGetLane	shared	neutral	const lane_bytes: u8 = @intCast(kind.laneBits() / 8);
+5265	generateSimdGetLane	x86_64	isa	8 => try self.emitLoadW8(result, index, slot),
+5305	generateSimdGetLane	x86_64	isa	try self.codegen.emit.movGeneralFromVector(result, shuffled, kind.laneBits() == 64);
+5392	generateSimdRearrange	aarch64	isa	if (kind.laneBits() == 64) {
+5407	generateSimdRearrange	x86_64	isa	16, 8 => {
+5411	generateSimdRearrange	x86_64	isa	if (kind.laneBits() == 8) {
+5437	generateSimdRearrange	x86_64	isa	16, 8 => {
+5451	generateSimdRearrange	x86_64	isa	try self.emitX86PackedBinary(.map_0f, if (lane_bits == 8) 0x63 else 0x6B, result, result, rhs_lanes);
+5597	emitSimdWiden	aarch64	isa	8 => 0x00080000,
+6007	generateSimdWidthChange	x86_64	isa	.x86_64 => if (self.cpu_level == .v1 and !(source_kind.isSigned() and (destination_kind.isSigned() or destination_kind.laneBits() == 8))) {
+6035	generateSimdWidthChange	x86_64	isa	8 => 0xFF,
+6062	generateSimdWidthChange	x86_64	isa	(if (destination_kind.laneBits() == 8) 0x63 else 0x6B)
+6063	generateSimdWidthChange	x86_64	isa	else if (destination_kind.laneBits() == 8)
+6218	generateSimdBitmask	aarch64-tail	isa	if (kind.laneBits() == 64) {
+6234	generateSimdBitmask	aarch64-tail	isa	if (kind.laneBits() == 8) {
+6268	signExtendGeneral	shared	reg-bits	const shift: u8 = @intCast(64 - source_bits);
+6318	generateSimdShift	x86_64-tail	isa	if (kind.laneBits() == 8) {
+6344	generateSimdShift	x86_64-tail	isa	} else if (ll.op == .simd_shr_wrap and kind.isSigned() and kind.laneBits() == 64) {
+6578	generateSimdSum	aarch64	isa	if (kind.laneBits() == 64) {
+6878	emitX86SignMask	fn:emitX86SignMask	isa	8 => {
+7082	emitBasicSimdVector	x86_64	isa	const compare_map: @TypeOf(self.codegen.emit).VexMap = if (kind.laneBits() == 64) .map_0f38 else .map_0f;
+7165	emitBasicSimdVector	x86_64	isa	.simd_eq_lanes => if (self.cpu_level == .v1 and kind.laneBits() == 64) {
+7182	emitBasicSimdVector	x86_64	isa	.simd_gt_lanes => if (self.cpu_level == .v1 and kind.laneBits() == 64) {
+7198	emitBasicSimdVector	x86_64	isa	if (kind.laneBits() == 8) {
+7787	normalizeIntegerWidthInReg	shared	reg-bits	1 => 56,
+7788	normalizeIntegerWidthInReg	shared	reg-bits	2 => 48,
+7789	normalizeIntegerWidthInReg	shared	reg-bits	4 => 32,
+7957	callListSublistFromRecord	shared	64	ls.getStructFieldSizeByOriginalIndex(record_idx, 0) != 8 or
+7958	callListSublistFromRecord	shared	64	ls.getStructFieldSizeByOriginalIndex(record_idx, 1) != 8)
+8041	loadListElemToStack	shared	size-8	if (elem_size <= 8) {
+8551	storeWideScalarToStackOffset	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val)) >> 64);
+8792	ensureStableLocationsForStmtLocals	x86_64	isa	.x86_64 => if (size > 8) 16 else 8,
+8922	generateIntBinop	shared	reg-bits	.i8 => 56,
+8923	generateIntBinop	shared	reg-bits	.i16 => 48,
+8924	generateIntBinop	shared	reg-bits	.i32 => 32,
+8947	generateIntBinop	shared	reg-bits	.u8, .i8 => 64 - 3,
+8948	generateIntBinop	shared	reg-bits	.u16, .i16 => 64 - 4,
+8949	generateIntBinop	shared	reg-bits	.u32, .i32 => 64 - 5,
+8950	generateIntBinop	shared	reg-bits	.bool, .str, .u64, .i64, .u128, .i128, .f32, .f64, .dec, .opaque_ptr, .zst, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, _ => 64 - 6,
+9979	generateIntTryConversion	shared	scalar	if (spec.src.bits() > 64) {
+10005	generateIntTryConversion	shared	reg-bits	if (spec.src.bits() < 64) {
+10006	generateIntTryConversion	shared	reg-bits	const shift_amount: u8 = 64 - spec.src.bits();
+10021	generateIntTryConversion	shared	neutral	if (spec.dst.bits() >= 64) break :blk std.math.minInt(i64);
+10027	generateIntTryConversion	shared	neutral	if (spec.dst.bits() >= 64) break :blk std.math.maxInt(i64);
+10032	generateIntTryConversion	shared	neutral	if (spec.dst.bits() >= 64) break :blk std.math.maxInt(i64);
+10049	generateIntTryConversion	shared	neutral	if (spec.dst.bits() >= 64) break :blk @as(u64, @bitCast(@as(i64, std.math.maxInt(i64))));
+10053	generateIntTryConversion	shared	neutral	if (spec.dst.bits() >= 64) break :blk std.math.maxInt(u64);
+10715	generateBitCountScalar	shared	neutral	.u8, .i8 => 8,
+10717	generateBitCountScalar	shared	neutral	.u32, .i32 => 32,
+10718	generateBitCountScalar	shared	neutral	.u64, .i64 => 64,
+10725	generateBitCountScalar	shared	reg-bits	if (width < 64) {
+10739	generateBitCountScalar	shared	reg-bits	if (width < 64) {
+10741	generateBitCountScalar	shared	reg-bits	try self.codegen.emitLoadImm(adj, @intCast(64 - @as(u32, width)));
+10747	generateBitCountScalar	shared	reg-bits	if (width < 64) {
+10830	getI128Parts	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val)) >> 64);
+11427	generateAbsDiff	shared	reg-bits	.i8 => 56,
+11428	generateAbsDiff	shared	reg-bits	.i16 => 48,
+11429	generateAbsDiff	shared	reg-bits	.i32 => 32,
+12046	emitSizedLoadStack	shared	size-8	.qword => try self.codegen.emitLoadStack(.w64, reg, offset),
+12056	emitValueLoadStack	shared	reg-bits	.i8 => 56,
+12057	emitValueLoadStack	shared	reg-bits	.i16 => 48,
+12058	emitValueLoadStack	shared	reg-bits	.i32 => 32,
+12091	emitSizedLoadMem	shared	size-8	.qword => try self.emitLoad(.w64, dst, base_reg, offset),
+12119	emitSizedStoreMem	shared	size-8	.qword => try self.emitStore(.w64, base_reg, offset, src),
+13056	generateBuiltinInternalRcHelperBody	shared	scalar	if (disc_size < 8) {
+13330	generateStructAccess	shared	size-8	if (field_size > 8) base.invariant("LIR/codegen invariant violated: struct field of {d} bytes held in a general register", .{field_size});
+13341	generateStructAccess	shared	size-8	if (field_size > 8) base.invariant("LIR/codegen invariant violated: struct field of {d} bytes held in an immediate", .{field_size});
+15061	emitHostedFloatResultStore	aarch64	isa	8 => try self.codegen.emitStoreStackF64(dst_off, freg),
+15069	emitHostedFloatResultStore	x86_64	isa	8 => try self.codegen.emit.movsdMemReg(frame_ptr, dst_off, freg),
+15367	moveToReg	shared	64	const size: ValueSize = if (float.width == .f32) .dword else .qword;
+15462	aggregateArgRegisterPressure	shared	piece	if (size <= 8) return 1;
+15463	aggregateArgRegisterPressure	shared	piece	const regs = (size + 7) / 8;
+15516	spillArgToStack	shared	size-8	if (num_regs == 1 and s.size != .qword) {
+15544	spillArgToStack	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val)) >> 64);
+15812	spillVectorLocalEntry	shared	neutral	.size = .qword,
+16019	ensureOnStack	shared	size-8	if (builtin.mode == .debug and size > 8) {
+16038	ensureOnStack	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val)) >> 64);
+16095	ensureInGeneralReg	shared	64	const size: ValueSize = if (float.width == .f32) .dword else .qword;
+16271	coerceImmediateForStackCopy	shared	64	8 => .f64,
+16370	ensureInFloatReg	shared	64	if (s.size != .qword) {
+16628	storeI128ToMem	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val)) >> 64);
+16675	storeI128ToMem	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val_i128)) >> 64);
+16724	copyBytesToStackOffset	shared	size-8	8 => try self.codegen.emitStoreStack(.w64, dest_offset, reg),
+16745	copyBytesToStackOffset	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val)) >> 64);
+16756	copyBytesToStackOffset	shared	size-8	8 => {
+16765	copyBytesToStackOffset	shared	size-8	std.debug.assert(size < 8);
+16813	copyBytesToStackOffset	shared	size-8	8 => try self.codegen.emitStoreStack(.w64, dest_offset, reg),
+16825	copyBytesToStackOffset	shared	size-8	8 => {
+17148	copyChunked	shared	chunk	if (size == 8) {
+17153	copyChunked	shared	chunk	if (size < 8) {
+17201	copyLoop	shared	chunk	std.debug.assert(size >= 8);
+17211	copyLoop	shared	chunk	try self.codegen.emitLoadImm(count, size / 8);
+17223	copyLoop	shared	chunk	try self.copyChunked(temp_reg, src, 0, dst, 0, size % 8);
+17251	fillMem	shared	chunk	try self.codegen.emitLoadImm(count, size / 8);
+17259	fillMem	shared	chunk	try self.fillSmall(value, dst, 0, size % 8);
+17269	fillSmall	shared	chunk	while (remaining >= 8) {
+17357	emitStoreScalarToPtr	shared	size-8	8 => try self.emitStoreToPtr(.w64, src_reg, ptr_reg, 0),
+17520	bindReturnedScalar	shared	size-8	8 => try self.emitStore(.w64, frame_ptr, slot, ret_reg_0),
+18509	ensureValueOnStackForRc	shared	size-8	std.debug.assert(value_size <= 8);
+18515	ensureValueOnStackForRc	shared	size-8	std.debug.assert(value_size <= 8);
+19371	saveCallReturnValue	shared	piece	if (size_align.size > 8) {
+19373	saveCallReturnValue	shared	piece	const num_regs = (size_align.size + 7) / 8;
+19494	LirCodeGen	shared	scalar	value_size: ValueSize = .qword,
+19511	freezeCallArg	shared	64	const high: u64 = @truncate(@as(u128, @bitCast(val)) >> 64);
+19618	freezeCallArg	shared	size-8	if (s.size == .qword) {
+19622	freezeCallArg	shared	size-8	.value_size = .qword,
+19631	freezeCallArg	shared	piece	.value_size = .qword,
+19639	freezeCallArg	shared	piece	.value_size = .qword,
+19650	freezeCallArg	shared	64	.value_size = .qword,
+19698	freezeCallArg	shared	scalar	.value_size = .qword,
+20310	moveToReturnRegisterWithLayout	shared	64	const high: i64 = @truncate(val >> 64);
+20349	moveToReturnRegisterWithLayout	shared	64	if (s.size != (if (width == .f32) ValueSize.dword else ValueSize.qword)) {
+20421	moveToReturnRegisterWithLayout	shared	64	const high: i64 = @truncate(val >> 64);
+20453	moveToReturnRegisterWithLayout	shared	64	try self.codegen.emitLoadImm(ret_reg_1, @truncate(val >> 64));
+20479	moveToReturnRegisterWithLayout	shared	piece	} else if (size_align.size <= 8) {
+20498	moveToReturnRegisterWithLayout	shared	piece	const num_regs = (size_align.size + 7) / 8;
+20592	copyResultToReturnPointer	shared	size-8	1, 2, 4, 8 => {
+20605	copyResultToReturnPointer	shared	size-8	if (builtin.mode == .debug and ret_size > 8) {
+20615	copyResultToReturnPointer	shared	size-8	1, 2, 4, 8 => {
+21818	emitCompareLiteralAtPtr	shared	chunk	const chunk_len: usize = if (remaining >= 8)
+21829	emitCompareLiteralAtPtr	shared	chunk	8 => try self.emitLoad(.w64, loaded_reg, ptr_reg, offset_i32),
+22818	generateEntrypointBodyCAbi	shared	piece	const slot_size = @max(self.entrypointParamSlotSize(arg_layout), std.mem.alignForward(u32, raw_size, 8));
+22823	generateEntrypointBodyCAbi	shared	piece	const piece_size: u8 = if (remaining >= 8) 8 else if (remaining >= 4) 4 else if (remaining >= 2) 2 else 1;
+22841	generateEntrypointBodyCAbi	shared	piece	const slot_size = @max(self.entrypointParamSlotSize(arg_layout), std.mem.alignForward(u32, raw_size, 8));
+22906	generateEntrypointBodyCAbi	x86_64	isa	8 => .w64,
+22985	emitEntryFloatStore	aarch64	isa	8 => try self.codegen.emitStoreStackF64(dest_off, freg),
+22993	emitEntryFloatStore	x86_64	isa	8 => try self.codegen.emit.movsdMemReg(frame_ptr, dest_off, freg),
+23010	emitEntryFloatLoad	aarch64	isa	8 => try self.codegen.emitLoadStackF64(freg, src_off),
+23020	emitEntryFloatLoad	x86_64	isa	8 => try self.codegen.emit.movsdRegMem(freg, frame_ptr, src_off),
+23056	emitEntryIncomingStackCopies	aarch64-tail	isa	8 => {
+25496	run	shared	compiler	return if (width == 64) raw else raw & ((@as(u64, 1) << width) - 1);

@@ -67,4 +67,5 @@ for row in open(sys.argv[1], encoding="utf-8"):
 unused = sorted(set(LINE) - used)
 if unused:
     sys.exit(f"entries that match no shared line: {unused}")
+print("line\tfunction\tcontext\tkind\tcode")
 print("\n".join(out))

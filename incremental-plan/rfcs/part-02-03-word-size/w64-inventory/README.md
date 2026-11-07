@@ -7,6 +7,11 @@ to a new base through `git diff`; it stops on any classified line that
 changed. Moving to `ad3a5d2830` changed no kind; it added one site, an
 aarch64 expect-site literal (`start + 8`, isa).
 
+A further search (2026-11-07) added `emitMovRegReg` and `emitCmpReg` to the
+helper calls, added `LirCodeGen-sizes.tsv` (size and register-bit literals
+the other lists miss), described the driver's one-register value model ("The
+value model" below), and fixed a lister context bug (see "Method").
+
 ## The problem
 
 Everything above the dev backend is built for either word: the layout store
@@ -31,10 +36,12 @@ apart; a misclassified site shows only once a 32-bit backend runs.
 | `LirCodeGen-args.tsv` | integer arguments to builtins |
 | `LirCodeGen-eights.tsv` | literal 8 offsets, strides, sizes |
 | `LirCodeGen-layouts.tsv` | `@offsetOf`, `@sizeOf`, `@alignOf` |
+| `LirCodeGen-sizes.tsv` | compares with 8, `8 =>`, `/ 8`, `.qword`, register bit counts |
 
 Scripts: `w64_sites.py` lists sites (`.w64`, `--calls`, `--pattern`) with
-their context; `classify*.py` hold the kinds; `brace_check.py` and
-`check_args.py` cross-check contexts and argument kinds.
+their context; `classify*.py` hold the kinds and print each TSV with its
+header; `brace_check.py` and `check_args.py` cross-check contexts and
+argument kinds.
 
 ## Method
 
@@ -56,9 +63,16 @@ their context; `classify*.py` hold the kinds; `brace_check.py` and
 
 The contexts are checked twice: `brace_check.py` finds the same arms, tails
 and `toCpuArch()` branches by brace matching instead of indentation, and
-agrees on every site except seven tail sites in `generateSimdBitmask` and
+agrees on every `.w64` site except seven tail sites in `generateSimdBitmask` and
 `generateSimdSum`, which reading confirms are tails (its tail test misreads
-those two bodies). Every `switch (isa)` with an empty arm was read to confirm
+those two bodies). `brace_check.py --any` checks the lines of the other lists
+the same way. Its first run found a lister bug: in an arm written
+`.x86_64 => if (...) {...} else {...}`, the lister took the `else` block for
+shared code, because the walk up the enclosing lines stopped at `} else {`
+and skipped the arm line at the same indent. Two `emitLoadImm` calls (5522,
+6039) were in such blocks; both are isa now, and no other list changed. The
+remaining `--any` differences are known tails and lines that start with an
+arm label (6007, 8792), where the lister is right. Every `switch (isa)` with an empty arm was read to confirm
 that the code after it is shared unless it is a tail, and every function
 marked by name is called only from its own instruction set's code.
 
@@ -133,18 +147,28 @@ helpers by the value they work on, with one more kind:
 
 - **narrow**: at most 32 bits on every target: a Bool, a flag, a shift or loop
   count, a u32 field, a small mask. Fits one register anywhere; no change.
+- **mixed**: a forwarder whose callers pass values of different kinds; its
+  callers are listed (`emitCmpRegImm64`'s body, 9307).
 
 The helpers are found by `w64_sites.py --calls` and classified by
 `classify_calls.py` (same checks as `classify.py`; `test` blocks left out).
 The list of helpers came from two searches: helpers whose instruction-set
 arms hold `.w64` and that take no width, and helpers that pass a caller's
-integer to an immediate instruction. `materializeVectorConstant`,
+integer to an immediate instruction. A third search (2026-11-07: every
+function without a width parameter whose body holds `.w64`, arms or not)
+added `emitMovRegReg` and `emitCmpReg`, one-line shared helpers that always
+move or compare a whole 64-bit register; a U64 or i128-half compare through
+`emitCmpReg` is wrong on a 32-bit target. The other functions that search
+found are generators with their own listed sites, or the value-model helpers
+("The value model" below). `materializeVectorConstant`,
 `loadAndMaskDiscriminant` and `storeDiscriminant` are not listed by caller:
 their callers pass no width-dependent value, and their own sites are listed.
 
 | Callee | word | 64 | scalar | narrow | other |
 |---|---|---|---|---|---|
-| `emitLoadImm` | 67 | 63 | 27 | 29 | isa 30, chunk 2, size-8 1 |
+| `emitLoadImm` | 67 | 63 | 27 | 27 | isa 32, chunk 2, size-8 1 |
+| `emitMovRegReg` | 16 | 5 | 6 | 3 | isa 11 |
+| `emitCmpReg` | 7 | 1 | 1 | 0 | isa 1, chunk 1, mixed 1 |
 | `emitCmpImm` | 20 | 5 | 8 | 14 | isa 2 |
 | `emitCmpRegImm64` | 0 | 6 | 8 | 0 | |
 | `emitSaturatingSub` | 0 | 8 | 0 | 0 | |
@@ -154,8 +178,8 @@ their callers pass no width-dependent value, and their own sites are listed.
 
 The address helpers are `emitLeaStack` 15, `emitAddUsizeImm` 10,
 `emitAddPtrImmAny` 7, `emitSubStackPtr` 3, `emitAddStackPtr` 2 and
-`emitTailBlockAddress` 2. All 343 sites: word 129, 64 82, narrow 48,
-scalar 43, isa 35, chunk 5, size-8 1. Every `emitSaturatingSub` site mixes a
+`emitTailBlockAddress` 2. All 396 sites: word 152, 64 88, scalar 50,
+narrow 49, isa 49, chunk 6, size-8 1, mixed 1. Every `emitSaturatingSub` site mixes a
 word length with a U64 operand (item 7 below).
 
 ### Arguments to builtins
@@ -209,6 +233,54 @@ Checked and word-neutral: the RocStr and RocList constants
 was read: u32 fields (layout and descriptor sizes, request fields), 4-byte
 size arms, F32 bits, discriminants, or 4-byte copy tails; none is a word.
 
+## The value model
+
+The largest assumption is not a site but the driver's value model: one
+general register holds any value up to 8 bytes.
+
+- `ValueLocation` has `general_reg` (one register), `immediate_i64` and
+  `stack`, whose `size` defaults to `.qword` and `layout_idx` to `.u64`
+  (1091). `FrozenCallArg.value_size` defaults to `.qword` too (19494).
+- 12 places build a `.stack` location without a size, meaning 8 bytes: 1844
+  (`stabilize`), 2167 (a layout but no size), 3738, 3747, 8057, 10071, 10124,
+  10354, 16616, 19313, 19388 and 19397.
+- `ensureInGeneralReg` (82 callers) and `ensureOnStack` (133 callers) give one
+  register or one slot for any value up to 8 bytes; `getI128Parts` (25)
+  gives two for 16.
+
+On a 32-bit target a U64, I64 or F64-bits value needs two registers, so the
+model needs a register-pair location (the Wide64 routing the `scalar` kind
+refers to), and `ValueSize` needs the word as a size of its own instead of
+`.qword` standing for "a whole register". This is a design change that comes
+before the site edits: the `scalar`, `size-8` and `reg-bits` sites are
+where the pair location is consumed.
+
+## Sizes and register bits
+
+`LirCodeGen-sizes.tsv` (`classify_sizes.py`, which also prints its search
+pattern) lists the literals the `± 8` search misses: compares with 8,
+`8 =>` arms, `/ 8` and `% 8`, `alignForward(.., 8)`, `ValueSize.qword`, and
+register bit counts. 171 lines, 138 shared. Two more kinds:
+
+- **reg-bits**: a general register's bit count, 64, as a shift amount or
+  bound: `64 - bits` sign and zero extension, the 56/48/32 shift tables
+  (`normalizeIntegerWidthInReg`, `generateIntBinop`, `generateAbsDiff`,
+  `emitValueLoadStack`), the shift-count masks `64 - 3..6`, and
+  `width < 64` guards. They go with shifts classified `scalar`; on a 32-bit
+  register they become 32-based.
+- **neutral**: the same at either word: type bit widths, SIMD lane bytes, a
+  64-bit type's bounds, `target_ptr_size` itself.
+
+Counts: reg-bits 40, isa 33, size-8 27, 64 24, neutral 19, piece 11,
+chunk 10, scalar 5, word 1, compiler 1. The size-8 sites include "a register
+holds at most 8 bytes" (one-register loads at `<= 8`, invariant checks at
+`> 8` in `generateStructAccess`, `ensureOnStack`, `ensureValueOnStackForRc`
+and `copyResultToReturnPointer`) and `ValueSize`'s `.qword`. The piece
+sites are register counts `(size + 7) / 8` and the C ABI entry wrapper's
+8-byte slots and pieces. Twelve lines are also in another list; where the
+kinds differ, the literal and the value differ (at 17211, `size / 8` is a
+chunk count, the loaded count a word).
+
 ## Word-size assumptions that are not `.w64`
 
 Items 2, 3 and 8 are inventoried site by site (`LirCodeGen-eights.tsv`,
@@ -251,8 +323,12 @@ or small groups described here.
    whose size, `builtins.native_callable.pending_words`, is itself
    `@sizeOf(Pending) / @sizeOf(usize)` on the compiler host.
 5. **`CallingConvention`:** stack arguments use fixed 8-byte slots
-   (`CallingConvention.zig:309`, `:345`), and aggregates split into pieces of
-   at most 8 bytes (`:316`). The arguments the driver passes through it are
+   (`CallingConvention.zig:345`), a stack pointer argument is 8 bytes
+   (`:309`, `addStackLeaArgAt`), aggregates split into pieces of at most 8
+   bytes (`:316`), and `addStackArg` asserts sizes of 1, 2, 4 or 8 (`:327`).
+   `beginCall` rounds the outgoing area to 16 bytes in shared code (`:887`,
+   asserted at `:890`); arm32's AAPCS needs 8, so the alignment belongs to the
+   instruction set. The arguments the driver passes through it are
    in "Arguments to builtins" above.
 6. **RocStr's small-string bit:** `str_small_bit` is an `i64` asserted to be
    `minInt(i64)` (`LirCodeGen.zig:364`); on a 4-byte word the length word's

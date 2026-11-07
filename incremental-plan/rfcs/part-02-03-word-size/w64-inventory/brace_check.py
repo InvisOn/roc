@@ -1,7 +1,10 @@
 """Independent ISA-context check by brace matching (not indentation).
 
-Usage: python3 -I brace_check.py <file.zig> <sites.tsv>
+Usage: python3 -I brace_check.py <file.zig> <sites.tsv> [--any]
 Prints every site whose context differs from the sites.tsv context.
+<sites.tsv> is w64_sites.py output. Without --any the sites are the `.w64`s;
+with --any they are the listed lines (for --calls and --pattern output), each
+placed at its first non-blank character.
 """
 import re
 import sys
@@ -133,16 +136,28 @@ for m in re.finditer(r"if \(comptime target\.toCpuArch\(\) == \.(\w+)\)", clean)
                 e = match[e] + 1 if clean[e] in "({[" else e + 1
             ranges.append((k, e + 1, other))
 
+def positions():
+    if sys.argv[3:] == ["--any"]:
+        starts = [0] + [i + 1 for i, ch in enumerate(src) if ch == "\n"]
+        for r in open(sys.argv[2], encoding="utf-8"):
+            p = starts[int(r.split("\t", 1)[0]) - 1]
+            while src[p] in " \t":
+                p += 1
+            yield p
+    else:
+        for m in re.finditer(r"\.w64\b", clean):
+            yield m.start()
+
 site_lines = {}
-for m in re.finditer(r"\.w64\b", clean):
+for pos in positions():
     label = "shared"
     best = None
     for s, e, lab in ranges:
-        if s <= m.start() < e and (best is None or s >= best[0]):
+        if s <= pos < e and (best is None or s >= best[0]):
             best = (s, lab)
     if best:
         label = best[1]
-    site_lines.setdefault(line_of[m.start()], []).append(label)
+    site_lines.setdefault(line_of[pos], []).append(label)
 
 rows = [r.rstrip("\n").split("\t") for r in open(sys.argv[2], encoding="utf-8")]
 seen = {}

@@ -22,12 +22,14 @@ CALLEES = [
     "emitLoadImm", "emitCmpImm", "emitCmpRegImm64", "emitSetCond", "emitAddImm",
     "emitSaturatingSub", "emitLeaStack", "emitAddPtrImmAny", "emitAddUsizeImm",
     "emitSubStackPtr", "emitAddStackPtr", "emitTailBlockAddress",
+    "emitMovRegReg", "emitCmpReg",
 ]
 if sys.argv[1:] == ["--callees"]:
     print(",".join(CALLEES))
     sys.exit(0)
 
-ISA, W, B64, SCALAR, NARROW, CHUNK, S8 = "isa", "word", "64", "scalar", "narrow", "chunk", "size-8"
+ISA, W, B64, SCALAR, NARROW, CHUNK, S8, MIXED = (
+    "isa", "word", "64", "scalar", "narrow", "chunk", "size-8", "mixed")
 
 # Address helpers: every call works on an address.
 BY_CALLEE = {c: W for c in ("emitLeaStack", "emitAddPtrImmAny", "emitAddUsizeImm",
@@ -65,11 +67,24 @@ lines(SCALAR, 6438, 8262, 8267, 8270, 9087, 9100, 9180, 9187, 9189, 9321, 9346,
       16058, 16719, 18307, 18518, 19670, 20542, 20617, 21186, 21227, 21230, 21304,
       21307, 21401, 9279, 9281, 9284, 9327, 9329, 9342, 9344, 11281)
 # narrow: at most 32 bits on every target (Bools, flags, counts, u32 fields)
-lines(NARROW, 3408, 3410, 3412, 3454, 3456, 3673, 4238, 4239, 4247, 4248, 5522,
-      5554, 6039, 6287, 6426, 6428, 6444, 6682, 6694, 8996, 9020, 9150, 9151, 9578,
+lines(NARROW, 3408, 3410, 3412, 3454, 3456, 3673, 4238, 4239, 4247, 4248,
+      5554, 6287, 6426, 6428, 6444, 6682, 6694, 8996, 9020, 9150, 9151, 9578,
       9584, 9602, 10159, 10161, 10163, 10741, 15380, 16110, 16129, 16135, 16459,
       16771, 17734, 17898, 18317, 18319, 19582, 19587, 21065, 21693, 21712, 21714,
       21783, 21863)
+# emitMovRegReg and emitCmpReg: a whole-register move or compare (always .w64)
+lines(W, 1592, 4861, 8415, 12545, 17538, 17716, 18124, 21634, 21643, 21660, 21699,
+      21736, 21739, 21741, 21764, 21767, 21772, 21775, 21860, 21892, 21895, 21911,
+      21927)
+lines(B64, 2131, 2245,              # U64 index (num_from_le_bytes, List.get)
+      10626, 10848, 10873, 11272)   # popcount of a U64, i128 halves
+lines(SCALAR, 8268,                 # F32 or F64 bits
+      9084, 10723, 11593, 15337, 21225, 21302)
+lines(NARROW, 6284, 6441,           # SIMD shift counts
+      10438)                        # c_int overflow flag
+lines(CHUNK, 21841)                 # emitCompareLiteralAtPtr's chunk
+lines(MIXED, 9307)                  # emitCmpRegImm64's body: its callers are listed
+
 # chunk: copy, fill and compare units
 lines(CHUNK, 17215, 17216, 17243, 17254, 21840)
 # size-8: chosen by an 8-byte size
@@ -99,4 +114,5 @@ for row in open(sys.argv[1], encoding="utf-8"):
 unused = sorted(set(LINE) - used)
 if unused:
     sys.exit(f"entries that match no shared site: {unused}")
+print("line\tfunction\tcallee\tcontext\tkind\tcode")
 print("\n".join(out))

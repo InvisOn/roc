@@ -46,6 +46,8 @@ for s in open(sys.argv[4], encoding="utf-8"):
 kind_of = {}
 for row in open(sys.argv[5], encoding="utf-8"):
     f = row.rstrip("\n").split("\t")
+    if f[0] == "line":
+        continue  # header
     kind_of.setdefault(int(f[0]), set()).add(f[4])
 
 add_re = re.compile(r"\b(addImmArg|addRegArg|addMemArg|addLeaArg|addListBytesLenCapMemArgs|"

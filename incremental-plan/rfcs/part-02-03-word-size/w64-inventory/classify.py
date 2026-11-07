@@ -146,4 +146,5 @@ used = {int(r.split("\t")[0]) for r in out}
 unused = sorted(set(LINE) - used)
 if unused:
     sys.exit(f"LINE entries that match no site: {unused}")
+print("line\tfunction\tcontext\tkind\tcode")
 print("\n".join(out))
