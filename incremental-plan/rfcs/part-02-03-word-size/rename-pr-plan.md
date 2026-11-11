@@ -3,7 +3,7 @@
 - **Status:** Accepted 2026-11-08
 - **Scope:** one PR, plan rows 1 to 3 (follows step 1, upstream PR 12740)
 - **Branch:** `isa-word-size` (worktree `.workspaces/pr-isa-word-size`)
-- **Base:** upstream `main` at `ad3a5d2830` (2026-11-06), rebased whenever `main` moves
+- **Base:** upstream `main`, rebased whenever `main` moves (now `a495502ad9`; first cut at `ad3a5d2830`, 2026-11-06)
 - **Inventory:** `w64-inventory/` (README, TSVs, classify scripts)
 - **Supersedes:** `word-size-2-3-plan.md` D1 to D4 for the word-size work
   (the register seams of its D1 are not part of this PR)
@@ -72,8 +72,9 @@ widths.wide64_width;`), which would make it eager again.
 
 `widths.zig` is separate from `isa.zig` so that `isa.zig` keeps one job,
 choosing the instruction set, and its other users (`isaOfOrNull`,
-`isa.host`) do not import the register files. Its doc comment carries the
-seven rules next to the names, and its test checks that every name is
+`isa.host`) do not import the register files. Its doc comment carries rules
+2 and 7, the two about the names themselves (`design.md` has all seven,
+decided 2026-11-08 in commit 5's review), and its test checks that every name is
 `.w64` and every bit count 64 on the x86_64 and aarch64 targets. The 4-byte
 side cannot be tested yet: no 4-byte target has a dev instruction set, so
 `Widths` cannot be built for one. The 32-bit backend's PR adds that test
@@ -144,7 +145,8 @@ The finished paragraph, with the commit that adds each part:
 > never by the compiler's own `@sizeOf` or `@offsetOf`, which describe the
 > host. **[commit 5]** Word sizes and register bit counts are `target_ptr_size`,
 > `word_bits` or `scalar_bits`, never a literal 8 or 64; a 64-bit value's
-> own size stays 8. **[commit 1]** A 32-bit instruction set's `RegisterWidth` has
+> own size stays 8. Stack argument slots stay 8 bytes until the 32-bit
+> calling convention (D6). **[commit 1]** A 32-bit instruction set's `RegisterWidth` has
 > no `w64` member, so `wide64_width`, `scalar_width` and a stray `.w64` are
 > compile errors on it until the driver routes those values through
 > register pairs.
@@ -218,11 +220,36 @@ byte-identical.
    (commit 1) to "names each register width": commit 5 renames the last
    sites, so only from then on does the driver use the names everywhere.
    About 190 lines.
-6. **Runtime structs laid out for the target's word** (D4): the
-   target-layout function, its comptime check against `@offsetOf` on
-   64-bit targets, and the 32 sites; `design.md` rule 5. About 100 lines.
+6. **Runtime structs laid out for the target's word** (D4): upstream's
+   `externLayout` at the target's width, its `usize` arm, native-layout
+   test lines for the structs it now lays out, and the remaining sites;
+   `design.md` rule 5. Review 2026-11-10: the pending cell is sized by
+   upstream's `pendingByteSize` (U-1); `externLayout` rejects field types
+   it cannot lay out at another width (F5); a test pins `ListOpRequest`
+   and `Payload` at 32-bit (F3). The commit message names the two
+   pending-cell word slots (`slot`, `flag_slot`) that go from 8 to
+   `target_ptr_size` (F2). About 100 lines.
 7. **Lint: no raw `.w64` in the shared driver** (D5), and `design.md`
-   rule 1. About 150 lines.
+   rule 1. Review 2026-11-11: the last three instruction-set choices with
+   a `.w64` (`generateDynFrameAlloc`, `emitReleaseDynRegion`,
+   `emitPopcount64`) become `switch (isa)` (G-1); the lint skips tests
+   (G-2); commit 4's `…Wide64` asserts compare with `word_width` instead
+   of `.w64` (G-3). About 250 lines; the lint's test and its error
+   messages make up most of the growth from 150.
+
+Made 2026-11-11 and rebased onto upstream `a495502ad9` the same day;
+the relative oracle passed on every commit there. Open as fork PR
+InvisOn/roc#12.
+
+| Commit | Hash |
+|---|---|
+| 1 | `c6ccdc2d66` |
+| 2 | `1f3d9c5f78` |
+| 3 | `79a55addc0` |
+| 4 | `5b82518428` |
+| 5 | `4c96f2a91c` |
+| 6 | `99029e4da1` |
+| 7 | `08f4556bbd` |
 
 The edits of commits 2, 3 and 5 are applied from the inventory's TSVs by
 line number and kind, then read in the diff; a site whose code no longer
@@ -354,7 +381,25 @@ matches its TSV row stops the script.
 
 ### D4. Structs laid out with the compiler's own types
 
-- **Status:** Decided 2026-11-07: alternative 3.
+- **Status:** Decided 2026-11-07: alternative 3. Revised 2026-11-09
+  after the rebase onto `db807292d9`: upstream added
+  `boxy_runtime.desc.externLayout(T, width)`, which already lays out any
+  `extern struct` at a pointer width, so commit 6 uses it with the target's
+  width instead of adding a second function (C6-5 A). It gets a `usize` and
+  `isize` arm that takes the target's width, and alignment stays equal to
+  size. The dev backend's existing `TypeDesc.layout(.u64)` and
+  `Field.layout(.u64)` switch to the target's width too. Revised
+  2026-11-10 after the rebase onto `77f23cbe27`: upstream added
+  `native_callable.pendingByteSize(word_size)` and a design.md rule that
+  backends size the pending cell with it, so `emitOwnPendingCell` uses
+  `pendingByteSize(target_ptr_size)` instead of `externLayout` (U-1);
+  the `callable` field's offset still comes from `externLayout`.
+- **PR description:** suggest a follow-up PR that moves `externLayout` and
+  `PointerWidth` out of `boxy_runtime` to a neutral module (for example
+  next to `RocTarget` in `src/target/`), with `boxy_runtime` re-exporting
+  them. The function is not Boxy-specific: this PR uses it for builtins
+  structs, and the wasm and LLVM backends could use it too (C6-6 B,
+  2026-11-10; this PR stays with A).
 - **Context:** 32 `@offsetOf`/`@sizeOf`/`@alignOf` uses in 6 functions
   (`generateDyn`, `generateDynElemLowLevel`, `generatePackedErasedFn`,
   `generateCachedComposition`, `emitOwnPendingCell`,
@@ -465,6 +510,54 @@ matches its TSV row stops the script.
   - Slots and alignment: part 7. Wide64 routing and lowering: part 10.
   - Unit images and the builtins' `u64` words: listed in the PR
     description.
+- **Left for later parts** (commit 6 review questions R1 and R2, both
+  decided 2026-11-10: leave them). Line numbers are in
+  `src/backend/dev/LirCodeGen.zig` at commit 7 (`08f4556bbd`, on
+  upstream `a495502ad9`; upstream did not change the file since `f7d1f1982f`).
+  - **Review R1, part 7: stack slots sized with a literal 8.** 61
+    `allocStackSlot(8)` calls. Some hold a word (should be
+    `target_ptr_size`), some a 64-bit value (8 is right), some need
+    reading. Too big only wastes stack on 32-bit; part 7 sorts them when
+    arm32 code runs. Find them with `grep -n 'allocStackSlot(8)'`. By
+    function (count: lines):
+    - `stabilize` (1): 1855
+    - `generateLowLevel` (3): 3014, 4576, 4831
+    - `callListSublist` (2): 7926, 7927
+    - `boxValueLocationToLayout` (1): 11918
+    - `emitRcHelperCallAtStackOffset` (2): 12561, 12573
+    - `emitRawRcHelperCallFromPtrReg` (1): 12627
+    - `compileRcHelperCallable` (2): 13186, 13193
+    - `generateList` (1): 13653
+    - `generateStruct` (1): 13736
+    - `generateTag` (1): 13857
+    - `generateDynCall` (2): 14070, 14091
+    - `emitTailCarry` (3): 14391, 14398, 14402
+    - `generateErasedCall` (3): 14468, 14512, 14520
+    - `generatePackedErasedFn` (5): 14722, 14737, 14748, 14778
+      (`heap_ptr_slot`, the pointer slot the review found), 14795
+    - `emitHotReloadEnterForHostCallable` (1): 16034
+    - `ensureInFloatReg` (1): 16400
+    - `bindScalarIn` (1): 17634
+    - `bindComponentAddressIn` (1): 17663
+    - `emitDynListGetUnsafe` (1): 17818
+    - `generateDyn` (10): 18086, 18197, 18236, 18243, 18253, 18260
+      (`copy_slot`, the `hot_reload_erased_callable_copy` address,
+      added upstream in `f7d1f1982f`), 18278, 18279, 18280, 18295
+    - `generateDynElemLowLevel` (2): 18398, 18421
+    - `bindErasedRecordParams` (4): 18539, 18540, 18541, 18542
+    - `compileProcSpec` (3): 19085, 19090, 19100
+    - `saveCallReturnValue` (2): 19424, 19515
+    - `freezeCallArg` (2): 19765, 19784
+    - `bindErasedCallableAdapterParams` (4): 20082, 20083, 20084, 20122
+    - `generateEntrypointBodyCAbi` (1): 22969
+  - **Review R2, part 6: the 24-byte field entry in `emitDynFieldAddr`.**
+    It multiplies a field's slot by 24 with shifts and an add (line
+    17872, the comment "A field entry is 24 bytes"). A `boxy_runtime.Field`
+    is 20 bytes on a 32-bit target. The assert
+    `field_entry_size == 24` (line 17484, in the struct's
+    descriptor-offset consts) stops a 32-bit build there. Part 6 lifts
+    the driver's 8-byte assert, so it hits this one next and writes the
+    20-byte sequence, tested by its arm32 tests.
 
 ## Risks
 
