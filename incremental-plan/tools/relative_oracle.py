@@ -679,6 +679,9 @@ def plan_side(path: str, env: Mapping[str, str], work: str, fresh: bool) -> Side
     key = side_key(path, env, work)
     entry = os.path.join(work, "cache", key + ".json")
     if fresh or not os.path.exists(entry):
+        # The full path, so a run on another machine can be given exactly this
+        # side's result (the cache holds both sides' results, by key).
+        print(f"[{side}] builds; its result will be saved as {entry}", flush=True)
         return SidePlan(path, key, None)
     saved = json.load(open(entry))
     os.utime(entry)  # mark it used, so pruning keeps it
