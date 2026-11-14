@@ -102,6 +102,12 @@ runs A32 and release builds go through LLVM, which can emit Thumb. Thumb
 comes back, if at all, as its own proposal with the Cortex-M track (see
 HANDOFF's reminder). Three cheap hooks keep that door open (parts 4 and 6).
 
+**Follow-up when the arm32 parts are done: Thumb-2 on ARMv7-M** (Cortex-M3,
+M4 and M7; noted 2026-11-14). The owner wants it, and it is a follow-up,
+not a change to this plan: doing it now would change the plan too much.
+Start it after part 12, with its own planning doc. The questions it has to
+answer are in HANDOFF's reminder "after Cortex-A, do Cortex-M".
+
 Parts 1, 2 and 3 together are the biggest change to upstream's own code. In
 the reference they are about 5,400 added and 2,800 removed lines in
 `LirCodeGen.zig`, plus about 1,000 in the x86_64 and aarch64 code
@@ -485,6 +491,8 @@ upstream first, so stopping early still leaves something of value.
   seven commits on `isa-word-size`, fork #12, opened upstream by the
   owner as PR 12983. The register seams (`word-size-2-3-plan.md` D1) are
   not in it.
+- 2026-11-14: follow-up noted: Thumb-2 on ARMv7-M after the arm32 parts
+  are done. The current plan does not change.
 - 2026-11-14: PR 12983 at `5b8de51f17` on upstream `a5c6d8bf5b`, all CI
   checks green, no conflicts, waiting for review. Open: W-2 and the
   `design.md` rewording (see the rename plan's "Where it stands").

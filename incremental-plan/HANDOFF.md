@@ -265,6 +265,26 @@ one's "How to test".
   itself, which is not in the current plan (decided 2026-10-27, see the
   README and `thumb-plan-review.md`). ARMv6-M's smaller Thumb subset is
   extra work on top.
+  - 2026-11-14: the owner narrowed it to **Thumb-2 on ARMv7-M**
+    (Cortex-M3, M4, M7), to start when the arm32 parts are done. Not
+    now: it would change the current plan too much. Questions its
+    planning doc must answer:
+    - A32 kept beside it, or Thumb-2 only from then on.
+    - Target: a new freestanding target (upstream has no freestanding
+      ARM target); the platform supplies startup code, memory and
+      output. Possibly also a Linux test target that runs the same
+      Thumb-2 code on Cortex-A in Thumb state (check on device first,
+      with the owner's OK).
+    - FPU: soft-float for all floats (M3 baseline), hardware F32 (M4F),
+      or hardware F64 (M7).
+    - Tests: no host path (part 9 does not apply), so the eval corpus
+      runs as linked programs under qemu's system emulator (for example
+      the `mps2-an385` Cortex-M3 board) with semihosting for output and
+      exit code.
+    - SIMD: no NEON on ARMv7-M; generic lowering, or ARMv7E-M DSP.
+    - What it reuses: ELF32 (with `$t` mapping symbols, Thumb bit 0 and
+      the Thumb relocations), AAPCS (base variant); the encoder and code
+      generator are new. See also `thumb-plan-review.md` finding 5.
 - **The proposal to the maintainers (part 0) is not recorded as sent.** The
   README says nothing else starts until they answer, but #9 is nearly
   ready (found by the Thumb review, 2026-10-27). Decide whether to send
