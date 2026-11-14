@@ -1,9 +1,10 @@
 # Name every width in the dev backend's shared driver
 
-- **Status:** Accepted 2026-11-08
+- **Status:** Accepted 2026-11-08. Open upstream as PR 12983 since
+  2026-11-12, waiting for a maintainer's review (see "Where it stands")
 - **Scope:** one PR, plan rows 1 to 3 (follows step 1, upstream PR 12740)
 - **Branch:** `isa-word-size` (worktree `.workspaces/pr-isa-word-size`)
-- **Base:** upstream `main`, rebased whenever `main` moves (now `a495502ad9`; first cut at `ad3a5d2830`, 2026-11-06)
+- **Base:** upstream `main`, rebased whenever `main` moves (now `a5c6d8bf5b`; first cut at `ad3a5d2830`, 2026-11-06)
 - **Inventory:** `w64-inventory/` (README, TSVs, classify scripts)
 - **Supersedes:** `word-size-2-3-plan.md` D1 to D4 for the word-size work
   (the register seams of its D1 are not part of this PR)
@@ -237,19 +238,56 @@ byte-identical.
    of `.w64` (G-3). About 250 lines; the lint's test and its error
    messages make up most of the growth from 150.
 
-Made 2026-11-11 and rebased onto upstream `a495502ad9` the same day;
-the relative oracle passed on every commit there. Open as fork PR
-InvisOn/roc#12.
+Made 2026-11-11 on upstream `a495502ad9`. Rebased since then, last onto
+upstream `a5c6d8bf5b` on 2026-11-13; the relative oracle passed on every
+commit there. Fork PR InvisOn/roc#12 and upstream PR 12983 both show the
+branch `isa-word-size`.
 
 | Commit | Hash |
 |---|---|
-| 1 | `c6ccdc2d66` |
-| 2 | `1f3d9c5f78` |
-| 3 | `79a55addc0` |
-| 4 | `5b82518428` |
-| 5 | `4c96f2a91c` |
-| 6 | `99029e4da1` |
-| 7 | `08f4556bbd` |
+| 1 | `b30bb26ad0` |
+| 2 | `977a9228ea` |
+| 3 | `51583fcc08` |
+| 4 | `e5c466cc1b` |
+| 5 | `084f048823` |
+| 6 | `5ade80db39` |
+| 7 | `5b8de51f17` |
+
+Earlier heads are kept as tags `pre-rebase5-isa-word-size` to
+`pre-rebase7-isa-word-size` (the head on `a495502ad9` was `08f4556bbd`).
+
+## Where it stands (2026-11-14)
+
+- Upstream PR 12983, opened by the owner on 2026-11-12, with the owner's
+  description. Head `5b8de51f17`. All 27 CI checks pass, GitHub reports no
+  conflicts, and it waits for a required review.
+- Upstream `main` is at `1833b0e1d4`, past the base. The PR still merges
+  cleanly, so no rebase until a reviewer asks or a conflict appears
+  (recommended 2026-11-14, R-1 B, not yet decided by the owner).
+- Every push to `isa-word-size` updates the upstream PR, so push only
+  with the owner's OK.
+- `zig build minici` on `5b8de51f17` was stopped by the owner after
+  `build-ci` passed; upstream CI covers the head.
+- How the rebases resolved upstream's new code:
+  - List bytes, length and capacity words and address math:
+    `word_width` (commit 2).
+  - U64 arguments (list index, counts) and the math that mixes them with
+    list words: `wide64_width` (commit 3), as `emitDynListGetUnsafe`
+    and `emitZstSublist` already did.
+  - Copy chunks: `wide64_width`. Descriptor offsets:
+    `target_desc_layout.of(...)` (commit 6). New `allocStackSlot(8)`
+    sites: left for part 7 (R1).
+  - `emitJumpIfDescHoldsNoRefcounted`: `word_width` for the descriptor
+    word and its mask (W-1 A, decided 2026-11-12).
+- Open, waiting for the owner:
+  - **W-2:** the U64 counts in upstream's zero-width-list helpers
+    (`emitZstListWithCapacity`, `emitBoundZstCapacity`,
+    `emitZstListReserving`, `emitZstListGrownBy`, the `count_off` load in
+    `List.with_capacity`) use `wide64_width`. Recommended: keep (A);
+    `word_width` would drop the top half of a U64 count on 32-bit.
+  - The plain-language rewording of the `design.md` paragraph: a local
+    draft, not applied. Applying it means a text-only fixup and a
+    force-push.
 
 The edits of commits 2, 3 and 5 are applied from the inventory's TSVs by
 line number and kind, then read in the diff; a site whose code no longer

@@ -64,7 +64,7 @@ stay out of upstream. They will change as upstream moves.
 | # | Pull request | Where it sits | Size | Changes 64-bit output? | Fork PR | Branch |
 |---|---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none | none |
-| 1–3 | **One PR, the shared driver for any backend:** architecture dispatch (`isa.zig`, `switch (isa)`), driver register seams, and the driver's word size (`word`, `target_ptr_size`, the 64-bit width names). With the instruction cache flush (draft 03). Which host word-size drafts (07, 12) stay in it is under review | dev backend: shared driver (`LirCodeGen`, `FrameBuilder`, `CallingConvention`) | not measured; the 2,000-line limit does not apply (see below) | no | step 1: [#11](https://github.com/InvisOn/roc/pull/11), upstream 12740; the rest: not yet ([#9](https://github.com/InvisOn/roc/pull/9) is its source and will close) | `isa-switch` (step 1), `isa-word-size` (the rest) |
+| 1–3 | **One PR, the shared driver for any backend:** architecture dispatch (`isa.zig`, `switch (isa)`), driver register seams, and the driver's word size (`word`, `target_ptr_size`, the 64-bit width names). With the instruction cache flush (draft 03). Which host word-size drafts (07, 12) stay in it is under review | dev backend: shared driver (`LirCodeGen`, `FrameBuilder`, `CallingConvention`) | not measured; the 2,000-line limit does not apply (see below) | no | step 1: [#11](https://github.com/InvisOn/roc/pull/11), upstream 12740 (merged); the rest: [#12](https://github.com/InvisOn/roc/pull/12), upstream 12983 (in review) | `isa-switch` (step 1), `isa-word-size` (the rest) |
 | 4 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet | `arm32/encoder` |
 | 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet | `arm32/elf32-objects` |
 | 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet | `arm32/codegen` |
@@ -479,3 +479,12 @@ upstream first, so stopping early still leaves something of value.
   branch `isa-word-size` (worktree `.workspaces/pr-isa-word-size`) from
   upstream `main` at `f7bef6b38f`, with step 1 on top until 12740 merges.
   `shared-driver/isa-word-size` is retired.
+- 2026-11-12: PR 12740 (step 1) merged upstream on 2026-11-01. The rest of
+  parts 1 to 3 became one rename PR, "Name every register width in the
+  dev backend's shared driver" (`rfcs/part-02-03-word-size/rename-pr-plan.md`):
+  seven commits on `isa-word-size`, fork #12, opened upstream by the
+  owner as PR 12983. The register seams (`word-size-2-3-plan.md` D1) are
+  not in it.
+- 2026-11-14: PR 12983 at `5b8de51f17` on upstream `a5c6d8bf5b`, all CI
+  checks green, no conflicts, waiting for review. Open: W-2 and the
+  `design.md` rewording (see the rename plan's "Where it stands").
