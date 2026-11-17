@@ -4,7 +4,7 @@
   2026-11-12, waiting for a maintainer's review (see "Where it stands")
 - **Scope:** one PR, plan rows 1 to 3 (follows step 1, upstream PR 12740)
 - **Branch:** `isa-word-size` (worktree `.workspaces/pr-isa-word-size`)
-- **Base:** upstream `main`, rebased whenever `main` moves (now `a5c6d8bf5b`; first cut at `ad3a5d2830`, 2026-11-06)
+- **Base:** upstream `main`, rebased whenever `main` moves (now `b978e608d0`; first cut at `ad3a5d2830`, 2026-11-06)
 - **Inventory:** `w64-inventory/` (README, TSVs, classify scripts)
 - **Supersedes:** `word-size-2-3-plan.md` D1 to D4 for the word-size work
   (the register seams of its D1 are not part of this PR)
@@ -256,18 +256,33 @@ branch `isa-word-size`.
 Earlier heads are kept as tags `pre-rebase5-isa-word-size` to
 `pre-rebase7-isa-word-size` (the head on `a495502ad9` was `08f4556bbd`).
 
-## Where it stands (2026-11-14)
+## Where it stands (2026-11-18)
 
 - Upstream PR 12983, opened by the owner on 2026-11-12, with the owner's
-  description. Head `5b8de51f17`. All 27 CI checks pass, GitHub reports no
-  conflicts, and it waits for a required review.
-- Upstream `main` is at `1833b0e1d4`, past the base. The PR still merges
-  cleanly, so no rebase until a reviewer asks or a conflict appears
-  (recommended 2026-11-14, R-1 B, not yet decided by the owner).
+  description. Head `8dfc9fc72f` on upstream `b978e608d0`: `2bc2da09c7`
+  width names, `99eeefc3fd` word widths, `5c46469cad` 64-bit widths,
+  `2a03bdd1ad` call-builder width check, `46a22f3b4e` scalar widths,
+  `ba09457418` runtime struct layout, `8dfc9fc72f` lint. All 27 CI checks
+  pass, GitHub reports no conflicts, and it waits for a required review.
+- Rebased twice since 2026-11-14 (R-1 A, owner's request): onto
+  `ca2be6d252` (conflicts only in functions upstream deleted; upstream's
+  side kept) and onto `b978e608d0` (clean, no new width sites). The
+  relative oracle passed on all 7 commits each time. Old heads: tags
+  `pre-rebase8-isa-word-size` (`5b8de51f17`) and
+  `pre-rebase9-isa-word-size` (`cb0b3a402b`).
+- The oracle needed a fourth A0 patch at `b978e608d0`
+  (`tools/a0-patches/0004-runtime-requests-items.patch`): A0's
+  `devObjectHashes` reads the runtime root requests through
+  `SafeList.items()`, as upstream's own code does.
+- CI on `cb0b3a402b` timed out in `minici (linux-harness)` (3 h limit):
+  `run-test-cli` took 8683 s against 1490 to 2920 s on other PRs, and
+  `run-test-cli-platforms-boxy` was cut off. A local A/B of
+  `run-test-cli-platforms-boxy` showed no slowdown from the PR (348 s
+  with it, 360 s on upstream), so the branch was rebased and pushed for a
+  fresh run, which passed. The slow run looks like runner trouble
+  (upstream PR 13141 enlarges swap on Linux CI runners).
 - Every push to `isa-word-size` updates the upstream PR, so push only
   with the owner's OK.
-- `zig build minici` on `5b8de51f17` was stopped by the owner after
-  `build-ci` passed; upstream CI covers the head.
 - How the rebases resolved upstream's new code:
   - List bytes, length and capacity words and address math:
     `word_width` (commit 2).
