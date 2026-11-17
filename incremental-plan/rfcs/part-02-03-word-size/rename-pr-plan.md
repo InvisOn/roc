@@ -294,15 +294,15 @@ Earlier heads are kept as tags `pre-rebase5-isa-word-size` to
     sites: left for part 7 (R1).
   - `emitJumpIfDescHoldsNoRefcounted`: `word_width` for the descriptor
     word and its mask (W-1 A, decided 2026-11-12).
-- Open, waiting for the owner:
-  - **W-2:** the U64 counts in upstream's zero-width-list helpers
+  - The `design.md` paragraph stays as it is in the PR; the
+    plain-language rewording is not applied (decided 2026-11-18).
+  - The U64 counts in upstream's zero-width-list helpers
     (`emitZstListWithCapacity`, `emitBoundZstCapacity`,
     `emitZstListReserving`, `emitZstListGrownBy`, the `count_off` load in
-    `List.with_capacity`) use `wide64_width`. Recommended: keep (A);
-    `word_width` would drop the top half of a U64 count on 32-bit.
-  - The plain-language rewording of the `design.md` paragraph: a local
-    draft, not applied. Applying it means a text-only fixup and a
-    force-push.
+    `List.with_capacity`) keep `wide64_width` (W-2 A, decided
+    2026-11-18). `word_width` would drop the top half of a U64 count on
+    32-bit; with `wide64_width` the arm32 parts get a compile error there
+    and decide how a U64 count becomes a word.
 
 The edits of commits 2, 3 and 5 are applied from the inventory's TSVs by
 line number and kind, then read in the diff; a site whose code no longer
