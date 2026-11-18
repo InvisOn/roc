@@ -496,3 +496,10 @@ upstream first, so stopping early still leaves something of value.
 - 2026-11-14: PR 12983 at `5b8de51f17` on upstream `a5c6d8bf5b`, all CI
   checks green, no conflicts, waiting for review. Open: W-2 and the
   `design.md` rewording (see the rename plan's "Where it stands").
+- 2026-11-18: W-2 A (U64 counts keep `wide64_width`) and no `design.md`
+  rewording, decided by the owner. PR 12983 rebased onto `37986e9a6a`
+  (head `896ca8b108`), oracle green on all 7 commits. The register seams
+  (`word-size-2-3-plan.md` D1) go into part 6 (N-1 B); a first piece, the
+  role registers read from each architecture's `CC`, is prototyped on the
+  local branch `isa-register-seams` and kept as its own commits so it can
+  still become a separate PR.

@@ -4,7 +4,7 @@
   2026-11-12, waiting for a maintainer's review (see "Where it stands")
 - **Scope:** one PR, plan rows 1 to 3 (follows step 1, upstream PR 12740)
 - **Branch:** `isa-word-size` (worktree `.workspaces/pr-isa-word-size`)
-- **Base:** upstream `main`, rebased whenever `main` moves (now `b978e608d0`; first cut at `ad3a5d2830`, 2026-11-06)
+- **Base:** upstream `main`, rebased whenever `main` moves (now `37986e9a6a`; first cut at `ad3a5d2830`, 2026-11-06)
 - **Inventory:** `w64-inventory/` (README, TSVs, classify scripts)
 - **Supersedes:** `word-size-2-3-plan.md` D1 to D4 for the word-size work
   (the register seams of its D1 are not part of this PR)
@@ -259,17 +259,20 @@ Earlier heads are kept as tags `pre-rebase5-isa-word-size` to
 ## Where it stands (2026-11-18)
 
 - Upstream PR 12983, opened by the owner on 2026-11-12, with the owner's
-  description. Head `8dfc9fc72f` on upstream `b978e608d0`: `2bc2da09c7`
-  width names, `99eeefc3fd` word widths, `5c46469cad` 64-bit widths,
-  `2a03bdd1ad` call-builder width check, `46a22f3b4e` scalar widths,
-  `ba09457418` runtime struct layout, `8dfc9fc72f` lint. All 27 CI checks
-  pass, GitHub reports no conflicts, and it waits for a required review.
-- Rebased twice since 2026-11-14 (R-1 A, owner's request): onto
+  description. Head `896ca8b108` on upstream `37986e9a6a`: `0acb0bc611`
+  width names, `8a9388f744` word widths, `7749c55726` 64-bit widths,
+  `fabaa0f79f` call-builder width check, `afa6dc4d9e` scalar widths,
+  `7cb9094193` runtime struct layout, `896ca8b108` lint. Pushed
+  2026-11-18; a fresh CI run is under way. GitHub reports no conflicts,
+  and it waits for a required review.
+- Rebased three times since 2026-11-14 (R-1 A, owner's request): onto
   `ca2be6d252` (conflicts only in functions upstream deleted; upstream's
-  side kept) and onto `b978e608d0` (clean, no new width sites). The
-  relative oracle passed on all 7 commits each time. Old heads: tags
-  `pre-rebase8-isa-word-size` (`5b8de51f17`) and
-  `pre-rebase9-isa-word-size` (`cb0b3a402b`).
+  side kept), onto `b978e608d0` (clean, no new width sites) and onto
+  `37986e9a6a` (conflicts in commits 1 and 2, below). The relative oracle
+  passed on all 7 commits each time. Old heads: tags
+  `pre-rebase8-isa-word-size` (`5b8de51f17`),
+  `pre-rebase9-isa-word-size` (`cb0b3a402b`) and
+  `pre-rebase10-isa-word-size` (`8dfc9fc72f`).
 - The oracle needed a fourth A0 patch at `b978e608d0`
   (`tools/a0-patches/0004-runtime-requests-items.patch`): A0's
   `devObjectHashes` reads the runtime root requests through
@@ -294,6 +297,17 @@ Earlier heads are kept as tags `pre-rebase5-isa-word-size` to
     sites: left for part 7 (R1).
   - `emitJumpIfDescHoldsNoRefcounted`: `word_width` for the descriptor
     word and its mask (W-1 A, decided 2026-11-12).
+  - Rebase onto `37986e9a6a`: upstream added two `design.md` paragraphs
+    (reference-count statements, the x86-64 encoder) where the width
+    paragraph sits; all three are kept, the width paragraph first.
+    Upstream loads reference-count helper arguments straight into
+    registers (`emitCallRcHelperFromStackSlots` is gone); its pointer,
+    count and queue values take `word_width`. New frame-callable code
+    (the refcount word, the heap pointer, the region size math), the
+    queued box drop and the hot-reload drop and copy addresses take
+    `word_width` (commit 2). The refcount word's offset below the data
+    pointer is `target_ptr_size`, not a literal 8 (kept by the owner
+    2026-11-18).
   - The `design.md` paragraph stays as it is in the PR; the
     plain-language rewording is not applied (decided 2026-11-18).
   - The U64 counts in upstream's zero-width-list helpers
