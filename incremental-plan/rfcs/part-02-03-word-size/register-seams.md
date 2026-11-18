@@ -18,11 +18,24 @@ into part 6 (N-1 B), prototyped first on a local branch.
     `ROC_OPS_SAVE_REG` in `CC`; the entry code,
     `reserveArgumentRegisters` and the RocOps pinning in lambda
     compilation read them.
+  - `58646c1c5c` remaining role registers: the C return register after a
+    builtin call (`CC.RETURN_REGS[0]`), `getReturnRegister`
+    (`ret_reg_0`), the Roc multi-register return lists (`ROC_RET_REGS`
+    now holds the whole list: 9 on x86_64, 16 on aarch64) and
+    `RET_PTR_COPY_REG` (an immediate result stored through the hidden
+    return pointer).
 - The commits use no width names (`word_width` and the others), so they
   can be cherry-picked onto `main` without upstream PR 12983. The same
   diff of the first commit applied cleanly on plain `main`.
-- Next piece, not started: the temporary registers (reference
-  `cc1c5fa33d`), such as the 16-register lists in the driver.
+- The temporary-register seam of the reference (`cc1c5fa33d`) already
+  exists upstream: the driver's `allocTempGeneral` and `allocTempFloat`
+  call each architecture's `CodeGen`. Its high-water measurement is a
+  diagnostic, not a seam, and is not ported.
+- The other register names left in the driver (about 120 lines) are
+  instruction-specific code inside a `switch (isa)` arm or a function for
+  one instruction set (x86 `mul`/`div` in RAX/RDX, shifts through RCX,
+  aarch64's IP0 and IP1, frame-pointer addressing). arm32 adds its own
+  arm there; they are not seams.
 
 ## Findings, not yet moved
 
@@ -48,6 +61,12 @@ Also: `LirCodeGen.zig` near line 697 has a stale upstream comment,
 "Register where RocOps pointer is saved", above a field that no longer
 exists.
 
+Hosted calls (`LirCodeGen.zig` near line 14952) still pick their two C
+return registers by `switch (isa)`: RAX and RDX, X0 and X1.
+`CC.RETURN_REGS` cannot replace them as it stands, because on Windows x64
+it has only RAX, so `[1]` does not compile there. Open: a two-register
+C-return role, or leave it to part 6.
+
 Other open review points in these commits:
 
 - x86_64 defines `TAIL_CALL_DELTA_REG` (R10) although its tail calls do
@@ -55,3 +74,8 @@ Other open review points in these commits:
   architecture.
 - `callee_saved_used` is a `u16` on x86_64 and a `u32` on aarch64; the
   driver writes `|= @intCast(...)` of a `u32` bit mask.
+- Two `switch (isa)` blocks (the builtin call's result move, and loading
+  the multi-register return values) now have identical arms. Merging
+  them would put a raw `.w64` in shared code (lint 7) or need a width
+  name, which ties the commit to upstream PR 12983. Merge them once the
+  width names are on `main` or in part 6.
