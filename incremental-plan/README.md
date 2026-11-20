@@ -503,3 +503,10 @@ upstream first, so stopping early still leaves something of value.
   role registers read from each architecture's `CC`, is prototyped on the
   local branch `isa-register-seams` and kept as its own commits so it can
   still become a separate PR.
+- 2026-11-19: part 4 planned (`rfcs/part-04-encoder/encoder-rfc.md`) on
+  the local branch `arm32/encoder`, cut from `isa-register-seams`. D8
+  (the oracle's build step runs in `minici`) accepted; D1 to D7 open.
+- 2026-11-21: PR 12983 rebased onto `22e3718d45` (head `2b6c5f7536`),
+  clean; oracle green on all 7 commits. `isa-register-seams` rebased on
+  top (head `f72be15da9`, oracle green on its 3 commits), and
+  `arm32/encoder` moved with it.

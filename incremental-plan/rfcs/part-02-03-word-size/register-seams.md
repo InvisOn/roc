@@ -5,20 +5,23 @@ generator names the registers the shared driver uses, by role, instead of
 the driver naming x86_64 and aarch64 registers. Decided 2026-11-18 to go
 into part 6 (N-1 B), prototyped first on a local branch.
 
-## State (2026-11-18)
+## State (2026-11-21)
 
 - Branch `isa-register-seams` (worktree `.workspaces/isa-register-seams`),
-  local only, on `isa-word-size` (`896ca8b108`). Each commit was checked
-  with the relative oracle (x86_64 and aarch64 output byte-identical).
-  - `ad32b1ec5a` role registers: frame, stack, scratch,
+  local only, on `isa-word-size` (`2b6c5f7536`, upstream `22e3718d45`).
+  Each commit was checked with the relative oracle (x86_64 and aarch64
+  output byte-identical), first on 2026-11-18 and again after the rebase
+  on 2026-11-21. Old head: tag `pre-rebase11-isa-register-seams`
+  (`58646c1c5c`).
+  - `f62f3a3dbc` role registers: frame, stack, scratch,
     caller-stack-argument base, tail-call target and delta, Roc return
     registers and the incoming stack-argument offset come from
     `Emit(target).CC`.
-  - `f484b7e684` entry-code save registers: `RESULT_PTR_SAVE_REG` and
+  - `0cbb41a86c` entry-code save registers: `RESULT_PTR_SAVE_REG` and
     `ROC_OPS_SAVE_REG` in `CC`; the entry code,
     `reserveArgumentRegisters` and the RocOps pinning in lambda
     compilation read them.
-  - `58646c1c5c` remaining role registers: the C return register after a
+  - `f72be15da9` remaining role registers: the C return register after a
     builtin call (`CC.RETURN_REGS[0]`), `getReturnRegister`
     (`ret_reg_0`), the Roc multi-register return lists (`ROC_RET_REGS`
     now holds the whole list: 9 on x86_64, 16 on aarch64) and
@@ -39,7 +42,7 @@ into part 6 (N-1 B), prototyped first on a local branch.
 
 ## Findings, not yet moved
 
-Found in the review of `f484b7e684`. The RocOps register (R12, X20) and
+Found in the review of the entry-code commit (then `f484b7e684`). The RocOps register (R12, X20) and
 the result-pointer register (RBX, X19) are still written directly in:
 
 - the code generators' starting register masks (`x86_64/CodeGen.zig`

@@ -6,11 +6,11 @@
 - **Branch:** `arm32/encoder` (worktree `.workspaces/arm32-encoder`)
 - **Fork PR:** not yet
 - **Parent:** none
-- **Base:** `isa-register-seams` (`58646c1c5c`), which sits on
-  `isa-word-size` (`896ca8b108`, upstream PR 12983) on upstream
-  `37986e9a6a`. The upstream PR is opened only after PR 12983 merges (one
+- **Base:** `isa-register-seams` (`f72be15da9`), which sits on
+  `isa-word-size` (`2b6c5f7536`, upstream PR 12983) on upstream
+  `22e3718d45`. The upstream PR is opened only after PR 12983 merges (one
   PR open at a time), and then from upstream `main`.
-- **Head:** `58646c1c5c` (no part 4 commits yet)
+- **Head:** `f72be15da9` (no part 4 commits yet)
 
 ## Abstract
 

@@ -4,7 +4,7 @@
   2026-11-12, waiting for a maintainer's review (see "Where it stands")
 - **Scope:** one PR, plan rows 1 to 3 (follows step 1, upstream PR 12740)
 - **Branch:** `isa-word-size` (worktree `.workspaces/pr-isa-word-size`)
-- **Base:** upstream `main`, rebased whenever `main` moves (now `37986e9a6a`; first cut at `ad3a5d2830`, 2026-11-06)
+- **Base:** upstream `main`, rebased whenever `main` moves (now `22e3718d45`; first cut at `ad3a5d2830`, 2026-11-06)
 - **Inventory:** `w64-inventory/` (README, TSVs, classify scripts)
 - **Supersedes:** `word-size-2-3-plan.md` D1 to D4 for the word-size work
   (the register seams of its D1 are not part of this PR)
@@ -256,23 +256,26 @@ branch `isa-word-size`.
 Earlier heads are kept as tags `pre-rebase5-isa-word-size` to
 `pre-rebase7-isa-word-size` (the head on `a495502ad9` was `08f4556bbd`).
 
-## Where it stands (2026-11-18)
+## Where it stands (2026-11-21)
 
 - Upstream PR 12983, opened by the owner on 2026-11-12, with the owner's
-  description. Head `896ca8b108` on upstream `37986e9a6a`: `0acb0bc611`
-  width names, `8a9388f744` word widths, `7749c55726` 64-bit widths,
-  `fabaa0f79f` call-builder width check, `afa6dc4d9e` scalar widths,
-  `7cb9094193` runtime struct layout, `896ca8b108` lint. Pushed
-  2026-11-18; a fresh CI run is under way. GitHub reports no conflicts,
+  description. Head `2b6c5f7536` on upstream `22e3718d45`: `51743e0d0a`
+  width names, `6d3272e76f` word widths, `c1f84f2ba6` 64-bit widths,
+  `df9057defe` call-builder width check, `8062113122` scalar widths,
+  `30effa184c` runtime struct layout, `2b6c5f7536` lint. Pushed
+  2026-11-21; a fresh CI run is under way. GitHub reports no conflicts,
   and it waits for a required review.
-- Rebased three times since 2026-11-14 (R-1 A, owner's request): onto
+- Rebased four times since 2026-11-14 (R-1 A, owner's request): onto
   `ca2be6d252` (conflicts only in functions upstream deleted; upstream's
-  side kept), onto `b978e608d0` (clean, no new width sites) and onto
-  `37986e9a6a` (conflicts in commits 1 and 2, below). The relative oracle
+  side kept), onto `b978e608d0` (clean, no new width sites), onto
+  `37986e9a6a` (conflicts in commits 1 and 2, below) and onto
+  `22e3718d45` (clean; `git range-diff` shows all 7 patches unchanged,
+  and lint 7 passes on upstream's new driver code). The relative oracle
   passed on all 7 commits each time. Old heads: tags
   `pre-rebase8-isa-word-size` (`5b8de51f17`),
-  `pre-rebase9-isa-word-size` (`cb0b3a402b`) and
-  `pre-rebase10-isa-word-size` (`8dfc9fc72f`).
+  `pre-rebase9-isa-word-size` (`cb0b3a402b`),
+  `pre-rebase10-isa-word-size` (`8dfc9fc72f`) and
+  `pre-rebase11-isa-word-size` (`896ca8b108`).
 - The oracle needed a fourth A0 patch at `b978e608d0`
   (`tools/a0-patches/0004-runtime-requests-items.patch`): A0's
   `devObjectHashes` reads the runtime root requests through
