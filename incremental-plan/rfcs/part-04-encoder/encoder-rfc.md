@@ -1,8 +1,9 @@
 # Part 4: the A32 encoder and its assembler oracle
 
-- **Status:** Draft
+- **Status:** Accepted (all decisions, 2026-11-21)
 - **Scope:** Branch
-- **Plan row:** 4, A32/NEON encoder and its assembler oracle
+- **Plan row:** 4, A32/VFP encoder and its assembler oracle (was A32/NEON
+  before D7)
 - **Branch:** `arm32/encoder` (worktree `.workspaces/arm32-encoder`)
 - **Fork PR:** not yet
 - **Parent:** none
@@ -173,7 +174,7 @@ no oracle entry; the second runs the generated tests.
 
 ### D1. How a target would choose A32 or Thumb, if Thumb ever comes
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-21)
 - **Context:** the plan asks part 4 to record this, because it shapes the
   encoder and part 6. Thumb would come with the ARMv7-M follow-up, where
   the cores run only Thumb.
@@ -201,7 +202,7 @@ no oracle entry; the second runs the generated tests.
 
 ### D2. Which assembler the oracle uses
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-21)
 - **Context:** the plan's text says "the GNU assembler"; the reference
   uses LLVM's, through `zig cc`.
 - **Alternatives:**
@@ -219,7 +220,7 @@ no oracle entry; the second runs the generated tests.
 
 ### D3. Where the expected bytes live
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-21)
 - **Context:** the assembler must not be needed to run `zig build test`.
 - **Alternatives:**
   1. Generated Zig tests, checked in (`encoding_oracle_tests.zig`), and a
@@ -236,7 +237,7 @@ no oracle entry; the second runs the generated tests.
 
 ### D4. The ELF reader the oracle needs
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-21)
 - **Context:** the oracle imports `ci/elf32_reader.py`, which the plan
   puts in part 5 (objects), but part 4 lands first.
 - **Alternatives:**
@@ -250,7 +251,7 @@ no oracle entry; the second runs the generated tests.
 
 ### D5. The encoder's `CC` namespace
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-21)
 - **Context:** the reference `Emit` has a `CC` namespace that reads
   `Call.zig` (part 7). The register seams now fix what `CC` must supply.
 - **Alternatives:**
@@ -266,7 +267,7 @@ no oracle entry; the second runs the generated tests.
 
 ### D6. What the coverage check counts
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-21)
 - **Context:** the plan says "every instruction form the code generator
   can emit". The reference checks every public emitting method of `Emit`.
 - **Alternatives:**
@@ -283,7 +284,7 @@ no oracle entry; the second runs the generated tests.
 
 ### D7. Whether NEON waits for part 11
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-21)
 - **Context:** the reference encoder includes 22 NEON emitters and about
   300 lines of NEON enums. Most are used only by the shared driver's SIMD
   lowering (part 11). Three are used by the reference's `arm32/CodeGen.zig`

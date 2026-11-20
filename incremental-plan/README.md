@@ -65,8 +65,8 @@ stay out of upstream. They will change as upstream moves.
 |---|---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none | none |
 | 1–3 | **One PR, the shared driver for any backend:** architecture dispatch (`isa.zig`, `switch (isa)`), driver register seams, and the driver's word size (`word`, `target_ptr_size`, the 64-bit width names). With the instruction cache flush (draft 03). Which host word-size drafts (07, 12) stay in it is under review | dev backend: shared driver (`LirCodeGen`, `FrameBuilder`, `CallingConvention`) | not measured; the 2,000-line limit does not apply (see below) | no | step 1: [#11](https://github.com/InvisOn/roc/pull/11), upstream 12740 (merged); the rest: [#12](https://github.com/InvisOn/roc/pull/12), upstream 12983 (in review) | `isa-switch` (step 1), `isa-word-size` (the rest) |
-| 4 | A32/NEON encoder and its assembler oracle | dev backend: instruction encoder | about 3,800 | no | not yet | `arm32/encoder` |
-| 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,300 | no | not yet | `arm32/elf32-objects` |
+| 4 | A32/VFP encoder and its assembler oracle | dev backend: instruction encoder | about 3,500 | no | not yet | `arm32/encoder` |
+| 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,050 | no | not yet | `arm32/elf32-objects` |
 | 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet | `arm32/codegen` |
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet | `arm32/aapcs32` |
 | 8 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet | `arm32/targets` |
@@ -269,26 +269,29 @@ explicit.
 
 ### 4. The encoder
 
-`src/backend/dev/arm32/Emit.zig` and `Registers.zig`, the encoding oracle
-(`ci/arm32_encoding_oracle.py`, `.s`, the generated tests) and its build
-step `run-check-arm32-encoding-oracle`. Self-contained: nothing calls it
-yet. The oracle checks it against the GNU assembler byte for byte, for the
-cases its `.s` file lists. So it also gets a coverage check: every
-instruction form the arm32 code generator can emit must be one of the
-oracle's cases, or the check fails. Part 4 brings the check, and part 6
-keeps it passing as it adds instructions.
+`src/backend/dev/arm32/Emit.zig` and `Registers.zig` (integer, branch,
+memory, stack and VFP instructions, plus the three 128-bit vector moves
+part 6 needs; the rest of NEON comes with part 11), the encoding oracle
+(`ci/arm32_encoding_oracle.py`, `ci/elf32_reader.py`, `.s`, the generated
+tests) and its build step `run-check-arm32-encoding-oracle`, run in
+`minici`. Self-contained: nothing calls it yet. The oracle checks it byte
+for byte, relocations included, against LLVM's assembler through
+`zig cc`, for the cases its `.s` file lists. So it also gets a coverage
+check: every public `Emit` method that emits bytes must have an oracle
+line, one per operand form, or the check fails. Part 4 brings the check,
+and part 6 keeps it passing as it adds instructions. Decisions:
+`rfcs/part-04-encoder/encoder-rfc.md`.
 
-Part 4's planning doc records how a target would choose A32 or Thumb, if
-Thumb ever comes (a new `Isa` member, a mode inside arm32, or a target
-variant like upstream's CPU-level twins), because that choice shapes the
-encoder and part 6. The driver keeps calling the encoder directly, as
-upstream's driver does for x86_64 and aarch64.
+Thumb, if it ever comes, becomes a new `Isa` member with its own
+encoder and code generator (part 4's D1); the A32 encoder takes no mode.
+The driver keeps calling the encoder directly, as upstream's driver does
+for x86_64 and aarch64.
 
 ### 5. Objects
 
 `object/elf.zig` (`write32`), `Relocation.zig` (ARM branches and movw/movt),
-`Dwarf.zig` (four-byte addresses), `ci/elf32_reader.py`,
-`ci/arm32_link_smoke.py`. Checked by the link smoke test.
+`Dwarf.zig` (four-byte addresses), `ci/arm32_link_smoke.py` (reusing
+part 4's `ci/elf32_reader.py`). Checked by the link smoke test.
 
 ### 6 and 7. Code generation and the calling convention
 
@@ -366,8 +369,11 @@ in CI.
 ### 10 and 11. Wide values and SIMD
 
 The Wide64 lowering, i128 as four words, and the NEON block, each in a few
-PRs by operation family. Each one makes a known set of eval cases pass in
-the CI lane, and takes them off its known-failure list.
+PRs by operation family. Part 11 also brings the rest of the NEON encoder
+(about 19 emitters and the operation enums, about 500 lines with their
+oracle lines), which part 4 leaves out (part 4's D7). Each one makes a
+known set of eval cases pass in the CI lane, and takes them off its
+known-failure list.
 
 ### 12. Docs and the required lane
 
