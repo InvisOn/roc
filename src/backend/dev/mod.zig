@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 
 pub const x86_64 = @import("x86_64/mod.zig");
 pub const aarch64 = @import("aarch64/mod.zig");
+pub const arm32 = @import("arm32/mod.zig");
 pub const object = @import("object/mod.zig");
 /// The instruction sets the dev backend emits.
 pub const isa = @import("isa.zig");
