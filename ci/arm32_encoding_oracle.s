@@ -1,0 +1,86 @@
+@ arm32 encoding oracle: `A32 assembly | arm32 Emit call`.
+@ See ci/arm32_encoding_oracle.py. Every emitter of
+@ src/backend/dev/arm32/Emit.zig needs at least one entry. Pick operands that
+@ exercise the high register bits (r8-r15, s-register odd halves, d16-d31) and
+@ both offset signs.
+
+@ Data processing: moves
+mov r0, r1                              | movRegReg(.r0, .r1)
+mov r11, sp                             | movRegReg(.r11, .r13)
+movne r3, r12                           | movRegRegCond(.ne, .r3, .r12)
+mov r2, #255                            | movRegModImm(.r2, ModImm.of(255))
+mov r2, #0xff000000                     | movRegModImm(.r2, ModImm.of(0xff000000))
+mov r9, #0x3fc                          | movRegModImm(.r9, ModImm.of(0x3fc))
+moveq r0, #1                            | movRegModImmCond(.eq, .r0, ModImm.of(1))
+movlt r10, #0                           | movRegModImmCond(.lt, .r10, ModImm.of(0))
+mvn r5, #0                              | mvnRegModImm(.r5, ModImm.of(0))
+mvn r5, r6                              | mvnRegReg(.r5, .r6)
+movw r7, #0x1234                        | movw(.r7, 0x1234)
+movw r12, #0xffff                       | movw(.r12, 0xffff)
+movt r7, #0xabcd                        | movt(.r7, 0xabcd)
+mov r0, #1024                           | movRegImm32(.r0, 0x400)
+mvn r1, #255                            | movRegImm32(.r1, 0xffffff00)
+movw r2, #0xabcd                        | movRegImm32(.r2, 0xabcd)
+movw r3, #0x5678; movt r3, #0x1234      | movRegImm32(.r3, 0x12345678)
+movw r4, #0; movt r4, #0x1235           | movRegImm32(.r4, 0x12350000)
+
+@ Data processing: arithmetic
+add r0, r1, r2                          | addRegRegReg(.r0, .r1, .r2)
+adds r3, r4, r5                         | addsRegRegReg(.r3, .r4, .r5)
+adc r6, r7, r8                          | adcRegRegReg(.r6, .r7, .r8)
+adcs r9, r10, r11                       | adcsRegRegReg(.r9, .r10, .r11)
+sub r0, r1, r2                          | subRegRegReg(.r0, .r1, .r2)
+subs r12, r0, r1                        | subsRegRegReg(.r12, .r0, .r1)
+sbc r2, r3, r4                          | sbcRegRegReg(.r2, .r3, .r4)
+sbcs r5, r6, r7                         | sbcsRegRegReg(.r5, .r6, .r7)
+add r0, r11, #4080                      | addRegRegModImm(.r0, .r11, ModImm.of(4080))
+add r12, sp, #8                         | addRegRegModImm(.r12, .r13, ModImm.of(8))
+adds r1, r1, #1                         | addsRegRegModImm(.r1, .r1, ModImm.of(1))
+sub sp, sp, #256                        | subRegRegModImm(.r13, .r13, ModImm.of(256))
+sub r12, r11, #0x10000                  | subRegRegModImm(.r12, .r11, ModImm.of(0x10000))
+subs r3, r2, #32                        | subsRegRegModImm(.r3, .r2, ModImm.of(32))
+rsb r0, r1, #0                          | rsbRegRegModImm(.r0, .r1, ModImm.of(0))
+rsb r12, r2, #32                        | rsbRegRegModImm(.r12, .r2, ModImm.of(32))
+rsbs r0, r0, #0                         | rsbsRegRegModImm(.r0, .r0, ModImm.of(0))
+rsc r1, r1, #0                          | rscRegRegModImm(.r1, .r1, ModImm.of(0))
+
+@ Data processing: logic
+and r0, r1, r2                          | andRegRegReg(.r0, .r1, .r2)
+orr r3, r4, r5                          | orrRegRegReg(.r3, .r4, .r5)
+eor r6, r7, r8                          | eorRegRegReg(.r6, .r7, .r8)
+bic r9, r10, r12                        | bicRegRegReg(.r9, .r10, .r12)
+and r0, r1, #255                        | andRegRegModImm(.r0, .r1, ModImm.of(255))
+orr r0, r0, #0x80000000                 | orrRegRegModImm(.r0, .r0, ModImm.of(0x80000000))
+eor r2, r2, #1                          | eorRegRegModImm(.r2, .r2, ModImm.of(1))
+bic r3, r3, #0xff00                     | bicRegRegModImm(.r3, .r3, ModImm.of(0xff00))
+
+@ Data processing: comparisons
+cmp r0, r1                              | cmpRegReg(.r0, .r1)
+cmp r10, r12                            | cmpRegReg(.r10, .r12)
+cmp r0, #0                              | cmpRegModImm(.r0, ModImm.of(0))
+cmp r7, #0xff0                          | cmpRegModImm(.r7, ModImm.of(0xff0))
+cmn r0, #1                              | cmnRegModImm(.r0, ModImm.of(1))
+tst r0, r1                              | tstRegReg(.r0, .r1)
+tst r2, #1                              | tstRegModImm(.r2, ModImm.of(1))
+teq r3, r4                              | teqRegReg(.r3, .r4)
+
+@ Data processing: the generic form (condition, flags, shifted operands)
+orr r1, r1, r0, lsr r12                 | dataProc(.al, .orr, false, .r1, .r1, Operand2{ .shift_reg = .{ .rm = .r0, .kind = .lsr, .rs = .r12 } })
+subgt r0, r1, r2, lsl #3                | dataProc(.gt, .sub, false, .r0, .r1, Operand2{ .shift_imm = .{ .rm = .r2, .kind = .lsl, .amount = 3 } })
+addsne r4, r5, r6, asr #32              | dataProc(.ne, .add, true, .r4, .r5, Operand2{ .shift_imm = .{ .rm = .r6, .kind = .asr, .amount = 32 } })
+lslpl r1, r0, r3                        | dataProc(.pl, .mov, false, .r1, .r0, Operand2{ .shift_reg = .{ .rm = .r0, .kind = .lsl, .rs = .r3 } })
+cmp r1, r3, ror #7                      | dataProc(.al, .cmp, true, .r0, .r1, Operand2{ .shift_imm = .{ .rm = .r3, .kind = .ror, .amount = 7 } })
+bichi r2, r2, #3                        | dataProc(.hi, .bic, false, .r2, .r2, Operand2{ .imm = ModImm.of(3) })
+
+@ Shifts
+lsl r0, r1, #31                         | lslRegRegImm(.r0, .r1, 31)
+lsl r8, r9, #1                          | lslRegRegImm(.r8, .r9, 1)
+lsr r0, r1, #32                         | lsrRegRegImm(.r0, .r1, 32)
+lsr r2, r3, #16                         | lsrRegRegImm(.r2, .r3, 16)
+asr r0, r1, #1                          | asrRegRegImm(.r0, .r1, 1)
+asr r4, r5, #32                         | asrRegRegImm(.r4, .r5, 32)
+ror r0, r1, #8                          | rorRegRegImm(.r0, .r1, 8)
+lsl r0, r1, r2                          | lslRegRegReg(.r0, .r1, .r2)
+lsr r3, r4, r12                         | lsrRegRegReg(.r3, .r4, .r12)
+asr r5, r6, r7                          | asrRegRegReg(.r5, .r6, .r7)
+ror r8, r9, r10                         | rorRegRegReg(.r8, .r9, .r10)

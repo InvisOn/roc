@@ -2147,6 +2147,8 @@ pub fn build(b: *std.Build) void {
     const run_check_simd_codegen_step = b.step("run-check-simd-codegen", "Check that optimized integer SIMD kernels select native instructions");
     const run_check_match_extension_codegen_step = b.step("run-check-match-extension-codegen", "Check the pinned instruction counts for the match-extension loop");
     const run_check_baseline_codegen_step = b.step("run-check-baseline-codegen", "Check that v1 targets emit no instruction above the architecture baseline");
+    const run_check_arm32_encoding_oracle_step = b.step("run-check-arm32-encoding-oracle", "Check that the arm32 encoder tests match the assembler oracle");
+    const run_arm32_encoding_oracle_step = b.step("run-arm32-encoding-oracle", "Regenerate the arm32 encoder tests from the assembler oracle");
     const run_check_str_eq_same_allocation_step = b.step("run-check-str-eq-same-allocation", "Check that comparing a string against itself does not read its bytes");
     const build_snapshot_tool_step = b.step("build-snapshot-tool", "Build the snapshot tool");
     const build_valgrind_step = b.step("build-valgrind", "Build roc and the snapshot tool, and copy the native str and int test hosts into the checkout, for the CI Valgrind job");
@@ -2753,6 +2755,34 @@ pub fn build(b: *std.Build) void {
     build_check_tools_step.dependOn(&source_bidi_tests.step);
     run_check_source_bidi_step.dependOn(&b.addRunArtifact(source_bidi_tests).step);
     run_check_source_bidi_step.dependOn(&run_source_bidi.step);
+
+    // The arm32 encoding oracle assembles ci/arm32_encoding_oracle.s with the
+    // build's own `zig cc` and compares the bytes with the generated encoder
+    // tests. It reads the `.s` file, `Emit.zig` and the generated file
+    // directly, so its runs have side effects and are never cached.
+    const arm32_encoding_oracle_root = b.createModule(.{
+        .root_source_file = b.path("ci/arm32_encoding_oracle.zig"),
+        .target = hostToolTarget(b, .debug),
+        .optimize = .debug,
+    });
+    const arm32_encoding_oracle_exe = b.addExecutable(.{ .name = "arm32-encoding-oracle", .root_module = arm32_encoding_oracle_root });
+    const install_arm32_encoding_oracle = b.addInstallArtifact(arm32_encoding_oracle_exe, .{});
+    build_check_tools_step.dependOn(&install_arm32_encoding_oracle.step);
+    const arm32_encoding_oracle_tests = b.addTest(.{ .name = "arm32-encoding-oracle-tests", .root_module = arm32_encoding_oracle_root });
+    build_check_tools_step.dependOn(&arm32_encoding_oracle_tests.step);
+    run_check_arm32_encoding_oracle_step.dependOn(&b.addRunArtifact(arm32_encoding_oracle_tests).step);
+    const run_arm32_encoding_oracle_check = b.addRunArtifact(arm32_encoding_oracle_exe);
+    run_arm32_encoding_oracle_check.addArg(b.graph.zig_exe);
+    _ = run_arm32_encoding_oracle_check.addOutputDirectoryArg("arm32-encoding-oracle");
+    run_arm32_encoding_oracle_check.addArg("--check");
+    run_arm32_encoding_oracle_check.has_side_effects = true;
+    run_arm32_encoding_oracle_check.step.dependOn(&install_arm32_encoding_oracle.step);
+    run_check_arm32_encoding_oracle_step.dependOn(&run_arm32_encoding_oracle_check.step);
+    const run_arm32_encoding_oracle = b.addRunArtifact(arm32_encoding_oracle_exe);
+    run_arm32_encoding_oracle.addArg(b.graph.zig_exe);
+    _ = run_arm32_encoding_oracle.addOutputDirectoryArg("arm32-encoding-oracle");
+    run_arm32_encoding_oracle.has_side_effects = true;
+    run_arm32_encoding_oracle_step.dependOn(&run_arm32_encoding_oracle.step);
 
     const minici_exe = b.addExecutable(.{
         .name = "minici",

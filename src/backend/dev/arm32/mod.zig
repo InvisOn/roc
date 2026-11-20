@@ -30,4 +30,5 @@ test "arm32 module imports" {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(MuslEmit);
     std.testing.refAllDecls(LinuxEmit);
+    _ = @import("encoding_oracle_tests.zig");
 }
