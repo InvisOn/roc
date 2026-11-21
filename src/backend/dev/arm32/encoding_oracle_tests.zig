@@ -419,3 +419,159 @@ test "arm32 encoding: push {r4, r5, r6, r7, r8, r9, r10}" {
 test "arm32 encoding: pop {r11, pc}" {
     try expectEncoding(E.pop, .{GeneralReg.fp.listBit() | GeneralReg.pc.listBit()}, &.{0xe8bd8800});
 }
+test "arm32 encoding: vadd.f32 s0, s1, s31" {
+    try expectEncoding(E.vaddF32, .{ .s0, .s1, .s31 }, &.{0xee300aaf});
+}
+test "arm32 encoding: vadd.f64 d0, d17, d31" {
+    try expectEncoding(E.vaddF64, .{ .d0, .d17, .d31 }, &.{0xee310baf});
+}
+test "arm32 encoding: vsub.f32 s3, s4, s5" {
+    try expectEncoding(E.vsubF32, .{ .s3, .s4, .s5 }, &.{0xee721a62});
+}
+test "arm32 encoding: vsub.f64 d16, d1, d2" {
+    try expectEncoding(E.vsubF64, .{ .d16, .d1, .d2 }, &.{0xee710b42});
+}
+test "arm32 encoding: vmul.f32 s30, s31, s0" {
+    try expectEncoding(E.vmulF32, .{ .s30, .s31, .s0 }, &.{0xee2ffa80});
+}
+test "arm32 encoding: vmul.f64 d8, d9, d10" {
+    try expectEncoding(E.vmulF64, .{ .d8, .d9, .d10 }, &.{0xee298b0a});
+}
+test "arm32 encoding: vdiv.f32 s1, s2, s3" {
+    try expectEncoding(E.vdivF32, .{ .s1, .s2, .s3 }, &.{0xeec10a21});
+}
+test "arm32 encoding: vdiv.f64 d20, d21, d22" {
+    try expectEncoding(E.vdivF64, .{ .d20, .d21, .d22 }, &.{0xeec54ba6});
+}
+test "arm32 encoding: vmov.f32 s3, s4" {
+    try expectEncoding(E.vmovF32, .{ .s3, .s4 }, &.{0xeef01a42});
+}
+test "arm32 encoding: vmov.f64 d16, d1" {
+    try expectEncoding(E.vmovF64, .{ .d16, .d1 }, &.{0xeef00b41});
+}
+test "arm32 encoding: vabs.f32 s0, s31" {
+    try expectEncoding(E.vabsF32, .{ .s0, .s31 }, &.{0xeeb00aef});
+}
+test "arm32 encoding: vabs.f64 d1, d17" {
+    try expectEncoding(E.vabsF64, .{ .d1, .d17 }, &.{0xeeb01be1});
+}
+test "arm32 encoding: vneg.f32 s5, s6" {
+    try expectEncoding(E.vnegF32, .{ .s5, .s6 }, &.{0xeef12a43});
+}
+test "arm32 encoding: vneg.f64 d30, d2" {
+    try expectEncoding(E.vnegF64, .{ .d30, .d2 }, &.{0xeef1eb42});
+}
+test "arm32 encoding: vsqrt.f32 s7, s8" {
+    try expectEncoding(E.vsqrtF32, .{ .s7, .s8 }, &.{0xeef13ac4});
+}
+test "arm32 encoding: vsqrt.f64 d3, d19" {
+    try expectEncoding(E.vsqrtF64, .{ .d3, .d19 }, &.{0xeeb13be3});
+}
+test "arm32 encoding: vcmp.f32 s0, s1" {
+    try expectEncoding(E.vcmpF32, .{ .s0, .s1 }, &.{0xeeb40a60});
+}
+test "arm32 encoding: vcmp.f64 d0, d16" {
+    try expectEncoding(E.vcmpF64, .{ .d0, .d16 }, &.{0xeeb40b60});
+}
+test "arm32 encoding: vcmpe.f32 s31, s2" {
+    try expectEncoding(E.vcmpeF32, .{ .s31, .s2 }, &.{0xeef4fac1});
+}
+test "arm32 encoding: vcmpe.f64 d17, d3" {
+    try expectEncoding(E.vcmpeF64, .{ .d17, .d3 }, &.{0xeef41bc3});
+}
+test "arm32 encoding: vcmp.f32 s5, #0" {
+    try expectEncoding(E.vcmpZeroF32, .{.s5}, &.{0xeef52a40});
+}
+test "arm32 encoding: vcmp.f64 d20, #0" {
+    try expectEncoding(E.vcmpZeroF64, .{.d20}, &.{0xeef54b40});
+}
+test "arm32 encoding: vmrs APSR_nzcv, fpscr" {
+    try expectEncoding(E.vmrsApsrNzcv, .{}, &.{0xeef1fa10});
+}
+test "arm32 encoding: vcvt.f64.f32 d16, s3" {
+    try expectEncoding(E.vcvtF64FromF32, .{ .d16, .s3 }, &.{0xeef70ae1});
+}
+test "arm32 encoding: vcvt.f32.f64 s3, d16" {
+    try expectEncoding(E.vcvtF32FromF64, .{ .s3, .d16 }, &.{0xeef71be0});
+}
+test "arm32 encoding: vcvt.s32.f32 s0, s1" {
+    try expectEncoding(E.vcvtS32FromF32, .{ .s0, .s1 }, &.{0xeebd0ae0});
+}
+test "arm32 encoding: vcvt.u32.f32 s2, s31" {
+    try expectEncoding(E.vcvtU32FromF32, .{ .s2, .s31 }, &.{0xeebc1aef});
+}
+test "arm32 encoding: vcvt.s32.f64 s0, d17" {
+    try expectEncoding(E.vcvtS32FromF64, .{ .s0, .d17 }, &.{0xeebd0be1});
+}
+test "arm32 encoding: vcvt.u32.f64 s1, d2" {
+    try expectEncoding(E.vcvtU32FromF64, .{ .s1, .d2 }, &.{0xeefc0bc2});
+}
+test "arm32 encoding: vcvt.f32.s32 s0, s1" {
+    try expectEncoding(E.vcvtF32FromS32, .{ .s0, .s1 }, &.{0xeeb80ae0});
+}
+test "arm32 encoding: vcvt.f32.u32 s3, s2" {
+    try expectEncoding(E.vcvtF32FromU32, .{ .s3, .s2 }, &.{0xeef81a41});
+}
+test "arm32 encoding: vcvt.f64.s32 d17, s1" {
+    try expectEncoding(E.vcvtF64FromS32, .{ .d17, .s1 }, &.{0xeef81be0});
+}
+test "arm32 encoding: vcvt.f64.u32 d2, s31" {
+    try expectEncoding(E.vcvtF64FromU32, .{ .d2, .s31 }, &.{0xeeb82b6f});
+}
+test "arm32 encoding: vmov r0, s3" {
+    try expectEncoding(E.vmovCoreFromS, .{ .r0, .s3 }, &.{0xee110a90});
+}
+test "arm32 encoding: vmov r12, s30" {
+    try expectEncoding(E.vmovCoreFromS, .{ .r12, .s30 }, &.{0xee1fca10});
+}
+test "arm32 encoding: vmov s3, r0" {
+    try expectEncoding(E.vmovSFromCore, .{ .s3, .r0 }, &.{0xee010a90});
+}
+test "arm32 encoding: vmov r0, r1, d17" {
+    try expectEncoding(E.vmovCorePairFromD, .{ .r0, .r1, .d17 }, &.{0xec510b31});
+}
+test "arm32 encoding: vmov r4, r10, d2" {
+    try expectEncoding(E.vmovCorePairFromD, .{ .r4, .r10, .d2 }, &.{0xec5a4b12});
+}
+test "arm32 encoding: vmov d17, r0, r1" {
+    try expectEncoding(E.vmovDFromCorePair, .{ .d17, .r0, .r1 }, &.{0xec410b31});
+}
+test "arm32 encoding: vldr s1, [r11, #-8]" {
+    try expectEncoding(E.vldrF32, .{ .s1, .r11, -8 }, &.{0xed5b0a02});
+}
+test "arm32 encoding: vstr s1, [sp, #1020]" {
+    try expectEncoding(E.vstrF32, .{ .s1, .r13, 1020 }, &.{0xedcd0aff});
+}
+test "arm32 encoding: vldr d17, [r11, #-1020]" {
+    try expectEncoding(E.vldrF64, .{ .d17, .r11, -1020 }, &.{0xed5b1bff});
+}
+test "arm32 encoding: vstr d8, [r0]" {
+    try expectEncoding(E.vstrF64, .{ .d8, .r0, 0 }, &.{0xed808b00});
+}
+test "arm32 encoding: vpush {d8-d15}" {
+    try expectEncoding(E.vpush, .{ .d8, 8 }, &.{0xed2d8b10});
+}
+test "arm32 encoding: vpush {d16}" {
+    try expectEncoding(E.vpush, .{ .d16, 1 }, &.{0xed6d0b02});
+}
+test "arm32 encoding: vpop {d8-d15}" {
+    try expectEncoding(E.vpop, .{ .d8, 8 }, &.{0xecbd8b10});
+}
+test "arm32 encoding: vpop {d17-d20}" {
+    try expectEncoding(E.vpop, .{ .d17, 4 }, &.{0xecfd1b08});
+}
+test "arm32 encoding: vmov q1, q15" {
+    try expectEncoding(E.vmovQ, .{ .q1, .q15 }, &.{0xf22e21fe});
+}
+test "arm32 encoding: vmov q8, q3" {
+    try expectEncoding(E.vmovQ, .{ .q8, .q3 }, &.{0xf2660156});
+}
+test "arm32 encoding: vld1.8 {d0, d1}, [r0]" {
+    try expectEncoding(E.vld1Q, .{ .q0, .r0 }, &.{0xf4200a0f});
+}
+test "arm32 encoding: vld1.8 {d16, d17}, [sp]" {
+    try expectEncoding(E.vld1Q, .{ .q8, .r13 }, &.{0xf46d0a0f});
+}
+test "arm32 encoding: vst1.8 {d2, d3}, [r11]" {
+    try expectEncoding(E.vst1Q, .{ .q1, .r11 }, &.{0xf40b2a0f});
+}

@@ -145,6 +145,10 @@ pub const MemForm = enum {
     signed_halfword,
     /// LDRD/STRD: ±255
     doubleword,
+    /// VLDR/VSTR: ±1020 in multiples of 4
+    vfp,
+    /// NEON VLD1/VST1: no immediate offset
+    neon,
 };
 
 /// Whether `offset` is encodable as the immediate offset of `form`.
@@ -152,6 +156,8 @@ pub fn fitsImmediate(form: MemForm, offset: i32) bool {
     return switch (form) {
         .word, .byte => offset >= -4095 and offset <= 4095,
         .halfword, .signed_byte, .signed_halfword, .doubleword => offset >= -255 and offset <= 255,
+        .vfp => offset >= -1020 and offset <= 1020 and @mod(offset, 4) == 0,
+        .neon => offset == 0,
     };
 }
 
@@ -877,6 +883,387 @@ pub fn Emit(comptime target: RocTarget) type {
             std.debug.assert(list & GeneralReg.sp.listBit() == 0);
             try self.emit32(condBits(.al) | 0x08BD0000 | @as(u32, list));
         }
+
+        // VFP
+        //
+        // A VFP register number splits into a 4-bit field and a 1-bit field
+        // whose positions depend on precision: an S register s[n] is
+        // Vx = n >> 1 with the extra bit n & 1, a D register d[n] is
+        // Vx = n & 15 with the extra bit n >> 4.
+
+        const VfpPrecision = enum(u1) { f32 = 0, f64 = 1 };
+
+        const VfpField = struct {
+            four: u4,
+            one: u1,
+
+            fn s(reg: SReg) VfpField {
+                return .{ .four = @intCast(reg.enc() >> 1), .one = @intCast(reg.enc() & 1) };
+            }
+
+            fn d(reg: DReg) VfpField {
+                return .{ .four = @intCast(reg.enc() & 15), .one = @intCast(reg.enc() >> 4) };
+            }
+        };
+
+        /// cond 1110 opc1(4 with D at bit 22) Vn Vd 101 sz N opc3 M 0 Vm
+        /// `base` supplies bits 27:20 (minus D), 19:16 when Vn is fixed, and
+        /// the opcode bits 7:6.
+        fn vfpDataProc(self: *Self, base: u32, sz: VfpPrecision, vd: VfpField, vn: VfpField, vm: VfpField) Allocator.Error!void {
+            const inst: u32 = condBits(.al) |
+                base |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, vn.four) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (0b101 << 9) |
+                (@as(u32, @backingInt(sz)) << 8) |
+                (@as(u32, vn.one) << 7) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        const vfp_zero: VfpField = .{ .four = 0, .one = 0 };
+
+        const VADD = 0x0E300000;
+        const VSUB = 0x0E300040;
+        const VMUL = 0x0E200000;
+        const VDIV = 0x0E800000;
+        const VMOV = 0x0EB00040;
+        const VABS = 0x0EB000C0;
+        const VNEG = 0x0EB10040;
+        const VSQRT = 0x0EB100C0;
+        const VCMP = 0x0EB40040;
+        const VCMPE = 0x0EB400C0;
+        const VCMP_ZERO = 0x0EB50040;
+        const VCVT_PRECISION = 0x0EB700C0;
+
+        /// VADD.F32 sd, sn, sm
+        pub fn vaddF32(self: *Self, dst: SReg, src1: SReg, src2: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VADD, .f32, .s(dst), .s(src1), .s(src2));
+        }
+
+        /// VADD.F64 dd, dn, dm
+        pub fn vaddF64(self: *Self, dst: DReg, src1: DReg, src2: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VADD, .f64, .d(dst), .d(src1), .d(src2));
+        }
+
+        /// VSUB.F32 sd, sn, sm
+        pub fn vsubF32(self: *Self, dst: SReg, src1: SReg, src2: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VSUB, .f32, .s(dst), .s(src1), .s(src2));
+        }
+
+        /// VSUB.F64 dd, dn, dm
+        pub fn vsubF64(self: *Self, dst: DReg, src1: DReg, src2: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VSUB, .f64, .d(dst), .d(src1), .d(src2));
+        }
+
+        /// VMUL.F32 sd, sn, sm
+        pub fn vmulF32(self: *Self, dst: SReg, src1: SReg, src2: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VMUL, .f32, .s(dst), .s(src1), .s(src2));
+        }
+
+        /// VMUL.F64 dd, dn, dm
+        pub fn vmulF64(self: *Self, dst: DReg, src1: DReg, src2: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VMUL, .f64, .d(dst), .d(src1), .d(src2));
+        }
+
+        /// VDIV.F32 sd, sn, sm
+        pub fn vdivF32(self: *Self, dst: SReg, src1: SReg, src2: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VDIV, .f32, .s(dst), .s(src1), .s(src2));
+        }
+
+        /// VDIV.F64 dd, dn, dm
+        pub fn vdivF64(self: *Self, dst: DReg, src1: DReg, src2: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VDIV, .f64, .d(dst), .d(src1), .d(src2));
+        }
+
+        /// VMOV.F32 sd, sm
+        pub fn vmovF32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VMOV, .f32, .s(dst), vfp_zero, .s(src));
+        }
+
+        /// VMOV.F64 dd, dm
+        pub fn vmovF64(self: *Self, dst: DReg, src: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VMOV, .f64, .d(dst), vfp_zero, .d(src));
+        }
+
+        /// VABS.F32 sd, sm
+        pub fn vabsF32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VABS, .f32, .s(dst), vfp_zero, .s(src));
+        }
+
+        /// VABS.F64 dd, dm
+        pub fn vabsF64(self: *Self, dst: DReg, src: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VABS, .f64, .d(dst), vfp_zero, .d(src));
+        }
+
+        /// VNEG.F32 sd, sm
+        pub fn vnegF32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VNEG, .f32, .s(dst), vfp_zero, .s(src));
+        }
+
+        /// VNEG.F64 dd, dm
+        pub fn vnegF64(self: *Self, dst: DReg, src: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VNEG, .f64, .d(dst), vfp_zero, .d(src));
+        }
+
+        /// VSQRT.F32 sd, sm
+        pub fn vsqrtF32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VSQRT, .f32, .s(dst), vfp_zero, .s(src));
+        }
+
+        /// VSQRT.F64 dd, dm
+        pub fn vsqrtF64(self: *Self, dst: DReg, src: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VSQRT, .f64, .d(dst), vfp_zero, .d(src));
+        }
+
+        /// VCMP.F32 sd, sm (quiet NaNs do not raise Invalid Operation)
+        pub fn vcmpF32(self: *Self, lhs: SReg, rhs: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VCMP, .f32, .s(lhs), vfp_zero, .s(rhs));
+        }
+
+        /// VCMP.F64 dd, dm (quiet NaNs do not raise Invalid Operation)
+        pub fn vcmpF64(self: *Self, lhs: DReg, rhs: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VCMP, .f64, .d(lhs), vfp_zero, .d(rhs));
+        }
+
+        /// VCMPE.F32 sd, sm (any NaN raises Invalid Operation)
+        pub fn vcmpeF32(self: *Self, lhs: SReg, rhs: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VCMPE, .f32, .s(lhs), vfp_zero, .s(rhs));
+        }
+
+        /// VCMPE.F64 dd, dm (any NaN raises Invalid Operation)
+        pub fn vcmpeF64(self: *Self, lhs: DReg, rhs: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VCMPE, .f64, .d(lhs), vfp_zero, .d(rhs));
+        }
+
+        /// VCMP.F32 sd, #0.0
+        pub fn vcmpZeroF32(self: *Self, lhs: SReg) Allocator.Error!void {
+            try self.vfpDataProc(VCMP_ZERO, .f32, .s(lhs), vfp_zero, vfp_zero);
+        }
+
+        /// VCMP.F64 dd, #0.0
+        pub fn vcmpZeroF64(self: *Self, lhs: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VCMP_ZERO, .f64, .d(lhs), vfp_zero, vfp_zero);
+        }
+
+        /// VMRS APSR_nzcv, FPSCR (copy the VFP comparison flags to the core
+        /// flags; required between VCMP and a conditional instruction)
+        pub fn vmrsApsrNzcv(self: *Self) Allocator.Error!void {
+            try self.emit32(condBits(.al) | 0x0EF1FA10);
+        }
+
+        /// VCVT.F64.F32 dd, sm
+        pub fn vcvtF64FromF32(self: *Self, dst: DReg, src: SReg) Allocator.Error!void {
+            // sz names the source precision: 0 = single to double.
+            try self.vfpDataProc(VCVT_PRECISION, .f32, .d(dst), vfp_zero, .s(src));
+        }
+
+        /// VCVT.F32.F64 sd, dm
+        pub fn vcvtF32FromF64(self: *Self, dst: SReg, src: DReg) Allocator.Error!void {
+            try self.vfpDataProc(VCVT_PRECISION, .f64, .s(dst), vfp_zero, .d(src));
+        }
+
+        /// VCVT between float and 32-bit integer:
+        /// cond 1110 1D11 1 opc2(3) Vd 101 sz op 1 M 0 Vm
+        /// To integer: opc2 = 10 signed, op = 1 (round toward zero); the
+        /// integer is always in an S register. To float: opc2 = 000, op =
+        /// signed.
+        fn vcvtInt(self: *Self, opc2: u3, op: u1, sz: VfpPrecision, vd: VfpField, vm: VfpField) Allocator.Error!void {
+            const base: u32 = 0x0EB80040 | (@as(u32, opc2) << 16) | (@as(u32, op) << 7);
+            try self.vfpDataProc(base, sz, vd, vfp_zero, vm);
+        }
+
+        /// VCVT.S32.F32 sd, sm (round toward zero)
+        pub fn vcvtS32FromF32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vcvtInt(0b101, 1, .f32, .s(dst), .s(src));
+        }
+
+        /// VCVT.U32.F32 sd, sm (round toward zero)
+        pub fn vcvtU32FromF32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vcvtInt(0b100, 1, .f32, .s(dst), .s(src));
+        }
+
+        /// VCVT.S32.F64 sd, dm (round toward zero)
+        pub fn vcvtS32FromF64(self: *Self, dst: SReg, src: DReg) Allocator.Error!void {
+            try self.vcvtInt(0b101, 1, .f64, .s(dst), .d(src));
+        }
+
+        /// VCVT.U32.F64 sd, dm (round toward zero)
+        pub fn vcvtU32FromF64(self: *Self, dst: SReg, src: DReg) Allocator.Error!void {
+            try self.vcvtInt(0b100, 1, .f64, .s(dst), .d(src));
+        }
+
+        /// VCVT.F32.S32 sd, sm
+        pub fn vcvtF32FromS32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vcvtInt(0b000, 1, .f32, .s(dst), .s(src));
+        }
+
+        /// VCVT.F32.U32 sd, sm
+        pub fn vcvtF32FromU32(self: *Self, dst: SReg, src: SReg) Allocator.Error!void {
+            try self.vcvtInt(0b000, 0, .f32, .s(dst), .s(src));
+        }
+
+        /// VCVT.F64.S32 dd, sm
+        pub fn vcvtF64FromS32(self: *Self, dst: DReg, src: SReg) Allocator.Error!void {
+            try self.vcvtInt(0b000, 1, .f64, .d(dst), .s(src));
+        }
+
+        /// VCVT.F64.U32 dd, sm
+        pub fn vcvtF64FromU32(self: *Self, dst: DReg, src: SReg) Allocator.Error!void {
+            try self.vcvtInt(0b000, 0, .f64, .d(dst), .s(src));
+        }
+
+        /// cond 1110 000 op Vn Rt 1010 N 001 0000
+        fn vmovCoreSingle(self: *Self, to_core: bool, rt: GeneralReg, sn: SReg) Allocator.Error!void {
+            std.debug.assert(rt != .r13 and rt != .r15);
+            const vn = VfpField.s(sn);
+            const inst: u32 = condBits(.al) |
+                0x0E000A10 |
+                (@as(u32, @intFromBool(to_core)) << 20) |
+                (@as(u32, vn.four) << 16) |
+                (@as(u32, rt.enc()) << 12) |
+                (@as(u32, vn.one) << 7);
+            try self.emit32(inst);
+        }
+
+        /// VMOV rt, sn (core register from S register bits)
+        pub fn vmovCoreFromS(self: *Self, dst: GeneralReg, src: SReg) Allocator.Error!void {
+            try self.vmovCoreSingle(true, dst, src);
+        }
+
+        /// VMOV sn, rt (S register from core register bits)
+        pub fn vmovSFromCore(self: *Self, dst: SReg, src: GeneralReg) Allocator.Error!void {
+            try self.vmovCoreSingle(false, src, dst);
+        }
+
+        /// cond 1100 010 op Rt2 Rt 1011 00 M 1 Vm
+        fn vmovCorePairDouble(self: *Self, to_core: bool, rt: GeneralReg, rt2: GeneralReg, dm: DReg) Allocator.Error!void {
+            std.debug.assert(rt != .r13 and rt != .r15 and rt2 != .r13 and rt2 != .r15);
+            if (to_core) std.debug.assert(rt != rt2);
+            const vm = VfpField.d(dm);
+            const inst: u32 = condBits(.al) |
+                0x0C400B10 |
+                (@as(u32, @intFromBool(to_core)) << 20) |
+                (@as(u32, rt2.enc()) << 16) |
+                (@as(u32, rt.enc()) << 12) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// VMOV rt, rt2, dm (core pair from D register bits; rt gets the
+        /// low word)
+        pub fn vmovCorePairFromD(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src: DReg) Allocator.Error!void {
+            try self.vmovCorePairDouble(true, dst_lo, dst_hi, src);
+        }
+
+        /// VMOV dm, rt, rt2 (D register bits from a core pair; rt is the low
+        /// word)
+        pub fn vmovDFromCorePair(self: *Self, dst: DReg, src_lo: GeneralReg, src_hi: GeneralReg) Allocator.Error!void {
+            try self.vmovCorePairDouble(false, src_lo, src_hi, dst);
+        }
+
+        /// cond 1101 U D 0 L Rn Vd 101 sz imm8
+        fn vfpLoadStore(self: *Self, load: bool, sz: VfpPrecision, vd: VfpField, rn: GeneralReg, offset: i32) Allocator.Error!void {
+            std.debug.assert(fitsImmediate(.vfp, offset));
+            const up = offset >= 0;
+            const inst: u32 = condBits(.al) |
+                0x0D000A00 |
+                (@as(u32, @intFromBool(up)) << 23) |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, @intFromBool(load)) << 20) |
+                (@as(u32, rn.enc()) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, @backingInt(sz)) << 8) |
+                (@as(u32, @abs(offset)) >> 2);
+            try self.emit32(inst);
+        }
+
+        /// VLDR sd, [rn, #offset]
+        pub fn vldrF32(self: *Self, dst: SReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.vfpLoadStore(true, .f32, .s(dst), base, offset);
+        }
+
+        /// VSTR sd, [rn, #offset]
+        pub fn vstrF32(self: *Self, src: SReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.vfpLoadStore(false, .f32, .s(src), base, offset);
+        }
+
+        /// VLDR dd, [rn, #offset]
+        pub fn vldrF64(self: *Self, dst: DReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.vfpLoadStore(true, .f64, .d(dst), base, offset);
+        }
+
+        /// VSTR dd, [rn, #offset]
+        pub fn vstrF64(self: *Self, src: DReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.vfpLoadStore(false, .f64, .d(src), base, offset);
+        }
+
+        /// cond 110 P U D W L 1101 Vd 1011 imm8 (imm8 = 2 * count)
+        fn vfpPushPop(self: *Self, base: u32, first: DReg, count: u5) Allocator.Error!void {
+            std.debug.assert(count >= 1 and count <= 16 and @as(u6, first.enc()) + count <= 32);
+            const vd = VfpField.d(first);
+            const inst: u32 = condBits(.al) |
+                base |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, count) * 2);
+            try self.emit32(inst);
+        }
+
+        /// VPUSH {d<first>-d<first+count-1>} (VSTMDB sp!)
+        pub fn vpush(self: *Self, first: DReg, count: u5) Allocator.Error!void {
+            try self.vfpPushPop(0x0D2D0B00, first, count);
+        }
+
+        /// VPOP {d<first>-d<first+count-1>} (VLDMIA sp!)
+        pub fn vpop(self: *Self, first: DReg, count: u5) Allocator.Error!void {
+            try self.vfpPushPop(0x0CBD0B00, first, count);
+        }
+
+        // Advanced SIMD (NEON). Unconditional encodings (1111 prefix). A Q
+        // register is encoded as the D register holding its low half, with the
+        // same `VfpField` split as VFP.
+
+        /// VMOV Qd, Qm, the assembler's name for VORR Qd, Qm, Qm:
+        /// 1111 0010 0 D 10 Vm Vd 0001 M 1 M 1 Vm
+        pub fn vmovQ(self: *Self, dst: QReg, src: QReg) Allocator.Error!void {
+            const vd = VfpField.d(dst.dLow());
+            const vm = VfpField.d(src.dLow());
+            const inst: u32 = 0xF2200150 |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, vm.four) << 16) |
+                (@as(u32, vd.four) << 12) |
+                (@as(u32, vm.one) << 7) |
+                (@as(u32, vm.one) << 5) |
+                vm.four;
+            try self.emit32(inst);
+        }
+
+        /// VLD1/VST1.8 {Dd, Dd+1}, [Rn] (no alignment requirement, no
+        /// writeback): 1111 0100 0 D L 0 Rn Vd 1010 00 00 1111
+        fn neonLoadStoreQ(self: *Self, load: bool, reg: QReg, base: GeneralReg) Allocator.Error!void {
+            std.debug.assert(base != .r15);
+            const vd = VfpField.d(reg.dLow());
+            const inst: u32 = 0xF4000A0F |
+                (@as(u32, vd.one) << 22) |
+                (@as(u32, @intFromBool(load)) << 21) |
+                (@as(u32, base.enc()) << 16) |
+                (@as(u32, vd.four) << 12);
+            try self.emit32(inst);
+        }
+
+        /// VLD1.8 {Qd}, [Rn]
+        pub fn vld1Q(self: *Self, dst: QReg, base: GeneralReg) Allocator.Error!void {
+            try self.neonLoadStoreQ(true, dst, base);
+        }
+
+        /// VST1.8 {Qd}, [Rn]
+        pub fn vst1Q(self: *Self, src: QReg, base: GeneralReg) Allocator.Error!void {
+            try self.neonLoadStoreQ(false, src, base);
+        }
     };
 }
 
@@ -921,4 +1308,9 @@ test "immediate offset ranges per form" {
     try std.testing.expect(fitsImmediate(.doubleword, -255));
     try std.testing.expect(!fitsImmediate(.doubleword, 256));
     try std.testing.expect(!fitsImmediate(.halfword, -256));
+    try std.testing.expect(fitsImmediate(.vfp, 1020));
+    try std.testing.expect(!fitsImmediate(.vfp, 1024));
+    try std.testing.expect(!fitsImmediate(.vfp, 2));
+    try std.testing.expect(fitsImmediate(.neon, 0));
+    try std.testing.expect(!fitsImmediate(.neon, 4));
 }
