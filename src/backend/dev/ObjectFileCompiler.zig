@@ -1013,7 +1013,7 @@ fn encodeObject(
     dwarf_procs: []const Dwarf.ProcEntry,
     timing: ?*ObjectFileCompiler.Timing,
 ) CompilationError![]const u8 {
-    var dwarf_sections = try buildDwarf(allocator, lir_store, codegen, code, dwarf_procs, timing);
+    var dwarf_sections = try buildDwarf(allocator, lir_store, target, codegen, code, dwarf_procs, timing);
     defer dwarf_sections.deinit(allocator);
 
     const object_encoding_started_ns = if (timing) |timings| timings.start() else 0;
@@ -1052,6 +1052,7 @@ fn encodeObject(
 fn buildDwarf(
     allocator: Allocator,
     lir_store: *const LirStore,
+    target: RocTarget,
     codegen: anytype,
     code: []const u8,
     dwarf_procs: []const Dwarf.ProcEntry,
@@ -1068,6 +1069,10 @@ fn buildDwarf(
     const dwarf_sections = Dwarf.build(
         allocator,
         "roc dev",
+        switch (TargetUsize.fromPtrBitWidth(target.ptrBitWidth())) {
+            .u32 => .four,
+            .u64 => .eight,
+        },
         source_file_names,
         codegen.getLineEntries(),
         dwarf_procs,
@@ -1095,7 +1100,7 @@ fn buildCompositionImage(
     patched: *const PatchedRefs,
     timing: ?*ObjectFileCompiler.Timing,
 ) CompilationError![]align(UnitImage.alignment.toByteUnits()) u8 {
-    var dwarf_sections = try buildDwarf(allocator, lir_store, codegen, code, dwarf_procs, timing);
+    var dwarf_sections = try buildDwarf(allocator, lir_store, target, codegen, code, dwarf_procs, timing);
     defer dwarf_sections.deinit(allocator);
     const image_started = ObjectFileCompiler.Timing.startDetail(timing);
     defer _ = ObjectFileCompiler.Timing.lapDetail(timing, image_started, "unit_image_ns");

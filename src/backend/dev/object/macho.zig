@@ -1058,7 +1058,7 @@ test "DWARF references between debug sections are section-relative" {
 test "issue 13145: an image relocates the same debug offsets from the writer as from the written object" {
     const allocator = std.testing.allocator;
     const Dwarf = @import("../Dwarf.zig");
-    var dwarf = try Dwarf.build(allocator, "roc test", &.{"main"}, &.{}, &.{}, 4);
+    var dwarf = try Dwarf.build(allocator, "roc test", .eight, &.{"main"}, &.{}, &.{}, 4);
     defer dwarf.deinit(allocator);
     var writer = try MachOWriter.init(allocator, .aarch64);
     defer writer.deinit();
