@@ -18,9 +18,8 @@ relocatable objects: ELF32 headers, sections and symbols, `.ARM.attributes`,
 the `$a` mapping symbol, `SHT_REL` relocations for `R_ARM_CALL`,
 `R_ARM_ABS32`, `R_ARM_MOVW_PREL_NC` and `R_ARM_MOVT_PREL`, and DWARF with
 four-byte addresses. Six decisions: where in-memory arm32 relocation
-patching goes, given that `Isa.arm32` arrives only in part 6 (D1: part 5
-replaces the patcher's byte-guessing with an explicit `isa` argument for
-x86_64 and aarch64, and part 9 adds arm32); how the link smoke test is written now that part 4
+patching goes (D1: in part 5, with the arm32 relocation kinds; upstream's
+explicit relocation kinds make an `Isa` argument unnecessary); how the link smoke test is written now that part 4
 brought no ELF reader (D2, a Zig build step that links but does not run);
 whether ELF32 is a second writer or a class parameter of the one writer
 (D3, one writer); what `.ARM.attributes` says (D4, a fixed block matching
@@ -116,11 +115,12 @@ encoder and this writer and links it with `zig cc` (D2).
 - **Acceptable upstream:** judged as if a maintainer wrote it. One writer
   rather than two copies (D3); every later reference fix included
   (`d0846f6eb6` changed `elf.zig` and `macho.zig` after the snapshot).
-- **AGENTS.md:** no heuristics. Upstream's in-memory patcher picks the
-  instruction set by looking at the bytes (an `E8` byte before the offset
-  means x86_64, a `bl` opcode means aarch64); the reference replaces that
-  with an explicit `isa` argument. Part 5 makes that change for x86_64
-  and aarch64 (D1).
+- **AGENTS.md:** no heuristics. The reference's base patched by looking
+  at the bytes, and the reference added an `isa` argument to fix that.
+  Upstream has since fixed it another way (`69b0808e11`, in our base):
+  every relocation carries an explicit kind set by the code generator, and
+  the bytes are only debug asserts. Part 5's arm32 kinds follow that
+  pattern (D1).
 - **Output unchanged:** x86_64 and aarch64 objects must be byte-identical.
   The relative oracle covers program behaviour; D3's byte comparison
   covers the object bytes themselves.
@@ -162,16 +162,28 @@ encoder and this writer and links it with `zig cc` (D2).
      writer for its tests.
 - **Recommendation:** Alternative 1, and offer alternative 2's fix to
   upstream separately when part 9 nears.
-- **Outcome:** Alternative 2. Removing a heuristic AGENTS.md forbids is
-  worth the larger review, and it is its own commit, so it can also be
-  offered upstream on its own.
-- **Consequences:** `applyRelocationsWithContext` takes `comptime isa:
-  Isa`; its callers (`HostSplice`, `machine_code_shim`) pass the ISA they
-  compile for; the x86_64 and aarch64 prongs patch as today, chosen by the
-  argument instead of the bytes. Part 5's other `Relocation.zig` change is
-  the arm32 kinds and their ELF type numbers. The arm32 prong and its patch
-  functions (`patchArm32BranchInstruction`, `patchArmMovPrel`,
-  `patchAbsolute32Operand`) come with part 9.
+- **Outcome:** first alternative 2, then alternative 4 (below), because
+  alternative 2 was already upstream. `69b0808e11` gave every function
+  relocation an explicit `FunctionRelocationKind`, and data relocations
+  already had `DataRelocationKind`; the patcher switches on the kind and
+  checks the bytes only in debug asserts. The context above described the
+  reference's older base. With explicit kinds no `Isa` is needed, so the
+  problem alternatives 1 to 3 solve is gone. Two new alternatives:
+  4. Part 5 adds the arm32 kinds with their in-memory patch functions and
+     unit tests. Implications: about 120 lines nothing calls in-process
+     until part 9; each kind is complete in one place.
+  5. Part 5 adds the kinds, and the patcher's arm32 prongs are
+     `unreachable` until part 9. Implications: about 120 lines smaller,
+     but a placeholder reachable as soon as an arm32 relocation is
+     patched in-process.
+  Accepted: alternative 4.
+- **Consequences:** `FunctionRelocationKind` gains `arm32_call` and
+  `DataRelocationKind` the arm32 data kinds; `patchLinkedFunctionRelocation`
+  and `patchLinkedDataRelocation` gain their prongs
+  (`patchArm32BranchInstruction`, `patchArmMovPrel`,
+  `patchAbsolute32Operand`), tested against part 4's encoder placeholders.
+  `HostSplice` and `machine_code_shim` do not change; part 9 starts
+  feeding them arm32 code.
 
 ### D2. How the link smoke test is written
 
@@ -316,8 +328,7 @@ From `.workspaces/arm32-elf32-objects`, on each commit:
     zig build test
     zig build run-check-arm32-link-smoke
 
-Expected: the writer's tests pass, and the patcher's x86_64 and aarch64
-tests pass with the ISA passed explicitly (D1); the writer's tests pass (ELF32 header, sections, symbols, REL
+Expected: the patcher's arm32 tests pass (D1); the writer's tests pass (ELF32 header, sections, symbols, REL
 records and attributes read back with `std.elf`); the smoke step links.
 
 64-bit objects unchanged, on each commit that touches `elf.zig` (D3): the
@@ -335,15 +346,14 @@ Plus the relative oracle and the part 4 check list on each commit, and
 
 ## Recommendation
 
-Accepted 2026-11-21: D1 2, D2 1, D3 1, D4 1, D5 1, D6 1. Commits, each
+Accepted 2026-11-21: D1 4, D2 1, D3 1, D4 1, D5 1, D6 1. Commits, each
 building and passing on its own:
 
-1. `Relocation.zig`: `applyRelocationsWithContext` takes `comptime isa`
-   instead of guessing from the bytes; callers pass their ISA.
-2. `Dwarf.zig`: the `address_width` argument; callers pass `.eight`.
-3. `elf.zig`: the writer generic over the ELF class, 64-bit output
+1. `Dwarf.zig`: the `address_width` argument; callers pass `.eight`.
+2. `elf.zig`: the writer generic over the ELF class, 64-bit output
    byte-identical.
-4. `elf.zig`: the arm32 architecture (ELF32, `EM_ARM`, `e_flags`, `$a`,
+3. `elf.zig`: the arm32 architecture (ELF32, `EM_ARM`, `e_flags`, `$a`,
    `.ARM.attributes`, `SHT_REL`) and its unit tests.
-5. `Relocation.zig`: the arm32 kinds and their ELF type numbers.
-6. The link smoke step and its minici job.
+4. `Relocation.zig`: the arm32 kinds, their ELF type numbers and their
+   in-memory patching, with tests.
+5. The link smoke step and its minici job.

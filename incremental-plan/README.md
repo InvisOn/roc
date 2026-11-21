@@ -290,12 +290,10 @@ for x86_64 and aarch64.
 ### 5. Objects
 
 `object/elf.zig` (one writer, generic over ELF32 and ELF64, with
-`.ARM.attributes`, `$a` and `SHT_REL`), `Relocation.zig` (the ARM kinds,
-and an explicit `isa` argument for in-memory patching in place of guessing
-from the bytes), `Dwarf.zig` (four-byte addresses), and a Zig build step
+`.ARM.attributes`, `$a` and `SHT_REL`), `Relocation.zig` (the ARM kinds
+with their in-memory patching), `Dwarf.zig` (four-byte addresses), and a Zig build step
 `run-check-arm32-link-smoke` that builds an object and links it with
-`zig cc`, run in `minici`'s source lane. The arm32 in-memory patching
-comes with part 9. Decisions: `rfcs/part-05-objects/objects-rfc.md`.
+`zig cc`, run in `minici`'s source lane. Decisions: `rfcs/part-05-objects/objects-rfc.md`.
 
 ### 6 and 7. Code generation and the calling convention
 
@@ -526,6 +524,8 @@ upstream first, so stopping early still leaves something of value.
   5 decides how its smoke test reads objects. 2,896 lines (577
   generated), 182 oracle entries. Outcome in the part 4 RFC.
 - 2026-11-21: part 5 planned (`rfcs/part-05-objects/objects-rfc.md`), all
-  six decisions accepted: D1 2 (the patcher takes an explicit `isa`), D2 1
+  six decisions accepted: D1 4 (arm32 kinds with their in-memory
+  patching; upstream's explicit kinds already removed the byte-guessing
+  D1 2 would have fixed), D2 1
   (a Zig link smoke step, no run), D3 1 (one writer), D4 1 (a fixed
   attributes block), D5 1 (REL), D6 1 (width from the target).
