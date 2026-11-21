@@ -273,6 +273,13 @@ encoder and this writer and links it with `zig cc` (D2).
 - **Outcome:** Alternative 1.
 - **Consequences:** the writer must not write an addend for arm32; a data
   relocation (`R_ARM_ABS32` in `.rodata`) needs its addend in the word.
+  The same holds for DWARF (X-5): `Dwarf.build` writes 0 in each relocated
+  field and keeps the addend in the relocation (a subprogram's `low_pc`
+  carries its `code_start`). RELA and Mach-O are fine with that; the ELF32
+  writer must copy each debug relocation's addend into its field, as the
+  Mach-O writer does, or every subprogram on arm32 would point at the
+  start of `.text`. A test reads a subprogram's `low_pc` field back and
+  checks it equals `code_start`.
 
 ### D6. How the writer learns the pointer width
 
@@ -353,7 +360,8 @@ building and passing on its own:
 2. `elf.zig`: the writer generic over the ELF class, 64-bit output
    byte-identical.
 3. `elf.zig`: the arm32 architecture (ELF32, `EM_ARM`, `e_flags`, `$a`,
-   `.ARM.attributes`, `SHT_REL`) and its unit tests.
+   `.ARM.attributes`, `SHT_REL` with addends in place, debug relocations
+   included) and its unit tests.
 4. `Relocation.zig`: the arm32 kinds, their ELF type numbers and their
    in-memory patching, with tests.
 5. The link smoke step and its minici job.
