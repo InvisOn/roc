@@ -498,6 +498,161 @@ pub fn Emit(comptime target: RocTarget) type {
         pub fn rorRegRegReg(self: *Self, dst: GeneralReg, src: GeneralReg, amount: GeneralReg) Allocator.Error!void {
             try self.dataProc(.al, .mov, false, dst, .r0, .{ .shift_reg = .{ .rm = src, .kind = .ror, .rs = amount } });
         }
+
+        // Multiply
+
+        /// cond 0000 opc(4) 0 Rd/RdHi(4) Ra/RdLo(4) Rm(4) 1001 Rn(4), flags never set
+        fn multiply(self: *Self, opc: u4, hi: GeneralReg, lo: GeneralReg, rm: GeneralReg, rn: GeneralReg) Allocator.Error!void {
+            std.debug.assert(hi != .r15 and lo != .r15 and rm != .r15 and rn != .r15);
+            const inst: u32 = condBits(.al) |
+                (@as(u32, opc) << 21) |
+                (@as(u32, hi.enc()) << 16) |
+                (@as(u32, lo.enc()) << 12) |
+                (@as(u32, rm.enc()) << 8) |
+                (0b1001 << 4) |
+                rn.enc();
+            try self.emit32(inst);
+        }
+
+        /// MUL rd, rn, rm (low 32 bits of the product)
+        pub fn mulRegRegReg(self: *Self, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            try self.multiply(0b0000, dst, .r0, src2, src1);
+        }
+
+        /// MLA rd, rn, rm, ra (rd = ra + rn * rm)
+        pub fn mlaRegRegRegReg(self: *Self, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg, addend: GeneralReg) Allocator.Error!void {
+            try self.multiply(0b0001, dst, addend, src2, src1);
+        }
+
+        /// MLS rd, rn, rm, ra (rd = ra - rn * rm)
+        pub fn mlsRegRegRegReg(self: *Self, dst: GeneralReg, src1: GeneralReg, src2: GeneralReg, minuend: GeneralReg) Allocator.Error!void {
+            try self.multiply(0b0011, dst, minuend, src2, src1);
+        }
+
+        /// UMULL rdlo, rdhi, rn, rm (unsigned 32x32 -> 64)
+        pub fn umull(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst_lo != dst_hi);
+            try self.multiply(0b0100, dst_hi, dst_lo, src2, src1);
+        }
+
+        /// UMLAL rdlo, rdhi, rn, rm (rdhi:rdlo += unsigned rn * rm)
+        pub fn umlal(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst_lo != dst_hi);
+            try self.multiply(0b0101, dst_hi, dst_lo, src2, src1);
+        }
+
+        /// UMAAL rdlo, rdhi, rn, rm (rdhi:rdlo = rn * rm + rdlo + rdhi, unsigned;
+        /// the sum cannot overflow 64 bits)
+        pub fn umaal(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst_lo != dst_hi);
+            try self.multiply(0b0010, dst_hi, dst_lo, src2, src1);
+        }
+
+        /// SMULL rdlo, rdhi, rn, rm (signed 32x32 -> 64)
+        pub fn smull(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst_lo != dst_hi);
+            try self.multiply(0b0110, dst_hi, dst_lo, src2, src1);
+        }
+
+        /// SMLAL rdlo, rdhi, rn, rm (rdhi:rdlo += signed rn * rm)
+        pub fn smlal(self: *Self, dst_lo: GeneralReg, dst_hi: GeneralReg, src1: GeneralReg, src2: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst_lo != dst_hi);
+            try self.multiply(0b0111, dst_hi, dst_lo, src2, src1);
+        }
+
+        // Bit manipulation
+
+        /// cond op(8) 1111 Rd 1111 op2(4) Rm, the shared shape of CLZ, RBIT,
+        /// REV and REV16.
+        fn bitOp(self: *Self, op: u8, op2: u4, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst != .r15 and src != .r15);
+            const inst: u32 = condBits(.al) |
+                (@as(u32, op) << 20) |
+                (0xF << 16) |
+                (@as(u32, dst.enc()) << 12) |
+                (0xF << 8) |
+                (@as(u32, op2) << 4) |
+                src.enc();
+            try self.emit32(inst);
+        }
+
+        /// CLZ rd, rm (count leading zeros)
+        pub fn clzRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.bitOp(0b0001_0110, 0b0001, dst, src);
+        }
+
+        /// RBIT rd, rm (reverse bits)
+        pub fn rbitRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.bitOp(0b0110_1111, 0b0011, dst, src);
+        }
+
+        /// REV rd, rm (reverse bytes)
+        pub fn revRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.bitOp(0b0110_1011, 0b0011, dst, src);
+        }
+
+        /// REV16 rd, rm (reverse bytes in each halfword)
+        pub fn rev16RegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.bitOp(0b0110_1011, 0b1011, dst, src);
+        }
+
+        /// cond 01101 op(3) 1111 Rd 00 00 0111 Rm (rotation 0)
+        fn extend(self: *Self, op: u3, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            std.debug.assert(dst != .r15 and src != .r15);
+            const inst: u32 = condBits(.al) |
+                (0b01101 << 23) |
+                (@as(u32, op) << 20) |
+                (0xF << 16) |
+                (@as(u32, dst.enc()) << 12) |
+                (0b0111 << 4) |
+                src.enc();
+            try self.emit32(inst);
+        }
+
+        /// UXTB rd, rm (zero-extend the low byte)
+        pub fn uxtbRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.extend(0b110, dst, src);
+        }
+
+        /// UXTH rd, rm (zero-extend the low halfword)
+        pub fn uxthRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.extend(0b111, dst, src);
+        }
+
+        /// SXTB rd, rm (sign-extend the low byte)
+        pub fn sxtbRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.extend(0b010, dst, src);
+        }
+
+        /// SXTH rd, rm (sign-extend the low halfword)
+        pub fn sxthRegReg(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.extend(0b011, dst, src);
+        }
+
+        /// cond 0111 1 op(2) widthm1(5) Rd lsb(5) 101 Rn
+        fn bitfieldExtract(self: *Self, signed: bool, dst: GeneralReg, src: GeneralReg, lsb: u5, width: u6) Allocator.Error!void {
+            std.debug.assert(dst != .r15 and src != .r15);
+            std.debug.assert(width >= 1 and @as(u7, lsb) + width <= 32);
+            const inst: u32 = condBits(.al) |
+                (0b01111 << 23) |
+                (@as(u32, if (signed) 0b01 else 0b11) << 21) |
+                (@as(u32, width - 1) << 16) |
+                (@as(u32, dst.enc()) << 12) |
+                (@as(u32, lsb) << 7) |
+                (0b101 << 4) |
+                src.enc();
+            try self.emit32(inst);
+        }
+
+        /// UBFX rd, rn, #lsb, #width (unsigned bitfield extract)
+        pub fn ubfx(self: *Self, dst: GeneralReg, src: GeneralReg, lsb: u5, width: u6) Allocator.Error!void {
+            try self.bitfieldExtract(false, dst, src, lsb, width);
+        }
+
+        /// SBFX rd, rn, #lsb, #width (signed bitfield extract)
+        pub fn sbfx(self: *Self, dst: GeneralReg, src: GeneralReg, lsb: u5, width: u6) Allocator.Error!void {
+            try self.bitfieldExtract(true, dst, src, lsb, width);
+        }
     };
 }
 

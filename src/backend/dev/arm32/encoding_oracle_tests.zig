@@ -235,3 +235,72 @@ test "arm32 encoding: asr r5, r6, r7" {
 test "arm32 encoding: ror r8, r9, r10" {
     try expectEncoding(E.rorRegRegReg, .{ .r8, .r9, .r10 }, &.{0xe1a08a79});
 }
+test "arm32 encoding: mul r0, r1, r2" {
+    try expectEncoding(E.mulRegRegReg, .{ .r0, .r1, .r2 }, &.{0xe0000291});
+}
+test "arm32 encoding: mul r10, r9, r8" {
+    try expectEncoding(E.mulRegRegReg, .{ .r10, .r9, .r8 }, &.{0xe00a0899});
+}
+test "arm32 encoding: mla r0, r1, r2, r3" {
+    try expectEncoding(E.mlaRegRegRegReg, .{ .r0, .r1, .r2, .r3 }, &.{0xe0203291});
+}
+test "arm32 encoding: mls r4, r5, r6, r7" {
+    try expectEncoding(E.mlsRegRegRegReg, .{ .r4, .r5, .r6, .r7 }, &.{0xe0647695});
+}
+test "arm32 encoding: umull r0, r1, r2, r3" {
+    try expectEncoding(E.umull, .{ .r0, .r1, .r2, .r3 }, &.{0xe0810392});
+}
+test "arm32 encoding: umlal r4, r5, r6, r7" {
+    try expectEncoding(E.umlal, .{ .r4, .r5, .r6, .r7 }, &.{0xe0a54796});
+}
+test "arm32 encoding: umaal r0, r1, r2, r3" {
+    try expectEncoding(E.umaal, .{ .r0, .r1, .r2, .r3 }, &.{0xe0410392});
+}
+test "arm32 encoding: umaal r10, r12, r9, r8" {
+    try expectEncoding(E.umaal, .{ .r10, .r12, .r9, .r8 }, &.{0xe04ca899});
+}
+test "arm32 encoding: smull r8, r9, r10, r12" {
+    try expectEncoding(E.smull, .{ .r8, .r9, .r10, .r12 }, &.{0xe0c98c9a});
+}
+test "arm32 encoding: smlal r0, r12, r2, r3" {
+    try expectEncoding(E.smlal, .{ .r0, .r12, .r2, .r3 }, &.{0xe0ec0392});
+}
+test "arm32 encoding: clz r0, r1" {
+    try expectEncoding(E.clzRegReg, .{ .r0, .r1 }, &.{0xe16f0f11});
+}
+test "arm32 encoding: clz r12, r10" {
+    try expectEncoding(E.clzRegReg, .{ .r12, .r10 }, &.{0xe16fcf1a});
+}
+test "arm32 encoding: rbit r2, r3" {
+    try expectEncoding(E.rbitRegReg, .{ .r2, .r3 }, &.{0xe6ff2f33});
+}
+test "arm32 encoding: rev r4, r5" {
+    try expectEncoding(E.revRegReg, .{ .r4, .r5 }, &.{0xe6bf4f35});
+}
+test "arm32 encoding: rev16 r6, r7" {
+    try expectEncoding(E.rev16RegReg, .{ .r6, .r7 }, &.{0xe6bf6fb7});
+}
+test "arm32 encoding: uxtb r0, r1" {
+    try expectEncoding(E.uxtbRegReg, .{ .r0, .r1 }, &.{0xe6ef0071});
+}
+test "arm32 encoding: uxth r2, r3" {
+    try expectEncoding(E.uxthRegReg, .{ .r2, .r3 }, &.{0xe6ff2073});
+}
+test "arm32 encoding: sxtb r4, r5" {
+    try expectEncoding(E.sxtbRegReg, .{ .r4, .r5 }, &.{0xe6af4075});
+}
+test "arm32 encoding: sxth r10, r12" {
+    try expectEncoding(E.sxthRegReg, .{ .r10, .r12 }, &.{0xe6bfa07c});
+}
+test "arm32 encoding: ubfx r0, r1, #3, #5" {
+    try expectEncoding(E.ubfx, .{ .r0, .r1, 3, 5 }, &.{0xe7e401d1});
+}
+test "arm32 encoding: ubfx r2, r3, #31, #1" {
+    try expectEncoding(E.ubfx, .{ .r2, .r3, 31, 1 }, &.{0xe7e02fd3});
+}
+test "arm32 encoding: sbfx r4, r5, #0, #32" {
+    try expectEncoding(E.sbfx, .{ .r4, .r5, 0, 32 }, &.{0xe7bf4055});
+}
+test "arm32 encoding: sbfx r6, r7, #8, #8" {
+    try expectEncoding(E.sbfx, .{ .r6, .r7, 8, 8 }, &.{0xe7a76457});
+}
