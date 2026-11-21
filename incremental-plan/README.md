@@ -65,7 +65,7 @@ stay out of upstream. They will change as upstream moves.
 |---|---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none | none |
 | 1–3 | **One PR, the shared driver for any backend:** architecture dispatch (`isa.zig`, `switch (isa)`), driver register seams, and the driver's word size (`word`, `target_ptr_size`, the 64-bit width names). With the instruction cache flush (draft 03). Which host word-size drafts (07, 12) stay in it is under review | dev backend: shared driver (`LirCodeGen`, `FrameBuilder`, `CallingConvention`) | not measured; the 2,000-line limit does not apply (see below) | no | step 1: [#11](https://github.com/InvisOn/roc/pull/11), upstream 12740 (merged); the rest: [#12](https://github.com/InvisOn/roc/pull/12), upstream 12983 (in review) | `isa-switch` (step 1), `isa-word-size` (the rest) |
-| 4 | A32/VFP encoder and its assembler oracle | dev backend: instruction encoder | about 3,500 | no | not yet | `arm32/encoder` |
+| 4 | A32/VFP encoder and its assembler oracle | dev backend: instruction encoder | 2,896 (577 generated) | no | not yet | `arm32/encoder` |
 | 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,050 | no | not yet | `arm32/elf32-objects` |
 | 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet | `arm32/codegen` |
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet | `arm32/aapcs32` |
@@ -272,10 +272,10 @@ explicit.
 `src/backend/dev/arm32/Emit.zig` and `Registers.zig` (integer, branch,
 memory, stack and VFP instructions, plus the three 128-bit vector moves
 part 6 needs; the rest of NEON comes with part 11), the encoding oracle
-(`ci/arm32_encoding_oracle.py`, `ci/elf32_reader.py`, `.s`, the generated
-tests) and its build step `run-check-arm32-encoding-oracle`, run in
-`minici`. Self-contained: nothing calls it yet. The oracle checks it byte
-for byte, relocations included, against LLVM's assembler through
+(`ci/arm32_encoding_oracle.zig`, which reads the assembled ELF32 object
+itself, the `.s` file, the generated tests) and its build step
+`run-check-arm32-encoding-oracle`, run in `minici`'s source lane. Self-contained: nothing calls it yet. The oracle checks it byte
+for byte, against LLVM's assembler through
 `zig cc`, for the cases its `.s` file lists. So it also gets a coverage
 check: every public `Emit` method that emits bytes must have an oracle
 line, one per operand form, or the check fails. Part 4 brings the check,
@@ -290,8 +290,11 @@ for x86_64 and aarch64.
 ### 5. Objects
 
 `object/elf.zig` (`write32`), `Relocation.zig` (ARM branches and movw/movt),
-`Dwarf.zig` (four-byte addresses), `ci/arm32_link_smoke.py` (reusing
-part 4's `ci/elf32_reader.py`). Checked by the link smoke test.
+`Dwarf.zig` (four-byte addresses), and the link smoke test
+(`ci/arm32_link_smoke.py` in the reference). Part 4 brought no ELF reader
+after all (its D4 is overtaken), so part 5's planning doc decides how the
+smoke test reads objects; a Python script would not run on minici's
+Windows lane, which has no `python3`.
 
 ### 6 and 7. Code generation and the calling convention
 
@@ -516,3 +519,8 @@ upstream first, so stopping early still leaves something of value.
   clean; oracle green on all 7 commits. `isa-register-seams` rebased on
   top (head `f72be15da9`, oracle green on its 3 commits), and
   `arm32/encoder` moved with it.
+- 2026-11-21: part 4 done on `arm32/encoder` (local, head `dbc497d6a8`):
+  seven signed commits, each with checks, the relative oracle and a
+  review. The oracle tool is Zig, not Python, so D4 is overtaken and part
+  5 decides how its smoke test reads objects. 2,896 lines (577
+  generated), 182 oracle entries. Outcome in the part 4 RFC.

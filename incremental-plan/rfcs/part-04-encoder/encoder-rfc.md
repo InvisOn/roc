@@ -11,23 +11,24 @@
   `isa-word-size` (`2b6c5f7536`, upstream PR 12983) on upstream
   `22e3718d45`. The upstream PR is opened only after PR 12983 merges (one
   PR open at a time), and then from upstream `main`.
-- **Head:** `f72be15da9` (no part 4 commits yet)
+- **Head:** `dbc497d6a8` (seven commits, local only; see "Outcome")
 
 ## Abstract
 
 Part 4 adds an A32 instruction encoder for 32-bit ARM
 (`src/backend/dev/arm32/Emit.zig`, `Registers.zig`) and an oracle that
 checks it byte for byte against an assembler: a list of assembly lines,
-each paired with the `Emit` call that must produce the same bytes, a
-script that assembles the list and writes the expected bytes into
-generated Zig tests, and a build step that fails when the tests are out of
-date or an emitter has no entry. Nothing calls the encoder yet, so x86_64
+each paired with the `Emit` call that must produce the same bytes, a tool
+(`ci/arm32_encoding_oracle.zig`, Zig rather than the reference's Python)
+that assembles the list and writes the expected bytes into generated Zig
+tests, and a build step that fails when the tests are out of date or an
+emitter has no entry. Nothing calls the encoder yet, so x86_64
 and aarch64 output cannot change; the relative oracle still runs on each
 commit to show it. Eight decisions: how a target would choose Thumb later
 (D1, recommended: a new `Isa` member then, no mode now), which assembler
 (D2, LLVM's, through `zig cc`), where the expected bytes live (D3,
-generated and checked in), the ELF reader the oracle needs (D4, moves
-here from part 5), the encoder's `CC` namespace (D5, left to part 6), what
+generated and checked in), the ELF reader the oracle needs (D4, overtaken:
+the Zig tool reads the object itself), the encoder's `CC` namespace (D5, left to part 6), what
 the coverage check counts (D6, every emitting method) and whether NEON
 waits for part 11 (D7, yes, except the three vector moves part 6 needs)
 and where the oracle's build step runs in CI (D8, in `minici`).
@@ -74,28 +75,30 @@ nothing asks for an A32 encoding yet. Run 2026-11-19 with a debug `roc`
 built from `58646c1c5c`, which matches upstream `37986e9a6a` here. Part 4
 does not change this output; part 6 is the first part that does.
 
-What part 4 makes runnable, on the branch once the commits exist:
+What part 4 makes runnable, on the branch:
 
     cd .workspaces/arm32-encoder
     zig build run-check-arm32-encoding-oracle
+    zig build run-arm32-encoding-oracle
     zig build test
 
 The first fails when the generated tests are out of date or an emitter has
-no oracle entry; the second runs the generated tests.
+no oracle entry; the second regenerates the tests after an edit to the `.s`
+file; the third runs the generated tests.
 
 ## What this enables
 
 - **Follows directly:** part 6 (the arm32 code generator) emits through
   this encoder, and keeps the oracle passing as it adds instructions.
-- **Follows directly:** part 5 (objects) gets the ELF reader (D4) already
-  in place.
+- **Follows directly:** part 5 (objects) decides how its link smoke test
+  reads objects (D4 is overtaken: part 4 brings no ELF reader of its own).
 - **Follows directly:** the encoder's coverage check means an emitter
   without an assembler-checked entry cannot land, in part 4 or later.
 - **Possible later, not planned:** the same oracle shape for x86_64 and
   aarch64 (LLVM assembles both), replacing hand-written expected bytes.
 - **Possible later, not planned:** a Thumb-2 encoder for ARMv7-M (the
   follow-up after part 12) gets its own `Emit` and its own oracle list,
-  with the same script.
+  with the same tool.
 
 ## Background
 
@@ -133,7 +136,9 @@ no oracle entry; the second runs the generated tests.
   .r2)`). The script assembles the lines with `zig cc -target
   arm-linux-musleabihf`, reads the object with `elf32_reader.py`, and
   writes one Zig test per line. It reads `R_ARM_CALL` relocations because
-  LLVM leaves every `bl` for the linker. `--check` fails if the output is
+  LLVM marks every `bl` with one, even to a local label; the displacement
+  is already in the instruction (REL form), so the bytes are final once the
+  relocation is known to point at the instruction itself. `--check` fails if the output is
   stale or an emitter has no line.
 - **Thumb review** (`thumb-plan-review.md`, 2026-10-27): Thumb left the
   committed plan; how a target would choose it must be recorded here (D1).
@@ -146,7 +151,9 @@ no oracle entry; the second runs the generated tests.
 
 - **Acceptable upstream.** Judged as if a maintainer wrote it: upstream's
   encoder style (`Emit(comptime target)`, one method per instruction form,
-  `buf` and `relocs`), current Zig (`@backingInt`, not `@intFromEnum`), no
+  a `buf`; upstream's aarch64 `Emit` also declares `relocs`, but nothing
+  appends to it, because the code generators keep their own relocation
+  lists, so arm32's `Emit` has none), current Zig (`@backingInt`, not `@intFromEnum`), no
   reference-branch leftovers (the `DESIGN.md`, `GUIDE.md` and `TOOLS.md`
   files and the `projects/` notes stay out), and the later reference fix
   included.
@@ -154,8 +161,9 @@ no oracle entry; the second runs the generated tests.
   debug assertions and `unreachable`; no workarounds.
 - **Output unchanged:** nothing calls the encoder, so x86_64 and aarch64
   output cannot change. The relative oracle runs on every commit anyway.
-- **Review size:** the plan's estimate is about 3,800 lines, a quarter of
-  it generated (D3). D7 can take about 500 lines out.
+- **Review size:** the plan's estimate was about 3,800 lines, a quarter
+  of it generated (D3). D7 took about 500 out; the branch came to 2,896
+  (577 generated).
 - **Plan order:** part 4 cannot depend on parts 5 to 7 (D4, D5).
 
 ### Alternatives considered
@@ -207,8 +215,8 @@ no oracle entry; the second runs the generated tests.
   uses LLVM's, through `zig cc`.
 - **Alternatives:**
   1. LLVM through `zig cc -target arm-linux-musleabihf`. Implications: no
-     tool beyond the Zig that CI already has; LLVM leaves every `bl` as a
-     relocation, so the script must read relocations (D4).
+     tool beyond the Zig that CI already has; LLVM marks every `bl` with
+     a relocation, so the tool must read relocations (D4).
   2. GNU `as` (`arm-linux-gnueabihf-as`). Implications: a cross binutils
      package on every machine that runs the check; the CI images would
      need it.
@@ -232,12 +240,13 @@ no oracle entry; the second runs the generated tests.
   3. Expected words written next to each line of the `.s` file.
      Implications: smaller, but the words are then hand-maintained again.
 - **Recommendation:** Alternative 1, as the reference does.
-- **Consequences:** reviewers read the `.s` file and the script, and skim
+- **Consequences:** reviewers read the `.s` file and the tool, and skim
   the generated file; the PR description says which file is generated.
 
 ### D4. The ELF reader the oracle needs
 
-- **Status:** Accepted (2026-11-21)
+- **Status:** Accepted (2026-11-21), then overtaken the same day when the
+  oracle tool was written in Zig (W-3 B)
 - **Context:** the oracle imports `ci/elf32_reader.py`, which the plan
   puts in part 5 (objects), but part 4 lands first.
 - **Alternatives:**
@@ -248,6 +257,14 @@ no oracle entry; the second runs the generated tests.
      offset field is left for the linker.
 - **Recommendation:** Alternative 1.
 - **Consequences:** part 5's row in the plan shrinks by about 250 lines.
+- **Outcome:** the oracle tool is Zig (`ci/arm32_encoding_oracle.zig`)
+  and reads the ELF32 object itself, bounds-checked: sections, symbols,
+  and `R_ARM_CALL` relocations, accepted only when they point at the `bl`
+  itself. No Python enters part 4, which also keeps the check off
+  `python3`, missing on minici's Windows lane. Part 5 must now decide how
+  its link smoke test reads objects; alternative 2's wording was also
+  wrong: `zig objcopy` would give the right bytes, since LLVM fills in the
+  `bl` displacement, and only the relocation check would be lost.
 
 ### D5. The encoder's `CC` namespace
 
@@ -303,8 +320,11 @@ no oracle entry; the second runs the generated tests.
 - **Recommendation:** Alternative 1.
 - **Consequences:** the plan's row 4 becomes "A32/VFP encoder"; part 11
   grows by the rest of the NEON encoder and its oracle lines.
-  `neonLogicQ` comes in reduced to `vorr` (a register move), or as a
-  dedicated `vmovQ`; to decide when writing the commit.
+- **Outcome (E-7 A, 2026-11-21):** a dedicated `vmovQ` (`VORR Qd, Qm,
+  Qm`, the assembler's `vmov qD, qM`) instead of `neonLogicQ`; `NeonLogic`
+  and `neonLogicQ` come with part 11, and part 6 calls `vmovQ` where the
+  reference calls `neonLogicQ(.vorr, ...)`. The NEON emitters share
+  `VfpField` with VFP; there is no `NeonField`.
 
 ### D8. Where the oracle's build step runs in CI
 
@@ -319,8 +339,8 @@ no oracle entry; the second runs the generated tests.
      job to maintain for a check of a few seconds.
 - **Recommendation:** Alternative 1.
 - **Consequences:** the oracle commit adds the step to `minici`; the
-  machines that run `minici` need only Zig and Python 3, which they
-  already have.
+  machines that run `minici` need only Zig. The job is in the `source`
+  lane: it reads only tracked files and needs nothing from `build-ci`.
 
 ## Risks
 
@@ -382,7 +402,9 @@ From `.workspaces/arm32-encoder`, on each commit:
     zig build run-check-arm32-encoding-oracle
     zig build test
 
-Expected: the check prints nothing and exits 0; the generated tests pass.
+Expected: the check prints `arm32 encoding oracle: <N> entries up to
+date` and exits 0; the generated tests pass. After an edit to the `.s`
+file, `zig build run-arm32-encoding-oracle` regenerates the tests.
 
 Test wiring, on each commit:
 
@@ -400,25 +422,49 @@ Output unchanged for x86_64 and aarch64, on each commit:
 Expected: `relative 64-bit oracle: PASS`.
 
 Also `zig build run-check-zig-lints` and `zig fmt --check` on the new
-files. Upstream CI runs the new build step through `minici` (D8).
+files. Upstream CI runs the new build step through `minici` (D8):
+
+    zig build minici -- --minici-shard source
+
+The check used on each commit: `run-check-arm32-encoding-oracle
+run-check-zig-format run-check-zig-lints run-check-tidy run-check-git-lints
+run-check-unreachable-rationale run-check-test-wiring
+run-test-zig-module-backend run-test-zig-minici run-test-zig-build-helpers`.
 
 ## Recommendation
 
-D1 alternative 1, D2 1, D3 1, D4 1, D5 1, D6 1, D7 1, D8 1. Commits, each
-building and passing on its own:
+D1 alternative 1, D2 1, D3 1, D4 1 (overtaken, see its outcome), D5 1,
+D6 1, D7 1, D8 1.
 
-1. `Registers.zig`: general, S, D and Q registers; `arm32/mod.zig`
-   (`Emit`, `Registers`) and its import in `dev/mod.zig`, so
-   `run-check-test-wiring` sees the arm32 tests from the start.
-2. `Emit.zig` core: `Emit(target)`, buffer and relocations, conditions,
-   `ModImm`, `Operand2`, data processing, moves and immediates.
-3. Multiply, bit operations, extends and bitfield instructions.
-4. Branches, calls and PC-relative addresses (with relocations).
-5. Loads, stores, `push` and `pop`.
-6. VFP: arithmetic, compares, conversions, moves, loads and stores, and
-   the three 128-bit vector moves (D7).
-7. The oracle: `ci/elf32_reader.py`, `ci/arm32_encoding_oracle.py`, the
-   `.s` file, the generated tests (imported from `arm32/mod.zig`'s test
-   block), the build step and its `minici` entry (D8). (Or bring the
-   oracle first and grow its `.s` file with each family; to decide when
-   writing the commits.)
+## Outcome
+
+Seven signed commits on `arm32/encoder`, on `isa-register-seams`
+(`f72be15da9`), local only. The oracle came third and its `.s` file grew
+with each family. Each commit passed the check list under "Testing", the
+relative oracle against `22e3718d45`, and its review.
+
+| # | Commit | Content |
+|---|---|---|
+| 1 | `2bc2f95b7e` | `Registers.zig`, `arm32/mod.zig`, the `dev/mod.zig` import |
+| 2 | `a9a78bcf43` | `Emit(target)` core: conditions, `ModImm`, `Operand2`, data processing, moves |
+| 3 | `e1db8d478f` | The oracle: Zig tool, `.s` file, generated tests, build steps, `minici` job |
+| 4 | `f756f1b8af` | Multiply, bit operations, extends, bitfield extracts |
+| 5 | `c766a2c17a` | Branches, calls, traps, `pcRelAddress` |
+| 6 | `33749e233b` | `MemForm`, loads, stores, `push`, `pop` |
+| 7 | `dbc497d6a8` | VFP, `vmovQ`, `vld1Q`, `vst1Q` |
+
+- **Size:** 2,896 lines in 10 files: `Emit.zig` 1,316, the tool 487, the
+  generated tests 577, the `.s` file 219 (182 entries), `Registers.zig`
+  225, the rest wiring.
+- **Differences from the reference:** the tool is Zig, not Python (D4);
+  no `CC` (D5); NEON only `vmovQ`, `vld1Q`, `vst1Q` (D7); no relocation
+  list in `Emit`; `MemForm` members arrive with their emitters; three
+  oracle lines added at the branch range limits; `multiply` without an
+  unused flags argument; `nop` and `vmrs` build their condition with
+  `condBits`; `push` also rejects `pc`.
+- **Kept although the reference never calls them (E-6 A):** whole
+  instruction families stay (for example `mls`, `smlal`, `rev`, `sxtb`,
+  `ubfx`, `ldrd`, `blxReg`, `bkpt`), each with its oracle line.
+- **Part-level check:** `zig build minici -- --minici-shard source` on
+  the head passed: 15 jobs passed, 0 failed, including
+  `run-check-arm32-encoding-oracle`.
