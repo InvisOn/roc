@@ -384,6 +384,7 @@ fn render(gpa: Allocator, entries: []const Entry, report: Report) ![]const u8 {
         \\const E = emit.Emit(.arm32musl);
         \\const ModImm = emit.ModImm;
         \\const Operand2 = emit.Operand2;
+        \\const GeneralReg = @import("Registers.zig").GeneralReg;
         \\
         \\/// Call `method` with `args` on a fresh emitter and expect exactly the
         \\/// little-endian `words`.

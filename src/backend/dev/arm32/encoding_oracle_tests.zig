@@ -11,6 +11,7 @@ const emit = @import("Emit.zig");
 const E = emit.Emit(.arm32musl);
 const ModImm = emit.ModImm;
 const Operand2 = emit.Operand2;
+const GeneralReg = @import("Registers.zig").GeneralReg;
 
 /// Call `method` with `args` on a fresh emitter and expect exactly the
 /// little-endian `words`.
@@ -357,4 +358,64 @@ test "arm32 encoding: nop" {
 }
 test "arm32 encoding: movw r4, #0xfff0; movt r4, #0xfff4; add r4, pc, r4" {
     try expectEncoding(E.pcRelAddress, .{.r4}, &.{ 0xe30f4ff0, 0xe34f4ff4, 0xe08f4004 });
+}
+test "arm32 encoding: ldr r0, [r1]" {
+    try expectEncoding(E.ldrRegMem, .{ .r0, .r1, 0 }, &.{0xe5910000});
+}
+test "arm32 encoding: ldr r0, [r11, #-4]" {
+    try expectEncoding(E.ldrRegMem, .{ .r0, .r11, -4 }, &.{0xe51b0004});
+}
+test "arm32 encoding: ldr r12, [sp, #4095]" {
+    try expectEncoding(E.ldrRegMem, .{ .r12, .r13, 4095 }, &.{0xe59dcfff});
+}
+test "arm32 encoding: str r1, [r11, #-4095]" {
+    try expectEncoding(E.strRegMem, .{ .r1, .r11, -4095 }, &.{0xe50b1fff});
+}
+test "arm32 encoding: str r10, [r0, #8]" {
+    try expectEncoding(E.strRegMem, .{ .r10, .r0, 8 }, &.{0xe580a008});
+}
+test "arm32 encoding: ldrb r2, [r3, #-1]" {
+    try expectEncoding(E.ldrbRegMem, .{ .r2, .r3, -1 }, &.{0xe5532001});
+}
+test "arm32 encoding: ldrb r4, [r5, #100]" {
+    try expectEncoding(E.ldrbRegMem, .{ .r4, .r5, 100 }, &.{0xe5d54064});
+}
+test "arm32 encoding: strb r6, [r7, #4095]" {
+    try expectEncoding(E.strbRegMem, .{ .r6, .r7, 4095 }, &.{0xe5c76fff});
+}
+test "arm32 encoding: ldrh r0, [r1, #-2]" {
+    try expectEncoding(E.ldrhRegMem, .{ .r0, .r1, -2 }, &.{0xe15100b2});
+}
+test "arm32 encoding: ldrh r8, [r9, #0]" {
+    try expectEncoding(E.ldrhRegMem, .{ .r8, .r9, 0 }, &.{0xe1d980b0});
+}
+test "arm32 encoding: strh r0, [r1, #254]" {
+    try expectEncoding(E.strhRegMem, .{ .r0, .r1, 254 }, &.{0xe1c10fbe});
+}
+test "arm32 encoding: ldrsb r0, [r1, #255]" {
+    try expectEncoding(E.ldrsbRegMem, .{ .r0, .r1, 255 }, &.{0xe1d10fdf});
+}
+test "arm32 encoding: ldrsh r0, [r11, #-255]" {
+    try expectEncoding(E.ldrshRegMem, .{ .r0, .r11, -255 }, &.{0xe15b0fff});
+}
+test "arm32 encoding: ldrd r4, r5, [r11, #-16]" {
+    try expectEncoding(E.ldrdRegMem, .{ .r4, .r11, -16 }, &.{0xe14b41d0});
+}
+test "arm32 encoding: ldrd r0, r1, [r2]" {
+    try expectEncoding(E.ldrdRegMem, .{ .r0, .r2, 0 }, &.{0xe1c200d0});
+}
+test "arm32 encoding: strd r2, r3, [sp, #8]" {
+    try expectEncoding(E.strdRegMem, .{ .r2, .r13, 8 }, &.{0xe1cd20f8});
+}
+test "arm32 encoding: strd r10, r11, [r0, #-255]" {
+    try expectEncoding(E.strdRegMem, .{ .r10, .r0, -255 }, &.{0xe140afff});
+}
+test "arm32 encoding: push {r11, lr}" {
+    try expectEncoding(E.push, .{GeneralReg.fp.listBit() | GeneralReg.lr.listBit()}, &.{0xe92d4800});
+}
+test "arm32 encoding: push {r4, r5, r6, r7, r8, r9, r10}" {
+    try expectEncoding(E.push, .{0x07f0}, &.{0xe92d07f0});
+}
+test "arm32 encoding: pop {r11, pc}" {
+    try expectEncoding(E.pop, .{GeneralReg.fp.listBit() | GeneralReg.pc.listBit()}, &.{0xe8bd8800});
 }

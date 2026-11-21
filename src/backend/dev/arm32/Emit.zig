@@ -131,6 +131,30 @@ pub const Operand2 = union(enum) {
     shift_reg: struct { rm: Registers.GeneralReg, kind: ShiftKind, rs: Registers.GeneralReg },
 };
 
+/// Load/store addressing forms, which differ in immediate-offset range.
+pub const MemForm = enum {
+    /// LDR/STR: ±4095
+    word,
+    /// LDRB/STRB: ±4095
+    byte,
+    /// LDRH/STRH: ±255
+    halfword,
+    /// LDRSB: ±255
+    signed_byte,
+    /// LDRSH: ±255
+    signed_halfword,
+    /// LDRD/STRD: ±255
+    doubleword,
+};
+
+/// Whether `offset` is encodable as the immediate offset of `form`.
+pub fn fitsImmediate(form: MemForm, offset: i32) bool {
+    return switch (form) {
+        .word, .byte => offset >= -4095 and offset <= 4095,
+        .halfword, .signed_byte, .signed_halfword, .doubleword => offset >= -255 and offset <= 255,
+    };
+}
+
 /// ARM32 instruction emitter for generating machine code.
 /// Parameterized by target for cross-compilation support.
 pub fn Emit(comptime target: RocTarget) type {
@@ -737,6 +761,122 @@ pub fn Emit(comptime target: RocTarget) type {
             try self.addRegRegReg(dst, .r15, dst);
             return offset;
         }
+
+        // Loads and stores
+
+        /// cond 010 P U B W L Rn Rt imm12, offset addressing (P=1, W=0)
+        /// `ldr` may load `pc` (a branch); the byte forms forbid it, so their
+        /// callers assert it.
+        fn loadStoreWordByte(self: *Self, load: bool, byte: bool, rt: GeneralReg, rn: GeneralReg, offset: i32) Allocator.Error!void {
+            std.debug.assert(fitsImmediate(if (byte) .byte else .word, offset));
+            const up = offset >= 0;
+            const inst: u32 = condBits(.al) |
+                (0b010 << 25) |
+                (1 << 24) |
+                (@as(u32, @intFromBool(up)) << 23) |
+                (@as(u32, @intFromBool(byte)) << 22) |
+                (@as(u32, @intFromBool(load)) << 20) |
+                (@as(u32, rn.enc()) << 16) |
+                (@as(u32, rt.enc()) << 12) |
+                @as(u32, @abs(offset));
+            try self.emit32(inst);
+        }
+
+        /// LDR rt, [rn, #offset]
+        pub fn ldrRegMem(self: *Self, dst: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.loadStoreWordByte(true, false, dst, base, offset);
+        }
+
+        /// STR rt, [rn, #offset]
+        pub fn strRegMem(self: *Self, src: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.loadStoreWordByte(false, false, src, base, offset);
+        }
+
+        /// LDRB rt, [rn, #offset] (zero-extending)
+        pub fn ldrbRegMem(self: *Self, dst: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            std.debug.assert(dst != .r15);
+            try self.loadStoreWordByte(true, true, dst, base, offset);
+        }
+
+        /// STRB rt, [rn, #offset]
+        pub fn strbRegMem(self: *Self, src: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            std.debug.assert(src != .r15);
+            try self.loadStoreWordByte(false, true, src, base, offset);
+        }
+
+        /// cond 000 P U 1 W L Rn Rt imm4H 1 op2(2) 1 imm4L, offset addressing
+        fn loadStoreMisc(self: *Self, form: MemForm, load: bool, op2: u2, rt: GeneralReg, rn: GeneralReg, offset: i32) Allocator.Error!void {
+            std.debug.assert(fitsImmediate(form, offset));
+            std.debug.assert(rt != .r15);
+            const up = offset >= 0;
+            const mag: u32 = @abs(offset);
+            const inst: u32 = condBits(.al) |
+                (1 << 24) |
+                (@as(u32, @intFromBool(up)) << 23) |
+                (1 << 22) |
+                (@as(u32, @intFromBool(load)) << 20) |
+                (@as(u32, rn.enc()) << 16) |
+                (@as(u32, rt.enc()) << 12) |
+                ((mag >> 4) << 8) |
+                (1 << 7) |
+                (@as(u32, op2) << 5) |
+                (1 << 4) |
+                (mag & 0xF);
+            try self.emit32(inst);
+        }
+
+        /// LDRH rt, [rn, #offset] (zero-extending)
+        pub fn ldrhRegMem(self: *Self, dst: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.loadStoreMisc(.halfword, true, 0b01, dst, base, offset);
+        }
+
+        /// STRH rt, [rn, #offset]
+        pub fn strhRegMem(self: *Self, src: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.loadStoreMisc(.halfword, false, 0b01, src, base, offset);
+        }
+
+        /// LDRSB rt, [rn, #offset] (sign-extending)
+        pub fn ldrsbRegMem(self: *Self, dst: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.loadStoreMisc(.signed_byte, true, 0b10, dst, base, offset);
+        }
+
+        /// LDRSH rt, [rn, #offset] (sign-extending)
+        pub fn ldrshRegMem(self: *Self, dst: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            try self.loadStoreMisc(.signed_halfword, true, 0b11, dst, base, offset);
+        }
+
+        /// LDRD rt, rt+1, [rn, #offset]. rt must be even and not r14; the
+        /// address must be 4-byte aligned.
+        pub fn ldrdRegMem(self: *Self, dst_lo: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            std.debug.assert(dst_lo.enc() % 2 == 0 and dst_lo != .r14);
+            // LDRD is encoded with L=0, op2=10.
+            try self.loadStoreMisc(.doubleword, false, 0b10, dst_lo, base, offset);
+        }
+
+        /// STRD rt, rt+1, [rn, #offset]. rt must be even and not r14; the
+        /// address must be 4-byte aligned.
+        pub fn strdRegMem(self: *Self, src_lo: GeneralReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            std.debug.assert(src_lo.enc() % 2 == 0 and src_lo != .r14);
+            // STRD is encoded with L=0, op2=11.
+            try self.loadStoreMisc(.doubleword, false, 0b11, src_lo, base, offset);
+        }
+
+        /// PUSH {list} (STMDB sp!, {list}). The list names at least two
+        /// registers; a single-register push has a different encoding.
+        pub fn push(self: *Self, list: u16) Allocator.Error!void {
+            std.debug.assert(@popCount(list) >= 2);
+            std.debug.assert(list & GeneralReg.sp.listBit() == 0);
+            std.debug.assert(list & GeneralReg.pc.listBit() == 0);
+            try self.emit32(condBits(.al) | 0x092D0000 | @as(u32, list));
+        }
+
+        /// POP {list} (LDMIA sp!, {list}). The list names at least two
+        /// registers; a single-register pop has a different encoding.
+        pub fn pop(self: *Self, list: u16) Allocator.Error!void {
+            std.debug.assert(@popCount(list) >= 2);
+            std.debug.assert(list & GeneralReg.sp.listBit() == 0);
+            try self.emit32(condBits(.al) | 0x08BD0000 | @as(u32, list));
+        }
     };
 }
 
@@ -772,4 +912,13 @@ test "branch encoding applies the PC bias" {
     try std.testing.expectEqual(@as(u32, 0xEBFFFFFE), E.encodeBranch(.al, true, 0));
     // B to the next-but-one instruction: imm24 = 0
     try std.testing.expectEqual(@as(u32, 0xEA000000), E.encodeBranch(.al, false, 8));
+}
+
+test "immediate offset ranges per form" {
+    try std.testing.expect(fitsImmediate(.word, 4095));
+    try std.testing.expect(fitsImmediate(.word, -4095));
+    try std.testing.expect(!fitsImmediate(.word, 4096));
+    try std.testing.expect(fitsImmediate(.doubleword, -255));
+    try std.testing.expect(!fitsImmediate(.doubleword, 256));
+    try std.testing.expect(!fitsImmediate(.halfword, -256));
 }

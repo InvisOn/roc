@@ -20,6 +20,8 @@ pub const ModImm = @import("Emit.zig").ModImm;
 pub const DataOp = @import("Emit.zig").DataOp;
 pub const ShiftKind = @import("Emit.zig").ShiftKind;
 pub const Operand2 = @import("Emit.zig").Operand2;
+pub const MemForm = @import("Emit.zig").MemForm;
+pub const fitsImmediate = @import("Emit.zig").fitsImmediate;
 
 /// Emit type for musl (static) arm32 Linux
 pub const MuslEmit = Emit(.arm32musl);
