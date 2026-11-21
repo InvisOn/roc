@@ -653,6 +653,90 @@ pub fn Emit(comptime target: RocTarget) type {
         pub fn sbfx(self: *Self, dst: GeneralReg, src: GeneralReg, lsb: u5, width: u6) Allocator.Error!void {
             try self.bitfieldExtract(true, dst, src, lsb, width);
         }
+
+        // Branches and calls
+
+        /// Encode B<cond> (link = false) or BL (link = true, cond must be
+        /// `al`). `offset_bytes` is relative to the branch instruction itself.
+        pub fn encodeBranch(cond: Condition, link: bool, offset_bytes: i32) u32 {
+            std.debug.assert(!link or cond == .al);
+            std.debug.assert(@mod(offset_bytes, 4) == 0);
+            const disp = (offset_bytes - 8) >> 2;
+            std.debug.assert(disp >= -(1 << 23) and disp < (1 << 23));
+            const imm24: u32 = @as(u24, @bitCast(@as(i24, @intCast(disp))));
+            return condBits(cond) |
+                (0b101 << 25) |
+                (@as(u32, @intFromBool(link)) << 24) |
+                imm24;
+        }
+
+        /// B label (unconditional branch)
+        pub fn b(self: *Self, offset_bytes: i32) Allocator.Error!void {
+            try self.emit32(encodeBranch(.al, false, offset_bytes));
+        }
+
+        /// B<cond> label
+        pub fn bcond(self: *Self, cond: Condition, offset_bytes: i32) Allocator.Error!void {
+            try self.emit32(encodeBranch(cond, false, offset_bytes));
+        }
+
+        /// BL label (branch with link). For a call through an `R_ARM_CALL`
+        /// relocation the displacement is 0, which encodes the REL-form
+        /// addend -8 (0xEBFFFFFE).
+        pub fn bl(self: *Self, offset_bytes: i32) Allocator.Error!void {
+            try self.emit32(encodeBranch(.al, true, offset_bytes));
+        }
+
+        /// BX rm (branch to register; bit 0 selects Thumb state)
+        pub fn bxReg(self: *Self, reg: GeneralReg) Allocator.Error!void {
+            // cond 0001 0010 1111 1111 1111 0001 Rm
+            try self.emit32(condBits(.al) | 0x012FFF10 | @as(u32, reg.enc()));
+        }
+
+        /// BX lr: return
+        pub fn ret(self: *Self) Allocator.Error!void {
+            try self.bxReg(.lr);
+        }
+
+        /// BLX rm (call register; bit 0 selects Thumb state)
+        pub fn blxReg(self: *Self, reg: GeneralReg) Allocator.Error!void {
+            std.debug.assert(reg != .r15);
+            // cond 0001 0010 1111 1111 1111 0011 Rm
+            try self.emit32(condBits(.al) | 0x012FFF30 | @as(u32, reg.enc()));
+        }
+
+        /// UDF #imm16 (permanently undefined; traps)
+        pub fn udf(self: *Self, imm16: u16) Allocator.Error!void {
+            // 1110 0111 1111 imm12 1111 imm4
+            try self.emit32(0xE7F000F0 | (@as(u32, imm16 >> 4) << 8) | (imm16 & 0xF));
+        }
+
+        /// BKPT #imm16 (breakpoint)
+        pub fn bkpt(self: *Self, imm16: u16) Allocator.Error!void {
+            // 1110 0001 0010 imm12 0111 imm4
+            try self.emit32(0xE1200070 | (@as(u32, imm16 >> 4) << 8) | (imm16 & 0xF));
+        }
+
+        /// NOP (architectural hint)
+        pub fn nop(self: *Self) Allocator.Error!void {
+            try self.emit32(condBits(.al) | 0x0320F000);
+        }
+
+        /// Materialize the address of a data symbol position-independently:
+        ///   MOVW rd, #0xFFF0   @ R_ARM_MOVW_PREL_NC at the returned offset
+        ///   MOVT rd, #0xFFF4   @ R_ARM_MOVT_PREL at the returned offset + 4
+        ///   ADD  rd, pc, rd
+        /// PC reads as the ADD's address + 8, i.e. MOVW's address + 16, so the
+        /// REL-form addends are -16 and -12, carried in the immediates.
+        /// Returns the offset of the MOVW.
+        pub fn pcRelAddress(self: *Self, dst: GeneralReg) Allocator.Error!u64 {
+            std.debug.assert(dst != .r15);
+            const offset = self.codeOffset();
+            try self.movw(dst, 0xFFF0);
+            try self.movt(dst, 0xFFF4);
+            try self.addRegRegReg(dst, .r15, dst);
+            return offset;
+        }
     };
 }
 
@@ -680,4 +764,12 @@ test "condition inversion" {
     try std.testing.expectEqual(Condition.ne, Condition.eq.invert());
     try std.testing.expectEqual(Condition.lt, Condition.ge.invert());
     try std.testing.expectEqual(Condition.ls, Condition.hi.invert());
+}
+
+test "branch encoding applies the PC bias" {
+    const E = Emit(.arm32musl);
+    // BL to itself: imm24 = -2
+    try std.testing.expectEqual(@as(u32, 0xEBFFFFFE), E.encodeBranch(.al, true, 0));
+    // B to the next-but-one instruction: imm24 = 0
+    try std.testing.expectEqual(@as(u32, 0xEA000000), E.encodeBranch(.al, false, 8));
 }

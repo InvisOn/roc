@@ -304,3 +304,57 @@ test "arm32 encoding: sbfx r4, r5, #0, #32" {
 test "arm32 encoding: sbfx r6, r7, #8, #8" {
     try expectEncoding(E.sbfx, .{ .r6, .r7, 8, 8 }, &.{0xe7a76457});
 }
+test "arm32 encoding: b .+16" {
+    try expectEncoding(E.b, .{16}, &.{0xea000002});
+}
+test "arm32 encoding: b .-8" {
+    try expectEncoding(E.b, .{-8}, &.{0xeafffffc});
+}
+test "arm32 encoding: b ." {
+    try expectEncoding(E.b, .{0}, &.{0xeafffffe});
+}
+test "arm32 encoding: bne .+0x100" {
+    try expectEncoding(E.bcond, .{ .ne, 0x100 }, &.{0x1a00003e});
+}
+test "arm32 encoding: ble .-0x1000" {
+    try expectEncoding(E.bcond, .{ .le, -0x1000 }, &.{0xdafffbfe});
+}
+test "arm32 encoding: bl .+4096" {
+    try expectEncoding(E.bl, .{4096}, &.{0xeb0003fe});
+}
+test "arm32 encoding: bl ." {
+    try expectEncoding(E.bl, .{0}, &.{0xebfffffe});
+}
+test "arm32 encoding: b .+33554436" {
+    try expectEncoding(E.b, .{33554436}, &.{0xea7fffff});
+}
+test "arm32 encoding: b .-33554424" {
+    try expectEncoding(E.b, .{-33554424}, &.{0xea800000});
+}
+test "arm32 encoding: bl .+33554436" {
+    try expectEncoding(E.bl, .{33554436}, &.{0xeb7fffff});
+}
+test "arm32 encoding: bx lr" {
+    try expectEncoding(E.bxReg, .{.r14}, &.{0xe12fff1e});
+}
+test "arm32 encoding: bx lr (2)" {
+    try expectEncoding(E.ret, .{}, &.{0xe12fff1e});
+}
+test "arm32 encoding: blx r3" {
+    try expectEncoding(E.blxReg, .{.r3}, &.{0xe12fff33});
+}
+test "arm32 encoding: udf #0" {
+    try expectEncoding(E.udf, .{0}, &.{0xe7f000f0});
+}
+test "arm32 encoding: udf #0xbeef" {
+    try expectEncoding(E.udf, .{0xbeef}, &.{0xe7fbeeff});
+}
+test "arm32 encoding: bkpt #0x1234" {
+    try expectEncoding(E.bkpt, .{0x1234}, &.{0xe1212374});
+}
+test "arm32 encoding: nop" {
+    try expectEncoding(E.nop, .{}, &.{0xe320f000});
+}
+test "arm32 encoding: movw r4, #0xfff0; movt r4, #0xfff4; add r4, pc, r4" {
+    try expectEncoding(E.pcRelAddress, .{.r4}, &.{ 0xe30f4ff0, 0xe34f4ff4, 0xe08f4004 });
+}
