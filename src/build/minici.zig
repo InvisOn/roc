@@ -307,6 +307,9 @@ const jobs = [_]Job{
     // Assembles its entries with the build's own `zig cc`, so the expected
     // bytes are the same from every host.
     .{ .name = "run-check-arm32-encoding-oracle", .placement = .source },
+    // Builds its object from the source tree and links it with the build's
+    // own `zig cc`, so the result is the same from every host.
+    .{ .name = "run-check-arm32-link-smoke", .placement = .source },
     .{ .name = "run-check-test-wiring" },
     .{ .name = "run-check-builtin-format", .placement = .primary_host },
     .{ .name = "run-check-glue-abi" },
