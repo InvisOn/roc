@@ -327,6 +327,16 @@ The `arm32musl` and `arm32linux` targets, the test runner options
 an optional qemu CI lane. The lane runs from here on, with the wide-value
 and NEON cases marked as known failures until parts 10 and 11 land.
 
+**The arm32 CPU floor (E-16 1, 2026-11-22).** `RocTarget.cpuContract`
+names an explicit floor for arm32, as it does for x64 and arm64: a generic
+ARMv7-A model with VFPv3-D32 and NEON as baseline features, and no
+hardware divide. `CpuLevel` documents it, and the `baselineCpuTarget`
+comment stops saying arm32 runs on every CPU that can run it (ARMv6 and
+NEON-less ARMv7 cannot). The encoder's compile-time check
+(`arm32/Emit.zig`) then compares against this contract instead of Zig's
+baseline, and `.ARM.attributes` and the link smoke step follow from it.
+About 30 to 50 lines; part 8's RFC decides the details.
+
 It also takes the glibc stub's 32-bit ARM body (draft 16, `#9`'s commit
 `3d73760a5b`): `src/build/glibc_stub.zig` returns with `mov r0, #0` and
 `bx lr` instead of AArch64's `ret`, and `abort` exits with
