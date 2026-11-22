@@ -178,12 +178,21 @@ encoder and this writer and links it with `zig cc` (D2).
      patched in-process.
   Accepted: alternative 4.
 - **Consequences:** `FunctionRelocationKind` gains `arm32_call` and
-  `DataRelocationKind` the arm32 data kinds; `patchLinkedFunctionRelocation`
-  and `patchLinkedDataRelocation` gain their prongs
-  (`patchArm32BranchInstruction`, `patchArmMovPrel`,
-  `patchAbsolute32Operand`), tested against part 4's encoder placeholders.
-  `HostSplice` and `machine_code_shim` do not change; part 9 starts
-  feeding them arm32 code.
+  `DataRelocationKind` gains `arm32_movw_prel` and `arm32_movt_prel`;
+  `patchLinkedFunctionRelocation` and `patchLinkedDataRelocation` gain
+  their prongs (`patchArm32Call`, `patchArm32MovPrel`), tested against
+  part 4's encoder output. No `abs32` kind and no `patchAbsolute32Operand`
+  (E-10): no arm32 code puts an address word in its code, and the
+  reference's one use, a `local_data` pointer patched in memory, is
+  already covered by `patchAbsolutePointerOperand`, which writes the host
+  pointer's width. Each kind fixes its addend (−8, −16, −12); the encoder
+  writes it into the instruction, and the ELF writer and the patcher
+  debug-assert it there rather than write it again (X-7). The ELF, Mach-O
+  and COFF writers and `RunImage` gain prongs for the kinds: Mach-O and
+  COFF as invariants, since arm32 objects are only ELF, and `RunImage`
+  returning `error.UnsupportedDevRunRelocation`, as it does for
+  `local_data`. `HostSplice` and `machine_code_shim` do not change; part
+  9 starts feeding them arm32 code.
 
 ### D2. How the link smoke test is written
 
@@ -362,6 +371,7 @@ building and passing on its own:
 3. `elf.zig`: the arm32 architecture (ELF32, `EM_ARM`, `e_flags`, `$a`,
    `.ARM.attributes`, `SHT_REL` with addends in place, debug relocations
    included) and its unit tests.
-4. `Relocation.zig`: the arm32 kinds, their ELF type numbers and their
-   in-memory patching, with tests.
+4. `Relocation.zig`: the arm32 kinds and their in-memory patching, with
+   their ELF types and the other writers' and `RunImage`'s prongs, and
+   tests.
 5. The link smoke step and its minici job.
