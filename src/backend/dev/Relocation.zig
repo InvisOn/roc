@@ -13,7 +13,22 @@ pub const FunctionRelocationKind = enum(u8) {
     /// Offset names the BL instruction. Its signed 26-bit immediate counts
     /// four-byte words relative to the instruction address.
     aarch64_call26,
+    /// Offset names the A32 BL instruction. Its signed 24-bit immediate
+    /// counts four-byte words relative to the instruction address plus 8,
+    /// where A32 reads PC. The instruction holds `arm32_call_addend`, as
+    /// `arm32.Emit.bl(0)` encodes it.
+    arm32_call,
 };
+
+/// The addend of an `arm32_call` relocation: S - (P + 8). Under REL it lives
+/// in the instruction itself.
+pub const arm32_call_addend = -8;
+/// The addend of an `arm32_movw_prel` relocation: the `add rd, pc, rd`
+/// after the `movw`/`movt` pair reads PC as the `movw`'s address + 16.
+pub const arm32_movw_addend = -16;
+/// The addend of an `arm32_movt_prel` relocation, whose `movt` is four
+/// bytes after the `movw`.
+pub const arm32_movt_addend = -12;
 
 /// Machine encoding used for a data-address relocation in generated code.
 pub const DataRelocationKind = enum {
@@ -32,6 +47,15 @@ pub const DataRelocationKind = enum {
     /// literals take this form against `expect_site_base_symbol` on arm64,
     /// which loads them from the instruction stream.
     abs64_field,
+    /// Offset names the `movw` of an arm32 `movw`/`movt`/`add rd, pc, rd`
+    /// address sequence; its 16-bit immediate takes the low half of
+    /// S + `arm32_movw_addend` - P, and holds that addend beforehand, as
+    /// `arm32.Emit.pcRelAddress` encodes it.
+    arm32_movw_prel,
+    /// Offset names the `movt` of that sequence; its 16-bit immediate takes
+    /// the high half of S + `arm32_movt_addend` - P, and holds that addend
+    /// beforehand.
+    arm32_movt_prel,
 };
 
 /// The symbol a test unit's expect-site immediates are relative to: each
@@ -197,6 +221,7 @@ fn patchLinkedFunctionRelocation(code: []u8, code_base_addr: usize, reloc_offset
             return patchX86Rel32Operand(code, reloc_offset, code_base_addr + reloc_offset + 4, target_addr);
         },
         .aarch64_call26 => return patchAarch64Call26(code, reloc_offset, code_base_addr + reloc_offset, target_addr),
+        .arm32_call => return patchArm32Call(code, reloc_offset, code_base_addr + reloc_offset, target_addr),
     }
 }
 
@@ -230,6 +255,8 @@ fn patchLinkedDataRelocation(
             const value = @as(i64, @intCast(target_addr)) +% std.mem.readInt(i64, field, .little);
             std.mem.writeInt(i64, field, value, .little);
         },
+        .arm32_movw_prel => return patchArm32MovPrel(code, reloc_offset, code_base_addr + reloc_offset, target_addr, .movw),
+        .arm32_movt_prel => return patchArm32MovPrel(code, reloc_offset, code_base_addr + reloc_offset, target_addr, .movt),
     }
 }
 
@@ -259,6 +286,77 @@ fn patchAarch64Call26(code: []u8, inst_offset: usize, inst_addr: usize, target_a
     inst = (inst & 0xFC000000) | @as(u32, imm26);
 
     std.mem.writeInt(u32, code[inst_offset..][0..4], inst, .little);
+}
+
+/// Point an A32 `bl` at `target_addr`: imm24 becomes the word count of
+/// S + `arm32_call_addend` - P.
+fn patchArm32Call(code: []u8, inst_offset: usize, inst_addr: usize, target_addr: usize) ApplyRelocationsError!void {
+    if (inst_offset + 4 > code.len) return error.InvalidOffset;
+
+    const inst = std.mem.readInt(u32, code[inst_offset..][0..4], .little);
+    // An unconditional BL holding the REL addend.
+    std.debug.assert(inst >> 24 == 0xEB and arm32BranchAddend(inst) == arm32_call_addend);
+    const rel_bytes = @as(i128, @intCast(target_addr)) + arm32_call_addend - @as(i128, @intCast(inst_addr));
+    if ((rel_bytes & 0b11) != 0) return error.MisalignedBranchTarget;
+    const rel_words = rel_bytes >> 2;
+    if (!fitsSignedBits(rel_words, 24)) return error.BranchOutOfRange;
+    const imm24: u24 = @bitCast(@as(i24, @intCast(rel_words)));
+    std.mem.writeInt(u32, code[inst_offset..][0..4], (inst & 0xFF00_0000) | imm24, .little);
+}
+
+/// The byte addend an A32 branch's imm24 encodes.
+pub fn arm32BranchAddend(inst: u32) i32 {
+    const imm24: i24 = @bitCast(@as(u24, @truncate(inst)));
+    return @as(i32, imm24) * 4;
+}
+
+/// Which instruction of an arm32 `movw`/`movt` address sequence a
+/// relocation names.
+const Arm32MovHalf = enum {
+    movw,
+    movt,
+
+    /// The relocation addend the instruction holds and applies.
+    pub fn addend(self: Arm32MovHalf) i32 {
+        return switch (self) {
+            .movw => arm32_movw_addend,
+            .movt => arm32_movt_addend,
+        };
+    }
+
+    /// The instruction's opcode bits (cond AL, `0011 0x00`), outside its
+    /// register and immediate fields.
+    pub fn opcode(self: Arm32MovHalf) u32 {
+        return switch (self) {
+            .movw => 0xE300_0000,
+            .movt => 0xE340_0000,
+        };
+    }
+};
+
+/// The signed 16-bit value in an A32 `movw`/`movt` imm4:imm12 field, which
+/// is the instruction's REL addend.
+pub fn arm32MovAddend(inst: u32) i32 {
+    const imm16: u16 = @intCast(((inst >> 4) & 0xF000) | (inst & 0xFFF));
+    return @as(i16, @bitCast(imm16));
+}
+
+/// Write one half of S + A - P into an A32 `movw`/`movt` imm4:imm12 field,
+/// with A the half's addend.
+fn patchArm32MovPrel(code: []u8, inst_offset: usize, inst_addr: usize, target_addr: usize, half: Arm32MovHalf) ApplyRelocationsError!void {
+    if (inst_offset + 4 > code.len) return error.InvalidOffset;
+
+    const inst = std.mem.readInt(u32, code[inst_offset..][0..4], .little);
+    std.debug.assert(inst & 0xFFF0_0000 == half.opcode() and arm32MovAddend(inst) == half.addend());
+    const value = @as(i128, @intCast(target_addr)) + half.addend() - @as(i128, @intCast(inst_addr));
+    if (!fitsSignedBits(value, 32)) return error.BranchOutOfRange;
+    const bits: u32 = @bitCast(@as(i32, @intCast(value)));
+    const imm16: u32 = switch (half) {
+        .movw => bits & 0xFFFF,
+        .movt => bits >> 16,
+    };
+    const patched = (inst & 0xFFF0_F000) | ((imm16 >> 12) << 16) | (imm16 & 0xFFF);
+    std.mem.writeInt(u32, code[inst_offset..][0..4], patched, .little);
 }
 
 fn patchAbsolutePointerOperand(code: []u8, operand_offset: usize, target_addr: usize) ApplyRelocationsError!void {
@@ -467,4 +565,73 @@ test "aarch64 signed branch and page displacements preserve exact units" {
     }
     std.mem.writeInt(u32, &code, 0x90000000, .little);
     try std.testing.expectError(error.BranchOutOfRange, patchAarch64AdrpRelocation(&code, 0, 0, 0x100000000));
+}
+
+/// Apply `relocs` to `code` at `code_base`, resolving every name to `target`.
+fn applyWithTarget(code: []u8, code_base: usize, relocs: []const Relocation, target: usize) ApplyRelocationsError!void {
+    const resolve = struct {
+        fn resolve(ctx: *const anyopaque, _: []const u8) ?usize {
+            return @as(*const usize, @ptrCast(@alignCast(ctx))).*;
+        }
+    }.resolve;
+    return applyRelocationsWithContext(code, code_base, relocs, &target, resolve);
+}
+
+test "arm32 call relocation points the encoder's bl at its target" {
+    const arm32 = @import("arm32/mod.zig");
+    var emit = arm32.LinuxEmit.init(std.testing.allocator);
+    defer emit.deinit();
+    try emit.nop();
+    try emit.bl(0);
+    const relocs = [_]Relocation{.{ .linked_function = .{ .offset = 4, .name = "callee", .kind = .arm32_call } }};
+
+    // The bl is at 0x1004 and reads PC as 0x100C, so a target at 0x2008
+    // is (0x2008 - 0x100C) / 4 = 0x3FF words ahead.
+    const code = try std.testing.allocator.dupe(u8, emit.buf.items);
+    defer std.testing.allocator.free(code);
+    try applyWithTarget(code, 0x1000, &relocs, 0x2008);
+    try std.testing.expectEqual(@as(u32, 0xEB00_03FF), std.mem.readInt(u32, code[4..8], .little));
+
+    // A target behind the bl: (0x0800 - 0x100C) / 4 = -0x203 words.
+    @memcpy(code, emit.buf.items);
+    try applyWithTarget(code, 0x1000, &relocs, 0x0800);
+    try std.testing.expectEqual(@as(u32, 0xEBFF_FDFD), std.mem.readInt(u32, code[4..8], .little));
+
+    @memcpy(code, emit.buf.items);
+    try std.testing.expectError(error.MisalignedBranchTarget, applyWithTarget(code, 0x1000, &relocs, 0x2002));
+    // imm24 reaches 32 MiB either way.
+    try std.testing.expectError(error.BranchOutOfRange, applyWithTarget(code, 0x1000, &relocs, 0x1000 + 0x0400_0000));
+}
+
+test "arm32 movw/movt relocations make the encoder's add produce the target address" {
+    const arm32 = @import("arm32/mod.zig");
+    var emit = arm32.LinuxEmit.init(std.testing.allocator);
+    defer emit.deinit();
+    const at = try emit.pcRelAddress(.r0);
+    const relocs = [_]Relocation{
+        .{ .linked_data = .{ .offset = at, .name = "data", .kind = .arm32_movw_prel } },
+        .{ .linked_data = .{ .offset = at + 4, .name = "data", .kind = .arm32_movt_prel } },
+    };
+    const code = try std.testing.allocator.dupe(u8, emit.buf.items);
+    defer std.testing.allocator.free(code);
+
+    const code_base: usize = 0x0001_0000;
+    for ([_]usize{ 0x0123_4568, 0x0000_8000, 0x0000_0040 }) |target| {
+        @memcpy(code, emit.buf.items);
+        try applyWithTarget(code, code_base, &relocs, target);
+        const movw = std.mem.readInt(u32, code[0..4], .little);
+        const movt = std.mem.readInt(u32, code[4..8], .little);
+        // The opcodes and destination register stay; the immediates make
+        // r0 = movt:movw, which the add adds to PC (its address + 8).
+        try std.testing.expectEqual(@as(u32, 0xE300_0000), movw & 0xFFF0_F000);
+        try std.testing.expectEqual(@as(u32, 0xE340_0000), movt & 0xFFF0_F000);
+        const imm16 = struct {
+            fn of(inst: u32) u32 {
+                return ((inst >> 4) & 0xF000) | (inst & 0xFFF);
+            }
+        }.of;
+        const r0 = (imm16(movt) << 16) | imm16(movw);
+        const add_pc: u32 = @intCast(code_base + 8 + 8);
+        try std.testing.expectEqual(@as(u32, @intCast(target)), add_pc +% r0);
+    }
 }

@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 const invariant = @import("base").invariant;
 const FunctionRelocationKind = @import("../Relocation.zig").FunctionRelocationKind;
 const DataRelocationKind = @import("../Relocation.zig").DataRelocationKind;
+const Relocation = @import("../Relocation.zig");
 const object = @import("mod.zig");
 const DebugReloc = object.DebugReloc;
 const UnitImage = @import("../UnitImage.zig");
@@ -80,6 +81,9 @@ const ELF = struct {
 
     // arm32 relocation types (AAELF32)
     const R_ARM_ABS32 = 2;
+    const R_ARM_CALL = 28;
+    const R_ARM_MOVW_PREL_NC = 45;
+    const R_ARM_MOVT_PREL = 46;
 
     // arm32 header flags: EABI version 5, hard-float procedure call standard
     const EF_ARM_EABI_VER5 = 0x05000000;
@@ -511,14 +515,19 @@ pub const ElfWriter = struct {
         std.debug.assert(self.arch == switch (kind) {
             .x86_call_rel32 => Architecture.x86_64,
             .aarch64_call26 => Architecture.aarch64,
+            .arm32_call => Architecture.arm32,
         });
         const reloc_type: u32 = switch (kind) {
             .x86_call_rel32 => ELF.R_X86_64_PLT32,
             .aarch64_call26 => ELF.R_AARCH64_CALL26,
+            // The linker may turn the BL into a BLX or route it through a
+            // veneer, as it may not for a plain R_ARM_JUMP24.
+            .arm32_call => ELF.R_ARM_CALL,
         };
         const addend: i64 = switch (kind) {
             .x86_call_rel32 => -4,
             .aarch64_call26 => 0,
+            .arm32_call => Relocation.arm32_call_addend,
         };
 
         try self.text_relocs.append(self.allocator, .{
@@ -536,7 +545,7 @@ pub const ElfWriter = struct {
                 .kind = switch (self.arch) {
                     .x86_64 => ELF.R_X86_64_64,
                     .aarch64 => ELF.R_AARCH64_ABS64,
-                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which has no data relocation kinds yet", .{kind}),
+                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which emits arm32_movw_prel and arm32_movt_prel", .{kind}),
                 },
                 .addend = @as(i64, 0),
             },
@@ -544,7 +553,7 @@ pub const ElfWriter = struct {
                 .kind = switch (self.arch) {
                     .x86_64 => ELF.R_X86_64_PC32,
                     .aarch64 => invariant("ELF invariant violated: rel32 data relocation in aarch64 code, which emits page21 and pageoff12", .{}),
-                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which has no data relocation kinds yet", .{kind}),
+                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which emits arm32_movw_prel and arm32_movt_prel", .{kind}),
                 },
                 .addend = @as(i64, -4),
             },
@@ -552,7 +561,7 @@ pub const ElfWriter = struct {
                 .kind = switch (self.arch) {
                     .x86_64 => invariant("ELF invariant violated: page21 data relocation in x86_64 code, which emits rel32", .{}),
                     .aarch64 => ELF.R_AARCH64_ADR_PREL_PG_HI21,
-                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which has no data relocation kinds yet", .{kind}),
+                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which emits arm32_movw_prel and arm32_movt_prel", .{kind}),
                 },
                 .addend = @as(i64, 0),
             },
@@ -560,7 +569,7 @@ pub const ElfWriter = struct {
                 .kind = switch (self.arch) {
                     .x86_64 => invariant("ELF invariant violated: pageoff12 data relocation in x86_64 code, which emits rel32", .{}),
                     .aarch64 => ELF.R_AARCH64_ADD_ABS_LO12_NC,
-                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which has no data relocation kinds yet", .{kind}),
+                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which emits arm32_movw_prel and arm32_movt_prel", .{kind}),
                 },
                 .addend = @as(i64, 0),
             },
@@ -569,7 +578,7 @@ pub const ElfWriter = struct {
                 .kind = switch (self.arch) {
                     .x86_64 => ELF.R_X86_64_32,
                     .aarch64 => invariant("ELF invariant violated: abs32_field data relocation in aarch64 code, which only an x86_64 test unit emits", .{}),
-                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which has no data relocation kinds yet", .{kind}),
+                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which emits arm32_movw_prel and arm32_movt_prel", .{kind}),
                 },
                 .addend = std.mem.readInt(u32, self.text[@intCast(offset)..][0..4], .little),
             },
@@ -577,9 +586,23 @@ pub const ElfWriter = struct {
                 .kind = switch (self.arch) {
                     .x86_64 => invariant("ELF invariant violated: abs64_field data relocation in x86_64 code, which only an arm64 test unit emits", .{}),
                     .aarch64 => ELF.R_AARCH64_ABS64,
-                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which has no data relocation kinds yet", .{kind}),
+                    .arm32 => invariant("ELF invariant violated: {t} data relocation in arm32 code, which emits arm32_movw_prel and arm32_movt_prel", .{kind}),
                 },
                 .addend = std.mem.readInt(i64, self.text[@intCast(offset)..][0..8], .little),
+            },
+            .arm32_movw_prel => .{
+                .kind = switch (self.arch) {
+                    .x86_64, .aarch64 => invariant("ELF invariant violated: arm32_movw_prel data relocation in {t} code", .{self.arch}),
+                    .arm32 => ELF.R_ARM_MOVW_PREL_NC,
+                },
+                .addend = Relocation.arm32_movw_addend,
+            },
+            .arm32_movt_prel => .{
+                .kind = switch (self.arch) {
+                    .x86_64, .aarch64 => invariant("ELF invariant violated: arm32_movt_prel data relocation in {t} code", .{self.arch}),
+                    .arm32 => ELF.R_ARM_MOVT_PREL,
+                },
+                .addend = Relocation.arm32_movt_addend,
             },
         };
 
@@ -1056,16 +1079,26 @@ fn storeDebugAddends(arch: Architecture, section: []u8, relocs: []const DebugRel
     for (relocs) |rel| storeAddend(arch, section[rel.section_offset..], debugRelocType(arch, rel.width), @intCast(rel.addend));
 }
 
-/// Store a REL relocation's addend in `field`, the bytes it relocates, as
-/// AAELF32 defines the addend of each relocation type. The field holds zero
-/// until then: the producer states the addend in the relocation only.
+/// Put a REL relocation's addend in `field`, the bytes it relocates, as
+/// AAELF32 defines the addend of each relocation type. A data word holds
+/// zero until then, because its producer states the addend in the
+/// relocation only. An instruction field already holds the addend, which
+/// the encoder wrote, so it is only checked.
 fn storeAddend(arch: Architecture, field: []u8, reloc_type: u32, addend: i64) void {
     switch (arch) {
         .x86_64, .aarch64 => invariant("ELF invariant violated: an addend stored in place for {t}, whose RELA records carry it", .{arch}),
         .arm32 => {
-            if (reloc_type != ELF.R_ARM_ABS32) invariant("ELF invariant violated: arm32 relocation type {d} has no in-place addend form", .{reloc_type});
-            std.debug.assert(std.mem.readInt(u32, field[0..4], .little) == 0);
-            std.mem.writeInt(i32, field[0..4], @intCast(addend), .little);
+            const word = std.mem.readInt(u32, field[0..4], .little);
+            if (reloc_type == ELF.R_ARM_ABS32) {
+                std.debug.assert(word == 0);
+                std.mem.writeInt(i32, field[0..4], @intCast(addend), .little);
+            } else if (reloc_type == ELF.R_ARM_CALL) {
+                std.debug.assert(Relocation.arm32BranchAddend(word) == addend);
+            } else if (reloc_type == ELF.R_ARM_MOVW_PREL_NC or reloc_type == ELF.R_ARM_MOVT_PREL) {
+                std.debug.assert(Relocation.arm32MovAddend(word) == addend);
+            } else {
+                invariant("ELF invariant violated: arm32 relocation type {d} has no in-place addend form", .{reloc_type});
+            }
         },
     }
 }
@@ -1230,9 +1263,9 @@ test "DWARF relocations preserve target section and field width" {
 }
 
 /// Write an object for `arch` holding a local and a global function, an
-/// external symbol, a call to it (64-bit architectures; arm32 has no call
-/// relocation yet), a pointer in read-only data, zero-fill data and DWARF
-/// for two procedures, the second starting at 16.
+/// external symbol, a call to it, on arm32 also a `movw`/`movt` address of
+/// the local function, a pointer in read-only data, zero-fill data and
+/// DWARF for two procedures, the second starting at 16.
 fn writeSampleObject(arch: Architecture, output: *std.ArrayList(u8)) Allocator.Error!void {
     const gpa = std.testing.allocator;
     const Dwarf = @import("../Dwarf.zig");
@@ -1243,6 +1276,13 @@ fn writeSampleObject(arch: Architecture, output: *std.ArrayList(u8)) Allocator.E
     var code: [32]u8 = @splat(0);
     if (arch == .x86_64) code[0] = 0xE8;
     if (arch == .aarch64) std.mem.writeInt(u32, code[0..4], 0x94000000, .little);
+    if (arch == .arm32) {
+        // `bl` and `movw r0`/`movt r0` holding their REL addends, as
+        // `arm32.Emit.bl(0)` and `pcRelAddress(.r0)` encode them.
+        std.mem.writeInt(u32, code[0..4], 0xEBFFFFFE, .little);
+        std.mem.writeInt(u32, code[4..8], 0xE30F0FF0, .little);
+        std.mem.writeInt(u32, code[8..12], 0xE34F0FF4, .little);
+    }
     writer.setCode(&code);
     const rodata: [16]u8 = @splat(0);
     const rodata_piece = [1]UnitImage.SectionPiece{.{ .offset = 0, .bytes = &rodata }};
@@ -1255,7 +1295,11 @@ fn writeSampleObject(arch: Architecture, output: *std.ArrayList(u8)) Allocator.E
     switch (arch) {
         .x86_64 => try writer.addTextRelocation(1, external, .x86_call_rel32),
         .aarch64 => try writer.addTextRelocation(0, external, .aarch64_call26),
-        .arm32 => {},
+        .arm32 => {
+            try writer.addTextRelocation(0, external, .arm32_call);
+            try writer.addTextDataRelocation(4, local, .arm32_movw_prel);
+            try writer.addTextDataRelocation(8, local, .arm32_movt_prel);
+        },
     }
     try writer.addRodataRelocation(8, local, 4);
 
@@ -1363,7 +1407,7 @@ fn expectSampleLayout(comptime arch: Architecture) (Allocator.Error || error{ Te
         try std.testing.expectEqual(@sizeOf(R.Reloc), h.entsize);
         try std.testing.expectEqual(0, h.size % h.entsize);
     }
-    const text_relocs: usize = if (is32) 0 else 1;
+    const text_relocs: usize = if (is32) 3 else 1;
     try std.testing.expectEqual(text_relocs * @sizeOf(R.Reloc), r.shdr(3).size);
     try std.testing.expectEqual(@sizeOf(R.Reloc), r.shdr(4).size);
 
@@ -1410,6 +1454,24 @@ test "arm32 object is EABI5 hard-float, marks .text as A32 and states its attrib
 
     try std.testing.expectEqual(@as(u32, 0x05000400), r.ehdr.flags.int);
     try std.testing.expectEqual(@as(u8, 2), r.reloc(4, 0).info.type); // R_ARM_ABS32
+
+    // The call and the address pair, against `puts` and `local_fn`, with
+    // their addends left in the instructions the encoder wrote.
+    const expected = [_]struct { offset: u32, type: u8, sym: u24 }{
+        .{ .offset = 0, .type = 28, .sym = 7 }, // R_ARM_CALL
+        .{ .offset = 4, .type = 45, .sym = 5 }, // R_ARM_MOVW_PREL_NC
+        .{ .offset = 8, .type = 46, .sym = 5 }, // R_ARM_MOVT_PREL
+    };
+    for (expected, 0..) |want, index| {
+        const rel = r.reloc(3, index);
+        try std.testing.expectEqual(want.offset, rel.offset);
+        try std.testing.expectEqual(want.type, rel.info.type);
+        try std.testing.expectEqual(want.sym, rel.info.sym);
+    }
+    const text = r.contents(1);
+    try std.testing.expectEqual(@as(u32, 0xEBFFFFFE), std.mem.readInt(u32, text[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0xE30F0FF0), std.mem.readInt(u32, text[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 0xE34F0FF4), std.mem.readInt(u32, text[8..12], .little));
 
     const mapping = r.sym(4);
     try std.testing.expectEqualStrings("$a", r.symName(4));

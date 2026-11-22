@@ -338,6 +338,7 @@ pub const MachOWriter = struct {
         std.debug.assert(self.arch == switch (kind) {
             .x86_call_rel32 => Architecture.x86_64,
             .aarch64_call26 => Architecture.aarch64,
+            .arm32_call => invariant("Mach-O invariant violated: arm32 call relocation, but arm32 code is written only as ELF", .{}),
         });
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,
@@ -348,6 +349,7 @@ pub const MachOWriter = struct {
             .reloc_type = switch (kind) {
                 .x86_call_rel32 => MachO.X86_64_RELOC_BRANCH,
                 .aarch64_call26 => MachO.ARM64_RELOC_BRANCH26,
+                .arm32_call => invariant("Mach-O invariant violated: arm32 call relocation, but arm32 code is written only as ELF", .{}),
             },
         });
     }
@@ -399,6 +401,7 @@ pub const MachOWriter = struct {
                 .length = @as(u2, 3),
                 .reloc_type = self.arch.unsignedRelocType(),
             },
+            .arm32_movw_prel, .arm32_movt_prel => invariant("Mach-O invariant violated: arm32 data relocation, but arm32 code is written only as ELF", .{}),
         };
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,
