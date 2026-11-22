@@ -1,8 +1,16 @@
 # Incremental Plan: landing the arm32 dev backend upstream
 
-Written 2026-10-22. This is how the arm32 work goes to roc-lang/roc: as a
-series of small pull requests the maintainers can review and merge one at
-a time, not as one 25,000-line branch.
+Written 2026-10-22. This is how the arm32 work goes to roc-lang/roc.
+
+**Changed 2026-11-22:** parts 1 to 3 go upstream on their own (upstream PR
+12983). Parts 4 to 12 do not go upstream one by one. Each is a branch with
+its own fork PR, stacked: part 4's PR targets `isa-word-size`, part 5's
+targets part 4's branch, and so on. Each is reviewed and tested there.
+When all of them pass, they are collapsed into one branch from upstream
+`main` that keeps every part's commits in order, and that branch is the
+one upstream PR for the arm32 backend (about 15,000 lines). See "How each
+PR is made". The sections below still describe the parts; where they say
+a part is its own upstream PR, read "its own fork PR".
 
 Stepwise Rebuild (`stepwise-rebuild/`) stays as it is. It is how I learn
 the backend by building it. This plan is how the work lands upstream. The
@@ -384,16 +392,30 @@ upstream wants to keep, and the CI lane made required.
 
 ## How each PR is made
 
+For each of parts 4 to 12 (decided 2026-11-22):
+
 1. Write the branch's planning doc from `templates/rfc.md`, and settle its
-   decisions, before cutting the topic. Required for every PR.
-2. Bring the topic onto current upstream `main` in a fresh branch, by
-   whatever method fits, and check it against the reference's final state.
+   decisions, before cutting the topic. Required for every part.
+2. Cut the part's branch from the branch of the part below it (part 4
+   from `isa-word-size`), and check it against the reference's final
+   state.
 3. Make it match upstream's current style and rules.
 4. Run the full check: fast checks, the relative oracle, minici, and for
    arm32 parts qemu and the Pis.
-5. Claude drafts the description, with its "How to test" commands. I
-   review, edit and post it.
-6. Keep it rebased on `main` daily until it merges. Then cut the next one.
+5. Open its fork PR, targeting the branch below it. Claude drafts the
+   description, with its "How to test" commands; I review it.
+6. When `isa-word-size` or a lower part moves, rebase the parts above it.
+
+When every part's fork PR passes its tests and review:
+
+7. Collapse them into one branch from upstream `main` (after PR 12983
+   merges), keeping every part's commits in order. The per-commit oracle
+   results carry over.
+8. Run the full check on it, then the ultrareviews (below), then open the
+   one upstream PR. Keep it rebased on `main` daily until it merges.
+
+PR 12983 (parts 1 to 3) stays its own upstream PR and is kept rebased on
+`main` daily until it merges.
 
 ## Ultrareviews
 
@@ -404,6 +426,11 @@ that is finished: its own nitpicky review is done and fixed, minici and the
 relative oracle pass, and it is about to be filed upstream. Run it from the
 PR's worktree (`/code-review ultra` reviews the local branch), or name the
 fork PR (`/code-review ultra <number>`).
+
+**Changed 2026-11-22:** the two runs left go on the final collapsed
+branch, just before it is opened upstream, since that is the diff upstream
+sees. The list below is why those parts matter most; read it as where to
+point the reviews.
 
 Spend them where a bug is subtle, our own tests are weak, and a mistake
 costs the most:
@@ -429,11 +456,14 @@ to part 6 (arm32 code generator) instead.
 
 ## Timing
 
-If the maintainers review one PR a week, the 13 items take about 4 months.
-Two a week, about 2 months. Parts 10 and 11 are several PRs each (by
-operation family), and parts 2 and 3 may be too, so the real count is
-higher. The order puts the parts most useful to
-upstream first, so stopping early still leaves something of value.
+**Changed 2026-11-22:** upstream reviews two PRs: 12983, then the one
+arm32 backend PR. The time goes into our own fork PRs first, then into one
+large upstream review. Nothing from parts 4 to 12 is upstream until all of
+them are done.
+
+The earlier estimate, for one upstream PR per part: if the maintainers
+review one PR a week, the 13 items take about 4 months. Two a week, about
+2 months.
 
 ## Progress
 
@@ -534,3 +564,15 @@ upstream first, so stopping early still leaves something of value.
   oracle and a review. 1,417 lines added, 138 removed. The link smoke
   step also checks the linked targets (X-8) and the hard-float attribute
   (E-12 2). Outcome in the part 5 RFC.
+- 2026-11-22: the register seams joined PR 12983 (10 commits), reversing
+  N-1 B. PR 12983 rebased onto `abdd76afeb` (head `db10fc1ec3`): upstream's
+  new delimiter search (`c0d2b5345c`) used two-argument `emitMovRegReg` and
+  `emitCmpReg` and raw `.w64` spills; fixed in commit 2. Oracle running on
+  all 10 commits.
+- 2026-11-22: plan changed. PR 12983 stays its own upstream PR. Parts 4 to
+  12 each get a branch and a stacked fork PR (part 4 targets
+  `isa-word-size`, each later part the part below it). When all pass
+  their tests and reviews, they are collapsed into one branch from
+  upstream `main` that keeps every part's commits, and opened as one
+  upstream PR (estimated about 15,000 lines). Both ultrareviews left go on
+  that final branch.
