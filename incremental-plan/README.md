@@ -529,3 +529,8 @@ upstream first, so stopping early still leaves something of value.
   D1 2 would have fixed), D2 1
   (a Zig link smoke step, no run), D3 1 (one writer), D4 1 (a fixed
   attributes block), D5 1 (REL), D6 1 (width from the target).
+- 2026-11-22: part 5 done on `arm32/elf32-objects` (local, head
+  `b84550f2b5`): five signed commits, each with checks, the relative
+  oracle and a review. 1,417 lines added, 138 removed. The link smoke
+  step also checks the linked targets (X-8) and the hard-float attribute
+  (E-12 2). Outcome in the part 5 RFC.

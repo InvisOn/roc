@@ -1,15 +1,15 @@
 # Part 5: ELF32 objects, ARM relocations and 32-bit DWARF
 
-- **Status:** Accepted
+- **Status:** Done
 - **Scope:** Branch
 - **Plan row:** 5, ELF32 objects, ARM relocations, 32-bit DWARF
-- **Branch:** `arm32/elf32-objects` (not cut yet)
+- **Branch:** `arm32/elf32-objects` (local)
 - **Fork PR:** not yet
 - **Parent:** none
 - **Base:** `arm32/encoder` (`dbc497d6a8`), on `isa-register-seams`
   (`f72be15da9`), on `isa-word-size` (upstream PR 12983), on upstream
   `22e3718d45`. Opened upstream only after the parts below it merge.
-- **Head:** none yet
+- **Head:** `b84550f2b5`
 
 ## Abstract
 
@@ -380,3 +380,32 @@ building and passing on its own:
    their ELF types and the other writers' and `RunImage`'s prongs, and
    tests.
 5. The link smoke step, its check of the linked targets, and its minici job.
+
+## Outcome
+
+Five signed commits on `arm32/elf32-objects`, on `arm32/encoder`
+(`dbc497d6a8`), local only. Each commit passed the check list under
+"Testing", the relative oracle against `22e3718d45`, and its review.
+
+| # | Commit | Content |
+|---|---|---|
+| 1 | `d3d6c4a60a` | DWARF address width from the target (D6) |
+| 2 | `c9905e2758` | One ELF layout from a class description (D3) |
+| 3 | `bb5c6be12b` | ELF32 with REL, `$a`, `.ARM.attributes`, in-place DWARF addends |
+| 4 | `8febee6e2d` | `arm32_call`, `arm32_movw_prel`, `arm32_movt_prel` and their patching (D1) |
+| 5 | `b84550f2b5` | `run-check-arm32-link-smoke` and its `minici` source-lane job (D2) |
+
+- **Size:** 1,417 lines added, 138 removed, in 11 files: `elf.zig` +762
+  / −116, the smoke tool 392, `Relocation.zig` 167, `Dwarf.zig` +49 / −16,
+  the rest wiring and other writers' prongs.
+- **64-bit objects:** byte-identical before and after commits 2 and 3.
+- **Decided during the commits:** no `abs32` relocation kind (E-10);
+  addends fixed by the kind and checked, never rewritten (X-7); a run
+  image reports arm32 relocations unsupported (E-11 1); `imageObject`
+  refuses arm32 (E-9 1).
+- **The smoke step** also reads the linked executable and checks the
+  `bl`, `movw`/`movt` and `abs32` reach their targets (X-8), and checks
+  `Tag_ABI_VFP_args` (E-12 2). Two deliberately wrong relocations were
+  each caught.
+- **Not run yet:** the part-level `minici -- --minici-shard source` on
+  the head.
