@@ -219,7 +219,10 @@ encoder and this writer and links it with `zig cc` (D2).
 - **Outcome:** Alternative 1, with the unit tests.
 - **Consequences:** the smoke program's run (does it print and return
   42?) waits for part 8; the step's placement must be checked like part
-  4's (it needs only Zig and the source tree).
+  4's (it needs only Zig and the source tree). After linking, the step
+  also reads the executable with `std.elf` and checks the `bl` lands on
+  its callee and the `movw`/`movt` pair on its data symbol (X-8), so a
+  wrong addend or relocation type shows without qemu.
 
 ### D3. One writer with a class parameter, or a second writer
 
@@ -322,7 +325,8 @@ encoder and this writer and links it with `zig cc` (D2).
 - **Likelihood:** Medium
 - **Impact:** Medium
 - **How we'd notice:** part 8's qemu lane runs the smoke program; before
-  that, nothing (D2 links only).
+  that, the smoke step's check of the linked `bl` and `movw`/`movt`
+  targets (D2) catches wrong relocations, but not wrong code.
 - **Mitigation:** run the smoke program by hand under qemu on each
   commit (not in CI).
 - **If it happens:** fix in part 5's branch if it is still open,
@@ -345,7 +349,8 @@ From `.workspaces/arm32-elf32-objects`, on each commit:
     zig build run-check-arm32-link-smoke
 
 Expected: the patcher's arm32 tests pass (D1); the writer's tests pass (ELF32 header, sections, symbols, REL
-records and attributes read back with `std.elf`); the smoke step links.
+records and attributes read back with `std.elf`); the smoke step links, and
+the linked `bl` and `movw`/`movt` reach their targets.
 
 64-bit objects unchanged, on each commit that touches `elf.zig` (D3): the
 same x86_64 and aarch64 objects written before and after, compared with
@@ -374,4 +379,4 @@ building and passing on its own:
 4. `Relocation.zig`: the arm32 kinds and their in-memory patching, with
    their ELF types and the other writers' and `RunImage`'s prongs, and
    tests.
-5. The link smoke step and its minici job.
+5. The link smoke step, its check of the linked targets, and its minici job.
