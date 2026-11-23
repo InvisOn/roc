@@ -411,7 +411,14 @@ For each of parts 4 to 12 (decided 2026-11-22):
    state.
 3. Make it match upstream's current style and rules.
 4. Run the full check: fast checks, the relative oracle, minici, and for
-   arm32 parts qemu and the Pis.
+   arm32 parts qemu and the Pis. The fast checks on each commit (X-10,
+   2026-11-24): the usual `zig build` list (format, lints, tidy, git
+   lints, unreachable rationale, test wiring, the backend, minici and
+   build-helper tests, and the part's own arm32 steps), `zig fmt --check
+   ci build.zig` (the format step skips `ci/`), and `zig build minici --
+   --minici-shard source`, which runs every source-lane job, so a new
+   upstream source check is never missed. On each part's head, also the
+   `linux-core` shard.
 5. Open its fork PR, targeting the branch below it. Claude drafts the
    description, with its "How to test" commands; I review it.
 6. When `isa-word-size` or a lower part moves, rebase the parts above it.
@@ -597,3 +604,9 @@ review one PR a week, the 13 items take about 4 months. Two a week, about
   [#13](https://github.com/InvisOn/roc/pull/13) into `isa-word-size`,
   part 5 [#14](https://github.com/InvisOn/roc/pull/14) into
   `arm32/encoder`.
+- 2026-11-24: part 5's source shard found an `_ = addend;` the per-commit
+  checks never ran (`run-check-unused-suppression`); fixed in commit 3
+  (E-19 1, head `e7065c3b92`, pushed). The per-commit checks now include
+  the whole source shard and `zig fmt` on `ci/` (X-10). The `linux-core`
+  shard passed on part 5's head (71 passed). Fork PRs get no GitHub CI:
+  the fork's last Actions run was on 2026-10-08.

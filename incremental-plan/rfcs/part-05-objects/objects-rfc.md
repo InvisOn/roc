@@ -9,7 +9,7 @@
 - **Base:** `arm32/encoder` (`97dae5a5f8`), on `isa-word-size`
   (`719cc5019a`, upstream PR 12983), on upstream `abdd76afeb`. Goes
   upstream inside the one collapsed PR for parts 4 to 12 (see the README).
-- **Head:** `954cceca77`
+- **Head:** `e7065c3b92`
 
 ## Abstract
 
@@ -392,9 +392,9 @@ hashes below are the current ones. Each commit passed the check list under
 |---|---|---|
 | 1 | `3f27d66e29` | DWARF address width from the target (D6) |
 | 2 | `14af169790` | One ELF layout from a class description (D3) |
-| 3 | `714e0ba52e` | ELF32 with REL, `$a`, `.ARM.attributes`, in-place DWARF addends |
-| 4 | `42f95f16a4` | `arm32_call`, `arm32_movw_prel`, `arm32_movt_prel` and their patching (D1) |
-| 5 | `954cceca77` | `run-check-arm32-link-smoke` and its `minici` source-lane job (D2) |
+| 3 | `2fc4f712ed` | ELF32 with REL, `$a`, `.ARM.attributes`, in-place DWARF addends |
+| 4 | `cab399f190` | `arm32_call`, `arm32_movw_prel`, `arm32_movt_prel` and their patching (D1) |
+| 5 | `e7065c3b92` | `run-check-arm32-link-smoke` and its `minici` source-lane job (D2) |
 
 - **Size:** 1,410 lines added, 138 removed, in 11 files: `elf.zig` +762
   / −116, the smoke tool 385, `Relocation.zig` 167, `Dwarf.zig` +49 / −16,
@@ -414,5 +414,10 @@ hashes below are the current ones. Each commit passed the check list under
 - **After the rebase onto `97dae5a5f8` (2026-11-23):** the head passed
   the check list (with the link smoke step) and the relative oracle
   against `97dae5a5f8`.
-- **Not run yet:** the part-level `minici -- --minici-shard source` on
-  the head.
+- **E-19 1 (2026-11-24):** the part-level `minici -- --minici-shard
+  source` found `_ = addend;` in `Elf32.reloc` (commit 3), which
+  `run-check-unused-suppression` rejects; the parameter is now unnamed
+  (`_: i64`), as upstream writes an unused parameter.
+- **Part-level checks on the head (2026-11-24):** the `source` shard (16
+  passed) and the `linux-core` shard (71 passed, 0 failed), which also
+  covers part 4.
