@@ -73,8 +73,8 @@ stay out of upstream. They will change as upstream moves.
 |---|---|---|---|---|---|---|
 | 0 | Proposal to the maintainers (no code) | none | none | no | none | none |
 | 1–3 | **One PR, the shared driver for any backend:** architecture dispatch (`isa.zig`, `switch (isa)`), driver register seams, and the driver's word size (`word`, `target_ptr_size`, the 64-bit width names). With the instruction cache flush (draft 03). Which host word-size drafts (07, 12) stay in it is under review | dev backend: shared driver (`LirCodeGen`, `FrameBuilder`, `CallingConvention`) | not measured; the 2,000-line limit does not apply (see below) | no | step 1: [#11](https://github.com/InvisOn/roc/pull/11), upstream 12740 (merged); the rest: [#12](https://github.com/InvisOn/roc/pull/12), upstream 12983 (in review) | `isa-switch` (step 1), `isa-word-size` (the rest) |
-| 4 | A32/VFP encoder and its assembler oracle | dev backend: instruction encoder | 2,896 (577 generated) | no | not yet | `arm32/encoder` |
-| 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,050 | no | not yet | `arm32/elf32-objects` |
+| 4 | A32/VFP encoder and its assembler oracle | dev backend: instruction encoder | 2,896 (577 generated) | no | [#13](https://github.com/InvisOn/roc/pull/13) | `arm32/encoder` |
+| 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,050 | no | [#14](https://github.com/InvisOn/roc/pull/14) | `arm32/elf32-objects` |
 | 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet | `arm32/codegen` |
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet | `arm32/aapcs32` |
 | 8 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet | `arm32/targets` |
@@ -586,3 +586,14 @@ review one PR a week, the 13 items take about 4 months. Two a week, about
   upstream `main` that keeps every part's commits, and opened as one
   upstream PR (estimated about 15,000 lines). Both ultrareviews left go on
   that final branch.
+- 2026-11-23: PR 12983 pushed at `719cc5019a`. Commit 10 reads the last
+  role registers from `CC` (X-9) and `design.md` states the rule (E-17
+  1); N-34 to N-36 fix the width paragraph (commit 7) and N-37 a stale
+  comment (commit 2). The relative oracle passed on all 10 commits before
+  N-34 to N-37; those are a comment and docs only, so it was not rerun.
+- 2026-11-23: parts 4 and 5 rebased onto `719cc5019a` and pushed, each
+  head with checks and the relative oracle. Part 5 dropped a dead
+  `sectionName` (E-18 1). Fork PRs: part 4
+  [#13](https://github.com/InvisOn/roc/pull/13) into `isa-word-size`,
+  part 5 [#14](https://github.com/InvisOn/roc/pull/14) into
+  `arm32/encoder`.
