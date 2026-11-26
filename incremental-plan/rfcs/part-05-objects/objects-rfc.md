@@ -6,10 +6,10 @@
 - **Branch:** `arm32/elf32-objects` (pushed)
 - **Fork PR:** [#14](https://github.com/InvisOn/roc/pull/14), base `arm32/encoder`
 - **Parent:** none
-- **Base:** `arm32/encoder` (`97dae5a5f8`), on `isa-word-size`
-  (`719cc5019a`, upstream PR 12983), on upstream `abdd76afeb`. Goes
+- **Base:** `arm32/encoder` (`f95f603d3d`), on `isa-word-size`
+  (`215b478e6f`, upstream PR 12983), on upstream `43e1ac99ee`. Goes
   upstream inside the one collapsed PR for parts 4 to 12 (see the README).
-- **Head:** `e7065c3b92`
+- **Head:** `94e6dc82c2`
 
 ## Abstract
 
@@ -384,17 +384,17 @@ building and passing on its own:
 ## Outcome
 
 Five signed commits on `arm32/elf32-objects`, first on `arm32/encoder`
-(`dbc497d6a8`), now on `arm32/encoder` (`97dae5a5f8`) and pushed. The
+(`dbc497d6a8`), now on `arm32/encoder` (`f95f603d3d`) and pushed. The
 hashes below are the current ones. Each commit passed the check list under
 "Testing", the relative oracle against `22e3718d45`, and its review.
 
 | # | Commit | Content |
 |---|---|---|
-| 1 | `3f27d66e29` | DWARF address width from the target (D6) |
-| 2 | `14af169790` | One ELF layout from a class description (D3) |
-| 3 | `2fc4f712ed` | ELF32 with REL, `$a`, `.ARM.attributes`, in-place DWARF addends |
-| 4 | `cab399f190` | `arm32_call`, `arm32_movw_prel`, `arm32_movt_prel` and their patching (D1) |
-| 5 | `e7065c3b92` | `run-check-arm32-link-smoke` and its `minici` source-lane job (D2) |
+| 1 | `7ed64db16a` | DWARF address width from the target (D6) |
+| 2 | `ee7847be80` | One ELF layout from a class description (D3) |
+| 3 | `cff1c5b360` | ELF32 with REL, `$a`, `.ARM.attributes`, in-place DWARF addends |
+| 4 | `f0b9bc2794` | `arm32_call`, `arm32_movw_prel`, `arm32_movt_prel` and their patching (D1) |
+| 5 | `94e6dc82c2` | `run-check-arm32-link-smoke` and its `minici` source-lane job (D2) |
 
 - **Size:** 1,410 lines added, 138 removed, in 11 files: `elf.zig` +762
   / −116, the smoke tool 385, `Relocation.zig` 167, `Dwarf.zig` +49 / −16,
@@ -421,3 +421,10 @@ hashes below are the current ones. Each commit passed the check list under
 - **Part-level checks on the head (2026-11-24):** the `source` shard (16
   passed) and the `linux-core` shard (71 passed, 0 failed), which also
   covers part 4.
+- **After the rebase onto `f95f603d3d` (2026-11-26):** no conflicts, but
+  the ELF32 test in commit 3 no longer compiled: upstream made a source
+  location's `file` an explicit optional (`62b2583886`), so the test now
+  writes `.file = .some(0)`, as upstream's own tests do. Then the head
+  passed the check list, the `source` shard and the relative oracle
+  against `f95f603d3d`, and commits 1 to 4 each passed the backend
+  tests.

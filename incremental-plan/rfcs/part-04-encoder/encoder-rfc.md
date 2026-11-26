@@ -7,10 +7,10 @@
 - **Branch:** `arm32/encoder` (worktree `.workspaces/arm32-encoder`)
 - **Fork PR:** [#13](https://github.com/InvisOn/roc/pull/13), base `isa-word-size`
 - **Parent:** none
-- **Base:** `isa-word-size` (`719cc5019a`, upstream PR 12983, which now
-  holds the register seams) on upstream `abdd76afeb`. Parts 4 to 12 are
+- **Base:** `isa-word-size` (`215b478e6f`, upstream PR 12983, which now
+  holds the register seams) on upstream `43e1ac99ee`. Parts 4 to 12 are
   collapsed into one upstream PR once all of them pass (see the README).
-- **Head:** `97dae5a5f8` (seven commits, pushed; see "Outcome")
+- **Head:** `f95f603d3d` (seven commits, pushed; see "Outcome")
 
 ## Abstract
 
@@ -438,20 +438,20 @@ D6 1, D7 1, D8 1.
 ## Outcome
 
 Seven signed commits on `arm32/encoder`, first on `isa-register-seams`
-(`f72be15da9`), now on `isa-word-size` (`719cc5019a`) and pushed. The
+(`f72be15da9`), now on `isa-word-size` (`215b478e6f`) and pushed. The
 hashes below are the current ones. The oracle came third and its `.s` file grew
 with each family. Each commit passed the check list under "Testing", the
 relative oracle against `22e3718d45`, and its review.
 
 | # | Commit | Content |
 |---|---|---|
-| 1 | `c03fd2cace` | `Registers.zig`, `arm32/mod.zig`, the `dev/mod.zig` import |
-| 2 | `6e8c5a8fb2` | `Emit(target)` core: conditions, `ModImm`, `Operand2`, data processing, moves |
-| 3 | `5e847bb794` | The oracle: Zig tool, `.s` file, generated tests, build steps, `minici` job |
-| 4 | `d5e30e7143` | Multiply, bit operations, extends, bitfield extracts |
-| 5 | `936c93ff5b` | Branches, calls, traps, `pcRelAddress` |
-| 6 | `d65a7afa6c` | `MemForm`, loads, stores, `push`, `pop` |
-| 7 | `97dae5a5f8` | VFP, `vmovQ`, `vld1Q`, `vst1Q` |
+| 1 | `7cdd1883c3` | `Registers.zig`, `arm32/mod.zig`, the `dev/mod.zig` import |
+| 2 | `764c4c01b6` | `Emit(target)` core: conditions, `ModImm`, `Operand2`, data processing, moves |
+| 3 | `626e67934c` | The oracle: Zig tool, `.s` file, generated tests, build steps, `minici` job |
+| 4 | `8634aedc26` | Multiply, bit operations, extends, bitfield extracts |
+| 5 | `04f0b95897` | Branches, calls, traps, `pcRelAddress` |
+| 6 | `b401b8adfe` | `MemForm`, loads, stores, `push`, `pop` |
+| 7 | `f95f603d3d` | VFP, `vmovQ`, `vld1Q`, `vst1Q` |
 
 - **Size:** 2,896 lines in 10 files: `Emit.zig` 1,316, the tool 487, the
   generated tests 577, the `.s` file 219 (182 entries), `Registers.zig`
@@ -470,3 +470,6 @@ relative oracle against `22e3718d45`, and its review.
   `run-check-arm32-encoding-oracle`.
 - **After the rebase onto `719cc5019a` (2026-11-23):** the head passed
   the check list and the relative oracle against `719cc5019a`.
+- **After the rebase onto `215b478e6f` (2026-11-26):** clean; the head
+  passed the check list, the `source` shard and the relative oracle
+  against `215b478e6f`.

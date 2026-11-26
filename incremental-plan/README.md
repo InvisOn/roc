@@ -421,7 +421,9 @@ For each of parts 4 to 12 (decided 2026-11-22):
    `linux-core` shard.
 5. Open its fork PR, targeting the branch below it. Claude drafts the
    description, with its "How to test" commands; I review it.
-6. When `isa-word-size` or a lower part moves, rebase the parts above it.
+6. When `isa-word-size` or a lower part moves, rebase the parts above it,
+   and build each rebased commit: new upstream code can break our new
+   code without a conflict.
 
 When every part's fork PR passes its tests and review:
 
@@ -431,8 +433,11 @@ When every part's fork PR passes its tests and review:
 8. Run the full check on it, then the ultrareviews (below), then open the
    one upstream PR. Keep it rebased on `main` daily until it merges.
 
-PR 12983 (parts 1 to 3) stays its own upstream PR and is kept rebased on
-`main` daily until it merges.
+PR 12983 (parts 1 to 3) stays its own upstream PR until it merges. It is
+rebased onto `main` only when `main` conflicts with it or a reviewer asks
+(R-3, 2026-11-26): each rebase costs the relative oracle on all 10
+commits (about 3.5 h) and rebasing every part above it, and `main` moves
+by 50 to 150 commits a day.
 
 ## Ultrareviews
 
@@ -610,3 +615,14 @@ review one PR a week, the 13 items take about 4 months. Two a week, about
   the whole source shard and `zig fmt` on `ci/` (X-10). The `linux-core`
   shard passed on part 5's head (71 passed). Fork PRs get no GitHub CI:
   the fork's last Actions run was on 2026-10-08.
+- 2026-11-24: upstream `main` (`43e1ac99ee`) conflicted with PR 12983 in
+  `LirCodeGen.zig` (proc addresses and `emitCmpImm`, rewritten upstream).
+  Rebased (R-1): commits 2 and 6 resolved by keeping upstream's code and
+  restoring our width names; the other 8 unchanged. Checks, the `source`
+  shard and the relative oracle on all 10 commits passed; pushed at
+  `215b478e6f`, CI green.
+- 2026-11-26: parts 4 and 5 rebased onto `215b478e6f` (R-2) and pushed:
+  part 4 `f95f603d3d`, part 5 `94e6dc82c2`. Part 5's ELF32 test needed
+  `.file = .some(0)` after upstream's explicit optionals (no conflict;
+  found by compiling). PR 12983 is now rebased only when `main` conflicts
+  or a reviewer asks (R-3).
