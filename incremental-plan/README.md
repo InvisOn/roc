@@ -84,13 +84,16 @@ stay out of upstream. They will change as upstream moves.
 | 12 | Docs, and turning the CI lane from optional to required | none | about 1,400 | no | not yet | `arm32/docs` |
 
 The parts were renumbered 0 to 12 on 2026-10-25, and reordered on
-2026-10-27 (see Progress for the old numbers). **Why targets, CI and the
-host path come right after part 7:** part 6 lifts the driver's 8-byte
-assert, and only arm32 tests running in CI guard every site part 1
-changed. The eval corpus on arm32 needs the targets and CI lane (8) and
-running code in-process (9), so they follow parts 6 and 7 directly, and
-every later part lands with that guard in place. Until parts 10 and 11
-arrive, the lane runs with the wide-value and NEON cases marked as known
+2026-10-27 (see Progress for the old numbers). **Changed 2026-11-28
+(Q-5 1):** the order is now 6, 7, 10, 8, 9, 11, 12; the numbers stay. On a
+4-byte word, the driver's 64-bit places (about 470) are compile errors
+until register pairs exist, so no arm32 program can be built before part
+10. **Why targets, CI and the host path come right after part 10:** part
+10 lifts the driver's 8-byte assert, and only arm32 tests running in CI
+guard every site part 1 changed. The eval corpus on arm32 needs the
+targets and CI lane (8) and running code in-process (9), so they follow
+part 10 directly, and every later part lands with that guard in place.
+Until part 11 arrives, the lane runs with the NEON cases marked as known
 failures. Two earlier parts folded into part 1 on 2026-10-24. One was a row
 of separate upstream bug fixes: the drafts that matter to arm32 are now in
 part 1, so the maintainers review them together with the change that needs
@@ -307,18 +310,19 @@ with their in-memory patching), `Dwarf.zig` (four-byte addresses), and a Zig bui
 
 `arm32/CodeGen.zig`, `arm32/Call.zig`, the arm32 parts of
 `FrameBuilder.zig` and `CallingConvention.zig`, and
-`src/layout/abi/arm32.zig`. From here `roc build --target=arm32musl
---opt=dev` produces programs. Only the arm32 code generator writes or
+`src/layout/abi/arm32.zig`. They are tested by unit tests that call the
+code generator and check the bytes it writes; the driver is not built for
+arm32 until part 10 (Q-5 1). Only the arm32 code generator writes or
 patches instruction bytes, or knows the PC offset and branch ranges, so a
 Thumb code generator could change those in one place. The ABI shape tests
 (`test/fx/abi_call_shapes.roc` and the nested struct probe) come with 7.
 
-The driver's 8-byte assert is lifted here, and only together with arm32
-tests that cover every kind of site part 1 changed (the table "Tests that
+The driver's 8-byte assert is lifted in part 10, not here, and only
+together with arm32 tests that cover every kind of site part 1 changed (the table "Tests that
 must cover step 6's sites" in `rfcs/part-01-dispatch-isa/step-6-word-size.md`).
 Until then nothing catches a word-sized site that goes back to `.w64`.
 Those tests run in CI from part 8, and the eval corpus from part 9, which
-come directly after.
+come directly after part 10.
 
 ### 8. Targets, platforms and CI
 
@@ -389,9 +393,12 @@ in CI.
 ### 10 and 11. Wide values and SIMD
 
 The Wide64 lowering, i128 as four words, and the NEON block, each in a few
-PRs by operation family. Part 11 also brings the rest of the NEON encoder
+PRs by operation family. Part 10 comes right after part 7 (Q-5 1): it
+routes 64-bit values through register pairs, lifts the driver's 8-byte
+assert, and is where `roc build --target=arm32musl --opt=dev` first
+produces programs. Part 11 also brings the rest of the NEON encoder
 (about 19 emitters and the operation enums, about 500 lines with their
-oracle lines), which part 4 leaves out (part 4's D7). Each one makes a
+oracle lines), which part 4 leaves out (part 4's D7). Each part 11 PR makes a
 known set of eval cases pass in the CI lane, and takes them off its
 known-failure list.
 
@@ -419,6 +426,8 @@ For each of parts 4 to 12 (decided 2026-11-22):
    --minici-shard source`, which runs every source-lane job, so a new
    upstream source check is never missed. On each part's head, also the
    `linux-core` shard.
+   The fork PRs get no GitHub CI (X-10.3 2, 2026-11-28): macOS, Windows
+   and arm64 are first tested by upstream CI on the final collapsed PR.
 5. Open its fork PR, targeting the branch below it. Claude drafts the
    description, with its "How to test" commands; I review it.
 6. When `isa-word-size` or a lower part moves, rebase the parts above it,
@@ -626,3 +635,12 @@ review one PR a week, the 13 items take about 4 months. Two a week, about
   `.file = .some(0)` after upstream's explicit optionals (no conflict;
   found by compiling). PR 12983 is now rebased only when `main` conflicts
   or a reviewer asks (R-3).
+- 2026-11-28: X-10.3 2: the fork PRs stay without GitHub CI (it stopped
+  running on the fork after 2026-10-08, cause unknown); local checks only
+  until the final collapsed PR, where upstream CI covers macOS, Windows
+  and arm64.
+- 2026-11-28: Q-5 1: part 6 is the arm32 code generator, frames and
+  register roles, tested on the bytes they emit; part 10 (register pairs)
+  moves up to right after part 7 and lifts the 8-byte assert, since the
+  driver cannot be built for a 4-byte word before it. New order 6, 7, 10,
+  8, 9, 11, 12.
