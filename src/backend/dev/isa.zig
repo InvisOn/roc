@@ -15,6 +15,10 @@ const RocTarget = roc_target.RocTarget;
 pub const Isa = enum {
     x86_64,
     aarch64,
+    /// 32-bit ARM (A32, ARMv7-A with VFPv3-D32). No target selects it yet:
+    /// `isaOfOrNull` returns it only once the shared driver handles a
+    /// 4-byte word.
+    arm32,
 };
 
 /// The instruction set that `target` compiles to in the dev backend, or null
@@ -59,11 +63,14 @@ pub const Abi = enum {
     aarch64_aapcs,
     aarch64_apple,
     aarch64_windows,
+    /// AAPCS32 with the VFP variant (hard-float), as on arm-linux-*eabihf.
+    arm32_aapcs_vfp,
 
     pub fn isa(self: Abi) Isa {
         return switch (self) {
             .x86_64_sysv, .x86_64_windows => .x86_64,
             .aarch64_aapcs, .aarch64_apple, .aarch64_windows => .aarch64,
+            .arm32_aapcs_vfp => .arm32,
         };
     }
 
@@ -72,13 +79,14 @@ pub const Abi = enum {
     pub fn ptrBitWidth(self: Abi) u16 {
         return switch (self) {
             .x86_64_sysv, .x86_64_windows, .aarch64_aapcs, .aarch64_apple, .aarch64_windows => 64,
+            .arm32_aapcs_vfp => 32,
         };
     }
 
     pub fn isWindows(self: Abi) bool {
         return switch (self) {
             .x86_64_windows, .aarch64_windows => true,
-            .x86_64_sysv, .aarch64_aapcs, .aarch64_apple => false,
+            .x86_64_sysv, .aarch64_aapcs, .aarch64_apple, .arm32_aapcs_vfp => false,
         };
     }
 
@@ -90,6 +98,7 @@ pub const Abi = enum {
             .aarch64_aapcs => .aarch64,
             .aarch64_apple => .aarch64_macho,
             .aarch64_windows => .aarch64_windows,
+            .arm32_aapcs_vfp => unreachable, // no arm32 code asks for its C ABI before AAPCS32 adds a layout.abi.Target
         };
     }
 };
@@ -105,6 +114,7 @@ pub fn abiOfOrNull(target: RocTarget) ?Abi {
             .aarch64_windows => .aarch64_windows,
             .x86_64_sysv, .x86_64_windows, .wasm32, .wasm32v1, .wasm64 => unreachable, // aarch64Target returns only AArch64 ABIs
         },
+        .arm32 => .arm32_aapcs_vfp,
     };
 }
 
@@ -144,6 +154,7 @@ test "abiOfOrNull agrees with each target's instruction set, Windows-ness and C 
             const c_abi: layout.abi.Target = switch (abi.isa()) {
                 .x86_64 => if (target.isWindows()) .x86_64_windows else .x86_64_sysv,
                 .aarch64 => layout.abi.aarch64Target(target.toOsTag()),
+                .arm32 => unreachable, // isaOfOrNull gives no target arm32 yet
             };
             try std.testing.expectEqual(c_abi, abi.cAbi());
         } else {

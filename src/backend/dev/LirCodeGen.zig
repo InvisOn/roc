@@ -39,6 +39,7 @@ const GuardedList = lir.LirStore.GuardedList;
 
 const x86_64 = @import("x86_64/mod.zig");
 const aarch64 = @import("aarch64/mod.zig");
+const arm32 = @import("arm32/mod.zig");
 const CallingConventionMod = @import("CallingConvention.zig");
 const roc_target_mod = @import("roc_target");
 const RocTarget = roc_target_mod.RocTarget;
@@ -413,21 +414,25 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
     // Select architecture-specific types based on target
     const CodeGen = switch (isa) {
+        .arm32 => @compileError("arm32: LirCodeGen is not written yet"),
         .x86_64 => x86_64.CodeGen(machine_abi),
         .aarch64 => aarch64.CodeGen(machine_abi),
     };
 
     const GeneralReg = switch (isa) {
+        .arm32 => arm32.GeneralReg,
         .x86_64 => x86_64.GeneralReg,
         .aarch64 => aarch64.GeneralReg,
     };
 
     const FloatReg = switch (isa) {
+        .arm32 => arm32.FloatReg,
         .x86_64 => x86_64.FloatReg,
         .aarch64 => aarch64.FloatReg,
     };
 
     const Condition = switch (isa) {
+        .arm32 => arm32.Condition,
         .x86_64 => x86_64.Emit(machine_abi).Condition,
         .aarch64 => aarch64.Emit(machine_abi).Condition,
     };
@@ -435,6 +440,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
     return struct {
         const Self = @This();
         const call_stack_alignment: u32 = switch (isa) {
+            .arm32 => @compileError("arm32: LirCodeGen is not written yet"),
             .aarch64 => aarch64.Call.STACK_ALIGNMENT,
             .x86_64 => if (machine_abi.isWindows())
                 x86_64.WindowsFastcall.STACK_ALIGNMENT
@@ -1671,6 +1677,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // Initialize stack_offset to reserve space for callee-saved area
             // (same convention as compileProcSpec—positive offsets, deferred prologue)
             switch (isa) {
+                .arm32 => @compileError("arm32: generateCode is not written yet"),
                 .x86_64 => {
                     self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
                 },
@@ -1725,6 +1732,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const body_epilogue_offset = self.codegen.currentOffset();
             {
                 const actual_locals: u32 = switch (isa) {
+                    .arm32 => @compileError("arm32: generateCode is not written yet"),
                     .aarch64 => @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE),
                     .x86_64 => @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE),
                 };
@@ -1743,6 +1751,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             var root_stack_alloc: u32 = 0;
             var root_frame_size: u32 = 0;
             switch (isa) {
+                .arm32 => @compileError("arm32: generateCode is not written yet"),
                 .x86_64 => {
                     const actual_locals_x86: u32 = @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE);
                     try self.codegen.emitPrologueWithAlloc(actual_locals_x86);
@@ -1772,6 +1781,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
             self.shiftPendingRcRefs(body_start, body_end, prologue_size);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateCode is not written yet"),
                 .aarch64 => try self.codegen.shiftBranchSites(body_start, body_end, prologue_size),
                 .x86_64 => {},
             }
@@ -2021,6 +2031,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     try self.codegen.emitAnd(widths.word_width, tag_reg, tag_reg, cap_reg);
                     try self.emitCmpImm(widths.word_width, tag_reg, 0);
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.csel(.w64, result_reg, len_reg, result_reg, .ne);
                         },
@@ -2850,6 +2861,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         ll.op == .i64_to_f32;
                     const freg = try self.allocTempFloat();
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.scvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
                         },
@@ -2890,6 +2902,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         ll.op == .u32_to_f32;
                     const freg = try self.allocTempFloat();
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.scvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
                         },
@@ -2917,6 +2930,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     const is_f32 = ll.op == .u64_to_f32;
 
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                         .aarch64 => {
                             // UCVTF handles unsigned integers directly
                             try self.codegen.emit.ucvtfFloatFromGen(if (is_f32) .single else .double, freg, src_reg, .w64);
@@ -2989,6 +3003,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     const src_reg = try self.ensureInFloatReg(src_loc, src_width);
                     const result_reg = try self.allocTempFloat();
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.fcvtFloatFloat(
                                 if (dst_width == .f32) .single else .double,
@@ -4226,6 +4241,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         const result_low, const result_high = try self.allocTempGenerals(2);
 
                         switch (isa) {
+                            .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                             .aarch64 => {
                                 try self.codegen.emit.subsRegRegReg(.w64, result_low, .ZRSP, parts.low);
                                 try self.codegen.emit.sbcRegRegReg(.w64, result_high, .ZRSP, parts.high);
@@ -4430,6 +4446,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     switch (ll.ret_layout) {
                         .f32 => {
                             switch (isa) {
+                                .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                                 .aarch64 => {
                                     try self.codegen.emit.fsqrtRegReg(.single, result_reg, src_reg);
                                 },
@@ -4440,6 +4457,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         },
                         .f64 => {
                             switch (isa) {
+                                .arm32 => @compileError("arm32: generateLowLevel is not written yet"),
                                 .aarch64 => {
                                     try self.codegen.emit.fsqrtRegReg(.double, result_reg, src_reg);
                                 },
@@ -4986,6 +5004,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         fn boolRetReg(self: *Self) Allocator.Error!ValueLocation {
             const loc = try self.scalarRetReg();
             switch (isa) {
+                .arm32 => @compileError("arm32: boolRetReg is not written yet"),
                 .x86_64 => try self.codegen.emit.andRegImm8(loc.general_reg, 1),
                 .aarch64 => {},
             }
@@ -5121,6 +5140,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             try self.emitLoadImm(widths.wide64_width, low_reg, @bitCast(low));
             try self.emitLoadImm(widths.wide64_width, high_reg, @bitCast(high));
             switch (isa) {
+                .arm32 => @compileError("arm32: materializeVectorConstant is not written yet"),
                 .x86_64 => {
                     if (self.cpu_level == .v1) {
                         // PINSRQ is SSE4.1. Assembling the constant in a stack slot
@@ -5228,6 +5248,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             kind: builtins.simd.Kind,
         ) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitSimdSplatFromGeneral is not written yet"),
                 .x86_64 => {
                     try self.codegen.emit.movVectorFromGeneral(dst, src, kind.laneBits() == 64);
                     if (self.cpu_level == .v1) {
@@ -5332,6 +5353,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             if (lane_bytes > 1) try self.emitShiftImm(.shl, widths.word_width, index, index, @ctz(lane_bytes));
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdGetLane is not written yet"),
                 .x86_64 => {
                     if (self.cpu_level == .v1) {
                         // Selecting a runtime lane inside a register takes PSHUFB,
@@ -5361,6 +5383,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             defer self.releaseAcquiredVector(ramp);
             protected |= floatRegMask(ramp.reg);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdGetLane is not written yet"),
                 .x86_64 => {
                     try self.emitX86PackedBinary(.map_0f, 0xFC, indices, indices, ramp.reg);
                 },
@@ -5371,6 +5394,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const shuffled = try self.allocTempVector(protected);
             defer self.codegen.freeFloat(shuffled);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdGetLane is not written yet"),
                 .x86_64 => {
                     try self.codegen.emit.vexRegRegReg(.map_0f38, .p66, false, 0x00, shuffled, vector.reg, indices);
                 },
@@ -5380,6 +5404,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             }
             const result = try self.allocTempGeneral();
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdGetLane is not written yet"),
                 .x86_64 => {
                     try self.codegen.emit.movGeneralFromVector(result, shuffled, kind.laneBits() == 64);
                 },
@@ -5463,6 +5488,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             protected |= floatRegMask(result);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdRearrange is not written yet"),
                 .aarch64 => {
                     switch (op) {
                         .simd_even_lanes => try self.codegen.emit.simdThreeReg(0x4E001800 | neonSizeBits(kind), result, lhs.reg, rhs.?.reg),
@@ -5567,6 +5593,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const result = try self.allocTempVector(protected);
             protected |= floatRegMask(result);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdTableLookup is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.simdThreeReg(0x4E000000, result, table.reg, indices.reg);
                 },
@@ -5623,6 +5650,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // PALIGNR is SSSE3, so a baseline target combines two whole-register
             // byte shifts instead.
             const shifted_rhs: ?FloatReg = switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdConcatShift is not written yet"),
                 .x86_64 => (if (self.cpu_level == .v1) try self.allocTempVector(protected | floatRegMask(result)) else null),
                 .aarch64 => null,
             };
@@ -5641,6 +5669,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 if (shift == 0) {
                     try self.codegen.emitMoveV128(result, lhs.reg);
                 } else switch (isa) {
+                    .arm32 => @compileError("arm32: generateSimdConcatShift is not written yet"),
                     .x86_64 => {
                         if (shifted_rhs) |high| {
                             try self.emitX86ShiftImm(.shr_bytes, 0, result, lhs.reg, @intCast(shift));
@@ -5671,6 +5700,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             protected_mask: u32,
         ) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitSimdWiden is not written yet"),
                 .aarch64 => {
                     const size_opcode: u32 = switch (source_kind.laneBits()) {
                         8 => 0x00080000,
@@ -5806,6 +5836,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             protected |= floatRegMask(result);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdMultiply is not written yet"),
                 .aarch64 => {
                     switch (op) {
                         .simd_mul_wrap => try self.codegen.emit.simdThreeReg(0x4E209C00 | neonSizeBits(source_kind), result, lhs.reg, rhs.reg),
@@ -6012,6 +6043,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     protected,
                 ),
                 .simd_pairwise_add_widen => switch (isa) {
+                    .arm32 => @compileError("arm32: generateSimdWidthChange is not written yet"),
                     .aarch64 => {
                         try self.codegen.emit.simdTwoReg(
                             (if (source_kind.isSigned()) @as(u32, 0x4E202800) else 0x6E202800) | neonSizeBits(source_kind),
@@ -6052,6 +6084,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     },
                 },
                 .simd_narrow_wrap => switch (isa) {
+                    .arm32 => @compileError("arm32: generateSimdWidthChange is not written yet"),
                     .aarch64 => {
                         const size = neonSizeBits(destination_kind);
                         try self.codegen.emit.simdTwoReg(0x0E212800 | size, result, lhs.reg);
@@ -6072,6 +6105,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     },
                 },
                 .simd_narrow_sat => switch (isa) {
+                    .arm32 => @compileError("arm32: generateSimdWidthChange is not written yet"),
                     .aarch64 => {
                         const size = neonSizeBits(destination_kind);
                         const low_base: u32 = if (destination_kind.isSigned())
@@ -6172,6 +6206,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             protected |= floatRegMask(result);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdDot is not written yet"),
                 .x86_64 => {
                     switch (op) {
                         .simd_dot_pairs => try self.emitX86PackedBinary(.map_0f, 0xF5, result, lhs.reg, rhs.reg),
@@ -6271,6 +6306,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const result = try self.allocTempGeneral();
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdBitmask is not written yet"),
                 .x86_64 => {
                     if (kind.laneBits() == 16 and self.cpu_level == .v1) {
                         // PEXT is BMI2. Packing the words into bytes with signed
@@ -6369,6 +6405,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const result = try self.allocTempVector(protected);
             protected |= floatRegMask(result);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdShift is not written yet"),
                 .aarch64 => {
                     if (ll.op != .simd_shl_wrap) {
                         const zero = try self.allocTempGeneral();
@@ -6526,6 +6563,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const bias = try self.allocTempVector(protected);
             try self.emitSimdSplatFromGeneral(bias, bias_scalar, wide_kind);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdRoundedShift is not written yet"),
                 .x86_64 => {
                     try self.emitX86PackedBinary(.map_0f, x86PackedOpcode(wide_kind, 0, 0, 0xFE, 0xD4), result, result, bias);
                     try self.emitX86PackedBinary(.map_0f, x86PackedOpcode(wide_kind, 0, 0, 0xFE, 0xD4), high, high, bias);
@@ -6539,6 +6577,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             const counts = try self.allocTempVector(protected);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdRoundedShift is not written yet"),
                 .x86_64 => {
                     try self.codegen.emit.movVectorFromGeneral(counts, count, true);
                     if (wide_kind.laneBits() == 32) {
@@ -6564,6 +6603,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             self.codegen.freeFloat(counts);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdRoundedShift is not written yet"),
                 .x86_64 => {
                     try self.emitX86NarrowWrapRegisters(result, result, high, wide_kind, kind, protected | floatRegMask(high));
                 },
@@ -6577,6 +6617,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             try self.codegen.patchJump(out_of_range_patch, self.codegen.currentOffset());
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdRoundedShift is not written yet"),
                 .x86_64 => {
                     try self.emitX86PackedBinary(.map_0f, 0xEF, result, result, result);
                 },
@@ -6653,6 +6694,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const result = try self.allocTempGeneral();
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdSum is not written yet"),
                 .aarch64 => {
                     if (kind.laneBits() == 64) {
                         const high = try self.allocTempGeneral();
@@ -6791,6 +6833,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             if (self.cpu_level == .v1) {
                 try self.emitSimdClmulBaseline(result, lhs.reg, rhs.reg, ll.op == .simd_clmul_hi);
             } else switch (isa) {
+                .arm32 => @compileError("arm32: generateSimdClmul is not written yet"),
                 .x86_64 => {
                     try self.codegen.emit.vexRegRegRegImm8(
                         .map_0f3a,
@@ -7156,6 +7199,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             };
             const basic_op = narrowEnum(BasicSimdOp, op);
             switch (isa) {
+                .arm32 => @compileError("arm32: emitBasicSimdVector is not written yet"),
                 .x86_64 => {
                     const r = rhs;
                     const compare_map: @TypeOf(self.codegen.emit).VexMap = if (kind.laneBits() == 64) .map_0f38 else .map_0f;
@@ -7741,6 +7785,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             const result_reg = try self.allocTempGeneral();
             switch (isa) {
+                .arm32 => @compileError("arm32: callStr1U64ToByte is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.movRegReg(.w64, result_reg, CC.RETURN_REGS[0]);
                 },
@@ -7749,6 +7794,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 },
             }
             switch (isa) {
+                .arm32 => @compileError("arm32: callStr1U64ToByte is not written yet"),
                 .x86_64 => {
                     try self.codegen.emit.andRegImm32(result_reg, 0xff);
                 },
@@ -8406,6 +8452,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     switch (signedness) {
                         .signed => {
                             switch (isa) {
+                                .arm32 => @compileError("arm32: storeWideScalarToStackOffset is not written yet"),
                                 .aarch64 => {
                                     try self.codegen.emit.asrRegRegImm(.w64, high_reg, reg, 63);
                                 },
@@ -8628,6 +8675,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 if (root_index != i or self.local_locations.contains(localKey(v.local))) continue;
                 const size = self.getLayoutSize(self.localLayout(v.local));
                 const alignment: u32 = switch (isa) {
+                    .arm32 => @compileError("arm32: ensureStableLocationsForStmtLocals is not written yet"),
                     .aarch64 => 16,
                     .x86_64 => if (size > 8) 16 else 8,
                 };
@@ -8818,6 +8866,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             switch (int_op) {
                 .num_plus => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateIntBinop is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.addsRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
                         },
@@ -8842,6 +8891,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 },
                 .num_minus => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateIntBinop is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.subsRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
                         },
@@ -8929,6 +8979,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         const zero_patch = try self.emitJumpIfEqual();
 
                         switch (isa) {
+                            .arm32 => @compileError("arm32: generateIntBinop is not written yet"),
                             .aarch64 => {
                                 try self.codegen.emit.eorRegRegReg(.w64, sign_check_reg, result_reg, divisor_reg);
                             },
@@ -9046,6 +9097,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     try self.emitNarrowIntRangeFlag(flag_reg, result_reg, operand_layout);
                 },
                 .i64 => switch (isa) {
+                    .arm32 => @compileError("arm32: emitIntMulOverflowFlag is not written yet"),
                     .aarch64 => {
                         const high_reg, const sign_reg = try self.allocTempGenerals(2);
                         try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
@@ -9060,6 +9112,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     },
                 },
                 .u64 => switch (isa) {
+                    .arm32 => @compileError("arm32: emitIntMulOverflowFlag is not written yet"),
                     .aarch64 => {
                         const high_reg, const zero_reg = try self.allocTempGenerals(2);
                         try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
@@ -9222,6 +9275,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitCheckedI64Mul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitCheckedI64Mul is not written yet"),
                 .aarch64 => {
                     const high_reg, const sign_reg = try self.allocTempGenerals(2);
                     try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
@@ -9240,6 +9294,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitCheckedU64Mul(self: *Self, result_reg: GeneralReg, lhs_reg: GeneralReg, rhs_reg: GeneralReg, message: []const u8) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitCheckedU64Mul is not written yet"),
                 .aarch64 => {
                     const high_reg = try self.allocTempGeneral();
                     try self.codegen.emit.mulRegRegReg(.w64, result_reg, lhs_reg, rhs_reg);
@@ -9303,6 +9358,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             unsigned_sub_overflow,
         }) Condition {
             return switch (isa) {
+                .arm32 => @compileError("arm32: condCode is not written yet"),
                 .aarch64 => switch (which) {
                     .equal => .eq,
                     .not_equal => .ne,
@@ -9402,6 +9458,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     const is_add = comptime add_sub == .num_plus;
                     const emit = &self.codegen.emit;
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateI128Binop is not written yet"),
                         .aarch64 => {
                             if (is_add) try emit.addsRegRegReg(.w64, result_low, lhs_parts.low, rhs_parts.low) else try emit.subsRegRegReg(.w64, result_low, lhs_parts.low, rhs_parts.low);
                             if (is_add) try emit.adcsRegRegReg(.w64, result_high, lhs_parts.high, rhs_parts.high) else try emit.sbcsRegRegReg(.w64, result_high, lhs_parts.high, rhs_parts.high);
@@ -9451,6 +9508,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         // result_hi = high64(a_lo * b_lo) + low64(a_lo * b_hi) + low64(a_hi * b_lo)
 
                         switch (isa) {
+                            .arm32 => @compileError("arm32: generateI128Binop is not written yet"),
                             .aarch64 => {
                                 // aarch64: Use MUL for low and UMULH for high
                                 // 1. a_lo * b_lo -> result_low (low), temp (high via UMULH)
@@ -9674,6 +9732,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             const freg = try self.allocTempFloat();
             switch (isa) {
+                .arm32 => @compileError("arm32: callI128PartsToFloat is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, freg, .V0);
                 },
@@ -9731,6 +9790,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             const result_reg = try self.allocTempFloat();
             switch (isa) {
+                .arm32 => @compileError("arm32: callFloatUnaryBuiltin is not written yet"),
                 .aarch64 => {
                     if (result_reg != .V0) {
                         try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, result_reg, .V0);
@@ -9780,6 +9840,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             const result_reg = try self.allocTempFloat();
             switch (isa) {
+                .arm32 => @compileError("arm32: callFloatBinaryBuiltin is not written yet"),
                 .aarch64 => {
                     if (result_reg != .V0) {
                         try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, result_reg, .V0);
@@ -10429,6 +10490,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // POPCNT is an SSE4.2-era instruction, so an x86 target at the
             // baseline CPU level counts bits the same way aarch64 does.
             switch (isa) {
+                .arm32 => @compileError("arm32: emitPopcount64 is not written yet"),
                 .aarch64 => try self.emitPopcount64Swar(dst, src),
                 .x86_64 => if (self.cpu_level == .v1)
                     try self.emitPopcount64Swar(dst, src)
@@ -10470,6 +10532,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// (64 when `src` is zero).
         fn emitClz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitClz64 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.clzRegReg(.w64, dst, src);
                     return;
@@ -10499,6 +10562,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// (64 when `src` is zero).
         fn emitCtz64(self: *Self, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitCtz64 is not written yet"),
                 .aarch64 => {
                     // No native ctz: reverse the bits, then count leading zeros.
                     try self.codegen.emit.rbitRegReg(.w64, dst, src);
@@ -10705,6 +10769,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             is_eq: bool,
         ) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: generateI128Equality is not written yet"),
                 .aarch64 => {
                     // Compare low parts
                     try self.codegen.emit.cmpRegReg(.w64, lhs_parts.low, rhs_parts.low);
@@ -10765,6 +10830,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // If high parts are equal, compare low parts (always unsigned since they're magnitudes)
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateI128Comparison is not written yet"),
                 .aarch64 => {
                     // Compare high parts
                     try self.codegen.emit.cmpRegReg(.w64, lhs_parts.high, rhs_parts.high);
@@ -10897,6 +10963,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // On x86_64, UCOMISD sets PF=1 for NaN (unordered), so eq/neq/lt/lte
             // need special handling to produce correct results when either operand is NaN.
             switch (isa) {
+                .arm32 => @compileError("arm32: generateFloatBinop is not written yet"),
                 .x86_64 => {
                     switch (float_op) {
                         .num_is_eq => {
@@ -11045,18 +11112,22 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             return switch (narrowEnum(IntBinOp, op)) {
                 .num_is_eq => condCode(.equal),
                 .num_is_lt => switch (isa) {
+                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
                     .aarch64 => @as(Condition, .mi),
                     .x86_64 => @as(Condition, .below),
                 },
                 .num_is_lte => switch (isa) {
+                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
                     .aarch64 => @as(Condition, .ls),
                     .x86_64 => @as(Condition, .below_or_equal),
                 },
                 .num_is_gt => switch (isa) {
+                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
                     .aarch64 => @as(Condition, .gt),
                     .x86_64 => @as(Condition, .above),
                 },
                 .num_is_gte => switch (isa) {
+                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
                     .aarch64 => @as(Condition, .ge),
                     .x86_64 => @as(Condition, .above_or_equal),
                 },
@@ -11124,6 +11195,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 const neg_low, const neg_high = try self.allocTempGenerals(2);
 
                 switch (isa) {
+                    .arm32 => @compileError("arm32: generateNumAbs is not written yet"),
                     .aarch64 => {
                         try self.codegen.emit.subsRegRegReg(.w64, neg_low, .ZRSP, parts.low);
                         try self.codegen.emit.sbcRegRegReg(.w64, neg_high, .ZRSP, parts.high);
@@ -11160,6 +11232,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             try self.codegen.emitNeg(widths.scalar_width, neg_reg, reg);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateNumAbs is not written yet"),
                 .aarch64 => {
                     // CMP reg, #0; CSEL result, neg_reg, reg, Before
                     try self.codegen.emit.cmpRegImm12(.w64, reg, 0);
@@ -11256,6 +11329,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const diff_reg, const neg_reg = try self.allocTempGenerals(2);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateAbsDiff is not written yet"),
                 .aarch64 => {
                     // CMP a, b
                     try self.codegen.emit.cmpRegReg(.w64, a_reg, b_reg);
@@ -11295,6 +11369,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const diff_lo, const diff_hi, const bma_lo, const bma_hi, const flag_reg = try self.allocTempGenerals(5);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateAbsDiff128 is not written yet"),
                 .aarch64 => {
                     // Compute a - b with flags (SUBS + SBCS gives correct 128-bit comparison)
                     try self.codegen.emit.subsRegRegReg(.w64, diff_lo, a_parts.low, b_parts.low);
@@ -11370,6 +11445,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             switch (value_loc) {
                 .stack_str, .stack_i128 => |base_offset| {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: loadAndMaskDiscriminant is not written yet"),
                         .aarch64 => {
                             const w = if (disc_use_w32) aarch64.RegisterWidth.w32 else aarch64.RegisterWidth.w64;
                             try self.codegen.emit.ldrRegMemSoff(w, disc_reg, .FP, base_offset + tu_disc_offset);
@@ -11383,6 +11459,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 .stack => |s| {
                     const base_offset = s.offset;
                     switch (isa) {
+                        .arm32 => @compileError("arm32: loadAndMaskDiscriminant is not written yet"),
                         .aarch64 => {
                             const w = if (disc_use_w32) aarch64.RegisterWidth.w32 else aarch64.RegisterWidth.w64;
                             try self.codegen.emit.ldrRegMemSoff(w, disc_reg, .FP, base_offset + tu_disc_offset);
@@ -11395,6 +11472,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 },
                 .list_stack => |ls_info| {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: loadAndMaskDiscriminant is not written yet"),
                         .aarch64 => {
                             const w = if (disc_use_w32) aarch64.RegisterWidth.w32 else aarch64.RegisterWidth.w64;
                             try self.codegen.emit.ldrRegMemSoff(w, disc_reg, .FP, ls_info.struct_offset + tu_disc_offset);
@@ -11427,6 +11505,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             if (tu_disc_size != 0 and tu_disc_size < 4) {
                 const mask: i32 = (@as(i32, 1) << @as(u5, @intCast(tu_disc_size * 8))) - 1;
                 switch (isa) {
+                    .arm32 => @compileError("arm32: loadAndMaskDiscriminant is not written yet"),
                     .aarch64 => {
                         const mask_reg = try self.allocTempGeneral();
                         try self.codegen.emitLoadImm(mask_reg, mask);
@@ -11459,6 +11538,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             // Store appropriate size - architecture specific
             switch (isa) {
+                .arm32 => @compileError("arm32: storeDiscriminant is not written yet"),
                 .aarch64 => {
                     // aarch64 only has .w32 and .w64 for emitStoreStack, use direct emit for smaller sizes.
                     switch (disc_size) {
@@ -11493,6 +11573,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             switch (disc_size) {
                 1 => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: storeDiscriminantToPtr is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.strbRegMemSoff(reg, ptr_reg, @intCast(offset));
                         },
@@ -11503,6 +11584,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 },
                 2 => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: storeDiscriminantToPtr is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.strhRegMemSoff(reg, ptr_reg, @intCast(offset));
                         },
@@ -11885,6 +11967,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             switch (size) {
                 .byte => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitSizedLoadMem is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.ldrbRegMemSoff(dst, base_reg, offset);
                         },
@@ -11895,6 +11978,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 },
                 .word => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitSizedLoadMem is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.ldrhRegMemSoff(dst, base_reg, offset);
                         },
@@ -11913,6 +11997,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             switch (size) {
                 .byte => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitSizedStoreMem is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.strbRegMemSoff(src, base_reg, offset);
                         },
@@ -11923,6 +12008,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 },
                 .word => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitSizedStoreMem is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.strhRegMemSoff(src, base_reg, offset);
                         },
@@ -11964,6 +12050,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 .target_offset = target_offset,
             });
             const form: CodeRefForm = switch (isa) {
+                .arm32 => @compileError("arm32: emitCallToOffset is not written yet"),
                 .aarch64 => switch (try self.codegen.emitDirectCall(target_offset)) {
                     .call => .call,
                     .inline_call => .inline_call,
@@ -12024,6 +12111,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     // For targets outside the shifted body, or the current body's entry point,
                     // re-patch because only the call site moved.
                     switch (isa) {
+                        .arm32 => @compileError("arm32: repatchInternalCalls is not written yet"),
                         .aarch64 => {
                             self.codegen.patchDirectCall(patch.call_offset, patch.target_offset);
                         },
@@ -12154,6 +12242,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitInternalCodeAddress(self: *Self, ref_target: CodeRefTarget, target_offset: usize, dst_reg: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitInternalCodeAddress is not written yet"),
                 .aarch64 => {
                     // The scratch register must be allocated before the anchor offset
                     // is read: allocation may emit spill code, and the anchor must be
@@ -12200,6 +12289,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const spec = self.store.getProcSpec(target_proc);
             if (spec.linked) return try self.emitLinkedProcAddress(spec.identity, dst_reg);
             switch (isa) {
+                .arm32 => @compileError("arm32: emitPendingProcAddress is not written yet"),
                 .aarch64 => {
                     // Reserve the 4-instruction PC-relative address sequence so the
                     // patcher can rewrite it once the target proc's code offset is
@@ -12242,6 +12332,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const call_site = self.codegen.currentOffset();
             try self.pending_rc_calls.append(self.allocator, .{ .instr_offset = call_site, .target_key = helper.encode() });
             switch (isa) {
+                .arm32 => @compileError("arm32: emitPendingRcCall is not written yet"),
                 .aarch64 => {
                     _ = try self.codegen.emitCallPlaceholder();
                 },
@@ -12258,6 +12349,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitPendingRcAddrKey(self: *Self, key: u64, dst_reg: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitPendingRcAddrKey is not written yet"),
                 .aarch64 => {
                     // Same 4-instruction sequence the patcher rewrites; the scratch
                     // register is allocated before the anchor offset is read because
@@ -12298,6 +12390,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             while (self.rc_helper_worklist.pop()) |helper| {
                 switch (isa) {
+                    .arm32 => @compileError("arm32: maybeDrainRcHelpers is not written yet"),
                     .aarch64 => try self.emitBranchIslandIfNeeded(),
                     .x86_64 => {},
                 }
@@ -12552,6 +12645,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             const skip_patch = blk: {
                 switch (isa) {
+                    .arm32 => @compileError("arm32: emitBuiltinInternalRcHelperStr is not written yet"),
                     .aarch64 => {
                         try self.codegen.emit.cmpRegImm12(.w64, len_reg, 0);
                         break :blk try self.codegen.emitCondJump(.mi);
@@ -13006,6 +13100,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             self.uses_caller_stack_arg_base = false;
 
             switch (isa) {
+                .arm32 => @compileError("arm32: compileRcHelperCallable is not written yet"),
                 .x86_64 => {
                     self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
                 },
@@ -13066,6 +13161,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const body_epilogue_offset = self.codegen.currentOffset();
             {
                 const actual_locals: u32 = switch (isa) {
+                    .arm32 => @compileError("arm32: compileRcHelperCallable is not written yet"),
                     .aarch64 => @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE),
                     .x86_64 => @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE),
                 };
@@ -13083,10 +13179,12 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const final_offset = body_start;
             const prologue_at = self.codegen.currentOffset();
             const helper_stack_alloc: u32 = switch (isa) {
+                .arm32 => @compileError("arm32: compileRcHelperCallable is not written yet"),
                 .x86_64 => @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE),
                 .aarch64 => @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE),
             };
             const helper_frame_size: u32 = switch (isa) {
+                .arm32 => @compileError("arm32: compileRcHelperCallable is not written yet"),
                 .x86_64 => blk: {
                     try self.codegen.emitPrologueWithAlloc(helper_stack_alloc);
                     break :blk helper_stack_alloc;
@@ -13111,6 +13209,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             try self.shiftNestedCompiledRcHelperOffsets(body_start, body_end, prologue_size, cache_key);
             self.shiftPendingRcRefs(body_start, body_end, prologue_size);
             switch (isa) {
+                .arm32 => @compileError("arm32: compileRcHelperCallable is not written yet"),
                 .aarch64 => try self.codegen.shiftBranchSites(body_start, body_end, prologue_size),
                 .x86_64 => {},
             }
@@ -13462,6 +13561,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     if (tu_data.discriminant_size != 0 and tu_data.discriminant_size < 4) {
                         const mask: i32 = (@as(i32, 1) << @as(u5, @intCast(tu_data.discriminant_size * 8))) - 1;
                         switch (isa) {
+                            .arm32 => @compileError("arm32: generateDiscriminantAccess is not written yet"),
                             .aarch64 => {
                                 const mask_reg = try self.allocTempGeneral();
                                 try self.codegen.emitLoadImm(mask_reg, mask);
@@ -14107,6 +14207,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         continue;
                     }
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateTailCall is not written yet"),
                         .aarch64 => {
                             if (self.argNeedsI128Abi(info.loc, info.layout_idx) and reg_idx < max_arg_regs and reg_idx % 2 != 0) reg_idx += 1;
                         },
@@ -14145,6 +14246,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         continue;
                     }
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateTailCall is not written yet"),
                         .aarch64 => {
                             if (self.argNeedsI128Abi(info.loc, info.layout_idx) and reg_idx < max_arg_regs and reg_idx % 2 != 0) reg_idx += 1;
                         },
@@ -14168,6 +14270,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             const proc = try self.compiledProcForId(call.proc);
             switch (isa) {
+                .arm32 => @compileError("arm32: generateTailCall is not written yet"),
                 .aarch64 => {
                     // The save area sits at the bottom of the frame, below the
                     // staging slot, so the block can move before the registers it
@@ -14287,6 +14390,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// into it, which is negative when the callee's block is the larger.
         fn emitTailBlockAddress(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitTailBlockAddress is not written yet"),
                 .aarch64 => {
                     const block_base = self.callerStackArgBaseReg();
                     try self.codegen.emitLoadImm(dst, offset);
@@ -14861,10 +14965,12 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // aarch64 it is the dedicated x8 register, set just before the call.
             // Not a cached isa test: every arm names that backend's answer.
             const aarch64_sret = switch (isa) {
+                .arm32 => @compileError("arm32: generateCAbiCall is not written yet"),
                 .aarch64 => lowered.ret == .indirect,
                 .x86_64 => false,
             };
             switch (isa) {
+                .arm32 => @compileError("arm32: generateCAbiCall is not written yet"),
                 .x86_64 => if (lowered.ret == .indirect) try builder.setReturnByPointer(ret_slot),
                 .aarch64 => {},
             }
@@ -14959,6 +15065,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         fn emitHostedFloatResultStore(self: *Self, dst_off: i32, index: usize, size: u8) Allocator.Error!void {
             const freg = hostedFloatResultReg(index);
             switch (isa) {
+                .arm32 => @compileError("arm32: emitHostedFloatResultStore is not written yet"),
                 .aarch64 => {
                     switch (size) {
                         4 => try self.codegen.emitStoreStackF32(dst_off, freg),
@@ -14980,6 +15087,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn hostedFloatResultReg(index: usize) FloatReg {
             return switch (isa) {
+                .arm32 => @compileError("arm32: hostedFloatResultReg is not written yet"),
                 .aarch64 => switch (index) {
                     0 => .V0,
                     1 => .V1,
@@ -14998,6 +15106,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Load the immediate `value` into `dst` at `width`.
         fn emitLoadImm(self: *Self, comptime width: widths.RegisterWidth, dst: GeneralReg, value: i64) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLoadImm is not written yet"),
                 // Both instruction sets' `emitLoadImm` write the whole 64-bit
                 // register.
                 .x86_64, .aarch64 => {
@@ -15010,6 +15119,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Compare a general register against an immediate bit pattern.
         fn emitCmpImm(self: *Self, comptime width: widths.RegisterWidth, reg: GeneralReg, value: i64) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitCmpImm is not written yet"),
                 .aarch64 => {
                     if (std.math.cast(u12, value)) |imm12| {
                         try self.codegen.emit.cmpRegImm12(width, reg, imm12);
@@ -15052,6 +15162,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// RETURNS: The patch location (where the displacement bytes are) for later patching.
         fn emitJumpIfNotEqual(self: *Self) Allocator.Error!usize {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitJumpIfNotEqual is not written yet"),
                 .aarch64 => {
                     return self.codegen.emitCondJump(.ne);
                 },
@@ -15069,6 +15180,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Emit a conditional jump for unsigned less than (for list length comparisons)
         fn emitJumpIfEqual(self: *Self) Allocator.Error!usize {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitJumpIfEqual is not written yet"),
                 .aarch64 => {
                     return self.codegen.emitCondJump(.eq);
                 },
@@ -15102,6 +15214,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             for (param_num_regs, 0..) |nr, i| {
                 const is_i128_arg = self.argNeedsI128Abi(arg_infos[i].loc, arg_infos[i].layout_idx);
                 switch (isa) {
+                    .arm32 => @compileError("arm32: computePassByPtrPlan is not written yet"),
                     .aarch64 => {
                         if (!pass_by_ptr[i] and is_i128_arg and reg_count < max_arg_regs and reg_count % 2 != 0) {
                             reg_count += 1;
@@ -15208,6 +15321,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         fn emitCallToLinkedProc(self: *Self, identity: lir.ProcIdentity) Allocator.Error!void {
             const symbol = try self.linkedProcSymbol(identity);
             switch (isa) {
+                .arm32 => @compileError("arm32: emitCallToLinkedProc is not written yet"),
                 .aarch64 => try self.codegen.emitExternCall(symbol),
                 .x86_64 => {
                     const code_offset = self.codegen.currentOffset();
@@ -15237,6 +15351,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             });
 
             switch (isa) {
+                .arm32 => @compileError("arm32: emitPendingCallToProc is not written yet"),
                 .aarch64 => {
                     _ = try self.codegen.emitCallPlaceholder();
                 },
@@ -16164,6 +16279,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     }
                     const reg = try self.allocTempGeneral();
                     switch (isa) {
+                        .arm32 => @compileError("arm32: materializeF32BitsInGeneralReg is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.fmovGenFromFloat(.single, reg, float.reg);
                         },
@@ -16327,6 +16443,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     }
                     const bits: u32 = @bitCast(val);
                     switch (isa) {
+                        .arm32 => @compileError("arm32: ensureInFloatReg is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.movRegImm64(.IP0, bits);
                             try self.codegen.emit.fmovFloatFromGen(.single, reg, .IP0);
@@ -16348,6 +16465,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     const bits: u64 = @bitCast(val);
                     if (bits == 0) {
                         switch (isa) {
+                            .arm32 => @compileError("arm32: ensureInFloatReg is not written yet"),
                             .aarch64 => {
                                 try self.codegen.emit.fmovFloatFromGen(.double, reg, .ZRSP);
                             },
@@ -16357,6 +16475,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         }
                     } else {
                         switch (isa) {
+                            .arm32 => @compileError("arm32: ensureInFloatReg is not written yet"),
                             .aarch64 => {
                                 try self.codegen.emit.movRegImm64(.IP0, @bitCast(bits));
                                 try self.codegen.emit.fmovFloatFromGen(.double, reg, .IP0);
@@ -16381,6 +16500,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                             );
                         }
                         switch (isa) {
+                            .arm32 => @compileError("arm32: ensureInFloatReg is not written yet"),
                             .aarch64 => {
                                 try self.codegen.emitLoadStackF32(reg, s.offset);
                             },
@@ -16467,6 +16587,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         .float_reg => |float| {
                             if (float.width != .f32) base.invariant("LIR/codegen invariant violated: storing F64 register as F32", .{});
                             switch (isa) {
+                                .arm32 => @compileError("arm32: storeResultToSavedPtr is not written yet"),
                                 .aarch64 => {
                                     try self.codegen.emit.fstrRegMemUoff(.single, float.reg, saved_ptr_reg, 0);
                                 },
@@ -16711,6 +16832,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     // by arithmetic-shifting right by 63 to fill high word.
                     const sign_reg = try self.allocTempGeneral();
                     switch (isa) {
+                        .arm32 => @compileError("arm32: storeI128ToMem is not written yet"),
                         .aarch64 => {
                             try self.emitStoreToPtr(.w64, reg, ptr_reg, 0);
                             try self.codegen.emit.asrRegRegImm(.w64, sign_reg, reg, 63);
@@ -16847,6 +16969,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         8 => {
                             if (float.width != .f64) base.invariant("LIR/codegen invariant violated: copying F32 register into F64 slot", .{});
                             switch (isa) {
+                                .arm32 => @compileError("arm32: copyBytesToStackOffset is not written yet"),
                                 .aarch64 => {
                                     try self.codegen.emitStoreStackF64(dest_offset, float.reg);
                                 },
@@ -16884,6 +17007,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitLoad(self: *Self, comptime width: widths.RegisterWidth, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLoad is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.ldrRegMemSoff(width, dst, base_reg, offset);
                 },
@@ -16895,6 +17019,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitStore(self: *Self, comptime width: widths.RegisterWidth, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitStore is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.strRegMemSoff(width, src, base_reg, offset);
                 },
@@ -16906,6 +17031,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitLoadW8(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLoadW8 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.ldrbRegMemSoff(dst, base_reg, offset);
                 },
@@ -16917,6 +17043,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitLoadW16(self: *Self, dst: GeneralReg, base_reg: GeneralReg, offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLoadW16 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.ldrhRegMemSoff(dst, base_reg, offset);
                 },
@@ -16928,6 +17055,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitStoreW8(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitStoreW8 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.strbRegMemSoff(src, base_reg, offset);
                 },
@@ -16939,6 +17067,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitStoreW16(self: *Self, base_reg: GeneralReg, offset: i32, src: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitStoreW16 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.strhRegMemSoff(src, base_reg, offset);
                 },
@@ -16950,6 +17079,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitLoadStackW8(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLoadStackW8 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emitLoadStackByte(dst, offset);
                 },
@@ -16961,6 +17091,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitLoadStackW16(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLoadStackW16 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emitLoadStackHalfword(dst, offset);
                 },
@@ -16974,6 +17105,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// right, or arithmetic right.
         fn emitShiftImm(self: *Self, comptime op: ShiftOp, comptime width: widths.RegisterWidth, dst: GeneralReg, src: GeneralReg, amount: u8) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitShiftImm is not written yet"),
                 .aarch64 => {
                     const emit_fn = switch (op) {
                         .shl => @TypeOf(self.codegen.emit).lslRegRegImm,
@@ -16997,6 +17129,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Shift `src` by the register `amount` into `dst`.
         fn emitShiftReg(self: *Self, comptime op: ShiftOp, comptime width: widths.RegisterWidth, dst: GeneralReg, src: GeneralReg, amount: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitShiftReg is not written yet"),
                 .aarch64 => {
                     const emit_fn = switch (op) {
                         .shl => @TypeOf(self.codegen.emit).lslRegReg,
@@ -17043,6 +17176,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitSaturatingSub(self: *Self, comptime width: widths.RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitSaturatingSub is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.cmpRegReg(width, a, b);
                     try self.codegen.emit.subRegRegReg(width, dst, a, b);
@@ -17060,6 +17194,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitAddImm(self: *Self, comptime width: widths.RegisterWidth, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitAddImm is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.addRegRegImm12(width, dst, src, @intCast(imm));
                 },
@@ -17077,6 +17212,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             }
 
             switch (isa) {
+                .arm32 => @compileError("arm32: emitAddPtrImmAny is not written yet"),
                 .aarch64 => {
                     if (imm > 0 and imm <= 4095) {
                         try self.codegen.emit.addRegRegImm12(.w64, dst, src, @intCast(imm));
@@ -17097,6 +17233,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitSubImm(self: *Self, comptime width: widths.RegisterWidth, dst: GeneralReg, src: GeneralReg, imm: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitSubImm is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.subRegRegImm12(width, dst, src, @intCast(imm));
                 },
@@ -17109,6 +17246,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitSetCond(self: *Self, comptime width: widths.RegisterWidth, dst: GeneralReg, cond: Condition) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitSetCond is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.cset(width, dst, cond);
                 },
@@ -17123,6 +17261,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitLeaStack(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLeaStack is not written yet"),
                 .aarch64 => {
                     if (offset >= 0 and offset <= 4095) {
                         try self.codegen.emit.addRegRegImm12(.w64, dst, frame_ptr, @intCast(offset));
@@ -17139,6 +17278,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitAddStackPtr(self: *Self, imm: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitAddStackPtr is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.addRegRegImm12(.w64, stack_ptr, stack_ptr, @intCast(imm));
                 },
@@ -17310,6 +17450,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitStoreToPtr(self: *Self, comptime width: widths.RegisterWidth, src: GeneralReg, ptr_reg: GeneralReg, byte_offset: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitStoreToPtr is not written yet"),
                 .aarch64 => try self.codegen.emit.strRegMemSoff(width, src, ptr_reg, byte_offset),
                 .x86_64 => try self.codegen.emit.movMemReg(width, ptr_reg, byte_offset, src),
             }
@@ -17317,6 +17458,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitStoreStackW8(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitStoreStackW8 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emitStoreStackByte(offset, src);
                 },
@@ -17328,6 +17470,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitStoreStackW16(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitStoreStackW16 is not written yet"),
                 .aarch64 => {
                     try self.codegen.emitStoreStackHalfword(offset, src);
                 },
@@ -17347,6 +17490,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 0 => {},
                 1 => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitStoreScalarToPtr is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.strbRegMem(src_reg, ptr_reg, 0);
                         },
@@ -17357,6 +17501,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 },
                 2 => {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitStoreScalarToPtr is not written yet"),
                         .aarch64 => {
                             try self.codegen.emit.strhRegMem(src_reg, ptr_reg, 0);
                         },
@@ -17374,6 +17519,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Store float register to memory at [ptr_reg] (architecture-specific)
         fn emitStoreFloatToMem(self: *Self, ptr_reg: anytype, src_reg: FloatReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitStoreFloatToMem is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.fstrRegMemUoff(.double, src_reg, ptr_reg, 0);
                 },
@@ -18138,6 +18284,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             try self.codegen.patchJump(back, loop);
             try self.codegen.patchJump(tail, self.codegen.currentOffset());
             switch (isa) {
+                .arm32 => @compileError("arm32: generateDynFrameAlloc is not written yet"),
                 .aarch64 => try self.codegen.emit.subRegRegReg(.w64, stack_ptr, stack_ptr, total),
                 .x86_64 => try self.codegen.emit.subRegReg(.w64, stack_ptr, total),
             }
@@ -18804,6 +18951,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn patchCallTarget(self: *Self, call_site: usize, target_offset: usize) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: patchCallTarget is not written yet"),
                 .aarch64 => {
                     // A far target gets a veneer appended at the emission point.
                     const island_start = self.codegen.currentOffset();
@@ -18821,6 +18969,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         fn patchInternalCodeAddress(self: *Self, instr_offset: usize, target_offset: usize) void {
             const buf = self.codegen.emit.buf.items;
             switch (isa) {
+                .arm32 => @compileError("arm32: patchInternalCodeAddress is not written yet"),
                 .aarch64 => {
                     // The emit reserves the 4-instruction PC-relative sequence (see
                     // Emit.pcRelAddrSequence) starting at instr_offset. The registers
@@ -18972,6 +19121,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     base.invariant("Dev/codegen invariant violated: external proc {d} had no object-cache entry spliced before compilation", .{i});
                 }
                 switch (isa) {
+                    .arm32 => @compileError("arm32: compileAllProcSpecs is not written yet"),
                     .aarch64 => {
                         try self.emitBranchIslandIfNeeded();
                         try self.codegen.compactBranchSites();
@@ -19128,6 +19278,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // PHASE 1: Generate body first (to determine callee_saved_used)
             // Initialize stack_offset to reserve space for callee-saved area
             switch (isa) {
+                .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                 .x86_64 => {
                     // Reserve 40 bytes for 5 callee-saved registers at fixed offsets
                     self.codegen.stack_offset = -CodeGen.CALLEE_SAVED_AREA_SIZE;
@@ -19252,6 +19403,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             }
             {
                 const actual_locals: u32 = switch (isa) {
+                    .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                     .aarch64 => @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE),
                     .x86_64 => @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE),
                 };
@@ -19269,6 +19421,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const body_tail_exit_offset = self.codegen.currentOffset();
             if (self.tail_exit_patches.items.len > saved_tail_exit_patches_len) {
                 const actual_locals: u32 = switch (isa) {
+                    .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                     .aarch64 => @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE),
                     .x86_64 => @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE),
                 };
@@ -19276,6 +19429,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 builder.setCalleeSavedMask(self.codegen.callee_saved_used);
                 builder.setStackSize(actual_locals);
                 switch (isa) {
+                    .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                     .aarch64 => {
                         try self.emitReleaseDynRegion();
                         try builder.emitTailCallExitAarch64(&self.codegen.emit, tail_call_delta_reg, tail_call_target_reg);
@@ -19296,10 +19450,12 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 const prologue_start = body_start;
                 const prologue_at = self.codegen.currentOffset();
                 const actual_locals: u32 = switch (isa) {
+                    .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                     .x86_64 => @intCast(-self.codegen.stack_offset - CodeGen.CALLEE_SAVED_AREA_SIZE),
                     .aarch64 => @intCast(self.codegen.stack_offset - 16 - CodeGen.CALLEE_SAVED_AREA_SIZE),
                 };
                 const frame_size: u32 = switch (isa) {
+                    .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                     .x86_64 => blk: {
                         try self.codegen.emitPrologueWithAllocAndStackProbe(actual_locals, stack_probe_required);
                         break :blk actual_locals;
@@ -19330,6 +19486,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 self.shiftPendingMessageAddrs(body_start, body_end, prologue_size);
                 self.shiftPendingRcRefs(body_start, body_end, prologue_size);
                 switch (isa) {
+                    .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                     .aarch64 => try self.codegen.shiftBranchSites(body_start, body_end, prologue_size),
                     .x86_64 => {},
                 }
@@ -19355,6 +19512,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 const final_tail_exit = body_tail_exit_offset - body_start + prologue_size + prologue_start;
                 for (self.tail_exit_patches.items[saved_tail_exit_patches_len..]) |site| {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: compileProcSpec is not written yet"),
                         .aarch64 => {
                             try self.codegen.patchJump(site + prologue_size, final_tail_exit);
                         },
@@ -19438,6 +19596,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         fn emitReleaseDynRegion(self: *Self) Allocator.Error!void {
             if (!self.proc_has_dyn_region) return;
             switch (isa) {
+                .arm32 => @compileError("arm32: emitReleaseDynRegion is not written yet"),
                 .aarch64 => try self.codegen.emit.addRegRegImm12(.w64, stack_ptr, frame_ptr, 0),
                 .x86_64 => {},
             }
@@ -19517,6 +19676,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             if (runtime_ret_layout == .f32) {
                 const stack_offset = self.codegen.allocStackSlot(4);
                 switch (isa) {
+                    .arm32 => @compileError("arm32: saveCallReturnValue is not written yet"),
                     .aarch64 => {
                         try self.codegen.emitStoreStackF32(stack_offset, .V0);
                     },
@@ -19530,6 +19690,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             if (runtime_ret_layout == .f64) {
                 const stack_offset = self.codegen.allocStackSlot(8);
                 switch (isa) {
+                    .arm32 => @compileError("arm32: saveCallReturnValue is not written yet"),
                     .aarch64 => {
                         try self.codegen.emitStoreStackF64(stack_offset, .V0);
                     },
@@ -19599,6 +19760,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         const stack_offset = self.codegen.allocStackSlot(size_align.size);
                         const num_regs = (size_align.size + target_ptr_size - 1) / target_ptr_size;
                         switch (isa) {
+                            .arm32 => @compileError("arm32: saveCallReturnValue is not written yet"),
                             .aarch64 => {
                                 const regs = CC.ROC_RET_REGS;
                                 for (0..@min(num_regs, regs.len)) |i| {
@@ -19667,6 +19829,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 const pbp = pass_by_ptr[i];
                 if (pbp) block.pointees += self.pointeeBlockBytes(ai.layout_idx.?);
                 switch (isa) {
+                    .arm32 => @compileError("arm32: callArgBlock is not written yet"),
                     .aarch64 => {
                         if (!pbp and self.argNeedsI128Abi(ai.loc, ai.layout_idx) and reg_count < max_arg_regs and reg_count % 2 != 0) {
                             reg_count += 1;
@@ -19702,6 +19865,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitSubStackPtr(self: *Self, size: u32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitSubStackPtr is not written yet"),
                 .aarch64 => {
                     if (size == lir.LIR.stack_probe_page_size) {
                         try self.codegen.emit.subRegRegImm12Shifted(.w64, stack_ptr, stack_ptr, 1, true);
@@ -19942,6 +20106,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     const pbp = if (config.pass_by_ptr) |p| p[i] else false;
                     const is_i128_arg = self.argNeedsI128Abi(ai.loc, ai.layout_idx);
                     switch (isa) {
+                        .arm32 => @compileError("arm32: placeCallArguments is not written yet"),
                         .aarch64 => {
                             if (!pbp and is_i128_arg and reg_count < max_arg_regs and reg_count % 2 != 0) {
                                 reg_count += 1;
@@ -20041,6 +20206,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     const is_i128_arg = self.argNeedsI128Abi(info.loc, arg_layout);
                     if (is_i128_arg) {
                         switch (isa) {
+                            .arm32 => @compileError("arm32: placeCallArguments is not written yet"),
                             .aarch64 => {
                                 if (reg_idx % 2 != 0) {
                                     reg_idx += 1;
@@ -20128,6 +20294,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn markCallerStackArgBaseUsed(self: *Self) void {
             switch (isa) {
+                .arm32 => @compileError("arm32: markCallerStackArgBaseUsed is not written yet"),
                 .aarch64 => {
                     const bit = @as(u32, 1) << @backingInt(caller_stack_arg_base_reg);
                     self.uses_caller_stack_arg_base = true;
@@ -20140,6 +20307,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn callerStackArgBaseReg(self: *Self) GeneralReg {
             switch (isa) {
+                .arm32 => @compileError("arm32: callerStackArgBaseReg is not written yet"),
                 .aarch64 => {
                     self.markCallerStackArgBaseUsed();
                     return caller_stack_arg_base_reg;
@@ -20299,6 +20467,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     break :blk runtime_layout_idx == .i128 or runtime_layout_idx == .u128 or runtime_layout_idx == .dec;
                 };
                 switch (isa) {
+                    .arm32 => @compileError("arm32: at is not written yet"),
                     .aarch64 => {
                         if (is_i128_param and pre_reg_count < max_arg_regs and pre_reg_count % 2 != 0) {
                             pre_reg_count += 1;
@@ -20347,6 +20516,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         break :blk runtime_layout_idx == .i128 or runtime_layout_idx == .u128 or runtime_layout_idx == .dec;
                     };
                     switch (isa) {
+                        .arm32 => @compileError("arm32: at is not written yet"),
                         .aarch64 => {
                             if (!pbp and is_i128_param and pre_reg_count < max_arg_regs and pre_reg_count % 2 != 0) {
                                 pre_reg_count += 1;
@@ -20407,6 +20577,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 }
 
                 switch (isa) {
+                    .arm32 => @compileError("arm32: at is not written yet"),
                     .aarch64 => {
                         const runtime_layout_idx = self.runtimeRepresentationLayoutIdx(self.paramLayout(local));
                         if (num_regs == 2 and (runtime_layout_idx == .i128 or runtime_layout_idx == .u128 or runtime_layout_idx == .dec) and reg_idx % 2 != 0) {
@@ -20559,6 +20730,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                                     .float_reg => |float| {
                                         if (float.width != width) base.invariant("LIR/codegen invariant violated: float return width mismatch", .{});
                                         switch (isa) {
+                                            .arm32 => @compileError("arm32: moveToReturnRegisterWithLayout is not written yet"),
                                             .aarch64 => {
                                                 if (float.reg != .V0) try self.codegen.emit.fmovRegReg(if (width == .f32) .single else .double, .V0, float.reg);
                                             },
@@ -20578,11 +20750,13 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                                         }
                                         if (width == .f32) {
                                             try self.codegen.emitLoadStackF32(switch (isa) {
+                                                .arm32 => @compileError("arm32: moveToReturnRegisterWithLayout is not written yet"),
                                                 .aarch64 => .V0,
                                                 .x86_64 => .XMM0,
                                             }, s.offset);
                                         } else {
                                             try self.codegen.emitLoadStackF64(switch (isa) {
+                                                .arm32 => @compileError("arm32: moveToReturnRegisterWithLayout is not written yet"),
                                                 .aarch64 => .V0,
                                                 .x86_64 => .XMM0,
                                             }, s.offset);
@@ -20593,6 +20767,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                                         const immediate_loc: ValueLocation = .{ .immediate_f32 = val };
                                         const reg = try self.ensureInFloatReg(immediate_loc, width);
                                         switch (isa) {
+                                            .arm32 => @compileError("arm32: moveToReturnRegisterWithLayout is not written yet"),
                                             .aarch64 => {
                                                 if (reg != .V0) try self.codegen.emit.fmovRegReg(.single, .V0, reg);
                                             },
@@ -20607,6 +20782,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                                         const immediate_loc: ValueLocation = .{ .immediate_f64 = val };
                                         const reg = try self.ensureInFloatReg(immediate_loc, width);
                                         switch (isa) {
+                                            .arm32 => @compileError("arm32: moveToReturnRegisterWithLayout is not written yet"),
                                             .aarch64 => {
                                                 if (reg != .V0) try self.codegen.emit.fmovRegReg(.double, .V0, reg);
                                             },
@@ -20724,6 +20900,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         };
                         const num_regs = (size_align.size + target_ptr_size - 1) / target_ptr_size;
                         switch (isa) {
+                            .arm32 => @compileError("arm32: moveToReturnRegisterWithLayout is not written yet"),
                             .aarch64 => {
                                 const regs = CC.ROC_RET_REGS;
                                 for (0..@min(num_regs, regs.len)) |i| {
@@ -20980,6 +21157,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
             fn finish(scratch: *@This(), owner: *Self) void {
                 scratch.end = switch (isa) {
+                    .arm32 => @compileError("arm32: finish is not written yet"),
                     .aarch64 => @max(scratch.end, owner.codegen.stack_offset),
                     .x86_64 => @min(scratch.end, owner.codegen.stack_offset),
                 };
@@ -21033,6 +21211,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                         histogram_offset = offset;
                     }
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateStmt is not written yet"),
                         .aarch64 => try self.emitBranchIslandIfNeeded(),
                         .x86_64 => {},
                     }
@@ -22427,6 +22606,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// arm64.
         fn emitRelocatableExpectSite(self: *Self, dst: GeneralReg, site: u32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitRelocatableExpectSite is not written yet"),
                 .x86_64 => {
                     // [REX.B] B8+rd imm32: the field is the instruction's
                     // last four bytes.
@@ -22488,6 +22668,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             self.assertImageOpen();
             const message_offset = try self.internMessage(msg);
             switch (isa) {
+                .arm32 => @compileError("arm32: emitPendingMessageAddress is not written yet"),
                 .aarch64 => {
                     // Reserve the 4-instruction PC-relative address sequence. The
                     // scratch register is allocated before the anchor offset is
@@ -22603,6 +22784,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         fn emitTrap(self: *Self) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitTrap is not written yet"),
                 .aarch64 => {
                     try self.codegen.emit.brk();
                 },
@@ -22662,6 +22844,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             self.codegen.callee_saved_used = 0;
 
             switch (isa) {
+                .arm32 => @compileError("arm32: generateEntrypointWrapper is not written yet"),
                 .aarch64 => {
                     const saved_callee_saved_used = self.codegen.callee_saved_used;
                     const saved_callee_saved_available = self.codegen.callee_saved_available;
@@ -23031,6 +23214,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // Capture the sret pointer before anything else can clobber it.
             if (lowered.ret == .indirect) {
                 switch (isa) {
+                    .arm32 => @compileError("arm32: generateEntrypointBodyCAbi is not written yet"),
                     .aarch64 => {
                         try self.codegen.emit.movRegReg(.w64, sret_reg, .XR);
                     },
@@ -23173,6 +23357,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             // offset depends on the final frame size; those copies are emitted
             // by emitEntryIncomingStackCopies right after the prologue.)
             switch (isa) {
+                .arm32 => @compileError("arm32: generateEntrypointBodyCAbi is not written yet"),
                 .x86_64 => {
                     for (incoming_stack_copies.items) |copy| {
                         const src_off = incoming_stack_arg_base_offset + @as(i32, @intCast(copy.incoming_byte_offset));
@@ -23222,6 +23407,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     }
                     // Both SysV and Win64 require the sret pointer back in RAX.
                     switch (isa) {
+                        .arm32 => @compileError("arm32: generateEntrypointBodyCAbi is not written yet"),
                         .x86_64 => {
                             try self.codegen.emit.movRegReg(.w64, .RAX, sret_reg);
                         },
@@ -23258,6 +23444,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Store an incoming float argument register into the frame.
         fn emitEntryFloatStore(self: *Self, dest_off: i32, freg: FloatReg, size: u8) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitEntryFloatStore is not written yet"),
                 .aarch64 => {
                     switch (size) {
                         4 => try self.codegen.emitStoreStackF32(dest_off, freg),
@@ -23281,6 +23468,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// float return register sequence (V0..V3 / XMM0..XMM1).
         fn emitEntryFloatLoad(self: *Self, src_off: i32, index: usize, size: u8) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitEntryFloatLoad is not written yet"),
                 .aarch64 => {
                     const fregs = [_]FloatReg{ .V0, .V1, .V2, .V3 };
                     const freg = fregs[index];
@@ -23309,6 +23497,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// where that area begins at [fp + frame_total].
         fn emitEntryIncomingStackCopies(self: *Self, copies: []const EntryStackCopy, frame_total: i32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitEntryIncomingStackCopies is not written yet"),
                 .x86_64 => {
                     std.debug.assert(copies.len == 0);
                     return;
@@ -23382,6 +23571,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Returns the patch location for use with patchJump.
         fn emitJumpPlaceholder(self: *Self) Allocator.Error!usize {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitJumpPlaceholder is not written yet"),
                 .aarch64 => {
                     return try self.codegen.emitJump();
                 },
@@ -23516,6 +23706,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         ) Allocator.Error!usize {
             self.assertImageOpen();
             switch (isa) {
+                .arm32 => @compileError("arm32: appendAssembledRegion is not written yet"),
                 .aarch64 => {
                     const island_start = self.codegen.currentOffset();
                     try self.codegen.prepareForAppend(bytes.len);
@@ -23625,6 +23816,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                 owned.target = .{ .rc_helper = self.symbolName(symbol) };
             }
             switch (isa) {
+                .arm32 => @compileError("arm32: queueAssembledSymbolicRef is not written yet"),
                 .aarch64 => {
                     if (reference.form == .call) {
                         try self.codegen.registerAssembledCallVeneer(reference.site, if (reference.veneer) |veneer| @as(usize, veneer) else null);
@@ -23664,6 +23856,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// Producer-authored placement metadata; never decode it from bytes.
         pub fn codeRefVeneer(self: *const Self, site: usize) ?usize {
             switch (isa) {
+                .arm32 => @compileError("arm32: codeRefVeneer is not written yet"),
                 .aarch64 => return self.codegen.callVeneer(site),
                 .x86_64 => {},
             }
@@ -23672,6 +23865,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         pub fn registerAssembledRefVeneer(self: *Self, site: usize, veneer: ?usize) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: registerAssembledRefVeneer is not written yet"),
                 .aarch64 => {
                     try self.codegen.registerAssembledCallVeneer(site, veneer);
                 },
@@ -23757,6 +23951,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         pub fn patchAssembledRef(self: *Self, site: usize, form: CodeRefForm, ref_target: CodeRefTarget, target_offset: usize) Allocator.Error!void {
             switch (form) {
                 .call => switch (isa) {
+                    .arm32 => @compileError("arm32: patchAssembledRef is not written yet"),
                     .aarch64 => {
                         try self.codegen.registerAssembledCallSite(site);
                         try self.patchCallTarget(site, target_offset);
@@ -23766,6 +23961,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
                     },
                 },
                 .inline_call => switch (isa) {
+                    .arm32 => @compileError("arm32: patchAssembledRef is not written yet"),
                     .aarch64 => self.codegen.patchDirectCall(site, target_offset),
                     .x86_64 => base.invariant("LIR/codegen invariant violated: inline-call references exist only in aarch64 code", .{}),
                 },
@@ -23781,6 +23977,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             const reloc_index: u32 = @intCast(self.codegen.relocations.items.len);
             try self.codegen.relocations.append(self.allocator, relocation);
             switch (isa) {
+                .arm32 => @compileError("arm32: appendAssembledRelocation is not written yet"),
                 .aarch64 => {
                     if (relocation == .linked_function) {
                         const loc: usize = @intCast(relocation.linked_function.offset);
@@ -23808,6 +24005,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         pub fn excerptRelocations(self: *Self, allocator: Allocator) Allocator.Error![]Relocation {
             const relocations = try allocator.dupe(Relocation, self.getRelocations());
             switch (isa) {
+                .arm32 => @compileError("arm32: excerptRelocations is not written yet"),
                 .aarch64 => {
                     for (self.codegen.extern_stubs.items) |stub| {
                         const stub_start = relocations[stub.page_relocation].linked_data.offset;
@@ -23842,6 +24040,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// the veneer's address sequence.
         pub fn codeRefEdges(self: *const Self, site: usize, form: CodeRefForm, target_offset: usize) CodeRefEdges {
             switch (isa) {
+                .arm32 => @compileError("arm32: codeRefEdges is not written yet"),
                 .aarch64 => switch (form) {
                     .addr => return .one(.{ .site = site, .target = target_offset, .kind = .pc_sequence, .addend = 0 }),
                     .inline_call => return .one(.{ .site = site, .target = target_offset, .kind = if (self.codegen.directCallBranches(site)) .branch26 else .pc_sequence, .addend = 0 }),
@@ -23890,6 +24089,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
         /// the buffer it was lifted from was laid out.
         pub fn normalizeExcerptRefSite(bytes: []u8, site: usize, form: CodeRefForm, veneer: ?usize) void {
             switch (isa) {
+                .arm32 => @compileError("arm32: normalizeExcerptRefSite is not written yet"),
                 .aarch64 => {
                     const EmitT = aarch64.Emit(machine_abi);
                     switch (form) {
@@ -23929,6 +24129,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
         pub fn normalizeExcerptCode(self: *const Self, start: usize, bytes: []u8) void {
             switch (isa) {
+                .arm32 => @compileError("arm32: normalizeExcerptCode is not written yet"),
                 .aarch64 => {
                     for (self.codegen.extern_stubs.items) |stub| {
                         if (stub.call < start or stub.call >= start + bytes.len) continue;
@@ -23948,6 +24149,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             try self.resolveAssembledSymbolicRefs();
             try self.placeMessagePool();
             switch (isa) {
+                .arm32 => @compileError("arm32: finishImage is not written yet"),
                 .aarch64 => {
                     const island_start = self.codegen.currentOffset();
                     try self.codegen.finishImage();
@@ -24246,6 +24448,7 @@ fn compileProcSpecsInOrder(cg: anytype, demand: []const lir.LIR.LirProcSpecId) A
         }
         std.debug.assert(!proc.external);
         switch (comptime @TypeOf(cg.*).code_abi.isa()) {
+            .arm32 => @compileError("arm32: compileProcSpecsInOrder is not written yet"),
             .aarch64 => {
                 try cg.emitBranchIslandIfNeeded();
                 try cg.codegen.compactBranchSites();
@@ -24489,6 +24692,7 @@ test "aggregate copies have bounded native code size at large frame offsets" {
             try cg.poisonStackArea(0x110000, size);
             try std.testing.expect(cg.codegen.currentOffset() - before_fill < 256);
             switch (comptime isaOf(target)) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .aarch64 => {
                     const before_entry = cg.codegen.currentOffset();
                     const free_general = cg.codegen.free_general;
@@ -25096,6 +25300,7 @@ test "proc params and mutable list cells use distinct stack slots" {
 
     const HostCodeGen = @TypeOf(codegen.codegen);
     switch (comptime isaOf(host_lir_codegen_target)) {
+        .arm32 => @compileError("the targets above are 64-bit"),
         .aarch64 => {
             codegen.codegen.stack_offset = 16 + HostCodeGen.CALLEE_SAVED_AREA_SIZE;
         },
@@ -25197,6 +25402,7 @@ test "immutable aliases share storage but aliases of mutable locals do not" {
     defer codegen.deinit();
     const HostCodeGen = @TypeOf(codegen.codegen);
     switch (comptime isaOf(host_lir_codegen_target)) {
+        .arm32 => @compileError("the targets above are 64-bit"),
         .aarch64 => {
             codegen.codegen.stack_offset = 16 + HostCodeGen.CALLEE_SAVED_AREA_SIZE;
         },
@@ -26404,6 +26610,7 @@ test "symbol producer caches reuse identities and reset with generated code" {
             try std.testing.expectEqual(builtin_symbol, try codegen.builtinSymbol(.str_concat));
             _ = try codegen.staticStringSymbol(literal);
             try codegen.emitStaticDataAddress(switch (comptime isaOf(target)) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => .RAX,
                 .aarch64 => .X0,
             }, data_id);
@@ -26414,6 +26621,7 @@ test "symbol producer caches reuse identities and reset with generated code" {
         codegen.reset();
         try std.testing.expectEqual(@as(usize, 0), codegen.getSymbolNames().len);
         try codegen.emitStaticDataAddress(switch (comptime isaOf(target)) {
+            .arm32 => @compileError("the targets above are 64-bit"),
             .x86_64 => .RAX,
             .aarch64 => .X0,
         }, data_id);

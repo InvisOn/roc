@@ -27,6 +27,7 @@ const win32 = struct {
     const PAGE_EXECUTE_READ: DWORD = 0x20;
 
     const RuntimeFunction = if (host_isa) |isa| switch (isa) {
+        .arm32 => @compileError("arm32: RuntimeFunction is not written for an arm32 host yet"),
         .x86_64 => extern struct {
             BeginAddress: DWORD,
             EndAddress: DWORD,
@@ -73,6 +74,7 @@ const WindowsUnwindState = if (builtin.os.tag == .windows) struct {
 
     fn coffArch() error{UnsupportedPlatform}!coff.Architecture {
         return switch (host_isa orelse return error.UnsupportedPlatform) {
+            .arm32 => @compileError("arm32: coffArch is not written for an arm32 host yet"),
             .x86_64 => .x86_64,
             .aarch64 => .aarch64,
         };
@@ -130,6 +132,7 @@ const WindowsUnwindState = if (builtin.os.tag == .windows) struct {
         for (sorted_functions, xdata_offsets, 0..) |function, xdata_function_offset, i| {
             const xdata_rva: u32 = @intCast(xdata_offset + xdata_function_offset);
             entries[i] = if (host_isa) |isa| switch (isa) {
+                .arm32 => @compileError("arm32: init is not written for an arm32 host yet"),
                 .x86_64 => .{
                     .BeginAddress = function.start_offset,
                     .EndAddress = function.end_offset,
@@ -441,6 +444,7 @@ fn freeMemory(memory: []align(std.heap.page_size_min) u8) void {
 
 test "execute simple x86_64 code" {
     switch (host_isa orelse return error.SkipZigTest) {
+        .arm32 => @compileError("the targets above are 64-bit"),
         .x86_64 => {},
         .aarch64 => return error.SkipZigTest,
     }
@@ -457,6 +461,7 @@ test "execute simple x86_64 code" {
 
 test "execute x86_64 return 64-bit value" {
     switch (host_isa orelse return error.SkipZigTest) {
+        .arm32 => @compileError("the targets above are 64-bit"),
         .x86_64 => {},
         .aarch64 => return error.SkipZigTest,
     }
@@ -473,6 +478,7 @@ test "execute x86_64 return 64-bit value" {
 
 test "execute aarch64 code" {
     switch (host_isa orelse return error.SkipZigTest) {
+        .arm32 => @compileError("the targets above are 64-bit"),
         .x86_64 => return error.SkipZigTest,
         .aarch64 => {},
     }
@@ -489,6 +495,7 @@ test "execute aarch64 code" {
 
 test "execute x86_64 with result ptr" {
     switch (host_isa orelse return error.SkipZigTest) {
+        .arm32 => @compileError("the targets above are 64-bit"),
         .x86_64 => {},
         .aarch64 => return error.SkipZigTest,
     }
@@ -514,6 +521,7 @@ test "execute x86_64 with result ptr" {
 
 test "execute x86_64 with full prologue/epilogue" {
     switch (host_isa orelse return error.SkipZigTest) {
+        .arm32 => @compileError("the targets above are 64-bit"),
         .x86_64 => {},
         .aarch64 => return error.SkipZigTest,
     }

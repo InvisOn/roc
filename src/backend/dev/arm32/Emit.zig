@@ -10,11 +10,12 @@
 //! Emitters encode exactly what they are asked to. Immediates that A32 cannot
 //! encode are rejected by the argument types (`ModImm`) or by assertions.
 //!
-//! The Emit function is parameterized by RocTarget to enable full cross-compilation.
+//! The Emit function is parameterized by the ABI of the code it emits.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RocTarget = @import("roc_target").RocTarget;
+const Abi = @import("../isa.zig").Abi;
 const Registers = @import("Registers.zig");
 
 /// A32 condition codes.
@@ -162,28 +163,31 @@ pub fn fitsImmediate(form: MemForm, offset: i32) bool {
 }
 
 /// ARM32 instruction emitter for generating machine code.
-/// Parameterized by target for cross-compilation support.
-pub fn Emit(comptime target: RocTarget) type {
-    // Validate this is an arm32 target
-    if (target.toCpuArch() != .arm) {
-        @compileError("arm32.Emit requires an arm32 target");
+/// Parameterized by the ABI of the code it emits.
+pub fn Emit(comptime machine_abi: Abi) type {
+    if (machine_abi.isa() != .arm32) {
+        @compileError("arm32.Emit requires an arm32 ABI");
     }
     // The CPU floor: NEON holds vector locals, and without `hwdiv` word
     // division calls `__aeabi_*` helpers. Roc names no CPU floor of its own
-    // for arm32 (`RocTarget.cpuContract`), so the target gets Zig's arm
+    // for arm32 (`RocTarget.cpuContract`), so each arm32 target gets Zig's arm
     // baseline; if a Zig upgrade moves that baseline, the code generated here
     // must move with it. `.ARM.attributes` in `object/elf.zig` states this
     // floor; change both together.
     comptime {
-        const arch = target.toCpuArch();
-        const os: std.Target.Os = .{ .tag = target.toOsTag(), .version_range = .{ .none = {} } };
-        const baseline = std.Target.Cpu.baseline(arch, os);
-        if (target.requiredRuntimeCpuFeatures().count() != 0)
-            @compileError("arm32.Emit assumes Zig's arm baseline, but " ++ target.toName() ++ " names CPU features of its own");
-        if (!baseline.has(.arm, .neon))
-            @compileError("arm32.Emit lowers SIMD to NEON, but Zig's arm baseline for " ++ target.toName() ++ " lacks NEON");
-        if (baseline.hasAny(.arm, &.{ .hwdiv, .hwdiv_arm }))
-            @compileError("arm32.Emit divides through __aeabi helpers, but Zig's arm baseline for " ++ target.toName() ++ " has hwdiv");
+        for (@typeInfo(RocTarget).@"enum".field_names) |name| {
+            const target = @field(RocTarget, name);
+            const arch = target.toCpuArch();
+            if (arch != .arm) continue;
+            const os: std.Target.Os = .{ .tag = target.toOsTag(), .version_range = .{ .none = {} } };
+            const baseline = std.Target.Cpu.baseline(arch, os);
+            if (target.requiredRuntimeCpuFeatures().count() != 0)
+                @compileError("arm32.Emit assumes Zig's arm baseline, but " ++ target.toName() ++ " names CPU features of its own");
+            if (!baseline.has(.arm, .neon))
+                @compileError("arm32.Emit lowers SIMD to NEON, but Zig's arm baseline for " ++ target.toName() ++ " lacks NEON");
+            if (baseline.hasAny(.arm, &.{ .hwdiv, .hwdiv_arm }))
+                @compileError("arm32.Emit divides through __aeabi helpers, but Zig's arm baseline for " ++ target.toName() ++ " has hwdiv");
+        }
     }
 
     return struct {
@@ -197,8 +201,8 @@ pub fn Emit(comptime target: RocTarget) type {
         pub const QReg = Registers.QReg;
         pub const RegisterWidth = Registers.RegisterWidth;
 
-        /// The target this Emit was instantiated for
-        pub const roc_target = target;
+        /// The ABI this Emit was instantiated for
+        pub const code_abi = machine_abi;
 
         allocator: std.mem.Allocator,
         buf: std.ArrayList(u8),
@@ -1295,7 +1299,7 @@ test "condition inversion" {
 }
 
 test "branch encoding applies the PC bias" {
-    const E = Emit(.arm32musl);
+    const E = Emit(.arm32_aapcs_vfp);
     // BL to itself: imm24 = -2
     try std.testing.expectEqual(@as(u32, 0xEBFFFFFE), E.encodeBranch(.al, true, 0));
     // B to the next-but-one instruction: imm24 = 0

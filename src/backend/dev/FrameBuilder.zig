@@ -63,6 +63,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
 
     // Architecture-specific callee-saved register definitions
     const CalleeSavedInfo = switch (isa) {
+        .arm32 => @compileError("arm32: DeferredFrameBuilder is not written yet"),
         .x86_64 => X86_64CalleeSavedInfo(is_windows, GeneralReg),
         .aarch64 => Aarch64CalleeSavedInfo(GeneralReg),
     };
@@ -130,6 +131,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         /// path preserves the incoming value before this prologue overwrites it.
         pub fn setCallerStackArgBaseReg(self: *Self, reg: GeneralReg) void {
             switch (isa) {
+                .arm32 => @compileError("arm32: setCallerStackArgBaseReg is not written yet"),
                 .x86_64 => {
                     invariant("{s}", .{"caller stack-argument base register is only meaningful on aarch64"});
                 },
@@ -161,6 +163,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             }
 
             switch (isa) {
+                .arm32 => @compileError("arm32: emitPrologue is not written yet"),
                 .x86_64 => {
                     return self.emitPrologueX86_64(emit);
                 },
@@ -178,6 +181,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             }
 
             switch (isa) {
+                .arm32 => @compileError("arm32: emitEpilogue is not written yet"),
                 .x86_64 => {
                     return self.emitEpilogueX86_64(emit);
                 },
@@ -191,6 +195,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         fn emitReturn(self: *const Self, emit: *EmitType) Allocator.Error!void {
             if (self.callee_pop == 0) return emit.ret();
             switch (isa) {
+                .arm32 => @compileError("arm32: emitReturn is not written yet"),
                 .x86_64 => {
                     if (std.math.cast(u16, self.callee_pop)) |pop_bytes| {
                         try emit.retImm16(pop_bytes);
@@ -222,6 +227,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         /// that frame-replacing calls reach before the body's own epilogue.
         pub fn emitRestoreCalleeSaved(self: *const Self, emit: *EmitType) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitRestoreCalleeSaved is not written yet"),
                 .x86_64 => {
                     return self.emitRestoreCalleeSavedX86_64(emit);
                 },
@@ -233,6 +239,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
 
         pub fn emitTailCallExitAarch64(self: *Self, emit: *EmitType, delta_reg: GeneralReg, target_reg: GeneralReg) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitTailCallExitAarch64 is not written yet"),
                 .x86_64 => @compileError("emitTailCallExitAarch64 is only meaningful on aarch64"),
                 .aarch64 => {},
             }
@@ -527,12 +534,14 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
 
         /// Callee-saved register slots (for direct access if needed)
         pub const CALLEE_SAVED_SLOTS = switch (isa) {
+            .arm32 => @compileError("arm32: isPairUsed is not written yet"),
             .x86_64 => CalleeSavedInfo.SLOTS,
             .aarch64 => @compileError("CALLEE_SAVED_SLOTS only available on x86_64"),
         };
 
         /// Callee-saved register pairs (for direct access if needed)
         pub const CALLEE_SAVED_PAIRS = switch (isa) {
+            .arm32 => @compileError("arm32: isPairUsed is not written yet"),
             .aarch64 => CalleeSavedInfo.PAIRS,
             .x86_64 => @compileError("CALLEE_SAVED_PAIRS only available on aarch64"),
         };

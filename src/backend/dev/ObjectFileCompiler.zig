@@ -348,6 +348,7 @@ pub const ObjectFileCompiler = struct {
         const exports = try UnitExports.keep(self.allocator, lir_store, target, static_data_exports);
         defer exports.keeper.release();
         switch (abiOfOrNull(target) orelse return CompilationError.UnsupportedTarget) {
+            .arm32_aapcs_vfp => unreachable, // abiOfOrNull gives no target this ABI until the driver handles a 4-byte word
             inline .x86_64_sysv, .x86_64_windows, .aarch64_aapcs, .aarch64_apple, .aarch64_windows => |abi| return compilePiecesWithCodeGen(
                 LirCodeGenMod.LirCodeGen(abi),
                 self.allocator,
@@ -377,6 +378,7 @@ pub const ObjectFileCompiler = struct {
         options: ComposeOptions,
     ) CompilationError!CompilationResult {
         switch (abiOfOrNull(target) orelse return CompilationError.UnsupportedTarget) {
+            .arm32_aapcs_vfp => unreachable, // abiOfOrNull gives no target this ABI until the driver handles a 4-byte word
             inline .x86_64_sysv, .x86_64_windows, .aarch64_aapcs, .aarch64_apple, .aarch64_windows => |abi| return composeWithCodeGen(LirCodeGenMod.LirCodeGen(abi), self.allocator, inputs, target, options, self.timing, self.post_check_executor),
         }
     }
@@ -1912,6 +1914,7 @@ fn crossCompileDispatch(
     reuse_same_program: ?*const NativeProcCompiler.Retained,
 ) CompilationError!CompilationResult {
     switch (abiOfOrNull(target) orelse return CompilationError.UnsupportedTarget) {
+        .arm32_aapcs_vfp => unreachable, // abiOfOrNull gives no target this ABI until the driver handles a 4-byte word
         inline .x86_64_sysv, .x86_64_windows, .aarch64_aapcs, .aarch64_apple, .aarch64_windows => |abi| return compileWithCodeGen(
             LirCodeGenMod.LirCodeGen(abi),
             allocator,

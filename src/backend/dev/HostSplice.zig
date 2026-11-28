@@ -475,6 +475,7 @@ fn collectCodeSymbols(allocator: Allocator, codegen: *const HostLirCodeGen, out:
 fn writeStub(stub: *[stub_size]u8, target: usize) void {
     @memset(stub, 0);
     if (host_isa) |isa| switch (isa) {
+        .arm32 => @compileError("arm32: writeStub is not written for an arm32 host yet"),
         .x86_64 => {
             stub[0..6].* = .{ 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 };
             std.mem.writeInt(u64, stub[6..14], target, .little);
