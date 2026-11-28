@@ -63,7 +63,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
 
     // Architecture-specific callee-saved register definitions
     const CalleeSavedInfo = switch (isa) {
-        .arm32 => @compileError("arm32: DeferredFrameBuilder is not written yet"),
+        .arm32 => Arm32CalleeSavedInfo(GeneralReg),
         .x86_64 => X86_64CalleeSavedInfo(is_windows, GeneralReg),
         .aarch64 => Aarch64CalleeSavedInfo(GeneralReg),
     };
@@ -74,6 +74,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         /// Bitmask of callee-saved registers that need to be saved/restored.
         /// On x86_64: bits correspond to GeneralReg enum values
         /// On aarch64: bits correspond to GeneralReg enum values
+        /// On arm32: bits correspond to GeneralReg encodings (`listBit`)
         callee_saved_mask: u32 = 0,
 
         /// Stack space needed for local variables (in bytes).
@@ -131,8 +132,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         /// path preserves the incoming value before this prologue overwrites it.
         pub fn setCallerStackArgBaseReg(self: *Self, reg: GeneralReg) void {
             switch (isa) {
-                .arm32 => @compileError("arm32: setCallerStackArgBaseReg is not written yet"),
-                .x86_64 => {
+                .x86_64, .arm32 => {
                     invariant("{s}", .{"caller stack-argument base register is only meaningful on aarch64"});
                 },
                 .aarch64 => {},
@@ -163,7 +163,9 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             }
 
             switch (isa) {
-                .arm32 => @compileError("arm32: emitPrologue is not written yet"),
+                .arm32 => {
+                    return self.emitPrologueArm32(emit);
+                },
                 .x86_64 => {
                     return self.emitPrologueX86_64(emit);
                 },
@@ -181,7 +183,9 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             }
 
             switch (isa) {
-                .arm32 => @compileError("arm32: emitEpilogue is not written yet"),
+                .arm32 => {
+                    return self.emitEpilogueArm32(emit);
+                },
                 .x86_64 => {
                     return self.emitEpilogueX86_64(emit);
                 },
@@ -195,7 +199,10 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         fn emitReturn(self: *const Self, emit: *EmitType) Allocator.Error!void {
             if (self.callee_pop == 0) return emit.ret();
             switch (isa) {
-                .arm32 => @compileError("arm32: emitReturn is not written yet"),
+                .arm32 => {
+                    try emitSpIncrementArm32(emit, self.callee_pop);
+                    try emit.ret();
+                },
                 .x86_64 => {
                     if (std.math.cast(u16, self.callee_pop)) |pop_bytes| {
                         try emit.retImm16(pop_bytes);
@@ -227,7 +234,9 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         /// that frame-replacing calls reach before the body's own epilogue.
         pub fn emitRestoreCalleeSaved(self: *const Self, emit: *EmitType) Allocator.Error!void {
             switch (isa) {
-                .arm32 => @compileError("arm32: emitRestoreCalleeSaved is not written yet"),
+                .arm32 => {
+                    return self.emitRestoreCalleeSavedArm32(emit);
+                },
                 .x86_64 => {
                     return self.emitRestoreCalleeSavedX86_64(emit);
                 },
@@ -239,8 +248,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
 
         pub fn emitTailCallExitAarch64(self: *Self, emit: *EmitType, delta_reg: GeneralReg, target_reg: GeneralReg) Allocator.Error!void {
             switch (isa) {
-                .arm32 => @compileError("arm32: emitTailCallExitAarch64 is not written yet"),
-                .x86_64 => @compileError("emitTailCallExitAarch64 is only meaningful on aarch64"),
+                .x86_64, .arm32 => @compileError("emitTailCallExitAarch64 is only meaningful on aarch64"),
                 .aarch64 => {},
             }
             if (self.actual_stack_alloc == 0) {
@@ -526,6 +534,54 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             }
         }
 
+        // ==================== arm32 Implementation ====================
+        //
+        //   push {fp, lr}; mov fp, sp        ; incoming stack args at [fp, #8]
+        //   sub sp, sp, #alloc               ; callee-saved area, then locals
+        //   str r4-r10 (used) at [fp, #-4k]  ; fixed slots, as on x86_64
+        // and the epilogue restores them, then `mov sp, fp; pop {fp, pc}`.
+        // fp is 8-aligned at entry (AAPCS32), and `alloc` is a multiple of 8.
+
+        fn emitPrologueArm32(self: *Self, emit: *EmitType) Allocator.Error!i32 {
+            try emit.push(GeneralReg.fp.listBit() | GeneralReg.lr.listBit());
+            try emit.movRegReg(.fp, .sp);
+            self.actual_stack_alloc = CC.alignStackSize(self.stack_size + @as(u32, @intCast(CalleeSavedInfo.AREA_SIZE)));
+            try emitSpDecrementArm32(emit, self.actual_stack_alloc, self.needsStackProbe(self.actual_stack_alloc));
+            try self.emitSaveCalleeSavedArm32(emit);
+            // Locals sit at negative offsets from fp, below the callee-saved
+            // area, as on x86_64.
+            return 0;
+        }
+
+        fn emitEpilogueArm32(self: *Self, emit: *EmitType) Allocator.Error!void {
+            try self.emitRestoreCalleeSavedArm32(emit);
+            try emit.movRegReg(.sp, .fp);
+            if (self.callee_pop == 0) {
+                try emit.pop(GeneralReg.fp.listBit() | GeneralReg.pc.listBit());
+            } else {
+                // The return address goes to lr, so the argument block above
+                // it can be removed before returning.
+                try emit.pop(GeneralReg.fp.listBit() | GeneralReg.lr.listBit());
+                try self.emitReturn(emit);
+            }
+        }
+
+        fn emitSaveCalleeSavedArm32(self: *const Self, emit: *EmitType) Allocator.Error!void {
+            for (CalleeSavedInfo.SLOTS) |slot| {
+                if ((self.callee_saved_mask & slot.reg.listBit()) != 0) {
+                    try emit.strRegMem(slot.reg, .fp, slot.offset);
+                }
+            }
+        }
+
+        fn emitRestoreCalleeSavedArm32(self: *const Self, emit: *EmitType) Allocator.Error!void {
+            for (CalleeSavedInfo.SLOTS) |slot| {
+                if ((self.callee_saved_mask & slot.reg.listBit()) != 0) {
+                    try emit.ldrRegMem(slot.reg, .fp, slot.offset);
+                }
+            }
+        }
+
         fn isPairUsed(self: *const Self, pair: [2]GeneralReg) bool {
             const mask1 = @as(u32, 1) << @backingInt(pair[0]);
             const mask2 = @as(u32, 1) << @backingInt(pair[1]);
@@ -534,16 +590,14 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
 
         /// Callee-saved register slots (for direct access if needed)
         pub const CALLEE_SAVED_SLOTS = switch (isa) {
-            .arm32 => @compileError("arm32: isPairUsed is not written yet"),
-            .x86_64 => CalleeSavedInfo.SLOTS,
+            .x86_64, .arm32 => CalleeSavedInfo.SLOTS,
             .aarch64 => @compileError("CALLEE_SAVED_SLOTS only available on x86_64"),
         };
 
         /// Callee-saved register pairs (for direct access if needed)
         pub const CALLEE_SAVED_PAIRS = switch (isa) {
-            .arm32 => @compileError("arm32: isPairUsed is not written yet"),
             .aarch64 => CalleeSavedInfo.PAIRS,
-            .x86_64 => @compileError("CALLEE_SAVED_PAIRS only available on aarch64"),
+            .x86_64, .arm32 => @compileError("CALLEE_SAVED_PAIRS only available on aarch64"),
         };
 
         /// Size of the callee-saved area when all registers are saved
@@ -579,6 +633,65 @@ fn X86_64CalleeSavedInfo(comptime is_windows: bool, comptime GeneralReg: type) t
     };
 }
 
+/// arm32 callee-saved register information: r4-r10 at fixed slots below fp,
+/// which is r11 itself.
+fn Arm32CalleeSavedInfo(comptime GeneralReg: type) type {
+    return struct {
+        pub const SLOTS = [_]struct { reg: GeneralReg, offset: i32 }{
+            .{ .reg = .r4, .offset = -4 },
+            .{ .reg = .r5, .offset = -8 },
+            .{ .reg = .r6, .offset = -12 },
+            .{ .reg = .r7, .offset = -16 },
+            .{ .reg = .r8, .offset = -20 },
+            .{ .reg = .r9, .offset = -24 },
+            .{ .reg = .r10, .offset = -28 },
+        };
+
+        /// Size of callee-saved area (all registers)
+        pub const AREA_SIZE: i32 = 28;
+    };
+}
+
+/// sp += bytes on arm32, through r12 when `bytes` is not an A32 modified
+/// immediate. r12 is the intra-procedure-call scratch, free in a prologue and
+/// an epilogue.
+fn emitSpIncrementArm32(emit: anytype, bytes: u32) Allocator.Error!void {
+    if (arm32.ModImm.encode(bytes)) |imm| {
+        try emit.addRegRegModImm(.sp, .sp, imm);
+    } else {
+        try emit.movRegImm32(.ip, bytes);
+        try emit.addRegRegReg(.sp, .sp, .ip);
+    }
+}
+
+/// sp -= alloc on arm32, touching every page on the way when `probe`:
+///   r12 = alloc
+/// loop:
+///   sub sp, sp, #4096; str r12, [sp]
+///   sub r12, r12, #4096; cmp r12, #4096; bhi loop
+///   sub sp, sp, r12; str r12, [sp]
+fn emitSpDecrementArm32(emit: anytype, alloc: u32, probe: bool) Allocator.Error!void {
+    if (alloc == 0) return;
+    if (probe) {
+        std.debug.assert(alloc >= stack_probe_page_size);
+        const page = arm32.ModImm.of(stack_probe_page_size);
+        try emit.movRegImm32(.ip, alloc);
+        const loop_start = emit.buf.items.len;
+        try emit.subRegRegModImm(.sp, .sp, page);
+        try emit.strRegMem(.ip, .sp, 0);
+        try emit.subRegRegModImm(.ip, .ip, page);
+        try emit.cmpRegModImm(.ip, page);
+        try emit.bcond(.hi, @intCast(@as(i64, @intCast(loop_start)) - @as(i64, @intCast(emit.buf.items.len))));
+        try emit.subRegRegReg(.sp, .sp, .ip);
+        try emit.strRegMem(.ip, .sp, 0);
+    } else if (arm32.ModImm.encode(alloc)) |imm| {
+        try emit.subRegRegModImm(.sp, .sp, imm);
+    } else {
+        try emit.movRegImm32(.ip, alloc);
+        try emit.subRegRegReg(.sp, .sp, .ip);
+    }
+}
+
 /// aarch64 callee-saved register information
 fn Aarch64CalleeSavedInfo(comptime GeneralReg: type) type {
     return struct {
@@ -598,6 +711,7 @@ fn Aarch64CalleeSavedInfo(comptime GeneralReg: type) type {
 
 const x86_64 = @import("x86_64/mod.zig");
 const aarch64 = @import("aarch64/mod.zig");
+const arm32 = @import("arm32/mod.zig");
 
 // DeferredFrameBuilder tests (mask-based pattern)
 
@@ -771,4 +885,99 @@ test "DeferredFrameBuilder Windows x86_64 no red zone" {
     // Windows requires stack allocation BEFORE mov saves
     // Verify we generated code
     try std.testing.expect(emit.buf.items.len > 15);
+}
+
+test "DeferredFrameBuilder arm32 saves used callee-saved registers at fixed fp slots" {
+    const Emit = arm32.LinuxEmit;
+    const Builder = DeferredFrameBuilder(Emit);
+
+    var emit = Emit.init(std.testing.allocator);
+    defer emit.deinit();
+    var frame = Builder.init();
+    frame.setStackSize(16);
+    frame.setCalleeSavedMask(Emit.GeneralReg.r4.listBit() | Emit.GeneralReg.r9.listBit());
+    try std.testing.expectEqual(@as(i32, 0), try frame.emitPrologue(&emit));
+    try frame.emitEpilogue(&emit);
+
+    var want = Emit.init(std.testing.allocator);
+    defer want.deinit();
+    try want.push(Emit.GeneralReg.fp.listBit() | Emit.GeneralReg.lr.listBit());
+    try want.movRegReg(.fp, .sp);
+    // 16 bytes of locals and the 28-byte callee-saved area, 8-aligned.
+    try want.subRegRegModImm(.sp, .sp, arm32.ModImm.of(48));
+    try want.strRegMem(.r4, .fp, -4);
+    try want.strRegMem(.r9, .fp, -24);
+    try want.ldrRegMem(.r4, .fp, -4);
+    try want.ldrRegMem(.r9, .fp, -24);
+    try want.movRegReg(.sp, .fp);
+    try want.pop(Emit.GeneralReg.fp.listBit() | Emit.GeneralReg.pc.listBit());
+    try std.testing.expectEqualSlices(u8, want.buf.items, emit.buf.items);
+}
+
+test "DeferredFrameBuilder arm32 forms a frame size that is not a modified immediate in r12" {
+    const Emit = arm32.LinuxEmit;
+    const Builder = DeferredFrameBuilder(Emit);
+
+    var emit = Emit.init(std.testing.allocator);
+    defer emit.deinit();
+    var frame = Builder.init();
+    // 1000 + 28, 8-aligned, is 0x408: two set bits an odd rotation apart.
+    frame.setStackSize(1000);
+    _ = try frame.emitPrologue(&emit);
+
+    var want = Emit.init(std.testing.allocator);
+    defer want.deinit();
+    try want.push(Emit.GeneralReg.fp.listBit() | Emit.GeneralReg.lr.listBit());
+    try want.movRegReg(.fp, .sp);
+    try std.testing.expectEqual(@as(?arm32.ModImm, null), arm32.ModImm.encode(0x408));
+    try want.movRegImm32(.ip, 0x408);
+    try want.subRegRegReg(.sp, .sp, .ip);
+    try std.testing.expectEqualSlices(u8, want.buf.items, emit.buf.items);
+}
+
+test "DeferredFrameBuilder arm32 probes every page of a frame of a page or more" {
+    const Emit = arm32.LinuxEmit;
+    const Builder = DeferredFrameBuilder(Emit);
+
+    var emit = Emit.init(std.testing.allocator);
+    defer emit.deinit();
+    var frame = Builder.init();
+    frame.setStackSize(0x2000);
+    _ = try frame.emitPrologue(&emit);
+
+    const alloc: u32 = 0x2000 + 32; // the callee-saved area, 8-aligned
+    const page = arm32.ModImm.of(0x1000);
+    var want = Emit.init(std.testing.allocator);
+    defer want.deinit();
+    try want.push(Emit.GeneralReg.fp.listBit() | Emit.GeneralReg.lr.listBit());
+    try want.movRegReg(.fp, .sp);
+    try want.movRegImm32(.ip, alloc);
+    try want.subRegRegModImm(.sp, .sp, page);
+    try want.strRegMem(.ip, .sp, 0);
+    try want.subRegRegModImm(.ip, .ip, page);
+    try want.cmpRegModImm(.ip, page);
+    // Back to the first `sub sp`, four instructions earlier.
+    try want.bcond(.hi, -16);
+    try want.subRegRegReg(.sp, .sp, .ip);
+    try want.strRegMem(.ip, .sp, 0);
+    try std.testing.expectEqualSlices(u8, want.buf.items, emit.buf.items);
+}
+
+test "DeferredFrameBuilder arm32 removes its argument block before returning" {
+    const Emit = arm32.LinuxEmit;
+    const Builder = DeferredFrameBuilder(Emit);
+
+    var emit = Emit.init(std.testing.allocator);
+    defer emit.deinit();
+    var frame = Builder.init();
+    frame.setCalleePop(24);
+    try frame.emitEpilogue(&emit);
+
+    var want = Emit.init(std.testing.allocator);
+    defer want.deinit();
+    try want.movRegReg(.sp, .fp);
+    try want.pop(Emit.GeneralReg.fp.listBit() | Emit.GeneralReg.lr.listBit());
+    try want.addRegRegModImm(.sp, .sp, arm32.ModImm.of(24));
+    try want.ret();
+    try std.testing.expectEqualSlices(u8, want.buf.items, emit.buf.items);
 }
