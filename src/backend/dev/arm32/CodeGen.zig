@@ -188,10 +188,12 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
         /// Deferred frame builder type for this architecture (mask-based, body generated first)
         pub const DeferredFrameBuilder = FrameBuilderMod.DeferredFrameBuilder(Emit);
 
+        /// Emit the function prologue, with `stack_size` bytes of locals
         pub fn emitPrologueWithAlloc(self: *Self, stack_size: u32) Allocator.Error!void {
             try self.emitPrologueWithAllocAndStackProbe(stack_size, false);
         }
 
+        /// Emit the function prologue, probing each page of the frame when LIR requires it
         pub fn emitPrologueWithAllocAndStackProbe(self: *Self, stack_size: u32, stack_probe_required: bool) Allocator.Error!void {
             var builder = DeferredFrameBuilder.init();
             builder.setCalleeSavedMask(self.callee_saved_used);
@@ -200,6 +202,7 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
             _ = try builder.emitPrologue(&self.emit);
         }
 
+        /// Emit function epilogue and return
         pub fn emitEpilogue(self: *Self) Allocator.Error!void {
             var builder = DeferredFrameBuilder.init();
             builder.setCalleeSavedMask(self.callee_saved_used);
@@ -278,6 +281,83 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
         fn emitSetCond(self: *Self, dst: GeneralReg, cond: Condition) Allocator.Error!void {
             try self.emit.movRegModImm(dst, ModImm.of(0));
             try self.emit.movRegModImmCond(cond, dst, ModImm.of(1));
+        }
+
+        /// Emit float64 compare and set: dst = (a cond b) ? 1 : 0
+        pub fn emitCmpF64(self: *Self, dst: GeneralReg, a: FloatReg, b: FloatReg, cond: Condition) Allocator.Error!void {
+            try self.emit.vcmpF64(a, b);
+            try self.emit.vmrsApsrNzcv();
+            try self.emitSetCond(dst, cond);
+        }
+
+        /// Emit float32 compare and set: dst = (a cond b) ? 1 : 0
+        pub fn emitCmpF32(self: *Self, dst: GeneralReg, a: FloatReg, b: FloatReg, cond: Condition) Allocator.Error!void {
+            try self.emit.vcmpF32(a.sLow(), b.sLow());
+            try self.emit.vmrsApsrNzcv();
+            try self.emitSetCond(dst, cond);
+        }
+
+        // Floating-point operations. An f32 lives in the low S half of its
+        // D register.
+
+        /// Emit float64 addition: dst = a + b
+        pub fn emitAddF64(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vaddF64(dst, a, b);
+        }
+
+        /// Emit float64 subtraction: dst = a - b
+        pub fn emitSubF64(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vsubF64(dst, a, b);
+        }
+
+        /// Emit float64 multiplication: dst = a * b
+        pub fn emitMulF64(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vmulF64(dst, a, b);
+        }
+
+        /// Emit float64 division: dst = a / b
+        pub fn emitDivF64(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vdivF64(dst, a, b);
+        }
+
+        /// Emit float64 negation: dst = -src, which flips the sign of -0.0 and NaN too
+        pub fn emitNegF64(self: *Self, dst: FloatReg, src: FloatReg) Allocator.Error!void {
+            try self.emit.vnegF64(dst, src);
+        }
+
+        /// Emit float64 absolute value: dst = |src|
+        pub fn emitAbsF64(self: *Self, dst: FloatReg, src: FloatReg) Allocator.Error!void {
+            try self.emit.vabsF64(dst, src);
+        }
+
+        /// Emit float32 addition: dst = a + b
+        pub fn emitAddF32(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vaddF32(dst.sLow(), a.sLow(), b.sLow());
+        }
+
+        /// Emit float32 subtraction: dst = a - b
+        pub fn emitSubF32(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vsubF32(dst.sLow(), a.sLow(), b.sLow());
+        }
+
+        /// Emit float32 multiplication: dst = a * b
+        pub fn emitMulF32(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vmulF32(dst.sLow(), a.sLow(), b.sLow());
+        }
+
+        /// Emit float32 division: dst = a / b
+        pub fn emitDivF32(self: *Self, dst: FloatReg, a: FloatReg, b: FloatReg) Allocator.Error!void {
+            try self.emit.vdivF32(dst.sLow(), a.sLow(), b.sLow());
+        }
+
+        /// Emit float32 negation: dst = -src, which flips the sign of -0.0 and NaN too
+        pub fn emitNegF32(self: *Self, dst: FloatReg, src: FloatReg) Allocator.Error!void {
+            try self.emit.vnegF32(dst.sLow(), src.sLow());
+        }
+
+        /// Emit float32 absolute value: dst = |src|
+        pub fn emitAbsF32(self: *Self, dst: FloatReg, src: FloatReg) Allocator.Error!void {
+            try self.emit.vabsF32(dst.sLow(), src.sLow());
         }
 
         // Control flow. A32 branches reach ±32 MiB; `encodeBranch` asserts
@@ -372,6 +452,61 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
             try self.emit.strhRegMem(src, at.base, at.offset);
         }
 
+        // Float and vector memory. VFP loads and stores reach ±1020 in words;
+        // NEON's whole-register load and store take no offset, so their
+        // address is formed first unless it is the base itself.
+
+        /// Load float64 from stack slot
+        pub fn emitLoadStackF64(self: *Self, dst: FloatReg, offset: i32) Allocator.Error!void {
+            const at = try self.reachable(.vfp, fp, offset);
+            try self.emit.vldrF64(dst, at.base, at.offset);
+        }
+
+        /// Store float64 to stack slot
+        pub fn emitStoreStackF64(self: *Self, offset: i32, src: FloatReg) Allocator.Error!void {
+            const at = try self.reachable(.vfp, fp, offset);
+            try self.emit.vstrF64(src, at.base, at.offset);
+        }
+
+        /// Load float32 from stack slot.
+        pub fn emitLoadStackF32(self: *Self, dst: FloatReg, offset: i32) Allocator.Error!void {
+            const at = try self.reachable(.vfp, fp, offset);
+            try self.emit.vldrF32(dst.sLow(), at.base, at.offset);
+        }
+
+        /// Store float32 to stack slot.
+        pub fn emitStoreStackF32(self: *Self, offset: i32, src: FloatReg) Allocator.Error!void {
+            const at = try self.reachable(.vfp, fp, offset);
+            try self.emit.vstrF32(src.sLow(), at.base, at.offset);
+        }
+
+        /// Load a 128-bit vector from `base + offset`
+        pub fn emitLoadV128(self: *Self, dst: FloatReg, base: GeneralReg, offset: i32) Allocator.Error!void {
+            const at = try self.reachable(.neon, base, offset);
+            try self.emit.vld1Q(dst.containingQ(), at.base);
+        }
+
+        /// Store a 128-bit vector to `base + offset`
+        pub fn emitStoreV128(self: *Self, base: GeneralReg, offset: i32, src: FloatReg) Allocator.Error!void {
+            const at = try self.reachable(.neon, base, offset);
+            try self.emit.vst1Q(src.containingQ(), at.base);
+        }
+
+        /// Load a 128-bit vector from stack slot
+        pub fn emitLoadStackV128(self: *Self, dst: FloatReg, offset: i32) Allocator.Error!void {
+            try self.emitLoadV128(dst, fp, offset);
+        }
+
+        /// Store a 128-bit vector to stack slot
+        pub fn emitStoreStackV128(self: *Self, offset: i32, src: FloatReg) Allocator.Error!void {
+            try self.emitStoreV128(fp, offset, src);
+        }
+
+        /// Copy a 128-bit vector register
+        pub fn emitMoveV128(self: *Self, dst: FloatReg, src: FloatReg) Allocator.Error!void {
+            if (dst != src) try self.emit.vmovQ(dst.containingQ(), src.containingQ());
+        }
+
         // Stack slots, at negative offsets from fp
 
         /// Load register from stack slot
@@ -384,18 +519,22 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
             try self.emitStoreMem(fp, offset, src);
         }
 
+        /// Load byte (zero-extended) from stack slot
         pub fn emitLoadStackByte(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
             try self.emitLoadMemByte(dst, fp, offset);
         }
 
+        /// Store byte to stack slot
         pub fn emitStoreStackByte(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
             try self.emitStoreMemByte(fp, offset, src);
         }
 
+        /// Load halfword (zero-extended) from stack slot
         pub fn emitLoadStackHalfword(self: *Self, dst: GeneralReg, offset: i32) Allocator.Error!void {
             try self.emitLoadMemHalfword(dst, fp, offset);
         }
 
+        /// Store halfword (2 bytes) to stack slot
         pub fn emitStoreStackHalfword(self: *Self, offset: i32, src: GeneralReg) Allocator.Error!void {
             try self.emitStoreMemHalfword(fp, offset, src);
         }
@@ -575,6 +714,99 @@ test "patchJump points a branch forward or backward and keeps its condition" {
             try e.addRegRegReg(.r0, .r0, .r1);
             try e.bcond(.hs, 8); // past the backward branch
             try e.b(-8); // back to the add
+        }
+    }.build);
+}
+
+test "f64 operations use D registers, f32 operations their low S halves" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    try cg.emitAddF64(.d0, .d2, .d4);
+    try cg.emitSubF64(.d0, .d2, .d4);
+    try cg.emitMulF64(.d0, .d2, .d4);
+    try cg.emitDivF64(.d0, .d2, .d4);
+    try cg.emitNegF64(.d6, .d0);
+    try cg.emitAbsF64(.d6, .d0);
+    try cg.emitAddF32(.d0, .d2, .d4);
+    try cg.emitSubF32(.d0, .d2, .d4);
+    try cg.emitMulF32(.d0, .d2, .d4);
+    try cg.emitDivF32(.d0, .d2, .d4);
+    try cg.emitNegF32(.d6, .d0);
+    try cg.emitAbsF32(.d6, .d0);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.vaddF64(.d0, .d2, .d4);
+            try e.vsubF64(.d0, .d2, .d4);
+            try e.vmulF64(.d0, .d2, .d4);
+            try e.vdivF64(.d0, .d2, .d4);
+            try e.vnegF64(.d6, .d0);
+            try e.vabsF64(.d6, .d0);
+            try e.vaddF32(.s0, .s4, .s8);
+            try e.vsubF32(.s0, .s4, .s8);
+            try e.vmulF32(.s0, .s4, .s8);
+            try e.vdivF32(.s0, .s4, .s8);
+            try e.vnegF32(.s12, .s0);
+            try e.vabsF32(.s12, .s0);
+        }
+    }.build);
+}
+
+test "float compares copy the VFP flags to the core before setting the result" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    try cg.emitCmpF64(.r0, .d0, .d2, .mi);
+    try cg.emitCmpF32(.r1, .d4, .d6, .ge);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.vcmpF64(.d0, .d2);
+            try e.vmrsApsrNzcv();
+            try e.movRegModImm(.r0, ModImm.of(0));
+            try e.movRegModImmCond(.mi, .r0, ModImm.of(1));
+            try e.vcmpF32(.s8, .s12);
+            try e.vmrsApsrNzcv();
+            try e.movRegModImm(.r1, ModImm.of(0));
+            try e.movRegModImmCond(.ge, .r1, ModImm.of(1));
+        }
+    }.build);
+}
+
+test "float stack accesses reach ±1020 in words directly, then through lr" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    try cg.emitLoadStackF64(.d0, -1020);
+    try cg.emitStoreStackF64(-1024, .d2);
+    try cg.emitStoreStackF32(-8, .d4);
+    try cg.emitLoadStackF32(.d6, -1028);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.vldrF64(.d0, .fp, -1020);
+            try e.subRegRegModImm(.lr, .fp, ModImm.of(1024));
+            try e.vstrF64(.d2, .lr, 0);
+            try e.vstrF32(.s8, .fp, -8);
+            // 1028 is not a modified immediate: the offset goes to lr first.
+            try e.movRegImm32(.lr, @bitCast(@as(i32, -1028)));
+            try e.addRegRegReg(.lr, .fp, .lr);
+            try e.vldrF32(.s12, .lr, 0);
+        }
+    }.build);
+}
+
+test "vector accesses form any non-zero offset in lr, and a move to itself is nothing" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    try cg.emitLoadV128(.d16, .r0, 0);
+    try cg.emitStoreStackV128(-32, .d16);
+    try cg.emitLoadStackV128(.d0, -48);
+    try cg.emitMoveV128(.d2, .d16);
+    try cg.emitMoveV128(.d2, .d2);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.vld1Q(.q8, .r0);
+            try e.subRegRegModImm(.lr, .fp, ModImm.of(32));
+            try e.vst1Q(.q8, .lr);
+            try e.subRegRegModImm(.lr, .fp, ModImm.of(48));
+            try e.vld1Q(.q0, .lr);
+            try e.vmovQ(.q1, .q8);
         }
     }.build);
 }

@@ -11128,22 +11128,22 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             return switch (narrowEnum(IntBinOp, op)) {
                 .num_is_eq => condCode(.equal),
                 .num_is_lt => switch (isa) {
-                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
+                    .arm32 => @as(Condition, .mi),
                     .aarch64 => @as(Condition, .mi),
                     .x86_64 => @as(Condition, .below),
                 },
                 .num_is_lte => switch (isa) {
-                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
+                    .arm32 => @as(Condition, .ls),
                     .aarch64 => @as(Condition, .ls),
                     .x86_64 => @as(Condition, .below_or_equal),
                 },
                 .num_is_gt => switch (isa) {
-                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
+                    .arm32 => @as(Condition, .gt),
                     .aarch64 => @as(Condition, .gt),
                     .x86_64 => @as(Condition, .above),
                 },
                 .num_is_gte => switch (isa) {
-                    .arm32 => @compileError("arm32: floatCondition is not written yet"),
+                    .arm32 => @as(Condition, .ge),
                     .aarch64 => @as(Condition, .ge),
                     .x86_64 => @as(Condition, .above_or_equal),
                 },
