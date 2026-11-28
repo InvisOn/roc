@@ -29,8 +29,15 @@ pub const Call = @import("Call.zig");
 /// Emit type for arm32 Linux (AAPCS32, VFP variant), musl or glibc
 pub const LinuxEmit = Emit(.arm32_aapcs_vfp);
 
+/// ABI-parameterized CodeGen function. Use CodeGen(abi) to get a specialized type.
+pub const CodeGen = @import("CodeGen.zig").CodeGen;
+
+/// CodeGen type for arm32 Linux (AAPCS32, VFP variant), musl or glibc
+pub const LinuxCodeGen = CodeGen(.arm32_aapcs_vfp);
+
 test "arm32 module imports" {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(LinuxEmit);
+    std.testing.refAllDecls(LinuxCodeGen);
     _ = @import("encoding_oracle_tests.zig");
 }
