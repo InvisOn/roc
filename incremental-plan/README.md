@@ -652,8 +652,12 @@ review one PR a week, the 13 items take about 4 months. Two a week, about
   word; checks and the `source` shard passed on the laptop. The oracle
   ran out of memory twice on c1 (20 GB, then 26 GB), on whichever side
   was hashing, upstream's own tree included: our A0 hash mode grows
-  without bound on something in upstream's new commits. O-1 1: find it
-  and fix the A0 patch, then rerun.
+  without bound on something in upstream's new commits. O-1 1: it is
+  "issue 11698: curried lambdas", which upstream ignores under `.lss`
+  until upstream issue 13560 (`30ed9367ab`); A0's hash mode compiled every
+  case under `.lss` and did not skip ignored cases. New A0 patch
+  `0005-strategy-and-ignored-cases.patch` fixes both (verification run
+  on the laptop pending).
 - 2026-11-28: part 6 planned (`rfcs/part-06-codegen/codegen-rfc.md`),
   all six decisions accepted: arm32 joins `Isa` and `Abi` in part 6 with
   each driver arm a compile error until part 10 (D1), every `CC` role in

@@ -1,0 +1,62 @@
+Hash each case under its own strategy, and skip ignored cases (applied by relative_oracle.py after A0)
+
+Upstream added `TestCase.ignore` and per-case specialization strategies
+(the "(specialize=no)" variants run under `.boxy`). A0's hash mode
+compiled every case under the default `.lss` and hashed ignored cases
+too. On 2026-11-26 upstream ignored "issue 11698: curried lambdas" under
+`.lss` until upstream issue 13560 (`30ed9367ab`); compiling it under `.lss`
+grows without bound, and hash mode compiled both it and its `.boxy`
+variant that way, so the oracle ran out of memory (27 GB) on every side.
+`devObjectHashes` now takes the case's strategy for publishing and
+lowering, and `devCodeHashApplies` skips a case the runners ignore
+(`TestCase.isIgnored`). Applies after 0004-runtime-requests-items.patch.
+
+diff --git a/src/eval/inspected.zig b/src/eval/inspected.zig
+index 82e9bc552e..1a0cf70430 100644
+--- a/src/eval/inspected.zig
++++ b/src/eval/inspected.zig
+@@ -1781,11 +1781,12 @@ pub fn devObjectHashes(
+     source_kind: SourceKind,
+     source: []const u8,
+     imports: []const ModuleSource,
++    strategy: base.SpecializationStrategy,
+     targets: []const roc_target.RocTarget,
+     out: []DevObjectHash,
+ ) Error!void {
+     std.debug.assert(targets.len == out.len);
+-    var resources = try parseAndCanonicalizeInspectedProgram(allocator, io, source_kind, source, imports);
++    var resources = try parseProgram(allocator, source_kind, source, imports, .{ .io = io, .roots = .inspected, .strategy = strategy });
+     defer cleanupParseAndCanonical(allocator, resources);
+ 
+     const import_views = try allocator.alloc(check.CheckedArtifact.ImportedModuleView, resources.import_artifacts.len);
+@@ -1794,7 +1795,7 @@ pub fn devObjectHashes(
+         import_views[i] = check.CheckedArtifact.importedView(module);
+     }
+ 
+-    var lowered = try lowerCheckedRootLive(allocator, &resources.checked_artifact, import_views, .u64, .{});
++    var lowered = try lowerCheckedRootLive(allocator, &resources.checked_artifact, import_views, .u64, .{ .specialization_strategy = strategy });
+     defer lowered.deinit();
+ 
+     const static_data = try @import("static_data").buildStaticDataForWidth(allocator, .{
+diff --git a/src/eval/test/parallel_runner.zig b/src/eval/test/parallel_runner.zig
+index 130c847b33..7944bcdaf7 100644
+--- a/src/eval/test/parallel_runner.zig
++++ b/src/eval/test/parallel_runner.zig
+@@ -2171,6 +2171,8 @@ fn parseDevCodeHashRequest(raw_args: []const []const u8) ?DevCodeHashRequest {
+ 
+ fn devCodeHashApplies(tc: TestCase) bool {
+     if (tc.skip.dev) return false;
++    // A case ignored under its own strategy is not run by the runners either.
++    if (tc.isIgnored()) return false;
+     return switch (tc.expected) {
+         .inspect_str, .allocations_at_most => true,
+         .comptime_f32_bits,
+@@ -2194,7 +2196,7 @@ fn appendDevCodeHashLine(
+ ) RunnerError!void {
+     try out.appendSlice(allocator, name);
+     var hashes: [dev_code_hash_targets.len]helpers.DevObjectHash = undefined;
+-    helpers.devObjectHashes(allocator, io, tc.source_kind, tc.source, tc.imports, &dev_code_hash_targets, &hashes) catch |err| {
++    helpers.devObjectHashes(allocator, io, tc.source_kind, tc.source, tc.imports, tc.specialization_strategy, &dev_code_hash_targets, &hashes) catch |err| {
+         try out.print(allocator, "\tcompile={s}\n", .{@errorName(err)});
+         return;
+     };
