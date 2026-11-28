@@ -75,7 +75,7 @@ stay out of upstream. They will change as upstream moves.
 | 1–3 | **One PR, the shared driver for any backend:** architecture dispatch (`isa.zig`, `switch (isa)`), driver register seams, and the driver's word size (`word`, `target_ptr_size`, the 64-bit width names). With the instruction cache flush (draft 03). Which host word-size drafts (07, 12) stay in it is under review | dev backend: shared driver (`LirCodeGen`, `FrameBuilder`, `CallingConvention`) | not measured; the 2,000-line limit does not apply (see below) | no | step 1: [#11](https://github.com/InvisOn/roc/pull/11), upstream 12740 (merged); the rest: [#12](https://github.com/InvisOn/roc/pull/12), upstream 12983 (in review) | `isa-switch` (step 1), `isa-word-size` (the rest) |
 | 4 | A32/VFP encoder and its assembler oracle | dev backend: instruction encoder | 2,896 (577 generated) | no | [#13](https://github.com/InvisOn/roc/pull/13) | `arm32/encoder` |
 | 5 | ELF32 objects, ARM relocations, 32-bit DWARF | output: object file | about 1,050 | no | [#14](https://github.com/InvisOn/roc/pull/14) | `arm32/elf32-objects` |
-| 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | about 2,000 | no | not yet | `arm32/codegen` |
+| 6 | arm32 code generator, frames, register roles | dev backend: per-architecture code generator | 1,714 | no | not yet | `arm32/codegen` |
 | 7 | AAPCS32 calling convention | dev backend: calls (C ABI, frames) | about 1,200 | no | not yet | `arm32/aapcs32` |
 | 8 | arm32 targets, platforms, runtime files, CI lane | CLI target (start) and linking (end) | about 500 | no | not yet | `arm32/targets` |
 | 9 | arm32 as a host (running code in-process) | output: code in memory | about 550 | no | not yet | `arm32/host` |
@@ -664,3 +664,11 @@ review one PR a week, the 13 items take about 4 months. Two a week, about
   part 6 (D2), the reference's fixed frame (D3), calls and veneers in part
   6 (D4), byte tests built from part 4's `Emit` (D5), part 6 turns
   `arm32.Emit(target)` into `Emit(abi)` (D6).
+- 2026-11-28: parts 4 and 5 rebased onto `7a684b27af` (R-4) and pushed:
+  part 4 `6244fffad0`, part 5 `68231fc7ed` (its commit 3 and smoke tool
+  build `PiecedBytes` for `setRodata`, upstream's new type). Oracles
+  passed on both, and on all 10 commits of PR 12983 after A0 patch 0005.
+- 2026-11-28: part 6 done on `arm32/codegen` (local, head `8fdc7c8868`):
+  seven signed commits, 1,714 lines. E-20 1, E-21 3, N-51 1; part 10 owes
+  the user-facing 32 MiB branch check, the tail-call delta read and
+  division as calls. Outcome in the part 6 RFC.

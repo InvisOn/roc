@@ -1,14 +1,14 @@
 # Part 6: the arm32 code generator, frames and register roles
 
-- **Status:** Accepted (all decisions, 2026-11-28)
+- **Status:** Done
 - **Scope:** Branch
 - **Plan row:** 6, arm32 code generator, frames, register roles
-- **Branch:** `arm32/codegen` (not cut yet)
+- **Branch:** `arm32/codegen` (worktree `.workspaces/arm32-codegen`, local)
 - **Fork PR:** not yet
 - **Parent:** none
-- **Base:** `arm32/elf32-objects` (part 5), once parts 4 and 5 are rebased
-  onto PR 12983's current head `7a684b27af` on upstream `f79ae91d2f` (R-4)
-- **Head:** none yet
+- **Base:** `arm32/elf32-objects` (part 5, `68231fc7ed`), on `arm32/encoder`
+  (`6244fffad0`), on PR 12983 (`7a684b27af`), on upstream `f79ae91d2f`
+- **Head:** `8fdc7c8868` (seven commits; see "Outcome")
 
 ## Abstract
 
@@ -335,4 +335,45 @@ D1 1, D2 1, D3 1, D4 1, D5 1, D6 1.
 
 ## Outcome
 
-Not started.
+Seven signed commits on `arm32/codegen`, local only. Each passed the
+check list, `zig fmt`, the `source` shard and its review; the relative
+oracle ran on each (results below).
+
+| # | Commit | Content |
+|---|---|---|
+| 1 | `bfb0f19ef6` | `Isa.arm32`, `Abi.arm32_aapcs_vfp` (32-bit word), 230 arms (D1), `arm32.Emit(abi)` (D6), the `design.md` rule |
+| 2 | `9c23a34c70` | `arm32/Call.zig` (registers only) and `Emit.CC` (D2) |
+| 3 | `ff85894bcb` | The fixed frame in `DeferredFrameBuilder` (D3) |
+| 4 | `1ff5f36a70` | `arm32/CodeGen.zig`: pools, stack slots, frames, immediates, word/byte/halfword memory |
+| 5 | `23a97d2b95` | Integer operations, compares, jumps; the driver's `condCode` |
+| 6 | `eae09a1d93` | f64/f32 operations, float compares, vector moves; the driver's `floatCondition` |
+| 7 | `8fdc7c8868` | Calls, call patching, `emitLoadDataAddress`; the driver's `CodeGen` arm |
+
+- **Size:** 1,714 lines added, 36 removed, in 19 files: `arm32/CodeGen.zig`
+  948, `FrameBuilder.zig` +226, `LirCodeGen.zig` +224 (arms), `Call.zig`
+  128, `Emit.zig` +112. 193 driver arms are still compile errors.
+- **Arm wording:** `"arm32: <function> is not written yet"`, and "is not
+  written for an arm32 host yet" for the host arms; arms inside tests of
+  64-bit targets say "the targets above are 64-bit" (N-38, N-41).
+- **Real now, not compile errors:** the driver's register and condition
+  types (N-39), `condCode`, `floatCondition`, `CodeGen`.
+- **Decided during the commits:**
+  - E-20 1: `CC` declares no `TAIL_CALL_DELTA_REG`; the delta is an
+    immediate on arm32.
+  - E-21 3: a branch or call beyond A32's ±32 MiB is reported to the user;
+    veneers wait for a program that needs them. D4 overstated the
+    reference: its veneer methods were empty.
+  - N-51 1: `CodeGen` treats an out-of-reach branch as an `invariant`; the
+    user-facing check comes with the arm32 driver path.
+  - Division (`__aeabi_*`) is not a `CodeGen` method: the call clobbers the
+    temporaries in r0-r3, so the driver models it as a call.
+  - The shared `RegisterPool` serves general registers only; arm32's float
+    pool mixes registers with and without S views.
+- **Owed by part 10 (recorded so it is not missed):** the user-facing 32 MiB
+  branch-range check (N-51); moving the driver's `TAIL_CALL_DELTA_REG` read
+  into the aarch64 arm and dropping x86_64's unused R10 (E-20); division
+  as driver-side calls; `allocVector` for vector temporaries (part 11).
+- **Check-list gap found:** tidy skips untracked files, so new files are
+  `git add -N`'d before every check run.
+- **Oracle:** commits 1 to 5 passed; 6 and 7 queued. `linux-core` on the
+  head: running.
