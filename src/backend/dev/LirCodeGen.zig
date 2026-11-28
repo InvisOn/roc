@@ -414,7 +414,7 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
 
     // Select architecture-specific types based on target
     const CodeGen = switch (isa) {
-        .arm32 => @compileError("arm32: LirCodeGen is not written yet"),
+        .arm32 => arm32.CodeGen(machine_abi),
         .x86_64 => x86_64.CodeGen(machine_abi),
         .aarch64 => aarch64.CodeGen(machine_abi),
     };

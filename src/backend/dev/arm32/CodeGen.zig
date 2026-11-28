@@ -360,8 +360,34 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
             try self.emit.vabsF32(dst.sLow(), src.sLow());
         }
 
-        // Control flow. A32 branches reach ±32 MiB; `encodeBranch` asserts
-        // that the distance fits.
+        // Control flow. A32 branches and calls reach ±32 MiB from PC+8. The
+        // check that tells the user when arm32 code needs more comes with
+        // the arm32 driver path, before any code is patched; behind it,
+        // `branchOffset` treats an out-of-reach distance as a compiler bug.
+
+        /// The byte offset from the branch at `loc` to `target_loc`.
+        fn branchOffset(loc: usize, target_loc: usize) i32 {
+            const offset = @as(i64, @intCast(target_loc)) - @as(i64, @intCast(loc));
+            // The same word displacement `Emit.encodeBranch` encodes.
+            const disp = (offset - 8) >> 2;
+            if (disp < -(1 << 23) or disp >= (1 << 23)) {
+                invariant("arm32 invariant violated: branch at 0x{x} to 0x{x} is out of A32 reach", .{ loc, target_loc });
+            }
+            return @intCast(offset);
+        }
+
+        fn readInst(self: *Self, at: usize) u32 {
+            return std.mem.readInt(u32, self.emit.buf.items[at..][0..4], .little);
+        }
+
+        fn writeInst(self: *Self, at: usize, inst: u32) void {
+            std.mem.writeInt(u32, self.emit.buf.items[at..][0..4], inst, .little);
+        }
+
+        /// Whether the instruction at `loc` is a BL.
+        fn isBlAt(self: *Self, loc: usize) bool {
+            return (self.readInst(loc) >> 24) == 0xEB;
+        }
 
         /// Emit unconditional jump (returns patch location for fixup)
         pub fn emitJump(self: *Self) Allocator.Error!usize {
@@ -380,11 +406,66 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
         /// Point the branch at `patch_loc` to `target_loc`, keeping its
         /// condition.
         pub fn patchJump(self: *Self, patch_loc: usize, target_loc: usize) Allocator.Error!void {
-            const inst = std.mem.readInt(u32, self.emit.buf.items[patch_loc..][0..4], .little);
+            const inst = self.readInst(patch_loc);
             std.debug.assert((inst >> 24) & 0xF == 0b1010); // B<cond>, not BL
             const cond: Condition = @fromBackingInt(@as(u4, @truncate(inst >> 28)));
-            const offset: i32 = @intCast(@as(i64, @intCast(target_loc)) - @as(i64, @intCast(patch_loc)));
-            std.mem.writeInt(u32, self.emit.buf.items[patch_loc..][0..4], Emit.encodeBranch(cond, false, offset), .little);
+            self.writeInst(patch_loc, Emit.encodeBranch(cond, false, branchOffset(patch_loc, target_loc)));
+        }
+
+        // Calls
+
+        /// How `emitDirectCall` reached its target, with the same members as
+        /// aarch64's; arm32 always emits a direct BL.
+        pub const CallKind = enum { call, inline_call };
+
+        /// Emit a call placeholder to a procedure not placed yet; returns its
+        /// location for `patchCall`.
+        pub fn emitCallPlaceholder(self: *Self) Allocator.Error!usize {
+            const loc = self.currentOffset();
+            try self.emit.bl(0);
+            return loc;
+        }
+
+        /// Patch a call emitted by `emitCallPlaceholder`.
+        pub fn patchCall(self: *Self, patch_loc: usize, target_loc: usize) Allocator.Error!void {
+            std.debug.assert(self.isBlAt(patch_loc));
+            self.writeInst(patch_loc, Emit.encodeBranch(.al, true, branchOffset(patch_loc, target_loc)));
+        }
+
+        /// Call a procedure whose code offset is already known: always a
+        /// direct BL, since arm32 code is kept within A32's branch reach.
+        pub fn emitDirectCall(self: *Self, target_loc: usize) Allocator.Error!CallKind {
+            const loc = self.currentOffset();
+            try self.emit.bl(branchOffset(loc, target_loc));
+            return .call;
+        }
+
+        /// Re-encode a call emitted by `emitDirectCall` after its site or its
+        /// target moved because a prologue was prepended in front of a body.
+        pub fn patchDirectCall(self: *Self, loc: usize, target_loc: usize) void {
+            std.debug.assert(self.isBlAt(loc));
+            self.writeInst(loc, Emit.encodeBranch(.al, true, branchOffset(loc, target_loc)));
+        }
+
+        /// Emit a BL to a linked symbol, recorded as an `arm32_call`
+        /// relocation. The instruction holds the relocation's addend.
+        pub fn emitExternCall(self: *Self, symbol: SymbolTable.Id) Allocator.Error!void {
+            const loc = self.currentOffset();
+            try self.emit.bl(0);
+            try self.relocations.append(self.allocator, .{ .linked_function = .{ .offset = @intCast(loc), .symbol = symbol, .kind = .arm32_call } });
+        }
+
+        /// Emit a call to a linked symbol.
+        pub fn emitCall(self: *Self, symbol: SymbolTable.Id) Allocator.Error!void {
+            try self.emitExternCall(symbol);
+        }
+
+        /// dst = the address of `symbol`, by a PC-relative movw/movt/add
+        /// sequence whose two halves are relocated.
+        pub fn emitLoadDataAddress(self: *Self, dst: GeneralReg, symbol: SymbolTable.Id) Allocator.Error!void {
+            const at = try self.emit.pcRelAddress(dst);
+            try self.relocations.append(self.allocator, .{ .linked_data = .{ .offset = at, .symbol = symbol, .kind = .arm32_movw_prel } });
+            try self.relocations.append(self.allocator, .{ .linked_data = .{ .offset = at + 4, .symbol = symbol, .kind = .arm32_movt_prel } });
         }
 
         // Memory access
@@ -809,4 +890,59 @@ test "vector accesses form any non-zero offset in lr, and a move to itself is no
             try e.vmovQ(.q1, .q8);
         }
     }.build);
+}
+
+test "calls to placed and unplaced procedures are BLs that patch in place" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    try cg.emitAdd(.w32, .r0, .r0, .r1); // the callee, at 0
+    const pending = try cg.emitCallPlaceholder();
+    try std.testing.expectEqual(TestCodeGen.CallKind.call, try cg.emitDirectCall(0));
+    try cg.patchCall(pending, 0);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.addRegRegReg(.r0, .r0, .r1);
+            try e.bl(-4);
+            try e.bl(-8);
+        }
+    }.build);
+    // A prologue prepended in front of the callee moves it to 16.
+    cg.patchDirectCall(8, 16);
+    try std.testing.expectEqual(TestEmit.encodeBranch(.al, true, 8), std.mem.readInt(u32, cg.getCode()[8..12], .little));
+}
+
+test "a call to a linked symbol and a data address carry their relocations" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    const puts = try cg.symbols.internEmitted(std.testing.allocator, "puts");
+    const table = try cg.symbols.internEmitted(std.testing.allocator, "table");
+    try cg.emitCall(puts);
+    try cg.emitLoadDataAddress(.r2, table);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.bl(0); // holds the arm32_call addend, -8
+            _ = try e.pcRelAddress(.r2);
+        }
+    }.build);
+    try std.testing.expectEqualDeep(&[_]Relocation{
+        .{ .linked_function = .{ .offset = 0, .symbol = puts, .kind = .arm32_call } },
+        .{ .linked_data = .{ .offset = 4, .symbol = table, .kind = .arm32_movw_prel } },
+        .{ .linked_data = .{ .offset = 8, .symbol = table, .kind = .arm32_movt_prel } },
+    }, cg.relocations.items);
+}
+
+test "a branch reaches exactly as far as A32 encodes, measured from PC+8" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    // The farthest targets: 2^23 - 1 words forward and 2^23 words back from PC+8.
+    // Only the branches need to be in the buffer, not their targets.
+    try cg.emit.buf.appendNTimes(std.testing.allocator, 0, 1 << 25);
+    const back_loc: usize = (1 << 25) - 8;
+    const forward_loc: usize = 4;
+    std.mem.writeInt(u32, cg.emit.buf.items[back_loc..][0..4], TestEmit.encodeBranch(.al, false, 0), .little);
+    std.mem.writeInt(u32, cg.emit.buf.items[forward_loc..][0..4], TestEmit.encodeBranch(.al, false, 0), .little);
+    try cg.patchJump(back_loc, 0);
+    try cg.patchJump(forward_loc, forward_loc + 8 + ((1 << 25) - 4));
+    try std.testing.expectEqual(TestEmit.encodeBranch(.al, false, -((1 << 25) - 8)), std.mem.readInt(u32, cg.emit.buf.items[back_loc..][0..4], .little));
+    try std.testing.expectEqual(TestEmit.encodeBranch(.al, false, (1 << 25) + 4), std.mem.readInt(u32, cg.emit.buf.items[forward_loc..][0..4], .little));
 }
