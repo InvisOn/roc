@@ -644,3 +644,19 @@ review one PR a week, the 13 items take about 4 months. Two a week, about
   moves up to right after part 7 and lifts the 8-byte assert, since the
   driver cannot be built for a 4-byte word before it. New order 6, 7, 10,
   8, 9, 11, 12.
+- 2026-11-28: PR 12983 rebased onto upstream `f79ae91d2f` (289 commits;
+  conflicts in `design.md`, `CallingConvention.zig`, `LirCodeGen.zig`).
+  Upstream now instantiates the code generator per `isa.Abi`
+  (`568382372d`), so the word size moved onto a new `Abi.ptrBitWidth()`
+  and `Widths` takes an `Abi`. Pushed at `7a684b27af` on the owner's
+  word; checks and the `source` shard passed on the laptop. The oracle
+  ran out of memory twice on c1 (20 GB, then 26 GB), on whichever side
+  was hashing, upstream's own tree included: our A0 hash mode grows
+  without bound on something in upstream's new commits. O-1 1: find it
+  and fix the A0 patch, then rerun.
+- 2026-11-28: part 6 planned (`rfcs/part-06-codegen/codegen-rfc.md`),
+  all six decisions accepted: arm32 joins `Isa` and `Abi` in part 6 with
+  each driver arm a compile error until part 10 (D1), every `CC` role in
+  part 6 (D2), the reference's fixed frame (D3), calls and veneers in part
+  6 (D4), byte tests built from part 4's `Emit` (D5), part 6 turns
+  `arm32.Emit(target)` into `Emit(abi)` (D6).
