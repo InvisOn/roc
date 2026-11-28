@@ -304,6 +304,9 @@ const jobs = [_]Job{
     .{ .name = "run-check-panic", .placement = .source },
     .{ .name = "run-check-unreachable-rationale", .placement = .source },
     .{ .name = "run-check-cli-global-stdio", .placement = .source },
+    // Assembles its entries with the build's own `zig cc`, so the expected
+    // bytes are the same from every host.
+    .{ .name = "run-check-arm32-encoding-oracle", .placement = .source },
     .{ .name = "run-check-test-wiring" },
     .{ .name = "run-check-builtin-format", .placement = .primary_host },
     .{ .name = "run-check-glue-abi" },
