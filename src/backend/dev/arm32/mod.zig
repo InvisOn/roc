@@ -23,6 +23,9 @@ pub const Operand2 = @import("Emit.zig").Operand2;
 pub const MemForm = @import("Emit.zig").MemForm;
 pub const fitsImmediate = @import("Emit.zig").fitsImmediate;
 
+/// The AAPCS32 registers and the roles the dev backend gives them.
+pub const Call = @import("Call.zig");
+
 /// Emit type for arm32 Linux (AAPCS32, VFP variant), musl or glibc
 pub const LinuxEmit = Emit(.arm32_aapcs_vfp);
 
