@@ -559,6 +559,7 @@ fn isTailSwitch(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) bool {
     for ((tree.fullSwitch(node) orelse unreachable).ast.cases) |case_node| {
         const case = tree.fullSwitchCase(case_node) orelse unreachable;
         const target = case.ast.target_expr;
+        if (isCompileError(tree, target)) continue;
         var buffer: [2]std.zig.Ast.Node.Index = undefined;
         const statements = tree.blockStatements(&buffer, target);
         if (statements != null and statements.?.len == 0) {
@@ -583,9 +584,17 @@ fn comptimeIsaCondition(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) 
     for ((tree.fullSwitch(switch_node) orelse unreachable).ast.cases) |case_node| {
         const target = (tree.fullSwitchCase(case_node) orelse unreachable).ast.target_expr;
         const is_false = tree.nodeTag(target) == .identifier and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(target)), "false");
-        if (!is_false) non_false_arms += 1;
+        if (!is_false and !isCompileError(tree, target)) non_false_arms += 1;
     }
     return non_false_arms == 1;
+}
+
+/// `@compileError(...)`: an arm for an instruction set the code does not
+/// support yet, which no build reaches.
+fn isCompileError(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) bool {
+    const tag = tree.nodeTag(node);
+    const is_builtin_call = tag == .builtin_call_two or tag == .builtin_call_two_comma or tag == .builtin_call or tag == .builtin_call_comma;
+    return is_builtin_call and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@compileError");
 }
 
 /// Checks if a line (after the //) is a horizontal line separator comment.
@@ -1058,11 +1067,13 @@ test "raw .w64 lint allows only code for one instruction set" {
         \\        .aarch64 => {},
         \\    }
         \\    switch (isa) {
+        \\        .arm32 => @compileError("not yet"),
         \\        .x86_64 => return self.emit(.w32),
         \\        .aarch64 => {},
         \\    }
         \\    self.emit(.w64);
         \\    if (comptime switch (isa) {
+        \\        .arm32 => @compileError("not yet"),
         \\        .x86_64 => is_windows,
         \\        .aarch64 => false,
         \\    }) self.emit(.w64);

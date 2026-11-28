@@ -98,6 +98,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
     const widths = Widths(machine_abi);
     const is_windows = machine_abi.isWindows();
     const uses_position_based_float_args = switch (isa) {
+        .arm32 => @compileError("arm32: CallBuilder is not written yet"),
         .x86_64 => is_windows,
         .aarch64 => false,
     };
@@ -188,6 +189,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
         pub fn init(emit: *EmitType, stack_offset: *i32) Allocator.Error!Self {
             var self = Self{ .emit = emit, .stack_offset = stack_offset };
             if (comptime switch (isa) {
+                .arm32 => @compileError("arm32: init is not written yet"),
                 .x86_64 => is_windows,
                 .aarch64 => false,
             }) {
@@ -582,6 +584,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                 },
                 .from_lea => |lea| {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitArgInst is not written yet"),
                         .aarch64 => {
                             if (lea.offset >= 0 and lea.offset <= 4095) {
                                 try self.emit.addRegRegImm12(.w64, dst, lea.base, @intCast(lea.offset));
@@ -601,6 +604,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                 .from_mem => |mem| try self.emitLoadPromoted(dst, mem.base, mem.offset, mem.promote),
                 .from_imm => |value| {
                     switch (isa) {
+                        .arm32 => @compileError("arm32: emitArgInst is not written yet"),
                         .aarch64 => try self.emit.movRegImm64(dst, @bitCast(value)),
                         .x86_64 => try self.emit.movRegImm(dst, value),
                     }
@@ -619,6 +623,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
             promote: Promotion,
         ) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: emitLoadPromoted is not written yet"),
                 .aarch64 => {
                     switch (promote) {
                         .none => try self.emit.ldrRegMemSoff(.w64, dst, base, offset),
@@ -764,6 +769,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// redirect the deferred arg to load from memory instead.
         fn saveScratchIfConflict(self: *Self) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: saveScratchIfConflict is not written yet"),
                 .aarch64 => return,
                 .x86_64 => {},
             }
@@ -811,6 +817,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
                         const save_offset = self.allocCallerTempSlot();
                         switch (isa) {
+                            .arm32 => @compileError("arm32: stabilizeDeferredMemorySources is not written yet"),
                             .aarch64 => {
                                 try self.emit.ldrRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, mem.base, mem.offset);
                                 try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.BASE_PTR, save_offset);
@@ -833,6 +840,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
                         const save_offset = self.allocCallerTempSlot();
                         switch (isa) {
+                            .arm32 => @compileError("arm32: stabilizeDeferredMemorySources is not written yet"),
                             .aarch64 => {
                                 if (lea.offset >= 0 and lea.offset <= 4095) {
                                     try self.emit.addRegRegImm12(.w64, CC_EMIT.SCRATCH_REG, lea.base, @intCast(lea.offset));
@@ -848,6 +856,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
                             },
                         }
                         switch (isa) {
+                            .arm32 => @compileError("arm32: stabilizeDeferredMemorySources is not written yet"),
                             .aarch64 => {
                                 try self.emit.strRegMemSoff(.w64, CC_EMIT.SCRATCH_REG, CC_EMIT.BASE_PTR, save_offset);
                             },
@@ -864,6 +873,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
         fn allocCallerTempSlot(self: *Self) i32 {
             switch (isa) {
+                .arm32 => @compileError("arm32: allocCallerTempSlot is not written yet"),
                 .aarch64 => {
                     const offset = self.stack_offset.*;
                     self.stack_offset.* += 16;
@@ -969,6 +979,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
             std.debug.assert(self.stackArgs().len == 0 or total_space >= CC_EMIT.SHADOW_SPACE + self.stack_arg_size);
 
             switch (isa) {
+                .arm32 => @compileError("arm32: beginCall is not written yet"),
                 .x86_64 => {
                     // Save SCRATCH_REG if it conflicts with stack arg processing
                     try self.saveScratchIfConflict();
@@ -1011,6 +1022,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
         /// if `init()` configured a save slot for it.
         fn finishCall(self: *Self, total_space: u32) Allocator.Error!void {
             switch (isa) {
+                .arm32 => @compileError("arm32: finishCall is not written yet"),
                 .x86_64 => {
                     // Restore stack pointer
                     if (total_space > 0) {
@@ -1038,6 +1050,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
             // Load function address into scratch register and call through it
             switch (isa) {
+                .arm32 => @compileError("arm32: call is not written yet"),
                 .aarch64 => {
                     try self.emit.movRegImm64(CC_EMIT.SCRATCH_REG, fn_addr);
                     try self.emit.blrReg(CC_EMIT.SCRATCH_REG);
@@ -1059,6 +1072,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
             const total_space = try self.beginCall();
 
             switch (isa) {
+                .arm32 => @compileError("arm32: callReg is not written yet"),
                 .aarch64 => {
                     try self.emit.blrReg(target);
                 },
@@ -1090,6 +1104,7 @@ pub fn CallBuilder(comptime EmitType: type) type {
 
             // Emit relocatable call instruction
             switch (isa) {
+                .arm32 => @compileError("arm32: callRelocatable is not written yet"),
                 .aarch64 => {
                     std.debug.assert(&codegen.emit == self.emit);
                     try codegen.emitExternCall(symbol);

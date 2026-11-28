@@ -31131,11 +31131,18 @@ the list of instruction sets lives only in `isa.zig`. Code that runs generated
 code in-process asks `isa.host`, never `RocTarget.detectNative`, which maps an
 architecture without a code generator to one that has one.
 
+While `isaOfOrNull` gives no target an instruction set, which is how a new
+instruction set arrives before the driver can compile for it, that instruction
+set's answer in a `switch (isa)` the driver does not yet support for it may be
+`@compileError("<isa>: <function> is not written yet")`: every build that would
+reach it fails, and no build reaches it. `arm32` is in this state.
+
 The code generator family (`LirCodeGen`, the per-instruction-set `CodeGen` and
 `Emit`, `CallBuilder`, `DeferredFrameBuilder`) is parameterized by
 `isa.Abi`, never by `RocTarget`. An `Abi` names exactly what the generated
 machine code depends on: the instruction set and the calling convention
-(System V or Windows on x86-64; AAPCS64, Apple or Windows on AArch64). Every
+(System V or Windows on x86-64; AAPCS64, Apple or Windows on AArch64; AAPCS32
+with VFP on 32-bit ARM, which no target selects yet). Every
 `RocTarget` with the same `Abi` shares one instantiation, which `abiOfOrNull`
 selects; what differs between those targets, such as the object format, symbol
 naming and CPU level, is runtime data the generator's callers pass in. A

@@ -22,6 +22,7 @@ const isa = @import("isa.zig");
 const Abi = isa.Abi;
 const x86_64 = @import("x86_64/mod.zig");
 const aarch64 = @import("aarch64/mod.zig");
+const arm32 = @import("arm32/mod.zig");
 
 /// The register widths of `machine_abi`'s instruction set, named by kind of
 /// value.
@@ -31,6 +32,7 @@ pub fn Widths(comptime machine_abi: Abi) type {
         pub const RegisterWidth = switch (machine_abi.isa()) {
             .x86_64 => x86_64.RegisterWidth,
             .aarch64 => aarch64.RegisterWidth,
+            .arm32 => arm32.RegisterWidth,
         };
 
         /// The number of bits in one target word.
@@ -67,11 +69,19 @@ pub fn Widths(comptime machine_abi: Abi) type {
 
 test "every width is w64 and every bit count 64 on the x86_64 and aarch64 ABIs" {
     inline for (@typeInfo(Abi).@"enum".field_names) |name| {
-        const widths = Widths(@field(Abi, name));
+        const machine_abi = @field(Abi, name);
+        if (comptime machine_abi.ptrBitWidth() != 64) continue;
+        const widths = Widths(machine_abi);
         try std.testing.expectEqual(widths.RegisterWidth.w64, widths.word_width);
         try std.testing.expectEqual(widths.RegisterWidth.w64, widths.wide64_width);
         try std.testing.expectEqual(widths.RegisterWidth.w64, widths.scalar_width);
         try std.testing.expectEqual(64, widths.word_bits);
         try std.testing.expectEqual(64, widths.scalar_bits);
     }
+}
+
+test "a word is w32 and 32 bits on the arm32 ABI" {
+    const widths = Widths(.arm32_aapcs_vfp);
+    try std.testing.expectEqual(widths.RegisterWidth.w32, widths.word_width);
+    try std.testing.expectEqual(32, widths.word_bits);
 }

@@ -168,6 +168,7 @@ fn emitIndexed(
             const elf_arch: object.elf.Architecture = switch (isa) {
                 .x86_64 => .x86_64,
                 .aarch64 => .aarch64,
+                .arm32 => .arm32,
             };
             var elf = try object.ElfWriter.init(allocator, elf_arch, elfOsabi(os_tag));
             defer elf.deinit();
@@ -212,6 +213,7 @@ fn emitIndexed(
             const macho_arch: object.macho.Architecture = switch (isa) {
                 .x86_64 => .x86_64,
                 .aarch64 => .aarch64,
+                .arm32 => unreachable, // every arm32 RocTarget is a Linux target
             };
             var macho = try object.MachOWriter.init(allocator, macho_arch);
             defer macho.deinit();
@@ -253,6 +255,7 @@ fn emitIndexed(
             const coff_arch: object.coff.Architecture = switch (isa) {
                 .x86_64 => .x86_64,
                 .aarch64 => .aarch64,
+                .arm32 => unreachable, // every arm32 RocTarget is a Linux target
             };
             var coff_writer = try object.CoffWriter.init(allocator, coff_arch);
             defer coff_writer.deinit();
@@ -741,6 +744,7 @@ fn expectReadonlyObjectDataForTarget(target: RocTarget, required: []const u8, fo
     const code = switch (isaOfOrNull(target) orelse return error.UnsupportedTarget) {
         .aarch64 => &[_]u8{ 0xC0, 0x03, 0x5F, 0xD6 }, // ret
         .x86_64 => &[_]u8{0xC3}, // ret
+        .arm32 => &[_]u8{ 0x1E, 0xFF, 0x2F, 0xE1 }, // bx lr
     };
     const rodata = required;
     const symbols = [_]Symbol{
@@ -1032,14 +1036,17 @@ test "indexed object relocations preserve targets through format symbol ordering
         const isa = comptime isaOf(target);
         const relocations = [_]IndexedRelocation{
             .{ .linked_data = .{ .offset = 8, .symbol = ids[2], .kind = switch (isa) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => .rel32,
                 .aarch64 => .page21,
             } } },
             .{ .linked_function = .{ .offset = 0, .symbol = ids[0], .kind = switch (isa) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => .x86_call_rel32,
                 .aarch64 => .aarch64_call26,
             } } },
             .{ .linked_data = .{ .offset = 12, .symbol = ids[2], .kind = switch (isa) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => .rel32,
                 .aarch64 => .pageoff12,
             } } },
@@ -1055,14 +1062,17 @@ test "indexed object relocations preserve targets through format symbol ordering
         try std.testing.expectEqual(@as(usize, 2), decoded.data.len / decoded.relocation_size);
         const expected_types: [4]usize = switch (decoded.format) {
             .elf => switch (isa) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => .{ 2, 4, 2, 1 },
                 .aarch64 => .{ 275, 283, 277, 257 },
             },
             .macho => switch (isa) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => .{ 1, 2, 1, 0 },
                 .aarch64 => .{ 3, 2, 4, 0 },
             },
             .coff => switch (isa) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => .{ 4, 4, 4, 1 },
                 .aarch64 => .{ 4, 3, 6, 14 },
             },
@@ -1080,6 +1090,7 @@ test "indexed object relocations preserve targets through format symbol ordering
         if (decoded.format == .elf) {
             try std.testing.expectEqual(@as(i64, 3), std.mem.readInt(i64, decoded.data[16..24], .little));
             try std.testing.expectEqual(@as(i64, switch (isa) {
+                .arm32 => @compileError("the targets above are 64-bit"),
                 .x86_64 => -4,
                 .aarch64 => 0,
             }), std.mem.readInt(i64, decoded.text[decoded.relocation_size + 16 ..][0..8], .little));

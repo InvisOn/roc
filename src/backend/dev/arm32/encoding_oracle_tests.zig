@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const emit = @import("Emit.zig");
-const E = emit.Emit(.arm32musl);
+const E = emit.Emit(.arm32_aapcs_vfp);
 const ModImm = emit.ModImm;
 const Operand2 = emit.Operand2;
 const GeneralReg = @import("Registers.zig").GeneralReg;

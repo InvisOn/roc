@@ -120,7 +120,7 @@ const SmokeObject = struct {
 };
 
 fn buildObject(gpa: Allocator) Allocator.Error!SmokeObject {
-    var e = arm32.MuslEmit.init(gpa);
+    var e = arm32.LinuxEmit.init(gpa);
     defer e.deinit();
     // push {r4, lr}: keeps SP 8-byte aligned across the call (AAPCS32).
     try e.push(arm32.GeneralReg.r4.listBit() | arm32.GeneralReg.lr.listBit());

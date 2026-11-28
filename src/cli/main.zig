@@ -9777,6 +9777,7 @@ fn devBackendPhaseName(target: RocTarget) []const u8 {
     if (backend.dev.isa.isaOfOrNull(target)) |isa| return switch (isa) {
         .x86_64 => "x64 Backend",
         .aarch64 => "arm64 Backend",
+        .arm32 => "arm32 Backend",
     };
     if (target.toCpuArch() == .wasm32) return "wasm32 Bytecode Generation";
     base.invariant(
@@ -9789,6 +9790,7 @@ fn devInstructionGenerationPhaseName(target: RocTarget) []const u8 {
     if (backend.dev.isa.isaOfOrNull(target)) |isa| return switch (isa) {
         .x86_64 => "x64 Instruction Generation",
         .aarch64 => "arm64 Instruction Generation",
+        .arm32 => "arm32 Instruction Generation",
     };
     return devBackendPhaseName(target);
 }

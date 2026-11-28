@@ -10,12 +10,14 @@
 //! Emitters encode exactly what they are asked to. Immediates that A32 cannot
 //! encode are rejected by the argument types (`ModImm`) or by assertions.
 //!
-//! The Emit function is parameterized by RocTarget to enable full cross-compilation.
+//! The Emit function is parameterized by the ABI of the code it emits.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RocTarget = @import("roc_target").RocTarget;
+const Abi = @import("../isa.zig").Abi;
 const Registers = @import("Registers.zig");
+const Call = @import("Call.zig");
 
 /// A32 condition codes.
 pub const Condition = enum(u4) {
@@ -162,28 +164,31 @@ pub fn fitsImmediate(form: MemForm, offset: i32) bool {
 }
 
 /// ARM32 instruction emitter for generating machine code.
-/// Parameterized by target for cross-compilation support.
-pub fn Emit(comptime target: RocTarget) type {
-    // Validate this is an arm32 target
-    if (target.toCpuArch() != .arm) {
-        @compileError("arm32.Emit requires an arm32 target");
+/// Parameterized by the ABI of the code it emits.
+pub fn Emit(comptime machine_abi: Abi) type {
+    if (machine_abi.isa() != .arm32) {
+        @compileError("arm32.Emit requires an arm32 ABI");
     }
     // The CPU floor: NEON holds vector locals, and without `hwdiv` word
     // division calls `__aeabi_*` helpers. Roc names no CPU floor of its own
-    // for arm32 (`RocTarget.cpuContract`), so the target gets Zig's arm
+    // for arm32 (`RocTarget.cpuContract`), so each arm32 target gets Zig's arm
     // baseline; if a Zig upgrade moves that baseline, the code generated here
     // must move with it. `.ARM.attributes` in `object/elf.zig` states this
     // floor; change both together.
     comptime {
-        const arch = target.toCpuArch();
-        const os: std.Target.Os = .{ .tag = target.toOsTag(), .version_range = .{ .none = {} } };
-        const baseline = std.Target.Cpu.baseline(arch, os);
-        if (target.requiredRuntimeCpuFeatures().count() != 0)
-            @compileError("arm32.Emit assumes Zig's arm baseline, but " ++ target.toName() ++ " names CPU features of its own");
-        if (!baseline.has(.arm, .neon))
-            @compileError("arm32.Emit lowers SIMD to NEON, but Zig's arm baseline for " ++ target.toName() ++ " lacks NEON");
-        if (baseline.hasAny(.arm, &.{ .hwdiv, .hwdiv_arm }))
-            @compileError("arm32.Emit divides through __aeabi helpers, but Zig's arm baseline for " ++ target.toName() ++ " has hwdiv");
+        for (@typeInfo(RocTarget).@"enum".field_names) |name| {
+            const target = @field(RocTarget, name);
+            const arch = target.toCpuArch();
+            if (arch != .arm) continue;
+            const os: std.Target.Os = .{ .tag = target.toOsTag(), .version_range = .{ .none = {} } };
+            const baseline = std.Target.Cpu.baseline(arch, os);
+            if (target.requiredRuntimeCpuFeatures().count() != 0)
+                @compileError("arm32.Emit assumes Zig's arm baseline, but " ++ target.toName() ++ " names CPU features of its own");
+            if (!baseline.has(.arm, .neon))
+                @compileError("arm32.Emit lowers SIMD to NEON, but Zig's arm baseline for " ++ target.toName() ++ " lacks NEON");
+            if (baseline.hasAny(.arm, &.{ .hwdiv, .hwdiv_arm }))
+                @compileError("arm32.Emit divides through __aeabi helpers, but Zig's arm baseline for " ++ target.toName() ++ " has hwdiv");
+        }
     }
 
     return struct {
@@ -197,8 +202,56 @@ pub fn Emit(comptime target: RocTarget) type {
         pub const QReg = Registers.QReg;
         pub const RegisterWidth = Registers.RegisterWidth;
 
-        /// The target this Emit was instantiated for
-        pub const roc_target = target;
+        /// The ABI this Emit was instantiated for
+        pub const code_abi = machine_abi;
+
+        /// The register roles the shared driver reads, and the AAPCS32
+        /// constants it needs.
+        pub const CC = struct {
+            pub const PARAM_REGS = Call.GENERAL_PARAM_REGS;
+
+            pub const FLOAT_PARAM_REGS = Call.FLOAT_PARAM_REGS;
+
+            pub const RETURN_REGS = Call.GENERAL_RETURN_REGS;
+
+            pub const SHADOW_SPACE: u8 = Call.SHADOW_SPACE_SIZE;
+
+            pub const SCRATCH_REG = Call.SCRATCH_REG;
+            pub const BASE_PTR = Call.BASE_PTR_REG;
+            pub const STACK_PTR = Call.STACK_PTR_REG;
+            pub const STACK_ALIGNMENT: u32 = Call.STACK_ALIGNMENT;
+
+            /// Roc-internal return registers, in order, for results of
+            /// compiled-proc calls; a result of several words fills them from
+            /// the first. These are every caller-saved register the allocator
+            /// hands out.
+            pub const ROC_RET_REGS = [_]Registers.GeneralReg{ .r0, .r1, .r2, .r3 };
+            /// Register that addresses the caller's stack arguments: the frame
+            /// pointer, since the prologue pushes {fp, lr} and then sets
+            /// fp = sp, so the arguments sit at a fixed offset above it.
+            pub const CALLER_STACK_ARG_BASE_REG = Call.BASE_PTR_REG;
+            /// Offset of the first incoming stack argument from
+            /// `CALLER_STACK_ARG_BASE_REG`: past the saved fp and lr.
+            pub const INCOMING_STACK_ARG_BASE_OFFSET: i32 = 8;
+            /// Register that holds the callee's address for the frame
+            /// teardown of a frame-replacing call. Like x86_64's, it is the
+            /// scratch register: no argument uses it, it is not callee-saved,
+            /// and address formation uses LR.
+            pub const TAIL_CALL_TARGET_REG = Call.SCRATCH_REG;
+            /// Callee-saved register that holds an entrypoint's result pointer.
+            pub const RESULT_PTR_SAVE_REG = Registers.GeneralReg.r9;
+            /// Callee-saved register that holds the RocOps pointer.
+            pub const ROC_OPS_SAVE_REG = Registers.GeneralReg.r10;
+            /// Register that holds an immediate result while it is stored
+            /// through the hidden return pointer, which `SCRATCH_REG` holds: a
+            /// caller-saved register no result occupies then.
+            pub const RET_PTR_COPY_REG = Registers.GeneralReg.r3;
+
+            /// Align a stack size to the platform's required alignment.
+            pub fn alignStackSize(size: u32) u32 {
+                return (size + STACK_ALIGNMENT - 1) & ~(STACK_ALIGNMENT - 1);
+            }
+        };
 
         allocator: std.mem.Allocator,
         buf: std.ArrayList(u8),
@@ -1295,7 +1348,7 @@ test "condition inversion" {
 }
 
 test "branch encoding applies the PC bias" {
-    const E = Emit(.arm32musl);
+    const E = Emit(.arm32_aapcs_vfp);
     // BL to itself: imm24 = -2
     try std.testing.expectEqual(@as(u32, 0xEBFFFFFE), E.encodeBranch(.al, true, 0));
     // B to the next-but-one instruction: imm24 = 0
@@ -1314,4 +1367,25 @@ test "immediate offset ranges per form" {
     try std.testing.expect(!fitsImmediate(.vfp, 2));
     try std.testing.expect(fitsImmediate(.neon, 0));
     try std.testing.expect(!fitsImmediate(.neon, 4));
+}
+
+test "no two register roles share a register while both are live" {
+    const CC = Emit(.arm32_aapcs_vfp).CC;
+    const allocatable = Call.CALLER_SAVED_GENERAL_MASK | Call.CALLEE_SAVED_GENERAL_MASK;
+    // The frame, stack and scratch registers are never handed out.
+    inline for (.{ CC.BASE_PTR, CC.STACK_PTR, CC.SCRATCH_REG, CC.TAIL_CALL_TARGET_REG }) |reg| {
+        try std.testing.expectEqual(@as(u32, 0), allocatable & reg.listBit());
+    }
+    // The result and RocOps pointers are callee-saved, distinct, and carry no
+    // argument or result, so they survive every call.
+    try std.testing.expect(CC.RESULT_PTR_SAVE_REG != CC.ROC_OPS_SAVE_REG);
+    inline for (.{ CC.RESULT_PTR_SAVE_REG, CC.ROC_OPS_SAVE_REG }) |reg| {
+        try std.testing.expect(Call.CALLEE_SAVED_GENERAL_MASK & reg.listBit() != 0);
+        for (CC.PARAM_REGS ++ CC.ROC_RET_REGS) |other| try std.testing.expect(other != reg);
+    }
+    // The return-pointer copy and the pointer it is stored through differ.
+    try std.testing.expect(CC.RET_PTR_COPY_REG != CC.SCRATCH_REG);
+    // Stack arguments sit past the saved fp and lr.
+    try std.testing.expectEqual(CC.BASE_PTR, CC.CALLER_STACK_ARG_BASE_REG);
+    try std.testing.expectEqual(@as(i32, 8), CC.INCOMING_STACK_ARG_BASE_OFFSET);
 }
