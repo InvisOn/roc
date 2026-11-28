@@ -31,6 +31,7 @@ const RegisterPool = @import("../RegisterPool.zig");
 const GeneralReg = Registers.GeneralReg;
 const FloatReg = Registers.FloatReg;
 const RegisterWidth = Registers.RegisterWidth;
+const Condition = EmitMod.Condition;
 const ModImm = EmitMod.ModImm;
 const MemForm = EmitMod.MemForm;
 const fitsImmediate = EmitMod.fitsImmediate;
@@ -220,6 +221,90 @@ pub fn CodeGen(comptime machine_abi: Abi) type {
                 invariant("arm32 invariant violated: immediate {d} does not fit a 32-bit register", .{value});
             }
             return @truncate(@as(u64, @bitCast(value)));
+        }
+
+        // Integer operations. Every operand is one word, so `width` is
+        // always `.w32`.
+
+        /// Emit integer addition: dst = a + b
+        pub fn emitAdd(self: *Self, _: RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            try self.emit.addRegRegReg(dst, a, b);
+        }
+
+        /// Emit integer subtraction: dst = a - b
+        pub fn emitSub(self: *Self, _: RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            try self.emit.subRegRegReg(dst, a, b);
+        }
+
+        /// Emit integer multiplication: dst = a * b (the low word)
+        pub fn emitMul(self: *Self, _: RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            try self.emit.mulRegRegReg(dst, a, b);
+        }
+
+        /// Emit integer negation: dst = 0 - src
+        pub fn emitNeg(self: *Self, _: RegisterWidth, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.emit.rsbRegRegModImm(dst, src, ModImm.of(0));
+        }
+
+        /// Emit bitwise AND: dst = a & b
+        pub fn emitAnd(self: *Self, _: RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            try self.emit.andRegRegReg(dst, a, b);
+        }
+
+        /// Emit bitwise OR: dst = a | b
+        pub fn emitOr(self: *Self, _: RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            try self.emit.orrRegRegReg(dst, a, b);
+        }
+
+        /// Emit bitwise XOR: dst = a ^ b
+        pub fn emitXor(self: *Self, _: RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg) Allocator.Error!void {
+            try self.emit.eorRegRegReg(dst, a, b);
+        }
+
+        /// Emit bitwise NOT: dst = ~src
+        pub fn emitNot(self: *Self, _: RegisterWidth, dst: GeneralReg, src: GeneralReg) Allocator.Error!void {
+            try self.emit.mvnRegReg(dst, src);
+        }
+
+        // Comparison operations
+
+        /// Emit comparison and set condition: dst = (a op b) ? 1 : 0
+        pub fn emitCmp(self: *Self, _: RegisterWidth, dst: GeneralReg, a: GeneralReg, b: GeneralReg, cond: Condition) Allocator.Error!void {
+            try self.emit.cmpRegReg(a, b);
+            try self.emitSetCond(dst, cond);
+        }
+
+        /// dst = cond ? 1 : 0, from the current flags
+        fn emitSetCond(self: *Self, dst: GeneralReg, cond: Condition) Allocator.Error!void {
+            try self.emit.movRegModImm(dst, ModImm.of(0));
+            try self.emit.movRegModImmCond(cond, dst, ModImm.of(1));
+        }
+
+        // Control flow. A32 branches reach ±32 MiB; `encodeBranch` asserts
+        // that the distance fits.
+
+        /// Emit unconditional jump (returns patch location for fixup)
+        pub fn emitJump(self: *Self) Allocator.Error!usize {
+            const at = self.currentOffset();
+            try self.emit.b(0);
+            return at;
+        }
+
+        /// Emit conditional jump (returns patch location for fixup)
+        pub fn emitCondJump(self: *Self, cond: Condition) Allocator.Error!usize {
+            const at = self.currentOffset();
+            try self.emit.bcond(cond, 0);
+            return at;
+        }
+
+        /// Point the branch at `patch_loc` to `target_loc`, keeping its
+        /// condition.
+        pub fn patchJump(self: *Self, patch_loc: usize, target_loc: usize) Allocator.Error!void {
+            const inst = std.mem.readInt(u32, self.emit.buf.items[patch_loc..][0..4], .little);
+            std.debug.assert((inst >> 24) & 0xF == 0b1010); // B<cond>, not BL
+            const cond: Condition = @fromBackingInt(@as(u4, @truncate(inst >> 28)));
+            const offset: i32 = @intCast(@as(i64, @intCast(target_loc)) - @as(i64, @intCast(patch_loc)));
+            std.mem.writeInt(u32, self.emit.buf.items[patch_loc..][0..4], Emit.encodeBranch(cond, false, offset), .little);
         }
 
         // Memory access
@@ -433,6 +518,63 @@ test "the prologue saves the callee-saved registers the body used" {
             try e.ldrRegMem(.r4, .fp, -4);
             try e.movRegReg(.sp, .fp);
             try e.pop(GeneralReg.fp.listBit() | GeneralReg.pc.listBit());
+        }
+    }.build);
+}
+
+test "integer operations are one A32 instruction each" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    try cg.emitAdd(.w32, .r0, .r1, .r2);
+    try cg.emitSub(.w32, .r0, .r1, .r2);
+    try cg.emitMul(.w32, .r0, .r1, .r2);
+    try cg.emitNeg(.w32, .r3, .r4);
+    try cg.emitAnd(.w32, .r0, .r1, .r2);
+    try cg.emitOr(.w32, .r0, .r1, .r2);
+    try cg.emitXor(.w32, .r0, .r1, .r2);
+    try cg.emitNot(.w32, .r5, .r6);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.addRegRegReg(.r0, .r1, .r2);
+            try e.subRegRegReg(.r0, .r1, .r2);
+            try e.mulRegRegReg(.r0, .r1, .r2);
+            try e.rsbRegRegModImm(.r3, .r4, ModImm.of(0));
+            try e.andRegRegReg(.r0, .r1, .r2);
+            try e.orrRegRegReg(.r0, .r1, .r2);
+            try e.eorRegRegReg(.r0, .r1, .r2);
+            try e.mvnRegReg(.r5, .r6);
+        }
+    }.build);
+}
+
+test "emitCmp sets 0, then 1 under the condition" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    try cg.emitCmp(.w32, .r0, .r1, .r2, .lt);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.cmpRegReg(.r1, .r2);
+            try e.movRegModImm(.r0, ModImm.of(0));
+            try e.movRegModImmCond(.lt, .r0, ModImm.of(1));
+        }
+    }.build);
+}
+
+test "patchJump points a branch forward or backward and keeps its condition" {
+    var cg = TestCodeGen.init(std.testing.allocator);
+    defer cg.deinit();
+    const loop = cg.currentOffset();
+    try cg.emitAdd(.w32, .r0, .r0, .r1);
+    const exit = try cg.emitCondJump(.hs);
+    const back = try cg.emitJump();
+    try cg.patchJump(back, loop);
+    try cg.patchJump(exit, cg.currentOffset());
+    try std.testing.expectEqual(@as(usize, 4), exit);
+    try expectCode(&cg, struct {
+        fn build(e: *TestEmit) Allocator.Error!void {
+            try e.addRegRegReg(.r0, .r0, .r1);
+            try e.bcond(.hs, 8); // past the backward branch
+            try e.b(-8); // back to the add
         }
     }.build);
 }

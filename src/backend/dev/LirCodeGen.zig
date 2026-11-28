@@ -9358,7 +9358,23 @@ pub fn LirCodeGen(comptime machine_abi: Abi) type {
             unsigned_sub_overflow,
         }) Condition {
             return switch (isa) {
-                .arm32 => @compileError("arm32: condCode is not written yet"),
+                .arm32 => switch (which) {
+                    .equal => .eq,
+                    .not_equal => .ne,
+                    .less => .lt,
+                    .less_or_equal => .le,
+                    .greater => .gt,
+                    .greater_or_equal => .ge,
+                    .below => .lo,
+                    .below_or_equal => .ls,
+                    .above => .hi,
+                    .above_or_equal => .hs,
+                    .overflow => .vs,
+                    // A32 sets C on an unsigned add's carry, and clears it on
+                    // a subtraction's borrow.
+                    .unsigned_add_overflow => .hs,
+                    .unsigned_sub_overflow => .lo,
+                },
                 .aarch64 => switch (which) {
                     .equal => .eq,
                     .not_equal => .ne,
