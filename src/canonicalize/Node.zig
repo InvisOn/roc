@@ -34,8 +34,19 @@ pub fn setPayload(self: *@This(), p: Payload) void {
 /// in the tree.
 pub const Idx = List.Idx;
 
+/// The raw index of the first node a store issues. Index zero holds the
+/// reserved node (`Tag.reserved`), which every walk over a store's nodes
+/// leaves out by starting here.
+pub const first_idx: u32 = 1;
+
 /// This is the tag associated with a raw Node in the list
 pub const Tag = enum {
+    /// The node every store holds at index zero. No statement, expression,
+    /// pattern, annotation or diagnostic is ever stored there, so a zero
+    /// index stored in a node-index field means "absent". It is the first
+    /// tag so that an all-zero node is this node.
+    reserved,
+
     // Statements
     statement_decl,
     statement_var,
@@ -233,6 +244,7 @@ pub const Tag = enum {
     diag_type_module_missing_matching_type,
     diag_type_module_has_alias_not_nominal,
     diag_default_app_missing_main,
+    diag_module_name_reserved,
     diag_default_app_wrong_arity,
     diag_cannot_import_default_app,
     diag_type_name_case_mismatch,
@@ -269,6 +281,7 @@ pub const Tag = enum {
     diag_nominal_type_redeclared,
     diag_type_shadowed_warning,
     diag_builtin_type_shadowed_warning,
+    diag_builtin_import_conflict,
     diag_type_parameter_conflict,
     diag_unused_variable,
     diag_used_underscore_variable,
@@ -555,7 +568,8 @@ pub const Payload = extern union {
     pub const StatementTypeAnno = extern struct {
         anno: u32,
         name: u32,
-        where_span2_idx_plus_one: u32, // 0 means no where clause, else index+1 into span_with_node_data
+        /// The where clause's index into span_with_node_data, if any.
+        where_span2_idx: collections.OptionalU32,
         _reserved: [4]u8 = .{ 0, 0, 0, 0 },
     };
 
@@ -635,7 +649,7 @@ pub const Payload = extern union {
         denom_power: u32,
         has_suffix: bool,
         _padding: [3]u8 = .{ 0, 0, 0 },
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
     };
 
     pub const ExprTuple = extern struct {
@@ -660,7 +674,7 @@ pub const Payload = extern union {
         func: u32,
         args_span2_idx: u32,
         called_via: u32,
-        constraint_fn_var_plus_one: u32,
+        constraint_fn_var: collections.OptionalU32,
     };
 
     pub const ExprRecord = extern struct {
@@ -721,7 +735,7 @@ pub const Payload = extern union {
         value: u32,
         has_suffix: bool,
         _padding: [3]u8 = .{ 0, 0, 0 },
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _reserved: [4]u8 = .{ 0, 0, 0, 0 },
     };
 
@@ -730,7 +744,7 @@ pub const Payload = extern union {
         value_hi: u32,
         has_suffix: bool,
         _padding: [3]u8 = .{ 0, 0, 0 },
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
     };
 
     /// expr_num: numeric literal with kind and value in int128_values
@@ -738,7 +752,7 @@ pub const Payload = extern union {
         kind: u32,
         val_kind: u32,
         int128_idx: u32,
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
     };
 
     /// expr_dec: decimal literal with value in int128_values
@@ -746,19 +760,19 @@ pub const Payload = extern union {
         int128_idx: u32,
         has_suffix: bool,
         _padding: [3]u8 = .{ 0, 0, 0 },
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _reserved: [4]u8 = .{ 0, 0, 0, 0 },
     };
 
     pub const ExprNumFromNumeral = extern struct {
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _padding: [12]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     };
 
     pub const ExprString = extern struct {
         segments_start: u32,
         segments_len: u32,
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _reserved: [4]u8 = .{ 0, 0, 0, 0 },
     };
 
@@ -866,7 +880,7 @@ pub const Payload = extern union {
         type_name: u32,
         val_kind: u32,
         int128_idx: u32,
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
     };
 
     /// expr_typed_frac: typed fraction with type name and value in int128_values
@@ -874,12 +888,12 @@ pub const Payload = extern union {
         type_name: u32,
         val_kind: u32,
         int128_idx: u32,
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
     };
 
     pub const ExprTypedNumFromNumeral = extern struct {
         type_name: u32,
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _padding: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
     };
 
@@ -899,10 +913,11 @@ pub const Payload = extern union {
 
     /// expr_nominal_external: external nominal type
     pub const ExprNominalExternal = extern struct {
+        /// An `Import.Idx` or a `ModuleIdentity.Idx`, as `module_kind` says.
         module_idx: u32,
         target_node_idx: u32,
         backing_span2_idx: u32, // Index into span2_data: (backing_expr, backing_type)
-        _reserved: [4]u8 = .{ 0, 0, 0, 0 },
+        module_kind: NominalExternalModuleKind,
     };
 
     /// expr_crash: crash expression with message
@@ -989,7 +1004,7 @@ pub const Payload = extern union {
         kind: u32,
         value_kind: u32,
         int128_idx: u32,
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
     };
 
     pub const PatternNominal = extern struct {
@@ -1000,11 +1015,15 @@ pub const Payload = extern union {
     };
 
     pub const PatternNominalExternal = extern struct {
+        /// An `Import.Idx` or a `ModuleIdentity.Idx`, as `module_kind` says.
         module_idx: u32,
         target_node_idx: u32,
         backing_span2_idx: u32, // Index into span2_data: (backing_pattern, backing_type)
-        _reserved: [4]u8 = .{ 0, 0, 0, 0 },
+        module_kind: NominalExternalModuleKind,
     };
+
+    /// Which index space an external nominal node's `module_idx` is in.
+    pub const NominalExternalModuleKind = enum(u32) { import, identity };
     /// pattern_deferred_import_ref: the deferred worklist entry that resolves
     /// this node, and the backing pattern the imported nominal type is
     /// matched against.
@@ -1020,7 +1039,7 @@ pub const Payload = extern union {
         denominator_power: u32,
         has_suffix: bool,
         _padding: [3]u8 = .{ 0, 0, 0 },
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
     };
 
     /// pattern_dec_literal: decimal pattern with value in int128_values
@@ -1028,18 +1047,18 @@ pub const Payload = extern union {
         int128_idx: u32,
         has_suffix: bool,
         _padding: [3]u8 = .{ 0, 0, 0 },
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _reserved: [4]u8 = .{ 0, 0, 0, 0 },
     };
 
     pub const PatternStrLiteral = extern struct {
         literal: u32,
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _padding: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
     };
 
     pub const PatternNumFromNumeralLiteral = extern struct {
-        literal_dispatch_plan_plus_one: u32 = 0,
+        literal_dispatch_plan: collections.OptionalU32 = .none,
         _padding: [12]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     };
 
@@ -1175,12 +1194,12 @@ pub const Payload = extern union {
 
     /// A `.malformed` node, which may be a statement, expression, pattern, or
     /// type annotation. When it replaced a source node in place,
-    /// `source_node_plus_one` is one more than that node's position in the
-    /// store's `replaced_source_nodes`; zero means the node was malformed in
+    /// `source_node` is that node's position in the store's
+    /// `replaced_source_nodes`; it is absent when the node was malformed in
     /// source or settles a deferred import reference.
     pub const Malformed = extern struct {
         diagnostic: u32,
-        source_node_plus_one: u32 = 0,
+        source_node: collections.OptionalU32 = .none,
         /// The expressions a retired expression or statement evaluates, in
         /// order, before it crashes (`CIR.Expr.e_runtime_error.evaluated`).
         evaluated_start: u32 = 0,
@@ -1451,7 +1470,7 @@ test "Payload: setPayload through a poisoned Node leaves no undefined byte" {
         .func = 0xAABBCCDD,
         .args_span2_idx = 0x01020304,
         .called_via = 0x05060708,
-        .constraint_fn_var_plus_one = 0x090A0B0C,
+        .constraint_fn_var = @fromBackingInt(0x090A0B0C),
     };
     node_ones.setPayload(.{ .expr_call = full });
     node_fives.setPayload(.{ .expr_call = full });
@@ -1484,7 +1503,7 @@ test "Node.List: serialization round-trips full-width payloads and ignores alloc
                 .func = 0x11111111,
                 .args_span2_idx = 0x22222222,
                 .called_via = 0x33333333,
-                .constraint_fn_var_plus_one = 0x44444444,
+                .constraint_fn_var = @fromBackingInt(0x44444444),
             } });
             const call_idx = try nodes.append(allocator, call);
             // A one-word payload, whose reserved tail must serialize as zeros.
@@ -1523,7 +1542,7 @@ test "Node.List: serialization round-trips full-width payloads and ignores alloc
     defer grown.nodes.deinit(gpa);
     var oversized = try Build.list(gpa, 4096);
     defer oversized.nodes.deinit(gpa);
-    try std.testing.expect(grown.nodes.items.capacity != oversized.nodes.items.capacity);
+    try std.testing.expect(grown.nodes.capacity() != oversized.nodes.capacity());
 
     const grown_bytes = try Build.serialize(gpa, &grown.nodes);
     defer gpa.free(grown_bytes);
@@ -1539,7 +1558,7 @@ test "Node.List: serialization round-trips full-width payloads and ignores alloc
 
     const call = loaded.get(grown.call);
     try std.testing.expectEqual(Tag.expr_call, call.tag);
-    try std.testing.expectEqual(@as(u32, 0x44444444), call.getPayload().expr_call.constraint_fn_var_plus_one);
+    try std.testing.expectEqual(@as(u32, 0x44444444), @backingInt(call.getPayload().expr_call.constraint_fn_var));
 
     const var_node = loaded.get(grown.var_node);
     try std.testing.expectEqual(Tag.expr_var, var_node.tag);

@@ -189,8 +189,8 @@ fn initWithImportLeaving(
     try imported_envs.append(gpa, other_test_env.builtin_module.env);
 
     // Process explicit imports
-    const import_count = module_env.imports.imports.items.items.len;
-    for (module_env.imports.imports.items.items[0..import_count]) |str_idx| {
+    const import_count = module_env.imports.imports.items().len;
+    for (module_env.imports.imports.items()[0..import_count]) |str_idx| {
         const import_name = module_env.getString(str_idx);
         if (std.mem.eql(u8, import_name, other_module_name)) {
             // Cross-module import - append the other test module's env
@@ -226,7 +226,6 @@ fn initWithImportLeaving(
         imported_envs.items,
         transitive_envs,
         &module_envs,
-        &module_env.store.regions,
         module_builtin_ctx,
     );
     checker.fixupTypeWriter();
@@ -273,12 +272,30 @@ pub fn initWithExecutableRootNames(module_name: []const u8, source: []const u8, 
     return initConfigured(module_name, source, explicit_root_names, false, .sealed);
 }
 
+/// Check a whole file with generalization scopes given no rank deeper than
+/// `deepest_rank`, so a test reaches the nesting limit (`Rank.deepest` in
+/// every compiler build) with a few nested definitions.
+pub fn initWithDeepestRank(module_name: []const u8, source: []const u8, deepest_rank: types.Rank) TestEnvError!TestEnv {
+    return initConfiguredWithDeepestRank(module_name, source, &.{}, false, .sealed, deepest_rank);
+}
+
 fn initConfigured(
     module_name: []const u8,
     source: []const u8,
     explicit_root_names: []const []const u8,
     hosted: bool,
     comptime store_after_check: StoreAfterCheck,
+) TestEnvError!TestEnv {
+    return initConfiguredWithDeepestRank(module_name, source, explicit_root_names, hosted, store_after_check, .deepest);
+}
+
+fn initConfiguredWithDeepestRank(
+    module_name: []const u8,
+    source: []const u8,
+    explicit_root_names: []const []const u8,
+    hosted: bool,
+    comptime store_after_check: StoreAfterCheck,
+    deepest_rank: types.Rank,
 ) TestEnvError!TestEnv {
     const gpa = std.testing.allocator;
 
@@ -371,7 +388,6 @@ fn initConfigured(
         module_env,
         imported_envs.items,
         &module_envs,
-        &module_env.store.regions,
         module_builtin_ctx,
     );
     checker.fixupTypeWriter();
@@ -380,6 +396,7 @@ fn initConfigured(
         try checker.addExecutableRootDef(root_def_idx);
     }
     errdefer checker.deinit();
+    checker.env_pool.deepest_rank = deepest_rank;
 
     try runChecker(&checker, store_after_check);
     _ = try checker.problems.flushAllPendingStaticExhaustiveness();
@@ -745,7 +762,7 @@ pub fn assertLastDefTypeWithWarnings(
 }
 
 /// Construct a ReportBuilder wired to this TestEnv's allocator, module env,
-/// checker snapshots, problems, and regions. All test call sites are
+/// checker snapshots and problems. All test call sites are
 /// identical, so this single helper avoids repeating the nine arguments.
 fn initReportBuilder(self: *TestEnv) Allocator.Error!report_mod.ReportBuilder {
     return report_mod.ReportBuilder.init(
@@ -757,7 +774,6 @@ fn initReportBuilder(self: *TestEnv) Allocator.Error!report_mod.ReportBuilder {
         "test",
         &.{},
         &self.checker.import_mapping,
-        &self.checker.regions,
         null,
     );
 }
@@ -938,6 +954,17 @@ pub fn assertOneTypeErrorHighlightsWithin(self: *TestEnv, expected_title: []cons
 /// Assert that checking produced a single problem (error or warning) with the
 /// expected title, and that its rendered message contains `expected_substring`.
 pub fn assertOneTypeProblemMsgContains(self: *TestEnv, expected_title: []const u8, expected_substring: []const u8) TestEnvError!void {
+    const rendered = try self.allocOneTypeProblemMsg(expected_title);
+    defer self.gpa.free(rendered);
+
+    if (std.mem.find(u8, rendered, expected_substring) == null) {
+        std.debug.print("expected the report to contain:\n{s}\nbut it was:\n{s}\n", .{ expected_substring, rendered });
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// Render the sole type problem, checking its title. The caller owns the text.
+pub fn allocOneTypeProblemMsg(self: *TestEnv, expected_title: []const u8) TestEnvError![]u8 {
     try self.assertNoParseProblems();
 
     try testing.expectEqual(1, self.checker.problems.problems.items.len);
@@ -955,23 +982,7 @@ pub fn assertOneTypeProblemMsgContains(self: *TestEnv, expected_title: []const u
     defer report_buf.deinit();
 
     try renderReportToMarkdownBuffer(&report_buf, &report);
-
-    const rendered = report_buf.items;
-    const contains = if (expected_substring.len > rendered.len) false else for (0..rendered.len - expected_substring.len + 1) |start| {
-        if (bytesEqual(rendered[start..][0..expected_substring.len], expected_substring)) break true;
-    } else false;
-    if (!contains) {
-        std.debug.print("expected the report to contain:\n{s}\nbut it was:\n{s}\n", .{ expected_substring, report_buf.items });
-        return error.TestUnexpectedResult;
-    }
-}
-
-fn bytesEqual(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (x != y) return false;
-    }
-    return true;
+    return report_buf.toOwnedSlice();
 }
 
 /// Assert that there was a single type error when checking the input. Assert
@@ -1245,7 +1256,7 @@ fn assertNoTypeProblems(self: *TestEnv) TestEnvError!void {
 /// The CIR node holding the type of the method this module defines under
 /// `name`, for tests that reach a method by the name its source declares.
 pub fn methodTypeNode(self: *const TestEnv, name: []const u8) ?CIR.Node.Idx {
-    for (self.module_env.method_defs.entries.items) |entry| {
+    for (self.module_env.method_defs.entries.items()) |entry| {
         const text = self.module_env.getIdentStoreConst().getText(entry.key.methodIdent());
         if (std.mem.eql(u8, name, text)) return entry.value.type_node_idx;
     }
@@ -1255,7 +1266,7 @@ pub fn methodTypeNode(self: *const TestEnv, name: []const u8) ?CIR.Node.Idx {
 /// This module's import of `module_name`, for tests that reach an import by
 /// the name its source spells.
 pub fn importIndex(self: *const TestEnv, module_name: []const u8) ?CIR.Import.Idx {
-    for (self.module_env.imports.imports.items.items, 0..) |str_idx, i| {
+    for (self.module_env.imports.imports.items(), 0..) |str_idx, i| {
         if (std.mem.eql(u8, self.module_env.getString(str_idx), module_name)) return @fromBackingInt(@intCast(i));
     }
     return null;

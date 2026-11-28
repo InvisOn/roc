@@ -26,9 +26,10 @@
 //!
 //! Each node carries flags for what it can contribute to a literal root:
 //!
-//! - *strict*: a custom interpolation no checked instantiation validates, or
-//!   a literal whose conversion root no evaluation of this compilation
-//!   requests and whose payload is not stored, each of which registers a
+//! - *strict*: a custom interpolation that neither a conversion root of its
+//!   own nor a checked instantiation validates, or a literal whose
+//!   conversion root no evaluation of this compilation requests and whose
+//!   payload is neither stored nor discarded, each of which registers a
 //!   literal root whatever the instance; or a body no checked data bounds;
 //! - *dependent numeral* (*quote*): a numeral (quote) whose conversion depends
 //!   on its instance and which no checked instantiation converts, which
@@ -211,7 +212,7 @@ pub const LiteralDemand = struct {
         self: *const LiteralDemand,
         allocator: Allocator,
         names: *const checked_names.CanonicalNameStore,
-        types: checked.CheckedTypeStoreView,
+        types: *const checked.CheckedTypeStoreView,
         root: checked.CheckedTypeId,
     ) Allocator.Error!Flags {
         var result: Flags = .{};
@@ -272,7 +273,7 @@ pub const LiteralDemand = struct {
         defer pending.deinit(allocator);
         try pending.appendSlice(allocator, evidence);
         while (pending.pop()) |entry| {
-            try pending.appendSlice(allocator, plans.evidence_refs[entry.callable_contracts.start..][0..entry.callable_contracts.len]);
+            try pending.appendSlice(allocator, plans.evidence_refs.items()[entry.callable_contracts.start..][0..entry.callable_contracts.len]);
             switch (entry.resolution) {
                 .direct => |node_id| {
                     const node = plans.evidenceNode(node_id);
@@ -317,7 +318,7 @@ const Builder = struct {
     /// forwards it to the instantiating scheme.
     converted_literals: std.AutoHashMapUnmanaged(LiteralKey, void) = .empty,
     /// Type nodes whose components are still to be added.
-    pending_types: std.ArrayListUnmanaged(struct { node: NodeId, view: checked.ImportedModuleView, ty: checked.CheckedTypeId }) = .empty,
+    pending_types: std.ArrayListUnmanaged(struct { node: NodeId, view: *const checked.ImportedModuleView, ty: checked.CheckedTypeId }) = .empty,
 
     fn deinit(self: *Builder) void {
         self.views.deinit(self.allocator);
@@ -366,7 +367,7 @@ const Builder = struct {
         return entry.value_ptr.*;
     }
 
-    fn typeNode(self: *Builder, view: checked.ImportedModuleView, ty: checked.CheckedTypeId) Allocator.Error!NodeId {
+    fn typeNode(self: *Builder, view: *const checked.ImportedModuleView, ty: checked.CheckedTypeId) Allocator.Error!NodeId {
         const entry = try self.types.getOrPut(self.allocator, .{ .module = view.key.bytes, .ty = @backingInt(ty) });
         if (entry.found_existing) return entry.value_ptr.*;
         const node = try self.addNode(.{});
@@ -375,7 +376,7 @@ const Builder = struct {
         return node;
     }
 
-    fn addTypeEdge(self: *Builder, from: NodeId, view: checked.ImportedModuleView, ty: checked.CheckedTypeId) Allocator.Error!void {
+    fn addTypeEdge(self: *Builder, from: NodeId, view: *const checked.ImportedModuleView, ty: checked.CheckedTypeId) Allocator.Error!void {
         try self.addEdge(from, try self.typeNode(view, ty));
     }
 
@@ -384,7 +385,7 @@ const Builder = struct {
     fn expandTypes(self: *Builder) Allocator.Error!void {
         while (self.pending_types.pop()) |item| {
             const view = item.view;
-            const types = view.checked_types;
+            const types = &view.checked_types;
             switch (types.payload(item.ty)) {
                 .pending, .field_kind, .err, .flex, .rigid, .empty_record, .empty_tag_union => {},
                 .alias => |alias| {
@@ -429,17 +430,17 @@ const Builder = struct {
     fn procedureUseTarget(self: *Builder, use: checked.ProcedureUseTemplate) ?TemplateOrUnbounded {
         return switch (use.binding) {
             .top_level => |top_level| blk: {
-                const view = self.views.get(top_level.artifact.bytes) orelse break :blk .unbounded;
+                const view = self.views.getPtr(top_level.artifact.bytes) orelse break :blk .unbounded;
                 break :blk self.bindingBodyTarget(view, view.top_level_procedure_bindings.get(top_level.binding).body);
             },
             .imported => |imported| blk: {
-                const view = self.views.get(imported.artifact.bytes) orelse break :blk .unbounded;
+                const view = self.views.getPtr(imported.artifact.bytes) orelse break :blk .unbounded;
                 const binding = view.exported_procedure_bindings.lookup(imported.def, imported.pattern) orelse break :blk .unbounded;
                 break :blk self.bindingBodyTarget(view, binding.body);
             },
             .hosted => null,
             .platform_required => |required| blk: {
-                const view = self.views.get(required.artifact.bytes) orelse break :blk .unbounded;
+                const view = self.views.getPtr(required.artifact.bytes) orelse break :blk .unbounded;
                 break :blk self.bindingBodyTarget(view, view.top_level_procedure_bindings.get(required.procedure_binding).body);
             },
         };
@@ -450,7 +451,7 @@ const Builder = struct {
         unbounded,
     };
 
-    fn bindingBodyTarget(_: *Builder, view: checked.ImportedModuleView, body: checked.ProcedureBindingBody) ?TemplateOrUnbounded {
+    fn bindingBodyTarget(_: *Builder, view: *const checked.ImportedModuleView, body: checked.ProcedureBindingBody) ?TemplateOrUnbounded {
         return switch (body) {
             .direct_template => |direct| switch (direct.template) {
                 .checked => |template| .{ .template = template },
@@ -471,7 +472,7 @@ const Builder = struct {
     /// place: the computation's entry template.
     fn constReadBody(self: *Builder, use: checked.ConstUseTemplate) ?TemplateOrUnbounded {
         const const_ref = use.const_ref;
-        const view = self.views.get(const_ref.artifact.bytes) orelse return .unbounded;
+        const view = self.views.getPtr(const_ref.artifact.bytes) orelse return .unbounded;
         const body: TemplateOrUnbounded = switch (view.const_templates.get(const_ref).state) {
             .stored_const, .unimplemented => return null,
             .reserved => .unbounded,
@@ -510,11 +511,11 @@ const Builder = struct {
     /// The flags an instantiation of `template` that checking records no
     /// edge for contributes (`requirementFlagsOf`).
     fn requirementFlags(self: *Builder, template: checked_names.ProcedureTemplateRef) Flags {
-        const view = self.views.get(template.artifact.bytes) orelse return Flags.all;
+        const view = self.views.getPtr(template.artifact.bytes) orelse return Flags.all;
         const table = view.checked_procedure_templates;
         const raw = @backingInt(template.template);
-        if (raw >= table.templates.items.len) return Flags.all;
-        return requirementFlagsOf(view, table.templates.items[raw]);
+        if (raw >= table.templates.items().len) return Flags.all;
+        return requirementFlagsOf(view, table.templates.items()[raw]);
     }
 
     fn addTemplateTarget(self: *Builder, from: NodeId, target: ?TemplateOrUnbounded) Allocator.Error!void {
@@ -525,13 +526,13 @@ const Builder = struct {
     }
 
     /// Add one template's own flags and edges.
-    fn addTemplate(self: *Builder, view: checked.ImportedModuleView, node: NodeId, template: checked.CheckedProcedureTemplate) Allocator.Error!void {
+    fn addTemplate(self: *Builder, view: *const checked.ImportedModuleView, node: NodeId, template: checked.CheckedProcedureTemplate) Allocator.Error!void {
         if (template.target == .hosted) return;
         try self.addTypeEdge(node, view, template.checked_fn_root);
 
         const refs = view.resolved_value_refs;
-        for (refs.template_refs[template.resolved_value_refs.start..][0..template.resolved_value_refs.len]) |ref_id| {
-            const record = refs.records[@backingInt(ref_id)];
+        for (refs.template_refs.items()[template.resolved_value_refs.start..][0..template.resolved_value_refs.len]) |ref_id| {
+            const record = refs.get(ref_id);
             try self.addTypeEdge(node, view, record.checked_ty);
             switch (record.ref) {
                 .top_level_proc, .imported_proc, .promoted_top_level_proc => |use| try self.addProcedureUse(node, use),
@@ -552,8 +553,8 @@ const Builder = struct {
         }
 
         const plans = view.static_dispatch_plans;
-        for (plans.template_refs[template.static_dispatch_plans.start..][0..template.static_dispatch_plans.len]) |plan_id| {
-            const plan = plans.plans[@backingInt(plan_id)];
+        for (plans.template_refs.items()[template.static_dispatch_plans.start..][0..template.static_dispatch_plans.len]) |plan_id| {
+            const plan = plans.plans.items()[@backingInt(plan_id)];
             try self.addTypeEdge(node, view, plan.callable_ty);
             try self.addTypeEdge(node, view, plan.dispatcher_ty);
             self.markOwn(node, self.literalFlags(view, plan_id, plan));
@@ -595,7 +596,7 @@ const Builder = struct {
         evidence: static_dispatch.CheckedEvidence,
         pending: *std.ArrayList(static_dispatch.EvidenceNodeId),
     ) Allocator.Error!void {
-        for (plans.evidence_refs[evidence.callable_contracts.start..][0..evidence.callable_contracts.len]) |contract| {
+        for (plans.evidence_refs.items()[evidence.callable_contracts.start..][0..evidence.callable_contracts.len]) |contract| {
             try self.addCheckedEvidence(from, plans, contract, pending);
         }
         switch (evidence.resolution) {
@@ -610,9 +611,9 @@ const Builder = struct {
     /// every instantiation checking records converts it in a
     /// `literal_argument` root or forwards it, and every other one
     /// contributes it through `requirementFlagsOf`.
-    fn literalFlags(self: *Builder, view: checked.ImportedModuleView, plan_id: static_dispatch.StaticDispatchPlanId, plan: static_dispatch.StaticDispatchCallPlan) Flags {
+    fn literalFlags(self: *Builder, view: *const checked.ImportedModuleView, plan_id: static_dispatch.StaticDispatchPlanId, plan: static_dispatch.StaticDispatchCallPlan) Flags {
         if (plan.resolution == .checked_error) return .{};
-        const bodies = view.checked_bodies;
+        const bodies = &view.checked_bodies;
         const region = view.module_env.store.getNodeRegion(@fromBackingInt(plan.node));
         const conversion_root, const dependent: Flags = switch (bodies.index().nodeKind(plan.node)) {
             // A custom literal pattern's node keys both its conversion plan
@@ -625,19 +626,23 @@ const Builder = struct {
                     .quote => .{ conversion.conversion_root, .{ .dependent_quote = true } },
                 };
             },
-            .expr => switch (bodies.exprData(@fromBackingInt(plan.node))) {
+            .expr => switch (bodies.exprDataKind(@fromBackingInt(plan.node))) {
                 .numeral => .{ bodies.literalConversionRoot(plan.node), .{ .dependent_numeral = true } },
                 .str => if (bodies.quoteIsCustom(plan.node)) .{ bodies.literalConversionRoot(plan.node), .{ .dependent_quote = true } } else return .{},
-                // An interpolation whose conversion depends on its instance
-                // is validated by the `literal_argument` roots of the
-                // instantiations checking records, as a numeral or a quote
-                // is converted by them; any other registers a literal root
-                // whatever the instance.
-                .interpolation => {
-                    if (self.converted_literals.contains(.{ .module = view.key.bytes, .node = plan.node })) return .{};
-                    if (traceEnabled()) std.debug.print("ctfe-demand unbounded interpolation {s} byte={d}\n", .{ view.canonical_names.moduleNameText(view.module_identity.module_name), region.start.offset });
-                    return .{ .strict = true };
-                },
+                // A custom interpolation is validated by its own conversion
+                // root when its conversion is closed, and by the
+                // `literal_argument` roots of the instantiations checking
+                // records when it depends on its instance, as a numeral or a
+                // quote is converted by them; any other registers a literal
+                // root whatever the instance. Its assembler is a function no
+                // root stores, so a body converting a closed interpolation
+                // registers a literal root for it unless its conversion root
+                // rejected it, and a runtime program specialized after
+                // evaluation registers only literal roots the evaluation did.
+                .interpolation => if (bodies.literalConversionRoot(plan.node)) |root_id| return switch (view.compile_time_roots.root(root_id).payload) {
+                    .const_node => .{},
+                    .pending, .unevaluated, .fn_value, .discarded, .expect, .runtime => .{ .strict = true },
+                } else .{ bodies.literalConversionRoot(plan.node), .{ .strict = true } },
                 .str_segment,
                 .bytes_literal,
                 .lookup_local,
@@ -683,7 +688,11 @@ const Builder = struct {
             .statement, .unreached => Common.invariant("a dispatch plan's node is neither a reached expression nor a reached pattern"),
         };
         // A conversion with no root of its own depends on its instance.
-        const root_id = conversion_root orelse return if (self.converted_literals.contains(.{ .module = view.key.bytes, .node = plan.node })) .{} else dependent;
+        const root_id = conversion_root orelse {
+            if (self.converted_literals.contains(.{ .module = view.key.bytes, .node = plan.node })) return .{};
+            if (dependent.strict and traceEnabled()) std.debug.print("ctfe-demand unbounded interpolation {s} byte={d}\n", .{ view.canonical_names.moduleNameText(view.module_identity.module_name), region.start.offset });
+            return dependent;
+        };
         return switch (view.compile_time_roots.root(root_id).payload) {
             .pending => if (self.declared.contains(.{ .module = view.key.digest(), .root = root_id })) .{} else unrequested: {
                 if (traceEnabled()) std.debug.print("ctfe-demand unbounded unrequested-root {s} byte={d}\n", .{ view.canonical_names.moduleNameText(view.module_identity.module_name), region.start.offset });
@@ -698,34 +707,34 @@ const Builder = struct {
 
     /// Record the literals of this module that are literal requirements of
     /// their own schemes.
-    fn addConvertedLiterals(self: *Builder, view: checked.ImportedModuleView) Allocator.Error!void {
+    fn addConvertedLiterals(self: *Builder, view: *const checked.ImportedModuleView) Allocator.Error!void {
         const table = view.checked_procedure_templates;
-        for (table.templates.items) |*template| {
+        for (table.templates.items()) |*template| {
             for (table.templateLiteralRequirements(template)) |requirement| try self.addConvertedLiteral(view, requirement);
         }
-        for (table.dispatch_scopes) |*scope| {
+        for (table.dispatch_scopes.items()) |*scope| {
             for (table.scopeLiteralRequirements(scope)) |requirement| try self.addConvertedLiteral(view, requirement);
         }
     }
 
-    fn addConvertedLiteral(self: *Builder, view: checked.ImportedModuleView, requirement: checked.LiteralRequirement) Allocator.Error!void {
+    fn addConvertedLiteral(self: *Builder, view: *const checked.ImportedModuleView, requirement: checked.LiteralRequirement) Allocator.Error!void {
         if (requirement.edge != .literal) return;
         try self.converted_literals.put(self.allocator, .{ .module = view.key.bytes, .node = requirement.site.node }, {});
     }
 
     /// Record every method name dispatch can select by type in this module.
-    fn addImplicitMethods(self: *Builder, view: checked.ImportedModuleView) Allocator.Error!void {
+    fn addImplicitMethods(self: *Builder, view: *const checked.ImportedModuleView) Allocator.Error!void {
         const names = view.canonical_names;
-        for (view.checked_procedure_templates.evidence_params_pool) |param| {
+        for (view.checked_procedure_templates.evidence_params_pool.items()) |param| {
             try self.implicit_methods.put(self.allocator, names.methodNameText(param.method), {});
         }
         const plans = view.static_dispatch_plans;
-        for (plans.plans) |plan| switch (plan.resolution) {
+        for (plans.plans.items()) |plan| switch (plan.resolution) {
             .evidence_dependent, .structural => try self.implicit_methods.put(self.allocator, names.methodNameText(plan.method), {}),
             .direct_pending, .direct_closed, .direct_parametric, .checked_error, .@"unreachable" => {},
         };
-        for (plans.generated_codec_calls) |call| try self.implicit_methods.put(self.allocator, names.methodNameText(call.method), {});
-        for (plans.iterator_for_plans) |plan| {
+        for (plans.generated_codec_calls.items()) |call| try self.implicit_methods.put(self.allocator, names.methodNameText(call.method), {});
+        for (plans.iterator_for_plans.items()) |plan| {
             try self.implicit_methods.put(self.allocator, names.methodNameText(plan.iter.method), {});
             try self.implicit_methods.put(self.allocator, names.methodNameText(plan.next.method), {});
         }
@@ -734,9 +743,9 @@ const Builder = struct {
 
     /// A type reaches the methods dispatch can select by that type; an
     /// explicit call reaches its method through its own plan.
-    fn addMethods(self: *Builder, view: checked.ImportedModuleView) Allocator.Error!void {
+    fn addMethods(self: *Builder, view: *const checked.ImportedModuleView) Allocator.Error!void {
         const names = view.canonical_names;
-        for (view.method_registry.entries) |entry| {
+        for (view.method_registry.entries.items()) |entry| {
             const target = entry.target orelse continue;
             const implicit = self.implicit_methods.contains(names.methodNameText(entry.key.method));
             const owner: NodeId = switch (entry.key.owner) {
@@ -817,32 +826,32 @@ pub fn compute(
     var builder = Builder{ .allocator = allocator, .demand = &demand, .declared = declared };
     defer builder.deinit();
 
-    try addView(&builder, checked.importedView(modules.root.module));
-    for (modules.root.relation_modules) |view| try addView(&builder, view);
-    for (modules.imports) |view| try addView(&builder, view);
+    try addView(&builder, &checked.importedView(modules.root.module));
+    for (modules.root.relation_modules) |*view| try addView(&builder, view);
+    for (modules.imports) |*view| try addView(&builder, view);
     demand.counters.modules = builder.views.count();
     demand.builtin = try builder.addNode(.{});
 
     // Every template has its node before any edge names one.
     var views = builder.views.valueIterator();
     while (views.next()) |view| {
-        for (0..view.checked_procedure_templates.templates.items.len) |index| {
+        for (0..view.checked_procedure_templates.templates.items().len) |index| {
             const node = try builder.addNode(.{});
             try demand.templates.put(allocator, .{ .module = view.key.bytes, .template = @intCast(index) }, node);
         }
     }
     views = builder.views.valueIterator();
-    while (views.next()) |view| try builder.addConvertedLiterals(view.*);
+    while (views.next()) |view| try builder.addConvertedLiterals(view);
     views = builder.views.valueIterator();
-    while (views.next()) |view| try builder.addImplicitMethods(view.*);
+    while (views.next()) |view| try builder.addImplicitMethods(view);
     views = builder.views.valueIterator();
-    while (views.next()) |view| try builder.addMethods(view.*);
+    while (views.next()) |view| try builder.addMethods(view);
     views = builder.views.valueIterator();
     while (views.next()) |view| {
-        for (view.checked_procedure_templates.templates.items, 0..) |template, index| {
+        for (view.checked_procedure_templates.templates.items(), 0..) |template, index| {
             const node = demand.templates.get(.{ .module = view.key.bytes, .template = @intCast(index) }).?;
-            try builder.addTemplate(view.*, node, template);
-            const requirement = requirementFlagsOf(view.*, template);
+            try builder.addTemplate(view, node, template);
+            const requirement = requirementFlagsOf(view, template);
             if (!requirement.eql(.{})) try demand.requirements.put(allocator, .{ .module = view.key.bytes, .template = @intCast(index) }, requirement);
             if (!builder.own.items[node].eql(.{})) demand.counters.source_templates += 1;
         }
@@ -890,23 +899,27 @@ pub fn compute(
 /// The flags an instantiation of `template` that checking records no edge
 /// for contributes: such an instantiation converts each of the template's
 /// literal requirements in the specialization, so each contributes its
-/// dependent kind, and an interpolation, which a specialization always
-/// hoists, is strict.
-fn requirementFlagsOf(view: checked.ImportedModuleView, template: checked.CheckedProcedureTemplate) Flags {
+/// dependent kind, and an interpolation, which a specialization hoists at
+/// any type no validate-only `literal_argument` root converts it at, is
+/// strict.
+fn requirementFlagsOf(view: *const checked.ImportedModuleView, template: checked.CheckedProcedureTemplate) Flags {
     var flags: Flags = .{};
     for (view.checked_procedure_templates.templateLiteralRequirements(&template)) |requirement| {
         flags = flags.merge(switch (requirement.site.kind) {
             .numeral => .{ .dependent_numeral = true },
             .quote => .{ .dependent_quote = true },
             .interpolation => .{ .strict = true },
+            // A polymorphic constant's instance this instantiation reaches
+            // with no checked edge is a literal root at its instance.
+            .constant_instance => .{ .strict = true },
         });
     }
     return flags;
 }
 
-fn addView(builder: *Builder, view: checked.ImportedModuleView) Allocator.Error!void {
+fn addView(builder: *Builder, view: *const checked.ImportedModuleView) Allocator.Error!void {
     const entry = try builder.views.getOrPut(builder.allocator, view.key.bytes);
-    if (!entry.found_existing) entry.value_ptr.* = view;
+    if (!entry.found_existing) entry.value_ptr.* = view.*;
 }
 
 /// Select the runtime roots compile-time evaluation must specialize to find
@@ -924,7 +937,7 @@ pub fn selectDiscoveryRoots(
     for (requests, 0..) |request, index| {
         const owner = if (source_modules.len == 0) modules.root.module.key.digest() else source_modules[index];
         const view = modules.moduleByKey(owner) orelse Common.invariant("discovery root named a checked module outside its lowering set");
-        const flags = try rootFlags(allocator, demand, modules, view, request);
+        const flags = try rootFlags(allocator, demand, modules, &view, request);
         const reaches = flags.reachesLiteralRoot();
         if (traceEnabled()) std.debug.print("ctfe-demand root {d} {s} {s}\n", .{
             index,
@@ -939,19 +952,19 @@ fn rootFlags(
     allocator: Allocator,
     demand: *const LiteralDemand,
     modules: Common.CheckedModules,
-    view: checked.ImportedModuleView,
+    view: *const checked.ImportedModuleView,
     request: checked.RootRequest,
 ) Allocator.Error!Flags {
     const template = request.procedure_template orelse return Flags.all;
     // A program root is an instantiation checking records no edge for.
     const template_flags = demand.templateFlags(template).merge(demand.requirementFlags(template));
-    const type_flags = try demand.checkedTypeFlags(allocator, view.canonical_names, view.checked_types, request.checked_type);
+    const type_flags = try demand.checkedTypeFlags(allocator, view.canonical_names, &view.checked_types, request.checked_type);
     var evidence_flags: Flags = .{};
     if (request.root_evidence) |evidence| {
         const evidence_view = modules.moduleByKey(evidence.checked_module) orelse
             Common.invariant("discovery root evidence named a checked module outside its lowering set");
         const plans = evidence_view.static_dispatch_plans;
-        evidence_flags = try demand.checkedEvidenceFlags(allocator, plans, plans.evidence_refs[evidence.span.start..][0..evidence.span.len]);
+        evidence_flags = try demand.checkedEvidenceFlags(allocator, plans, plans.evidence_refs.items()[evidence.span.start..][0..evidence.span.len]);
     }
     if (traceEnabled()) std.debug.print("ctfe-demand root-flags template={b:0>8} type={b:0>8} evidence={b:0>8}\n", .{
         @as(u8, @bitCast(template_flags)),

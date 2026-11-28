@@ -20,6 +20,7 @@ const std = @import("std");
 const collections = @import("collections");
 const base = @import("base");
 const check = @import("check");
+const Common = @import("../common.zig");
 const boxy_runtime = @import("boxy_runtime");
 
 const Allocator = std.mem.Allocator;
@@ -37,12 +38,12 @@ pub const ModuleView = struct {
     /// What `Modules.linkName` returns.
     link_name: [32]u8,
 
-    pub fn types(self: *const ModuleView) checked.CheckedTypeStoreView {
-        return self.view.checked_types;
+    pub fn types(self: *const ModuleView) *const checked.CheckedTypeStoreView {
+        return &self.view.checked_types;
     }
 
-    pub fn bodies(self: *const ModuleView) checked.CheckedBodies {
-        return self.view.checked_bodies;
+    pub fn bodies(self: *const ModuleView) *const checked.CheckedBodies {
+        return &self.view.checked_bodies;
     }
 
     pub fn nameStore(self: *const ModuleView) *const names.CanonicalNameStore {
@@ -148,7 +149,7 @@ pub const ModuleNames = struct {
         self.content_named.deinit(allocator);
     }
 
-    pub fn of(self: *const ModuleNames, view: checked.ImportedModuleView) [32]u8 {
+    pub fn of(self: *const ModuleNames, view: *const checked.ImportedModuleView) [32]u8 {
         if (self.content_named.contains(view.key.bytes)) return view.module_identity.stable_hash;
         return stableName(view);
     }
@@ -157,7 +158,7 @@ pub const ModuleNames = struct {
     pub fn fromViews(allocator: Allocator, views: []const checked.ImportedModuleView) Allocator.Error!ModuleNames {
         var owners: std.AutoHashMapUnmanaged([32]u8, ?[32]u8) = .empty;
         defer owners.deinit(allocator);
-        for (views) |view| {
+        for (views) |*view| {
             const entry = try owners.getOrPut(allocator, stableName(view));
             if (!entry.found_existing) {
                 entry.value_ptr.* = view.module_identity.stable_hash;
@@ -167,14 +168,14 @@ pub const ModuleNames = struct {
         }
         var result: ModuleNames = .{};
         errdefer result.deinit(allocator);
-        for (views) |view| {
+        for (views) |*view| {
             if (owners.get(stableName(view)).? == null) try result.content_named.put(allocator, view.key.bytes, {});
         }
         return result;
     }
 
     /// The name a body edit leaves alone (`fromViews`).
-    pub fn stableName(view: checked.ImportedModuleView) [32]u8 {
+    pub fn stableName(view: *const checked.ImportedModuleView) [32]u8 {
         var hasher = base.Sha256.init(.{});
         hasher.update("roc.boxy.module_name.v1");
         hasher.update(view.module_env.module_name);
@@ -198,8 +199,12 @@ pub const Modules = struct {
     /// The names of a module unit's link. A whole program links nothing, and
     /// names each module by its content identity.
     link_names: ?*const ModuleNames = null,
+    /// The platform relation modules of the lowering's root, which is the
+    /// first module: the app whose values fill the root's requirements.
+    relations: std.ArrayList(ModuleIndex) = .empty,
 
     pub fn deinit(self: *Modules) void {
+        self.relations.deinit(self.allocator);
         self.views.deinit(self.allocator);
         self.by_key.deinit(self.allocator);
         self.by_identity.deinit(self.allocator);
@@ -207,13 +212,13 @@ pub const Modules = struct {
     }
 
     /// Add a module unless one with the same key is present.
-    pub fn add(self: *Modules, view: checked.ImportedModuleView) Allocator.Error!ModuleIndex {
+    pub fn add(self: *Modules, view: *const checked.ImportedModuleView) Allocator.Error!ModuleIndex {
         const entry = try self.by_key.getOrPut(self.allocator, view.key.bytes);
         if (entry.found_existing) return entry.value_ptr.*;
         const index: ModuleIndex = @fromBackingInt(@intCast(self.views.items.len));
         entry.value_ptr.* = index;
         const link_name = if (self.link_names) |link_names| link_names.of(view) else view.module_identity.stable_hash;
-        try self.views.append(self.allocator, .{ .index = index, .key = view.key.digest(), .view = view, .link_name = link_name });
+        try self.views.append(self.allocator, .{ .index = index, .key = view.key.digest(), .view = view.*, .link_name = link_name });
         try self.by_identity.put(self.allocator, view.module_identity.stable_hash, index);
         const named = try self.by_link_name.getOrPut(self.allocator, link_name);
         if (!named.found_existing) named.value_ptr.* = index;
@@ -225,13 +230,18 @@ pub const Modules = struct {
     }
 
     /// Rebase a checked default from its name store into this program's modules.
-    pub fn fieldDefault(self: *const Modules, module: ModuleIndex, default: checked.CheckedFieldDefault) FieldDefault {
+    pub fn fieldDefault(self: *const Modules, module: ModuleIndex, default: checked.CheckedFieldDefault) Allocator.Error!FieldDefault {
         const origin = default.origin() orelse invariant("a field default has no declaring module");
         const identity = self.get(module).nameStore().moduleIdentityBytes(origin).*;
-        return .{
-            .module = self.by_identity.get(identity) orelse invariant("a field default's declaring module is not in this lowering"),
-            .expr_node = default.expr_node,
-        };
+        const declaring = self.by_identity.get(identity) orelse invariant("a field default's declaring module is not in this lowering");
+        const bodies = self.get(declaring).bodies();
+        try bodies.demandIndex();
+        const ordinal = std.sort.binarySearch(u32, bodies.defaultExprs(), default.expr_node, struct {
+            fn order(target: u32, item: u32) std.math.Order {
+                return std.math.order(target, item);
+            }
+        }.order) orelse invariant("a field default's expression is no default of its module");
+        return .{ .module = declaring, .ordinal = @intCast(ordinal) };
     }
 
     /// The name module `index`'s workers and nominal types are digested
@@ -297,9 +307,11 @@ pub const TypeId = enum(u32) { _ };
 
 /// A nominal declaration: its module and its id in that module's checked
 /// type store.
+/// A nominal's module and its checked declaration, absent for a nominal
+/// whose declaration lowering cannot name.
 pub const NominalDeclKey = struct {
     module: ModuleIndex,
-    decl: checked.CheckedNominalDeclarationId,
+    decl: collections.OptionalId(checked.CheckedNominalDeclarationId),
 };
 
 pub const Primitive = checked.CheckedPrimitive;
@@ -326,12 +338,15 @@ pub const FieldKind = enum(u8) {
     variable_slot,
 };
 
-/// A `??` default's immutable identity, rebased into this program's modules.
-/// Defaults affect codec semantics, not the field's inline representation.
-pub const FieldDefault = struct { module: ModuleIndex, expr_node: u32 };
+/// A `??` default's immutable identity, rebased into this program's modules:
+/// its declaring module and its place among that module's defaults, which
+/// an edit elsewhere in the module leaves alone (design.md "Caching Under
+/// `.boxy`"). Defaults affect codec semantics, not the field's inline
+/// representation.
+pub const FieldDefault = struct { module: ModuleIndex, ordinal: u32 };
 
 /// An optional `FieldDefault` at its own size.
-pub const OptionalFieldDefault = collections.OptionalStruct(FieldDefault, "expr_node");
+pub const OptionalFieldDefault = collections.OptionalStruct(FieldDefault, "ordinal");
 
 /// One field of a record type: its name, type, and storage kind.
 pub const Field = struct {
@@ -355,7 +370,8 @@ pub const Span = struct { start: u32, len: u32 };
 pub const FieldSpan = struct { start: u32, len: u32 };
 /// A range of tags in `Store.tags`.
 pub const TagSpan = struct { start: u32, len: u32 };
-/// A stored memory order: its entry in `Store.declared_slots`.
+/// A stored memory order: its entry in `Store.declared_slots` and
+/// `Store.declared_entries`.
 pub const SlotSpan = struct { start: u32, len: u32 };
 
 /// How a nominal record with unnamed fields lays itself out (design.md
@@ -367,10 +383,22 @@ pub const SlotSpan = struct { start: u32, len: u32 };
 pub const DeclaredOrder = struct {
     /// The types of the unnamed fields, in declared order.
     padding: Span,
-    /// The record's slots in declared order, each by storage index: a named
+    /// The record's slots in memory order, each by storage index: a named
     /// field's position in the record's `fields`, and an unnamed field's
-    /// position in `padding` past those.
+    /// position in `padding` past those. The store derives them from the
+    /// declaration's entries when it interns the record: the entries in
+    /// declared order, then every field no entry names, which a row
+    /// extension supplies, in label order. So every field has a slot, and
+    /// resolving a row extension early or late gives one type.
     slots: SlotSpan,
+};
+
+/// One entry of a padded nominal's declaration, in declared order.
+pub const DeclaredEntry = union(enum) {
+    /// A named field, by label.
+    named: NameId,
+    /// An unnamed field, by its position in `padding`.
+    padding: u32,
 };
 
 /// A record's `DeclaredOrder`, or its absence, at a `DeclaredOrder`'s own
@@ -384,7 +412,6 @@ pub const OptionalDeclaredOrder = struct {
     pub const none: OptionalDeclaredOrder = .{};
 
     pub fn some(order: DeclaredOrder) OptionalDeclaredOrder {
-        std.debug.assert(order.slots.start < std.math.maxInt(u32));
         return .{ .padding = order.padding, .stored_slots_start = order.slots.start + 1, .slots_len = order.slots.len };
     }
 
@@ -400,7 +427,7 @@ pub const OptionalDeclaredOrder = struct {
 /// A `DeclaredOrder` to intern, with its children as slices.
 pub const DeclaredOrderInput = struct {
     padding: []const TypeId,
-    slots: []const u32,
+    entries: []const DeclaredEntry,
 };
 
 /// A record type: its fields sorted by label text, a variable node standing
@@ -459,15 +486,242 @@ pub const Env = struct {
     module: ModuleIndex,
     vars: []const checked.CheckedTypeId,
     bound: []const TypeId,
+    /// The position of each of `vars`, when the environment's owner built
+    /// one (`VarPositions`): a worker's environment carries its scheme's, so
+    /// its conversions' lookups do not scan the scheme.
+    positions: ?*const VarPositions = null,
+    /// Only literal-chain frames carry a checked substitution. Conversion
+    /// substitutes a demanded root into a concrete environment before entering the
+    /// ordinary converter; ordinary variable lookups remain concrete.
+    lazy_substitution: ?*LazySubstitution = null,
 
     pub const empty_bindings: []const checked.CheckedTypeId = &.{};
 
     pub fn lookup(self: Env, module: ModuleIndex, id: checked.CheckedTypeId) ?TypeId {
+        const index = self.lookupIndex(module, id) orelse return null;
+        return self.bound[index];
+    }
+
+    /// The scheme position `id` is bound at, if any.
+    pub fn lookupIndex(self: Env, module: ModuleIndex, id: checked.CheckedTypeId) ?usize {
+        std.debug.assert(self.lazy_substitution == null);
         if (module != self.module) return null;
+        if (self.positions) |positions| {
+            std.debug.assert(positions.vars.ptr == self.vars.ptr and positions.vars.len == self.vars.len);
+            return positions.map.get(id) orelse return null;
+        }
         for (self.vars, 0..) |variable, index| {
-            if (variable == id) return self.bound[index];
+            if (variable == id) return index;
         }
         return null;
+    }
+};
+
+/// A literal frame's checked instantiation, resolved lazily: each actual is
+/// converted only when a demanded type reads its variable. It is not a
+/// runtime call instance, and its unused bindings can mention scopes the
+/// literal root never entered.
+pub const LazySubstitution = struct {
+    module: ModuleIndex,
+    vars: []const checked.CheckedTypeId,
+    actuals: []const checked.CheckedTypeId,
+    source_module: ModuleIndex,
+    source: Env,
+    lexical: Env,
+    memo: std.AutoHashMapUnmanaged(Key, TypeId) = .empty,
+    allocator: Allocator,
+
+    const Key = struct { module: ModuleIndex, ty: checked.CheckedTypeId, seal_kinds: bool };
+    const Query = struct { module: ModuleIndex, ty: checked.CheckedTypeId, env: Env };
+    const Source = union(enum) { query: Query, concrete: TypeId };
+    const Binding = struct { variable: checked.CheckedTypeId, source: Source };
+    const Work = struct {
+        query: Query,
+        bindings: []const Binding,
+        values: []TypeId,
+        next: usize = 0,
+    };
+
+    /// The arena owns the frame, its memo, and the immutable substitution.
+    pub fn init(arena: Allocator, module: ModuleIndex, vars: []const checked.CheckedTypeId, actuals: []const checked.CheckedTypeId, source_module: ModuleIndex, source: Env, lexical: Env) Allocator.Error!Env {
+        if (vars.len != actuals.len) invariant("a literal frame's substitution differs from its scheme");
+        if (vars.len == 0) return lexical;
+        const frame = try arena.create(LazySubstitution);
+        frame.* = .{ .module = module, .vars = vars, .actuals = actuals, .source_module = source_module, .source = source, .lexical = lexical, .allocator = arena };
+        return .{ .module = module, .vars = &.{}, .bound = &.{}, .lazy_substitution = frame };
+    }
+
+    fn binding(converter: Converter, module: ModuleIndex, ty: checked.CheckedTypeId, original: Env) ?struct { source: Source, descend: bool = false } {
+        var env = original;
+        while (env.lazy_substitution) |frame| {
+            if (module == frame.module) {
+                if (std.mem.findScalar(checked.CheckedTypeId, frame.vars, ty)) |index| {
+                    const actual = frame.actuals[index];
+                    return .{ .source = .{ .query = .{ .module = frame.source_module, .ty = actual, .env = frame.source } } };
+                }
+            }
+            env = frame.lexical;
+        }
+        if (env.lookupIndex(module, ty)) |index| return .{
+            .source = .{ .concrete = env.bound[index] },
+            .descend = converter.tailNodeAt(env, index) != null,
+        };
+        return null;
+    }
+
+    /// Discover only the bindings the ordinary conversion will read. Field
+    /// kinds and whole-row bindings count too, not just flex/rigid leaves.
+    fn dependencies(converter: Converter, query: Query, allocator: Allocator) Allocator.Error![]const Binding {
+        var pending: std.ArrayList(Converter.Child) = .empty;
+        defer pending.deinit(allocator);
+        var seen: CheckedTypeMap(void) = .empty;
+        defer seen.deinit(allocator);
+        var bindings: std.ArrayList(Binding) = .empty;
+        errdefer bindings.deinit(allocator);
+        try pending.append(allocator, .{ .module = query.module, .ty = query.ty });
+        const store = converter.modules.get(query.module).types();
+        while (pending.pop()) |child| {
+            const ty = child.ty;
+            if ((try seen.getOrPut(allocator, ty)).found_existing) continue;
+            if (binding(converter, query.module, ty, query.env)) |resolved| {
+                try bindings.append(allocator, .{ .variable = ty, .source = resolved.source });
+                if (!resolved.descend) continue;
+            }
+            switch (store.payloadTag(ty)) {
+                // Use precisely the converter's row flattening and alias
+                // traversal, with the field-kind reads finish performs too.
+                .alias, .record, .tag_union, .tuple, .function, .nominal => {
+                    _ = try converter.appendChildren(&pending, query.module, store.payload(ty), true);
+                },
+                .pending, .err, .flex, .rigid, .field_kind, .empty_record, .empty_tag_union => {},
+            }
+        }
+        return try bindings.toOwnedSlice(allocator);
+    }
+
+    fn known(converter: Converter, query: Query) Allocator.Error!?TypeId {
+        const frame = query.env.lazy_substitution orelse return try converter.convert(query.module, query.ty, query.env);
+        return frame.memo.get(.{ .module = query.module, .ty = query.ty, .seal_kinds = converter.seal_undetermined_kinds });
+    }
+
+    fn push(converter: Converter, stack: *std.ArrayList(Work), query: Query, allocator: Allocator) Allocator.Error!void {
+        const bindings = try dependencies(converter, query, allocator);
+        errdefer allocator.free(bindings);
+        const values = try allocator.alloc(TypeId, bindings.len);
+        errdefer allocator.free(values);
+        try stack.append(allocator, .{ .query = query, .bindings = bindings, .values = values });
+    }
+
+    /// Substitute each demanded type once per frame, using an explicit dependency
+    /// stack. No type conversion or dictionary lookup resolves unused bindings.
+    fn convert(converter: Converter, module: ModuleIndex, ty: checked.CheckedTypeId, env: Env) Allocator.Error!TypeId {
+        const allocator = converter.store.allocator;
+        const root: Query = .{ .module = module, .ty = ty, .env = env };
+        if (try known(converter, root)) |value| return value;
+        var stack: std.ArrayList(Work) = .empty;
+        defer {
+            for (stack.items) |work| {
+                allocator.free(work.bindings);
+                allocator.free(work.values);
+            }
+            stack.deinit(allocator);
+        }
+        try push(converter, &stack, root, allocator);
+        while (stack.items.len != 0) {
+            const work = &stack.items[stack.items.len - 1];
+            if (work.next < work.bindings.len) {
+                const child = switch (work.bindings[work.next].source) {
+                    .query => |query| query,
+                    .concrete => |value| {
+                        work.values[work.next] = value;
+                        work.next += 1;
+                        continue;
+                    },
+                };
+                if (try known(converter, child)) |value| {
+                    work.values[work.next] = value;
+                    work.next += 1;
+                } else try push(converter, &stack, child, allocator);
+                continue;
+            }
+            const variables = try allocator.alloc(checked.CheckedTypeId, work.bindings.len);
+            defer allocator.free(variables);
+            for (work.bindings, variables) |entry, *variable| variable.* = entry.variable;
+            const value = try converter.convert(work.query.module, work.query.ty, .{ .module = work.query.module, .vars = variables, .bound = work.values });
+            const owner = work.query.env.lazy_substitution.?;
+            try owner.memo.put(owner.allocator, .{ .module = work.query.module, .ty = work.query.ty, .seal_kinds = converter.seal_undetermined_kinds }, value);
+            allocator.free(work.bindings);
+            allocator.free(work.values);
+            _ = stack.pop();
+        }
+        return (try known(converter, root)).?;
+    }
+};
+
+/// A map keyed by checked type ids. Those live in two ranges, source
+/// variables counting up from zero and synthesized types counting up from
+/// the high bit (`check.CheckedTypeIds`), and a `DenseMap`'s chunk directory
+/// spans every chunk between the lowest and highest key it holds, so one
+/// map holding a key of each range would allocate, clear and free a
+/// directory over half the 32-bit id space. This keeps one map per range.
+pub fn CheckedTypeMap(comptime V: type) type {
+    return struct {
+        const Self = @This();
+        const Range = collections.DenseMapUnmanaged(checked.CheckedTypeId, V);
+
+        source: Range = .empty,
+        synthesized: Range = .empty,
+
+        pub const empty: Self = .{};
+
+        pub fn get(self: *const Self, key: checked.CheckedTypeId) ?V {
+            return if (check.CheckedTypeIds.isSynthesized(key)) self.synthesized.get(key) else self.source.get(key);
+        }
+
+        pub fn getOrPut(self: *Self, gpa: Allocator, key: checked.CheckedTypeId) Allocator.Error!Range.GetOrPutResult {
+            const range = if (check.CheckedTypeIds.isSynthesized(key)) &self.synthesized else &self.source;
+            return range.getOrPut(gpa, key);
+        }
+
+        pub fn count(self: *const Self) usize {
+            return self.source.count() + self.synthesized.count();
+        }
+
+        /// Empty the map, keeping its storage, in time proportional to the
+        /// entries it held.
+        pub fn clearRetainingCapacity(self: *Self) void {
+            self.source.clearRetainingCapacity();
+            self.synthesized.clearRetainingCapacity();
+        }
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self.source.deinit(gpa);
+            self.synthesized.deinit(gpa);
+            self.* = undefined;
+        }
+    };
+}
+
+/// The position of each variable of a scope's variable list `vars`, for
+/// `Env.lookup`: a variable listed twice (an enclosing scheme's variable that
+/// a generalized local's scheme lists again) is at its first position, where
+/// a scan finds it.
+pub const VarPositions = struct {
+    vars: []const checked.CheckedTypeId,
+    map: CheckedTypeMap(u32) = .empty,
+
+    pub fn init(allocator: Allocator, vars: []const checked.CheckedTypeId) Allocator.Error!VarPositions {
+        var positions: VarPositions = .{ .vars = vars };
+        errdefer positions.deinit(allocator);
+        for (vars, 0..) |variable, index| {
+            const entry = try positions.map.getOrPut(allocator, variable);
+            if (!entry.found_existing) entry.value_ptr.* = @intCast(index);
+        }
+        return positions;
+    }
+
+    pub fn deinit(self: *VarPositions, allocator: Allocator) void {
+        self.map.deinit(allocator);
     }
 };
 
@@ -496,8 +750,28 @@ pub const Store = struct {
     fields: std.ArrayList([]const Field) = .empty,
     tags: std.ArrayList([]const Tag) = .empty,
     declared_slots: std.ArrayList([]const u32) = .empty,
+    declared_entries: std.ArrayList([]const DeclaredEntry) = .empty,
     span_arena: std.heap.ArenaAllocator,
     interned: std.HashMapUnmanaged(InternKey, TypeId, InternContext, std.hash_map.default_max_load_percentage) = .empty,
+    /// The checked types the current walk over a checked type has visited
+    /// (`beginCheckedWalk`). A fresh dense map per walk would allocate a
+    /// chunk for each id it meets and a directory spanning the ids between,
+    /// and free them all again, though a walk visits only a few types spread
+    /// over the module's whole id range; this one keeps its storage across
+    /// walks, so a walk pays only for the entries it adds.
+    checked_walk: CheckedTypeMap(void) = .empty,
+    /// The work lists of finished `Converter.convert` calls, kept with their
+    /// capacity for later ones. Each conversion takes its own, so one that a
+    /// conversion's step starts never moves the outer one's lists.
+    convert_pool: std.ArrayList(ConvertScratch) = .empty,
+    /// The node `intern` gave each primitive, the variable of each low index,
+    /// the empty record and the empty tag union, once one was asked for:
+    /// these leaves are asked for far more often than they are new, and
+    /// interned nodes never change.
+    primitive_ids: std.EnumArray(Primitive, ?TypeId) = .initFill(null),
+    variable_ids: std.ArrayList(collections.OptionalId(TypeId)) = .empty,
+    empty_record_id: ?TypeId = null,
+    empty_tag_union_id: ?TypeId = null,
     key_bytes: std.ArrayList(u8) = .empty,
     scratch_key: std.ArrayList(u8) = .empty,
 
@@ -511,8 +785,21 @@ pub const Store = struct {
     decl_name_ids: std.AutoHashMapUnmanaged(NominalDeclKey, NameId) = .empty,
     name_arena: std.heap.ArenaAllocator,
 
-    /// Converted closed checked types, by module and checked id.
-    closed_memo: std.AutoHashMapUnmanaged(ClosedKey, TypeId) = .empty,
+    /// Converted closed checked types, by module and checked id
+    /// (`Converter.convert`).
+    closed_memo: std.AutoHashMapUnmanaged(ClosedKey, ClosedMemo) = .empty,
+    /// Converted checked types under a worker's own scheme environment (one
+    /// carrying `Env.positions`), by module, checked id and environment.
+    scheme_memo: std.AutoHashMapUnmanaged(SchemeKey, ClosedMemo) = .empty,
+    /// The scheme position of each closed record or tag union that is a row
+    /// node of the converting worker's signature: one whose row ends in a
+    /// quantified uncommitted tail (design.md "Methods On Open Rows"). Such a
+    /// type stores its values exactly as the plain record or tag union does,
+    /// and is a distinct type only so a descriptor taken of it reads the
+    /// worker's input for the whole value (`Program.rowNodesAsVariables`).
+    /// Like a `variable` node's index, the position names a slot of the
+    /// scope the type was converted in.
+    tail_node_of: collections.DenseMapUnmanaged(TypeId, u32) = .empty,
     /// The backing of each instantiated nominal node.
     backing_memo: collections.DenseMapUnmanaged(TypeId, TypeId) = .empty,
     /// `Converter.representationClosed` of each type asked about.
@@ -531,6 +818,17 @@ pub const Store = struct {
     const DeclKey = struct { module: ModuleIndex, key: names.NominalTypeKey };
 
     const ClosedKey = struct { module: ModuleIndex, ty: checked.CheckedTypeId };
+
+    /// A memoized conversion, and whether the type reaches a record or tag
+    /// union whose row ends in an uncommitted tail, which a scope can name as
+    /// a closed row node (`Converter.pushFrame`). Such a type
+    /// converts the same only in scopes that name no record or tag union.
+    const ClosedMemo = struct { ty: TypeId, reaches_row_node: bool };
+
+    /// A checked type under an environment that carries `Env.positions`.
+    /// Its positions and bindings are never freed or changed while the
+    /// store lives, so their addresses name the environment.
+    pub const SchemeKey = struct { module: ModuleIndex, ty: checked.CheckedTypeId, env_module: ModuleIndex, positions: usize, bound: usize, bound_len: usize };
 
     pub const InternKey = struct { start: u32, len: u32 };
 
@@ -575,8 +873,11 @@ pub const Store = struct {
         self.fields.deinit(self.allocator);
         self.tags.deinit(self.allocator);
         self.declared_slots.deinit(self.allocator);
+        self.declared_entries.deinit(self.allocator);
         self.span_arena.deinit();
         self.interned.deinit(self.allocator);
+        self.checked_walk.deinit(self.allocator);
+        self.variable_ids.deinit(self.allocator);
         self.key_bytes.deinit(self.allocator);
         self.scratch_key.deinit(self.allocator);
         self.name_texts.deinit(self.allocator);
@@ -585,6 +886,8 @@ pub const Store = struct {
         self.decl_name_ids.deinit(self.allocator);
         self.name_arena.deinit();
         self.closed_memo.deinit(self.allocator);
+        self.scheme_memo.deinit(self.allocator);
+        self.tail_node_of.deinit(self.allocator);
         self.backing_memo.deinit(self.allocator);
         self.representation_closed.deinit(self.allocator);
         self.erased_slots.deinit(self.allocator);
@@ -592,7 +895,44 @@ pub const Store = struct {
         self.decl_keys_indexed.deinit(self.allocator);
         self.decl_by_source.deinit(self.allocator);
         self.decl_sources_indexed.deinit(self.allocator);
+        for (self.convert_pool.items) |*scratch| scratch.deinit(self.allocator);
+        self.convert_pool.deinit(self.allocator);
     }
+
+    /// The work lists of one `Converter.convert`.
+    const ConvertScratch = struct {
+        frames: std.ArrayList(Converter.Frame) = .empty,
+        results: std.ArrayList(TypeId) = .empty,
+        pending: std.ArrayList(Converter.Child) = .empty,
+        reaches: std.ArrayList(bool) = .empty,
+        /// The row a `Converter.finish` of a record or tag union builds.
+        fields: std.ArrayList(Field) = .empty,
+        tags: std.ArrayList(TagInput) = .empty,
+
+        fn isEmpty(self: *const ConvertScratch) bool {
+            return self.frames.items.len == 0 and self.results.items.len == 0 and
+                self.pending.items.len == 0 and self.reaches.items.len == 0 and
+                self.fields.items.len == 0 and self.tags.items.len == 0;
+        }
+
+        fn clear(self: *ConvertScratch) void {
+            self.frames.clearRetainingCapacity();
+            self.results.clearRetainingCapacity();
+            self.pending.clearRetainingCapacity();
+            self.reaches.clearRetainingCapacity();
+            self.fields.clearRetainingCapacity();
+            self.tags.clearRetainingCapacity();
+        }
+
+        fn deinit(self: *ConvertScratch, allocator: Allocator) void {
+            self.frames.deinit(allocator);
+            self.results.deinit(allocator);
+            self.pending.deinit(allocator);
+            self.reaches.deinit(allocator);
+            self.fields.deinit(allocator);
+            self.tags.deinit(allocator);
+        }
+    };
 
     /// The declaration with nominal key `key` in `view`'s type store.
     /// The nominal declaration of `view` declared at source statement
@@ -670,16 +1010,9 @@ pub const Store = struct {
         return self.nodes.items[@backingInt(id)];
     }
 
-    /// Whether this is the compiler-owned Iter or Stream nominal.
-    pub fn isSequence(self: *const Store, id: TypeId) bool {
-        const node = self.get(id);
-        if (node != .nominal) return false;
-        return node.nominal.builtin == .iter or node.nominal.builtin == .stream;
-    }
-
     /// Direct payloads whose explicit Box is one erased allocation.
     pub fn isErasedBoxPayload(self: *const Store, id: TypeId) bool {
-        return self.get(id) == .function or self.isSequence(id);
+        return self.get(id) == .function;
     }
 
     pub fn isClosed(self: *const Store, id: TypeId) bool {
@@ -762,9 +1095,14 @@ pub const Store = struct {
         return self.span(declared.padding);
     }
 
-    /// The slots of `declared`, in declared order, by storage index.
+    /// The slots of `declared`, in memory order, by storage index.
     pub fn declaredSlots(self: *const Store, declared: DeclaredOrder) []const u32 {
         return self.declared_slots.items[declared.slots.start];
+    }
+
+    /// The declaration entries `declared`'s slots were derived from.
+    pub fn declaredEntries(self: *const Store, declared: DeclaredOrder) []const DeclaredEntry {
+        return self.declared_entries.items[declared.slots.start];
     }
 
     /// The record row of `ty`: `ty` itself, unless it is the backing of a
@@ -790,6 +1128,13 @@ pub const Store = struct {
         try self.scratch_key.appendSlice(self.allocator, std.mem.asBytes(&value));
     }
 
+    /// A presence byte, then the value when present, so absence never
+    /// matches a real value.
+    fn keyOptionalU32(self: *Store, value: ?u32) Allocator.Error!void {
+        try self.scratch_key.append(self.allocator, @intFromBool(value != null));
+        if (value) |present| try self.keyU32(present);
+    }
+
     fn keyType(self: *Store, id: TypeId) Allocator.Error!void {
         try self.keyU32(@backingInt(id));
     }
@@ -809,6 +1154,13 @@ pub const Store = struct {
             .primitive => |prim| try self.scratch_key.append(self.allocator, @backingInt(prim)),
             .empty_record => {},
             .record => |record| {
+                // Reading a field by name, merging a substituted remainder,
+                // and deriving declared slots all rely on this order.
+                if (std.debug.runtime_safety) {
+                    for (record.fields[0..record.fields.len -| 1], record.fields[@min(1, record.fields.len)..]) |prev, next| {
+                        std.debug.assert(self.nameLessThan(prev.name, next.name));
+                    }
+                }
                 try self.keyU32(@intCast(record.fields.len));
                 for (record.fields) |field| {
                     try self.keyU32(@backingInt(field.name));
@@ -818,18 +1170,25 @@ pub const Store = struct {
                     try self.scratch_key.append(self.allocator, @intFromBool(field.default.get() != null));
                     if (field.default.get()) |default| {
                         try self.keyU32(@backingInt(default.module));
-                        try self.keyU32(default.expr_node);
+                        try self.keyU32(default.ordinal);
                     }
                     closed = closed and self.isClosed(field.ty) and field.kind != .variable_slot;
                 }
-                try self.keyU32(if (record.ext) |ext| @backingInt(ext) else std.math.maxInt(u32));
+                try self.keyOptionalU32(if (record.ext) |ext| @backingInt(ext) else null);
                 if (record.ext) |ext| closed = closed and self.isClosed(ext);
                 if (record.declared) |declared| {
                     try self.keySpan(declared.padding);
-                    try self.keyU32(@intCast(declared.slots.len));
-                    for (declared.slots) |slot| try self.keyU32(slot);
+                    try self.keyU32(@intCast(declared.entries.len));
+                    for (declared.entries) |entry| {
+                        try self.scratch_key.append(self.allocator, @backingInt(std.meta.activeTag(entry)));
+                        try self.keyU32(switch (entry) {
+                            .named => |name| @backingInt(name),
+                            .padding => |ordinal| ordinal,
+                        });
+                    }
                     for (declared.padding) |padding| closed = closed and self.isClosed(padding);
                 }
+                try self.keyOptionalU32(record.tail_node);
             },
             .tuple => |items| {
                 try self.keySpan(items);
@@ -842,8 +1201,9 @@ pub const Store = struct {
                     try self.keySpan(tag.payloads);
                     for (tag.payloads) |payload| closed = closed and self.isClosed(payload);
                 }
-                try self.keyU32(if (tag_union.ext) |ext| @backingInt(ext) else std.math.maxInt(u32));
+                try self.keyOptionalU32(if (tag_union.ext) |ext| @backingInt(ext) else null);
                 if (tag_union.ext) |ext| closed = closed and self.isClosed(ext);
+                try self.keyOptionalU32(tag_union.tail_node);
             },
             .list => |elem| {
                 try self.keyType(elem);
@@ -891,7 +1251,7 @@ pub const Store = struct {
                 .ext = .of(record.ext),
                 .declared = if (record.declared) |declared| .some(.{
                     .padding = try self.addSpan(declared.padding),
-                    .slots = try self.addSlots(declared.slots),
+                    .slots = try self.addDeclaredOrder(record.fields, declared),
                 }) else .none,
             } },
             .tuple => |items| .{ .tuple = try self.addSpan(items) },
@@ -910,6 +1270,11 @@ pub const Store = struct {
             .variable => |index| .{ .variable = index },
         };
         try self.nodes.append(self.allocator, stored);
+        switch (node) {
+            .record => |record| if (record.tail_node) |position| try self.tail_node_of.put(self.allocator, id, position),
+            .tag_union => |tag_union| if (tag_union.tail_node) |position| try self.tail_node_of.put(self.allocator, id, position),
+            .primitive, .empty_record, .tuple, .list, .box, .nominal, .function, .variable => {},
+        }
         try self.closed_flags.append(self.allocator, closed);
         try self.variable_free_flags.append(self.allocator, self.inputVariableFree(node));
         switch (node) {
@@ -922,6 +1287,13 @@ pub const Store = struct {
             .primitive, .empty_record, .record, .tuple, .list, .box, .nominal, .function, .variable => {},
         }
         return id;
+    }
+
+    /// The scheme position `ty` is a row node at, when it is a closed record
+    /// or tag union whose row ends in a quantified uncommitted tail of the
+    /// scope it was converted in (`tail_node_of`).
+    pub fn tailNode(self: *const Store, ty: TypeId) ?u32 {
+        return self.tail_node_of.get(ty);
     }
 
     /// The payload of `ty` when it is a presence slot.
@@ -963,10 +1335,48 @@ pub const Store = struct {
         return .{ .start = start, .len = @intCast(fields.len) };
     }
 
-    fn addSlots(self: *Store, slots: []const u32) Allocator.Error!SlotSpan {
-        const owned = try self.span_arena.allocator().dupe(u32, slots);
-        try self.declared_slots.append(self.allocator, owned);
+    /// Stores `declared`'s entries and the slots derived from them over
+    /// `fields`, which are sorted by label (see `DeclaredOrder.slots`).
+    fn addDeclaredOrder(self: *Store, fields: []const Field, declared: DeclaredOrderInput) Allocator.Error!SlotSpan {
+        const arena = self.span_arena.allocator();
+        const slots = try arena.alloc(u32, fields.len + declared.padding.len);
+        const named = try self.allocator.alloc(bool, fields.len);
+        defer self.allocator.free(named);
+        @memset(named, false);
+        var next_slot: usize = 0;
+        for (declared.entries) |entry| {
+            slots[next_slot] = switch (entry) {
+                .named => |name| blk: {
+                    const index = self.fieldIndex(fields, name) orelse invariant("a declared field is absent from its nominal's record row");
+                    std.debug.assert(!named[index]);
+                    named[index] = true;
+                    break :blk index;
+                },
+                .padding => |ordinal| @intCast(fields.len + ordinal),
+            };
+            next_slot += 1;
+        }
+        for (named, 0..) |is_named, index| {
+            if (is_named) continue;
+            slots[next_slot] = @intCast(index);
+            next_slot += 1;
+        }
+        std.debug.assert(next_slot == slots.len);
+        try self.declared_slots.append(self.allocator, slots);
+        try self.declared_entries.append(self.allocator, try arena.dupe(DeclaredEntry, declared.entries));
         return .{ .start = @intCast(self.declared_slots.items.len - 1), .len = @intCast(slots.len) };
+    }
+
+    /// The position of the field named `name` in `fields`, sorted by label.
+    fn fieldIndex(self: *const Store, fields: []const Field, name: NameId) ?u32 {
+        var low: usize = 0;
+        var high: usize = fields.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.nameLessThan(fields[mid].name, name)) low = mid + 1 else high = mid;
+        }
+        if (low < fields.len and fields[low].name == name) return @intCast(low);
+        return null;
     }
 
     fn addTags(self: *Store, tags: []const TagInput) Allocator.Error!TagSpan {
@@ -993,21 +1403,58 @@ pub const Store = struct {
         return .{ .name = name, .ty = ty, .kind = .inline_slot };
     }
 
+    /// Start a walk over checked types, which records the types it visits
+    /// with `visitChecked` and ends with `endCheckedWalk`. Walks do not nest.
+    pub fn beginCheckedWalk(self: *Store) void {
+        std.debug.assert(self.checked_walk.count() == 0);
+    }
+
+    /// Whether the current walk meets `ty` for the first time, recording it.
+    pub fn visitChecked(self: *Store, ty: checked.CheckedTypeId) Allocator.Error!bool {
+        return !(try self.checked_walk.getOrPut(self.allocator, ty)).found_existing;
+    }
+
+    pub fn endCheckedWalk(self: *Store) void {
+        self.checked_walk.clearRetainingCapacity();
+    }
+
     pub fn primitive(self: *Store, value: Primitive) Allocator.Error!TypeId {
-        return self.intern(.{ .primitive = value });
+        const slot = self.primitive_ids.getPtr(value);
+        if (slot.*) |known| return known;
+        const id = try self.intern(.{ .primitive = value });
+        slot.* = id;
+        return id;
     }
 
     pub fn variable(self: *Store, index: u32) Allocator.Error!TypeId {
-        return self.intern(.{ .variable = index });
+        // Scope variables count up from zero; a relation's placeholder
+        // variables sit far above them (`Program.relateThroughRequirements`)
+        // and are interned without a slot here.
+        if (index >= cached_variable_count) return try self.intern(.{ .variable = index });
+        if (index < self.variable_ids.items.len) {
+            if (self.variable_ids.items[index].get()) |known| return known;
+        } else try self.variable_ids.appendNTimes(self.allocator, .none, index + 1 - self.variable_ids.items.len);
+        const id = try self.intern(.{ .variable = index });
+        self.variable_ids.items[index] = .some(id);
+        return id;
     }
 
+    /// How many of the lowest variable indices `variable` keeps a node for.
+    const cached_variable_count = 1 << 12;
+
     pub fn emptyRecord(self: *Store) Allocator.Error!TypeId {
-        return self.intern(.empty_record);
+        if (self.empty_record_id) |known| return known;
+        const id = try self.intern(.empty_record);
+        self.empty_record_id = id;
+        return id;
     }
 
     /// The empty tag union: a type with no values.
     pub fn emptyTagUnion(self: *Store) Allocator.Error!TypeId {
-        return self.intern(.{ .tag_union = .{ .tags = &.{}, .ext = null } });
+        if (self.empty_tag_union_id) |known| return known;
+        const id = try self.intern(.{ .tag_union = .{ .tags = &.{}, .ext = null } });
+        self.empty_tag_union_id = id;
+        return id;
     }
 };
 
@@ -1021,9 +1468,9 @@ pub const TagInput = struct {
 pub const NodeInput = union(enum) {
     primitive: Primitive,
     empty_record,
-    record: struct { fields: []const Field, ext: ?TypeId, declared: ?DeclaredOrderInput = null },
+    record: struct { fields: []const Field, ext: ?TypeId, declared: ?DeclaredOrderInput = null, tail_node: ?u32 = null },
     tuple: []const TypeId,
-    tag_union: struct { tags: []const TagInput, ext: ?TypeId },
+    tag_union: struct { tags: []const TagInput, ext: ?TypeId, tail_node: ?u32 = null },
     list: TypeId,
     box: TypeId,
     nominal: struct {
@@ -1066,57 +1513,98 @@ pub const Converter = struct {
     const Frame = struct {
         module: ModuleIndex,
         ty: checked.CheckedTypeId,
+        /// The checked payload of `ty`, read once by `leaf`.
+        payload: checked.CheckedTypePayload,
+        /// `rootHasIdentityVariables` of `ty`, as `leaf` found it; null
+        /// when the converter seals undetermined kinds and memoizes nothing.
+        identity_variables: ?bool,
         /// The children converted so far, in `results`.
         results_start: usize,
         /// Children still to convert, in `pending`.
         pending_start: usize,
         pending_next: usize,
+        /// Whether `ty` is a record or tag union whose row ends in an
+        /// uncommitted tail (`ClosedMemo`), read where `pushFrame` finds the
+        /// row's end.
+        ends_in_uncommitted_tail: bool,
     };
 
     /// Convert `ty`, read in `module`, binding the variables `env` names.
     /// A variable `env` does not bind must seal to its row default or its
     /// numeric default; any other unbound variable is an invariant failure.
     pub fn convert(self: Converter, module: ModuleIndex, ty: checked.CheckedTypeId, env: Env) Allocator.Error!TypeId {
+        if (env.lazy_substitution != null) return LazySubstitution.convert(self, module, ty, env);
         const allocator = self.store.allocator;
-        var frames: std.ArrayList(Frame) = .empty;
-        defer frames.deinit(allocator);
-        var results: std.ArrayList(TypeId) = .empty;
-        defer results.deinit(allocator);
-        var pending: std.ArrayList(Child) = .empty;
-        defer pending.deinit(allocator);
+        var scratch = self.store.convert_pool.pop() orelse Store.ConvertScratch{};
+        std.debug.assert(scratch.isEmpty());
+        defer {
+            scratch.clear();
+            self.store.convert_pool.append(allocator, scratch) catch scratch.deinit(allocator);
+        }
+        const frames = &scratch.frames;
+        const results = &scratch.results;
+        const pending = &scratch.pending;
+        // Whether each converted child reaches a record or tag union a scope
+        // can name as a closed row node, parallel to `results`.
+        const reaches = &scratch.reaches;
 
-        if (try self.leaf(module, ty, env)) |done| return done;
-        try self.pushFrame(&frames, &pending, results.items.len, module, ty);
+        // A scope that names closed row nodes converts a type holding one to
+        // the node's marked type or to the use's whole value, so a type
+        // reaching one is shared only between scopes that name none.
+        var shared: ?bool = null;
+        var root_reaches = false;
+        switch (try self.leaf(module, ty, env, &shared, &root_reaches)) {
+            .done => |done| return done,
+            .composite => |composite| try self.pushFrame(frames, pending, results.items.len, module, ty, composite),
+        }
         while (frames.items.len > 0) {
             const top = &frames.items[frames.items.len - 1];
             if (top.pending_next < pending.items.len) {
                 const child = pending.items[top.pending_next];
                 top.pending_next += 1;
-                if (try self.leaf(child.module, child.ty, env)) |done| {
-                    try results.append(allocator, done);
-                } else {
-                    if (frames.items.len > 1_000_000) invariant("checked type conversion nested past every finite type");
-                    try self.pushFrame(&frames, &pending, results.items.len, child.module, child.ty);
+                var child_reaches = false;
+                switch (try self.leaf(child.module, child.ty, env, &shared, &child_reaches)) {
+                    .done => |done| {
+                        try results.append(allocator, done);
+                        try reaches.append(allocator, child_reaches);
+                    },
+                    .composite => |composite| {
+                        if (frames.items.len > 1_000_000) invariant("checked type conversion nested past every finite type");
+                        try self.pushFrame(frames, pending, results.items.len, child.module, child.ty, composite);
+                    },
                 }
                 continue;
             }
             const frame = frames.pop().?;
             const children = results.items[frame.results_start..];
-            const built = try self.finish(frame.module, frame.ty, children, env);
+            const built = try self.finish(&scratch, frame.module, frame.ty, frame.payload, children, env);
+            const built_reaches = frame.ends_in_uncommitted_tail or std.mem.findScalar(bool, reaches.items[frame.results_start..], true) != null;
             results.shrinkRetainingCapacity(frame.results_start);
+            reaches.shrinkRetainingCapacity(frame.results_start);
             pending.shrinkRetainingCapacity(frame.pending_start);
             // A type with no identity variables converts the same under
-            // every environment.
-            if (!self.seal_undetermined_kinds and !try rootHasIdentityVariables(self.modules.get(frame.module), frame.ty)) {
-                try self.store.closed_memo.put(allocator, .{ .module = frame.module, .ty = frame.ty }, built);
+            // every environment that names no closed row node it reaches.
+            const memo: Store.ClosedMemo = .{ .ty = built, .reaches_row_node = built_reaches };
+            if (frame.identity_variables == false and (!built_reaches or try self.namesNoRow(env, &shared))) {
+                try self.store.closed_memo.put(allocator, .{ .module = frame.module, .ty = frame.ty }, memo);
+            } else if (schemeKey(frame.module, frame.ty, env)) |key| {
+                if (!self.seal_undetermined_kinds) try self.store.scheme_memo.put(allocator, key, memo);
             }
             if (frames.items.len == 0) return built;
             try results.append(allocator, built);
+            try reaches.append(allocator, built_reaches);
         }
         unreachable; // the loop returns when the outermost frame finishes
     }
 
     const Child = struct { module: ModuleIndex, ty: checked.CheckedTypeId };
+
+    /// The `Store.scheme_memo` key of `ty` under `env`, when `env` is a
+    /// worker's own scheme environment.
+    fn schemeKey(module: ModuleIndex, ty: checked.CheckedTypeId, env: Env) ?Store.SchemeKey {
+        const positions = env.positions orelse return null;
+        return .{ .module = module, .ty = ty, .env_module = env.module, .positions = @intFromPtr(positions), .bound = @intFromPtr(env.bound.ptr), .bound_len = env.bound.len };
+    }
 
     /// The app type the program solves platform requirement identity
     /// variable `ty` to, or null for any other type.
@@ -1129,15 +1617,96 @@ pub const Converter = struct {
         return try view.types().rootHasIdentityVariables(ty);
     }
 
+    /// Whether `env` names no record or tag union, so it converts every
+    /// identity-free type as every other such environment does, decided on
+    /// first need into `shared`. A scope's closed row nodes are the only
+    /// records and tag unions an environment names (`tailNodeAt`), bound to
+    /// a `variable` node in the scope itself and to the use's whole value in
+    /// an instantiation.
+    fn namesNoRow(self: Converter, env: Env, shared: *?bool) Allocator.Error!bool {
+        if (shared.*) |known| return known;
+        const names_none = for (env.vars) |variable| {
+            switch (self.modules.get(env.module).types().payload(variable)) {
+                .record, .tag_union => break false,
+                .pending, .err, .flex, .rigid, .alias, .tuple, .nominal, .function, .empty_record, .empty_tag_union, .field_kind => {},
+            }
+        } else true;
+        shared.* = names_none;
+        return names_none;
+    }
+
+    /// The position of the closed row node `env` binds at `index`, if it
+    /// binds one: a scheme position holding the checked record or tag union
+    /// whose row ends in a quantified uncommitted tail
+    /// (`Program.templateScope`), bound to a `variable` node, the one the
+    /// converting scope names that position by. Such a record or tag union
+    /// converts to its closed type marked with that position
+    /// (`Store.tailNode`). An instantiation binds the position to the use's
+    /// whole value, which the record or tag union converts to.
+    fn tailNodeAt(self: Converter, env: Env, index: usize) ?u32 {
+        const position = switch (self.store.get(env.bound[index])) {
+            .variable => |position| position,
+            .primitive, .empty_record, .record, .tuple, .tag_union, .list, .box, .nominal, .function => return null,
+        };
+        return switch (self.modules.get(env.module).types().payload(env.vars[index])) {
+            .record, .tag_union => position,
+            .pending, .err, .flex, .rigid, .alias, .tuple, .nominal, .function, .empty_record, .empty_tag_union, .field_kind => null,
+        };
+    }
+
+    /// The position `ty` is a closed row node at in `env`'s scope, if it is
+    /// one (`tailNodeAt`).
+    fn tailNodeOf(self: Converter, module: ModuleIndex, ty: checked.CheckedTypeId, env: Env) ?u32 {
+        const index = env.lookupIndex(module, ty) orelse return null;
+        return self.tailNodeAt(env, index);
+    }
+
+    /// What `leaf` finds for a type: its node, or the checked payload of a
+    /// type whose children convert first, with whether it reaches an
+    /// identity variable (`Frame.identity_variables`).
+    const Leaf = union(enum) {
+        done: TypeId,
+        composite: struct { payload: checked.CheckedTypePayload, identity_variables: ?bool },
+    };
+
     /// The node for `ty` when it needs no children converted first.
-    fn leaf(self: Converter, module: ModuleIndex, ty: checked.CheckedTypeId, env: Env) Allocator.Error!?TypeId {
-        if (env.lookup(module, ty)) |bound| return bound;
-        if (self.platformIdentity(module, ty)) |solved| return solved;
-        const view = self.modules.get(module);
-        if (!self.seal_undetermined_kinds and !try rootHasIdentityVariables(view, ty)) {
-            if (self.store.closed_memo.get(.{ .module = module, .ty = ty })) |memo| return memo;
+    /// `reaches` says whether the node reaches a record or tag union a
+    /// scope can name as a closed row node (`ClosedMemo`).
+    fn leaf(self: Converter, module: ModuleIndex, ty: checked.CheckedTypeId, env: Env, shared: *?bool, reaches: *bool) Allocator.Error!Leaf {
+        reaches.* = false;
+        if (env.lookupIndex(module, ty)) |index| {
+            // A closed row node of the scope converts as its own structure.
+            if (self.tailNodeAt(env, index) == null) {
+                // A closed row node an instantiation binds to the use's
+                // whole value: the scope names the record or tag union.
+                reaches.* = switch (self.modules.get(env.module).types().payload(env.vars[index])) {
+                    .record, .tag_union => true,
+                    .pending, .err, .flex, .rigid, .alias, .tuple, .nominal, .function, .empty_record, .empty_tag_union, .field_kind => false,
+                };
+                return .{ .done = env.bound[index] };
+            }
         }
-        return switch (view.types().payload(ty)) {
+        if (self.platformIdentity(module, ty)) |solved| return .{ .done = solved };
+        const view = self.modules.get(module);
+        const identity_variables: ?bool = if (self.seal_undetermined_kinds) null else try rootHasIdentityVariables(view, ty);
+        if (identity_variables == false) {
+            if (self.store.closed_memo.get(.{ .module = module, .ty = ty })) |memo| {
+                if (!memo.reaches_row_node or try self.namesNoRow(env, shared)) {
+                    reaches.* = memo.reaches_row_node;
+                    return .{ .done = memo.ty };
+                }
+            }
+        }
+        if (!self.seal_undetermined_kinds) {
+            if (schemeKey(module, ty, env)) |key| {
+                if (self.store.scheme_memo.get(key)) |memo| {
+                    reaches.* = memo.reaches_row_node;
+                    return .{ .done = memo.ty };
+                }
+            }
+        }
+        const payload = view.types().payload(ty);
+        const node: ?TypeId = switch (payload) {
             .pending => invariant("a pending checked type reached Boxy lowering"),
             .err => invariant("an erroneous checked type reached Boxy lowering"),
             .flex, .rigid => |variable| try self.sealVariable(variable),
@@ -1146,13 +1715,15 @@ pub const Converter = struct {
             .nominal => |nominal| switch (nominal.representation) {
                 .builtin => |builtin_nominal| switch (checked.builtinRuntimeEncoding(builtin_nominal)) {
                     .primitive => |prim| try self.store.primitive(prim),
-                    .bool_tag_union, .try_nominal, .list, .box, .dict, .set, .iterator, .parse_tag_union_spec, .fields, .field, .crypto_sha256_digest, .crypto_sha256_hasher, .crypto_blake3_digest, .crypto_blake3_hasher => null,
+                    .bool_tag_union, .try_nominal, .list, .box, .declared_backing, .parse_tag_union_spec, .fields, .field => null,
                 },
                 .local_declaration, .imported_declaration, .local_box_payload_capability, .imported_box_payload_capability, .opaque_without_backing => null,
             },
             .field_kind => |kind| try self.store.committedKind(kind == .optional),
             .alias, .record, .tuple, .function, .tag_union => null,
         };
+        if (node) |done| return .{ .done = done };
+        return .{ .composite = .{ .payload = payload, .identity_variables = identity_variables } };
     }
 
     /// The distinct flex and rigid variables the checked type `root` of
@@ -1163,11 +1734,11 @@ pub const Converter = struct {
         var found: std.ArrayList(checked.CheckedTypeId) = .empty;
         var pending: std.ArrayList(checked.CheckedTypeId) = .empty;
         defer pending.deinit(scratch);
-        var seen: collections.DenseMapUnmanaged(checked.CheckedTypeId, void) = .empty;
-        defer seen.deinit(scratch);
+        self.store.beginCheckedWalk();
+        defer self.store.endCheckedWalk();
         try pending.append(scratch, root);
         while (pending.pop()) |ty| {
-            if ((try seen.getOrPut(scratch, ty)).found_existing) continue;
+            if (!try self.store.visitChecked(ty)) continue;
             const start = pending.items.len;
             switch (types.payload(ty)) {
                 .flex, .rigid => try found.append(allocator, ty),
@@ -1226,12 +1797,30 @@ pub const Converter = struct {
         return try self.store.emptyTagUnion();
     }
 
-    fn pushFrame(self: Converter, frames: *std.ArrayList(Frame), pending: *std.ArrayList(Child), results_start: usize, module: ModuleIndex, ty: checked.CheckedTypeId) Allocator.Error!void {
+    fn pushFrame(self: Converter, frames: *std.ArrayList(Frame), pending: *std.ArrayList(Child), results_start: usize, module: ModuleIndex, ty: checked.CheckedTypeId, composite: @FieldType(Leaf, "composite")) Allocator.Error!void {
         const allocator = self.store.allocator;
         const pending_start = pending.items.len;
+        const ends_in_uncommitted_tail = try self.appendChildren(pending, module, composite.payload, false);
+        try frames.append(allocator, .{
+            .module = module,
+            .ty = ty,
+            .payload = composite.payload,
+            .identity_variables = composite.identity_variables,
+            .results_start = results_start,
+            .pending_start = pending_start,
+            .pending_next = pending_start,
+            .ends_in_uncommitted_tail = ends_in_uncommitted_tail,
+        });
+    }
+
+    /// Lazy substitution and conversion must visit the same flattened row children.
+    /// Lazy substitution additionally binds the field kinds that finish reads.
+    fn appendChildren(self: Converter, pending: *std.ArrayList(Child), module: ModuleIndex, payload: checked.CheckedTypePayload, comptime include_field_kinds: bool) Allocator.Error!bool {
+        const allocator = self.store.allocator;
         const view = self.modules.get(module);
         const types = view.types();
-        switch (types.payload(ty)) {
+        var ends_in_uncommitted_tail = false;
+        switch (payload) {
             .alias => |alias| try pending.append(allocator, .{ .module = module, .ty = alias.backing }),
             .record => |record| {
                 var current_fields = record.fields;
@@ -1240,6 +1829,8 @@ pub const Converter = struct {
                     for (0..current_fields.len()) |field_index| {
                         const field = current_fields.get(field_index);
                         try pending.append(allocator, .{ .module = module, .ty = field.ty });
+                        if (include_field_kinds and !self.seal_undetermined_kinds)
+                            if (field.kind.undeterminedVariable()) |variable| try pending.append(allocator, .{ .module = module, .ty = variable });
                     }
                     current_fields = .empty;
                     switch (types.payload(current)) {
@@ -1254,7 +1845,11 @@ pub const Converter = struct {
                 // The row's remainder, when it is not the empty record.
                 switch (types.payload(current)) {
                     .empty_record => {},
-                    .pending, .field_kind, .err, .flex, .rigid, .alias, .record, .tuple, .nominal, .function, .tag_union, .empty_tag_union => try pending.append(allocator, .{ .module = module, .ty = current }),
+                    .flex => |flex| {
+                        ends_in_uncommitted_tail = flex.row_tail == .uncommitted_record;
+                        try pending.append(allocator, .{ .module = module, .ty = current });
+                    },
+                    .pending, .field_kind, .err, .rigid, .alias, .record, .tuple, .nominal, .function, .tag_union, .empty_tag_union => try pending.append(allocator, .{ .module = module, .ty = current }),
                 }
             },
             .tuple => |items| for (items) |item| try pending.append(allocator, .{ .module = module, .ty = item }),
@@ -1276,8 +1871,8 @@ pub const Converter = struct {
                         .pending, .field_kind, .err, .flex, .rigid, .record, .tuple, .nominal, .function, .empty_record, .empty_tag_union => break,
                     }
                 }
-                switch (types.payload(current)) {
-                    .empty_tag_union => {},
+                switch (types.payloadTag(current)) {
+                    .empty_tag_union => ends_in_uncommitted_tail = types.uncommittedTagTail(current),
                     .pending, .field_kind, .err, .flex, .rigid, .alias, .record, .tuple, .nominal, .function, .empty_record, .tag_union => try pending.append(allocator, .{ .module = module, .ty = current }),
                 }
             },
@@ -1288,21 +1883,17 @@ pub const Converter = struct {
             .nominal => |nominal| for (nominal.args) |arg| try pending.append(allocator, .{ .module = module, .ty = arg }),
             .pending, .field_kind, .err, .flex, .rigid, .empty_record, .empty_tag_union => unreachable, // `leaf` answers these
         }
-        try frames.append(allocator, .{
-            .module = module,
-            .ty = ty,
-            .results_start = results_start,
-            .pending_start = pending_start,
-            .pending_next = pending_start,
-        });
+        return ends_in_uncommitted_tail;
     }
 
-    fn finish(self: Converter, module: ModuleIndex, ty: checked.CheckedTypeId, children: []const TypeId, env: Env) Allocator.Error!TypeId {
+    /// Build `ty` from its converted `children`, its row in the lists of
+    /// `scratch`, the calling conversion's own.
+    fn finish(self: Converter, scratch: *Store.ConvertScratch, module: ModuleIndex, ty: checked.CheckedTypeId, payload: checked.CheckedTypePayload, children: []const TypeId, env: Env) Allocator.Error!TypeId {
         const allocator = self.store.allocator;
         const view = self.modules.get(module);
         const types = view.types();
         const name_store = view.nameStore();
-        switch (types.payload(ty)) {
+        switch (payload) {
             .alias => return children[0],
             .tuple => return try self.store.intern(.{ .tuple = children }),
             .function => |function| return try self.store.intern(.{ .function = .{
@@ -1311,8 +1902,8 @@ pub const Converter = struct {
                 .effectful = checked.finalizedFunctionKind(function.kind) == .effectful,
             } }),
             .record => |record| {
-                var fields: std.ArrayList(Field) = .empty;
-                defer fields.deinit(allocator);
+                const fields = &scratch.fields;
+                fields.clearRetainingCapacity();
                 var child_index: usize = 0;
                 var current_fields = record.fields;
                 var current = record.ext;
@@ -1320,7 +1911,7 @@ pub const Converter = struct {
                     for (0..current_fields.len()) |field_index| {
                         const field = current_fields.get(field_index);
                         const field_name = try self.store.internName(name_store.recordFieldLabelText(field.name));
-                        try fields.append(allocator, self.convertedField(module, field_name, children[child_index], field.kind, env));
+                        try fields.append(allocator, try self.convertedField(module, field_name, children[child_index], field.kind, env));
                         child_index += 1;
                     }
                     current_fields = .empty;
@@ -1333,7 +1924,7 @@ pub const Converter = struct {
                         .pending, .field_kind, .err, .flex, .rigid, .tuple, .nominal, .function, .empty_record, .tag_union, .empty_tag_union => break,
                     }
                 }
-                var ext: ?TypeId = switch (types.payload(current)) {
+                var ext: ?TypeId = switch (types.payloadTag(current)) {
                     .empty_record => null,
                     .pending, .field_kind, .err, .flex, .rigid, .alias, .record, .tuple, .nominal, .function, .tag_union, .empty_tag_union => children[child_index],
                 };
@@ -1347,18 +1938,19 @@ pub const Converter = struct {
                     .variable => {},
                     .primitive, .tuple, .tag_union, .list, .box, .nominal, .function => invariant("a record row's remainder converted to a non-record type"),
                 };
-                if (fields.items.len == 0 and ext == null) return try self.store.emptyRecord();
+                const tail_node = self.tailNodeOf(module, ty, env);
+                if (fields.items.len == 0 and ext == null and tail_node == null) return try self.store.emptyRecord();
                 const store = self.store;
                 std.mem.sort(Field, fields.items, store, struct {
                     fn lessThan(s: *Store, a: Field, b: Field) bool {
                         return s.nameLessThan(a.name, b.name);
                     }
                 }.lessThan);
-                return try self.store.intern(.{ .record = .{ .fields = fields.items, .ext = ext } });
+                return try self.store.intern(.{ .record = .{ .fields = fields.items, .ext = ext, .tail_node = tail_node } });
             },
             .tag_union => |tag_union| {
-                var tags: std.ArrayList(TagInput) = .empty;
-                defer tags.deinit(allocator);
+                const tags = &scratch.tags;
+                tags.clearRetainingCapacity();
                 var child_index: usize = 0;
                 var current_tags = tag_union.tags;
                 var current = tag_union.ext;
@@ -1382,7 +1974,7 @@ pub const Converter = struct {
                         .pending, .field_kind, .err, .flex, .rigid, .record, .tuple, .nominal, .function, .empty_record, .empty_tag_union => break,
                     }
                 }
-                var ext: ?TypeId = switch (types.payload(current)) {
+                var ext: ?TypeId = switch (types.payloadTag(current)) {
                     .empty_tag_union => null,
                     .pending, .field_kind, .err, .flex, .rigid, .alias, .record, .tuple, .nominal, .function, .empty_record, .tag_union => children[child_index],
                 };
@@ -1406,7 +1998,7 @@ pub const Converter = struct {
                         return s.nameLessThan(a.name, b.name);
                     }
                 }.lessThan);
-                return try self.store.intern(.{ .tag_union = .{ .tags = tags.items, .ext = ext } });
+                return try self.store.intern(.{ .tag_union = .{ .tags = tags.items, .ext = ext, .tail_node = self.tailNodeOf(module, ty, env) } });
             },
             .nominal => |nominal| return try self.nominalNode(module, nominal, children),
             .pending, .field_kind, .err, .flex, .rigid, .empty_record, .empty_tag_union => unreachable, // `leaf` answers these
@@ -1424,7 +2016,7 @@ pub const Converter = struct {
             .nominal => |nominal| {
                 if (nominal.representation == .builtin) switch (checked.builtinRuntimeEncoding(nominal.representation.builtin)) {
                     .primitive => |prim| return try self.store.primitive(prim),
-                    .bool_tag_union, .try_nominal, .list, .box, .dict, .set, .iterator, .parse_tag_union_spec, .fields, .field, .crypto_sha256_digest, .crypto_sha256_hasher, .crypto_blake3_digest, .crypto_blake3_hasher => {},
+                    .bool_tag_union, .try_nominal, .list, .box, .declared_backing, .parse_tag_union_spec, .fields, .field => {},
                 };
                 return try self.nominalNode(module, nominal, args);
             },
@@ -1455,12 +2047,12 @@ pub const Converter = struct {
                             // lowering supplies the options-record call signature.
                             return try self.store.intern(.{ .function = .{ .args = children[1..], .ret = children[0], .effectful = false } });
                         },
-                        .bool_tag_union, .try_nominal, .dict, .set, .iterator, .crypto_sha256_digest, .crypto_sha256_hasher, .crypto_blake3_digest, .crypto_blake3_hasher => {},
+                        .bool_tag_union, .try_nominal, .declared_backing => {},
                     },
                     .local_declaration, .imported_declaration, .local_box_payload_capability, .imported_box_payload_capability, .opaque_without_backing => {},
                 }
                 const decl = try self.declarationKey(view, nominal);
-                const decl_key = decl orelse NominalDeclKey{ .module = module, .decl = @fromBackingInt(std.math.maxInt(u32)) };
+                const decl_key = decl orelse NominalDeclKey{ .module = module, .decl = .none };
                 return try self.store.intern(.{ .nominal = .{
                     .decl = decl_key,
                     .args = children,
@@ -1493,10 +2085,10 @@ pub const Converter = struct {
     /// A record field of value type `ty`: an undetermined kind takes the
     /// binding its scheme gives it, and a kind no scope binds commits to
     /// `required`, as it does for every other strategy.
-    fn convertedField(self: Converter, module: ModuleIndex, name: NameId, ty: TypeId, kind: checked.CheckedFieldKind, env: Env) Field {
+    fn convertedField(self: Converter, module: ModuleIndex, name: NameId, ty: TypeId, kind: checked.CheckedFieldKind, env: Env) Allocator.Error!Field {
         return switch (kind.tag) {
             .required => .{ .name = name, .ty = ty, .kind = .inline_slot },
-            .defaulted => .{ .name = name, .ty = ty, .kind = .inline_slot, .default = .some(self.modules.fieldDefault(module, kind.default)) },
+            .defaulted => .{ .name = name, .ty = ty, .kind = .inline_slot, .default = .some(try self.modules.fieldDefault(module, kind.default)) },
             .optional => .{ .name = name, .ty = ty, .kind = .presence_slot },
             .undetermined => {
                 if (!self.seal_undetermined_kinds) {
@@ -1514,8 +2106,8 @@ pub const Converter = struct {
     fn declarationKey(self: Converter, view: *const ModuleView, nominal: checked.CheckedNominalType) Allocator.Error!?NominalDeclKey {
         return switch (nominal.representation) {
             .opaque_without_backing => null,
-            .local_declaration => |decl| .{ .module = view.index, .decl = decl },
-            .imported_declaration => |imported| .{ .module = self.modules.byKey(imported.artifact).index, .decl = imported.declaration },
+            .local_declaration => |decl| .{ .module = view.index, .decl = .some(decl) },
+            .imported_declaration => |imported| .{ .module = self.modules.byKey(imported.artifact).index, .decl = .some(imported.declaration) },
             .builtin => |builtin_nominal| blk: {
                 if (!checked.builtinNominalHasDeclarationBacking(builtin_nominal)) {
                     invariantFmt("builtin nominal {s} has no declaration backing yet reached nominal conversion", .{@tagName(builtin_nominal)});
@@ -1523,20 +2115,20 @@ pub const Converter = struct {
                 const owner = self.modules.byKey(nominal.owner_module.*);
                 const declaration = owner.types().builtinNominalDeclaration(builtin_nominal) orelse
                     invariantFmt("module has no declaration for builtin nominal {s}", .{@tagName(builtin_nominal)});
-                break :blk .{ .module = owner.index, .decl = declaration.id };
+                break :blk .{ .module = owner.index, .decl = .some(declaration.id) };
             },
             .local_box_payload_capability => |cap| blk: {
                 const capability = view.view.interface_capabilities.boxPayloadCapability(cap.capability);
                 const decl = (try self.store.declarationByKey(view, capability.nominal)) orelse
                     invariant("a box payload capability names a nominal its module does not declare");
-                break :blk .{ .module = view.index, .decl = decl };
+                break :blk .{ .module = view.index, .decl = .some(decl) };
             },
             .imported_box_payload_capability => |cap| blk: {
                 const owner = self.modules.byKey(cap.artifact);
                 const capability = owner.view.interface_capabilities.boxPayloadCapability(cap.capability);
                 const decl = (try self.store.declarationByKey(owner, capability.nominal)) orelse
                     invariant("a box payload capability names a nominal its module does not declare");
-                break :blk .{ .module = owner.index, .decl = decl };
+                break :blk .{ .module = owner.index, .decl = .some(decl) };
             },
         };
     }
@@ -1721,13 +2313,15 @@ pub const Converter = struct {
     /// whatever its text (design.md "Name Identity"): the runtime node's id
     /// digests the declaring module's link name and the declaration.
     fn declName(self: Converter, decl: NominalDeclKey, text: []const u8) Allocator.Error!NameId {
+        if (self.store.decl_name_ids.get(decl)) |existing| return existing;
         const view = self.modules.get(decl.module);
-        const declaration = view.types().nominalDeclarationById(decl.decl);
+        const decl_id = decl.decl.get().?;
+        const declaration = view.types().nominalDeclarationById(decl_id);
         // Declarations sharing a name are told apart by their order, which
         // the rest of the module's source leaves alone.
         var ordinal: u32 = 0;
         const name = view.types().nominalDeclarationName(declaration);
-        for (view.types().nominal_declarations[0..@backingInt(decl.decl)]) |earlier| {
+        for (view.types().nominal_declarations[0..@backingInt(decl_id)]) |earlier| {
             if (view.types().nominalDeclarationName(earlier) == name) ordinal += 1;
         }
         return try self.store.internDeclName(decl, self.modules.linkName(decl.module), ordinal, text);
@@ -1741,7 +2335,7 @@ pub const Converter = struct {
         };
         if (!nominal.has_backing) invariant("asked for the backing of an opaque type without one");
         const view = self.modules.get(nominal.decl.module);
-        const declaration = view.types().nominalDeclarationById(nominal.decl.decl);
+        const declaration = view.types().nominalDeclarationById(nominal.decl.decl.get().?);
         const formals = declaration.formalArgs(view.types());
         const args = try self.store.allocator.dupe(TypeId, self.store.nominalArgs(nominal));
         defer self.store.allocator.free(args);
@@ -1772,22 +2366,16 @@ pub const Converter = struct {
         defer allocator.free(padding);
         for (declared_padding, padding) |checked_ty, *slot| slot.* = try self.convert(module, checked_ty, env);
         const declared_fields = declaration.declaredFields(view.types());
-        const slots = try allocator.alloc(u32, declared_fields.len);
-        defer allocator.free(slots);
-        for (declared_fields, slots) |declared, *slot| slot.* = switch (declared) {
-            .named => |label| blk: {
-                const name = try self.store.internName(view.nameStore().recordFieldLabelText(label));
-                for (fields, 0..) |field, index| {
-                    if (field.name == name) break :blk @intCast(index);
-                }
-                invariant("a declared field is absent from its nominal's record row");
-            },
-            .padding => |ordinal| @intCast(fields.len + ordinal),
+        const entries = try allocator.alloc(DeclaredEntry, declared_fields.len);
+        defer allocator.free(entries);
+        for (declared_fields, entries) |declared, *entry| entry.* = switch (declared) {
+            .named => |label| .{ .named = try self.store.internName(view.nameStore().recordFieldLabelText(label)) },
+            .padding => |ordinal| .{ .padding = ordinal },
         };
         return try self.store.intern(.{ .record = .{
             .fields = fields,
             .ext = ext,
-            .declared = .{ .padding = padding, .slots = slots },
+            .declared = .{ .padding = padding, .entries = entries },
         } });
     }
 };
@@ -1810,26 +2398,29 @@ test "interning shares structurally equal nodes" {
 test "record interning preserves immutable field default identities" {
     var store = Store.init(std.testing.allocator);
     defer store.deinit();
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(std.testing.allocator);
+    defer empty_modules.deinit(std.testing.allocator);
     var modules: Modules = .{ .allocator = std.testing.allocator };
     defer modules.deinit();
-    var view: checked.ImportedModuleView = undefined;
+    var view = empty_modules.view();
     view.key = .{ .bytes = @splat(1) };
     view.module_identity.stable_hash = view.key.bytes;
-    const first_module = try modules.add(view);
+    const first_module = try modules.add(&view);
     view.key.bytes = @splat(2);
     view.module_identity.stable_hash = view.key.bytes;
-    const second_module = try modules.add(view);
+    const second_module = try modules.add(&view);
     const count = try store.internName("count");
     const u8_ty = try store.primitive(.u8);
     var fields = [_]Field{.{ .name = count, .ty = u8_ty, .kind = .inline_slot }};
     const required = try store.intern(.{ .record = .{ .fields = &fields, .ext = null } });
-    const first_default: FieldDefault = .{ .module = first_module, .expr_node = 10 };
+    const first_default: FieldDefault = .{ .module = first_module, .ordinal = 10 };
     fields[0].default = .some(first_default);
     const first = try store.intern(.{ .record = .{ .fields = &fields, .ext = null } });
     try std.testing.expectEqual(first, try store.intern(.{ .record = .{ .fields = &fields, .ext = null } }));
-    fields[0].default = .some(.{ .module = first_module, .expr_node = 20 });
+    fields[0].default = .some(.{ .module = first_module, .ordinal = 20 });
     const other_expr = try store.intern(.{ .record = .{ .fields = &fields, .ext = null } });
-    fields[0].default = .some(.{ .module = second_module, .expr_node = 10 });
+    fields[0].default = .some(.{ .module = second_module, .ordinal = 10 });
     const other_module = try store.intern(.{ .record = .{ .fields = &fields, .ext = null } });
     try std.testing.expect(required != first);
     try std.testing.expect(first != other_expr);
@@ -1843,7 +2434,7 @@ test "record interning preserves immutable field default identities" {
     const padded = try store.intern(.{ .record = .{
         .fields = &fields,
         .ext = null,
-        .declared = .{ .padding = &.{u8_ty}, .slots = &.{ 0, 1 } },
+        .declared = .{ .padding = &.{u8_ty}, .entries = &.{ .{ .named = count }, .{ .padding = 0 } } },
     } });
     try std.testing.expectEqual(first, try store.recordRow(padded));
 }
@@ -1855,14 +2446,15 @@ test "a padded backing is a type of its own, whose unnamed fields count toward i
     const z = try store.internName("z");
     const number = try store.primitive(.u32);
     const fields: []const Field = &.{ .{ .name = a, .ty = number, .kind = .inline_slot }, .{ .name = z, .ty = number, .kind = .inline_slot } };
+    const z_pad_a: []const DeclaredEntry = &.{ .{ .named = z }, .{ .padding = 0 }, .{ .named = a } };
     const plain = try store.intern(.{ .record = .{ .fields = fields, .ext = null } });
-    const padded = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{number}, .slots = &.{ 1, 2, 0 } } } });
-    const other_order = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{number}, .slots = &.{ 0, 2, 1 } } } });
-    const other_padding = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{try store.primitive(.u64)}, .slots = &.{ 1, 2, 0 } } } });
+    const padded = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{number}, .entries = z_pad_a } } });
+    const other_order = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{number}, .entries = &.{ .{ .named = a }, .{ .padding = 0 }, .{ .named = z } } } } });
+    const other_padding = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{try store.primitive(.u64)}, .entries = z_pad_a } } });
     try std.testing.expect(plain != padded);
     try std.testing.expect(padded != other_order);
     try std.testing.expect(padded != other_padding);
-    try std.testing.expectEqual(padded, try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{number}, .slots = &.{ 1, 2, 0 } } } }));
+    try std.testing.expectEqual(padded, try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{number}, .entries = z_pad_a } } }));
 
     try std.testing.expect(!store.sameRecordOrder(store.get(plain).record, store.get(padded).record));
     try std.testing.expect(!store.sameRecordOrder(store.get(padded).record, store.get(plain).record));
@@ -1874,12 +2466,48 @@ test "a padded backing is a type of its own, whose unnamed fields count toward i
     try std.testing.expectEqual(plain, try store.recordRow(padded));
     try std.testing.expectEqual(plain, try store.recordRow(plain));
     try std.testing.expectEqual(number, try store.recordRow(number));
-    const only_padding = try store.intern(.{ .record = .{ .fields = &.{}, .ext = null, .declared = .{ .padding = &.{number}, .slots = &.{0} } } });
+    const only_padding = try store.intern(.{ .record = .{ .fields = &.{}, .ext = null, .declared = .{ .padding = &.{number}, .entries = &.{.{ .padding = 0 }} } } });
     try std.testing.expectEqual(try store.emptyRecord(), try store.recordRow(only_padding));
 
     try std.testing.expect(store.isClosed(padded));
-    const open = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{try store.variable(0)}, .slots = &.{ 1, 2, 0 } } } });
+    const open = try store.intern(.{ .record = .{ .fields = fields, .ext = null, .declared = .{ .padding = &.{try store.variable(0)}, .entries = z_pad_a } } });
     try std.testing.expect(!store.isClosed(open));
+}
+
+test "a padded backing's fields that no entry names follow the entries in label order" {
+    var store = Store.init(std.testing.allocator);
+    defer store.deinit();
+    const a = try store.internName("a");
+    const b = try store.internName("b");
+    const z = try store.internName("z");
+    const number = try store.primitive(.u64);
+    const byte = try store.primitive(.u8);
+    const entries: []const DeclaredEntry = &.{ .{ .named = z }, .{ .padding = 0 } };
+
+    // `Pad(r) := { z : U64, _ : U8, ..r }` at `r = { a : U64 }`.
+    const one = try store.intern(.{ .record = .{
+        .fields = &.{ .{ .name = a, .ty = number, .kind = .inline_slot }, .{ .name = z, .ty = number, .kind = .inline_slot } },
+        .ext = null,
+        .declared = .{ .padding = &.{byte}, .entries = entries },
+    } });
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 0 }, store.declaredSlots(store.get(one).record.declared.get().?));
+    try std.testing.expectEqualSlices(DeclaredEntry, entries, store.declaredEntries(store.get(one).record.declared.get().?));
+
+    // At `r = { a : U64, b : U64 }`.
+    const two = try store.intern(.{ .record = .{
+        .fields = &.{ .{ .name = a, .ty = number, .kind = .inline_slot }, .{ .name = b, .ty = number, .kind = .inline_slot }, .{ .name = z, .ty = number, .kind = .inline_slot } },
+        .ext = null,
+        .declared = .{ .padding = &.{byte}, .entries = entries },
+    } });
+    try std.testing.expectEqualSlices(u32, &.{ 2, 3, 0, 1 }, store.declaredSlots(store.get(two).record.declared.get().?));
+
+    // Generic in `r`, whose fields are not yet known.
+    const open = try store.intern(.{ .record = .{
+        .fields = &.{.{ .name = z, .ty = number, .kind = .inline_slot }},
+        .ext = try store.variable(0),
+        .declared = .{ .padding = &.{byte}, .entries = entries },
+    } });
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, store.declaredSlots(store.get(open).record.declared.get().?));
 }
 
 /// Whether two types could unify without a structural conflict: the same
@@ -2001,25 +2629,140 @@ fn hasErrorUnmemoized(allocator: Allocator, modules: *const Modules, module: Mod
     return false;
 }
 
-/// Register a distinct fixture module through the real module-ID producer.
-/// Only identity and checked types are consumed by these reachability tests.
-fn addErrorTestModule(modules: *Modules, store: *checked.CheckedTypeStore) Allocator.Error!ModuleIndex {
+/// Register a distinct fixture module through the real module-ID producer:
+/// `empty`'s module under its own identity, holding `store`'s types.
+fn addErrorTestModule(empty: *const Common.EmptyCheckedModulesForTest, modules: *Modules, store: *checked.CheckedTypeStore) Allocator.Error!ModuleIndex {
     if (store.synthesized_keys == null) {
-        store.attachSynthesizedKeys(try checked.SynthesizedTypeKeys.create(modules.allocator, std.testing.io, store.roots.items.len));
+        store.attachSynthesizedKeys(try checked.SynthesizedTypeKeys.create(modules.allocator, std.testing.io, store.roots.items().len));
     }
     var identity: [32]u8 = @splat(0);
     std.mem.writeInt(u64, identity[0..8], @intCast(modules.views.items.len), .little);
-    var view: checked.ImportedModuleView = undefined;
+    var view = empty.view();
     view.key = .{ .bytes = identity };
     view.module_identity.stable_hash = identity;
     view.checked_types = store.view();
-    return try modules.add(view);
+    return try modules.add(&view);
 }
 
 fn errorTestStore(allocator: Allocator) Allocator.Error!checked.CheckedTypeStore {
     var store = checked.CheckedTypeStore{};
     store.attachSynthesizedKeys(try checked.SynthesizedTypeKeys.create(allocator, std.testing.io, 0));
     return store;
+}
+
+test "Boxy literal substitution visits only demanded substitutions and preserves lexical scope" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var checked_store = try errorTestStore(a);
+    defer checked_store.deinit(a);
+    const record = try checked_store.appendSyntheticPayloadRoot(a, .empty_record);
+    const tags = try checked_store.appendSyntheticPayloadRoot(a, .empty_tag_union);
+    const first = try checked_store.reserveSyntheticTypeRoot(a);
+    try checked_store.declareIdentityInstance(a, first);
+    try checked_store.fillSyntheticTypeRoot(a, first, .{ .flex = .{} });
+    const second = try checked_store.reserveSyntheticTypeRoot(a);
+    try checked_store.declareIdentityInstance(a, second);
+    try checked_store.fillSyntheticTypeRoot(a, second, .{ .flex = .{} });
+    // Converting this unused argument would violate the record-row invariant.
+    const unrelated = try checked_store.appendSyntheticPayloadRoot(a, .{ .record = .{ .fields = &.{}, .ext = tags } });
+    const pair = try checked_store.appendSyntheticPayloadRoot(a, .{ .tuple = try a.dupe(checked.CheckedTypeId, &.{ first, second }) });
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(a);
+    defer empty_modules.deinit(a);
+    var modules = Modules{ .allocator = a };
+    defer modules.deinit();
+    const module = try addErrorTestModule(&empty_modules, &modules, &checked_store);
+    var store = Store.init(a);
+    defer store.deinit();
+    const converter: Converter = .{ .store = &store, .modules = &modules };
+    const empty: Env = .{ .module = module, .vars = &.{}, .bound = &.{} };
+    const outer = try LazySubstitution.init(arena.allocator(), module, &.{ first, second }, &.{ record, unrelated }, module, empty, empty);
+    try std.testing.expectEqual(try store.emptyRecord(), try converter.convert(module, first, outer));
+    try std.testing.expectEqual(@as(usize, 1), outer.lazy_substitution.?.memo.count());
+    // The local's own second binding shadows the unused outer argument.
+    const inner = try LazySubstitution.init(arena.allocator(), module, &.{second}, &.{tags}, module, empty, outer);
+    const result = try converter.convert(module, pair, inner);
+    const items = store.span(store.get(result).tuple);
+    try std.testing.expectEqualSlices(TypeId, &.{ try store.emptyRecord(), try store.emptyTagUnion() }, items);
+    const count = inner.lazy_substitution.?.memo.count();
+    try std.testing.expectEqual(result, try converter.convert(module, pair, inner));
+    try std.testing.expectEqual(count, inner.lazy_substitution.?.memo.count());
+}
+
+test "Boxy literal substitution shares conversion row flattening and binds field kinds" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var canonical_names = names.CanonicalNameStore.init(a);
+    defer canonical_names.deinit();
+    const label = try canonical_names.internRecordFieldLabel("item");
+    var checked_store = try errorTestStore(a);
+    defer checked_store.deinit(a);
+    const empty_record = try checked_store.appendSyntheticPayloadRoot(a, .empty_record);
+    const optional = try checked_store.appendSyntheticPayloadRoot(a, .{ .field_kind = .optional });
+    const value = try checked_store.reserveSyntheticTypeRoot(a);
+    try checked_store.declareIdentityInstance(a, value);
+    try checked_store.fillSyntheticTypeRoot(a, value, .{ .flex = .{} });
+    const kind = try checked_store.reserveSyntheticTypeRoot(a);
+    try checked_store.declareIdentityInstance(a, kind);
+    try checked_store.fillSyntheticTypeRoot(a, kind, .{ .flex = .{} });
+    const row = try checked_store.appendSyntheticPayloadRoot(a, .{ .record = .{
+        .fields = try a.dupe(checked.CheckedRecordField, &.{.{ .name = label, .ty = value, .kind = .undetermined(kind) }}),
+        .ext = empty_record,
+    } });
+    const whole = try checked_store.appendSyntheticPayloadRoot(a, .{ .record = .{ .fields = &.{}, .ext = row } });
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(a);
+    defer empty_modules.deinit(a);
+    var modules = Modules{ .allocator = a };
+    defer modules.deinit();
+    const module = try addErrorTestModule(&empty_modules, &modules, &checked_store);
+    modules.views.items[@backingInt(module)].view.canonical_names = &canonical_names;
+    var store = Store.init(a);
+    defer store.deinit();
+    const converter: Converter = .{ .store = &store, .modules = &modules };
+    const empty: Env = .{ .module = module, .vars = &.{}, .bound = &.{} };
+    for ([_]TypeId{ try store.emptyTagUnion(), try store.variable(7) }) |row_value| {
+        const row_binding: Env = .{ .module = module, .vars = &.{row}, .bound = &.{row_value} };
+        const substituted = try LazySubstitution.init(arena.allocator(), module, &.{ value, kind }, &.{ empty_record, optional }, module, empty, row_binding);
+        const concrete: Env = .{
+            .module = module,
+            .vars = &.{ value, kind, row },
+            .bound = &.{ try store.emptyRecord(), try store.committedKind(true), row_value },
+        };
+        // Extensions flatten; a root's row marker still visits its fields,
+        // whereas a root bound to a whole value consumes that value directly.
+        try std.testing.expectEqual(try converter.convert(module, whole, concrete), try converter.convert(module, whole, substituted));
+        try std.testing.expectEqual(try converter.convert(module, row, concrete), try converter.convert(module, row, substituted));
+    }
+}
+
+test "Boxy literal substitution composes deep chains without native recursion" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var checked_store = try errorTestStore(a);
+    defer checked_store.deinit(a);
+    const record = try checked_store.appendSyntheticPayloadRoot(a, .empty_record);
+    const variable = try checked_store.reserveSyntheticTypeRoot(a);
+    try checked_store.declareIdentityInstance(a, variable);
+    try checked_store.fillSyntheticTypeRoot(a, variable, .{ .flex = .{} });
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(a);
+    defer empty_modules.deinit(a);
+    var modules = Modules{ .allocator = a };
+    defer modules.deinit();
+    const module = try addErrorTestModule(&empty_modules, &modules, &checked_store);
+    var store = Store.init(a);
+    defer store.deinit();
+    const converter: Converter = .{ .store = &store, .modules = &modules };
+    const empty: Env = .{ .module = module, .vars = &.{}, .bound = &.{} };
+    var env = try LazySubstitution.init(arena.allocator(), module, &.{variable}, &.{record}, module, empty, empty);
+    for (0..4096) |_| {
+        env = try LazySubstitution.init(arena.allocator(), module, &.{variable}, &.{variable}, module, env, empty);
+    }
+    try std.testing.expectEqual(try store.emptyRecord(), try converter.convert(module, variable, env));
 }
 
 test "Boxy error reachability separates modules and preserves proofs across append-only publication" {
@@ -2031,10 +2774,13 @@ test "Boxy error reachability separates modules and preserves proofs across appe
     const bad = try first.appendSyntheticPayloadRoot(a, .err);
     const good = try second.appendSyntheticPayloadRoot(a, .empty_record);
     try std.testing.expectEqual(bad, good); // IDs alone cannot identify a node.
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(a);
+    defer empty_modules.deinit(a);
     var modules = Modules{ .allocator = a };
     defer modules.deinit();
-    const first_module = try addErrorTestModule(&modules, &first);
-    const second_module = try addErrorTestModule(&modules, &second);
+    const first_module = try addErrorTestModule(&empty_modules, &modules, &first);
+    const second_module = try addErrorTestModule(&empty_modules, &modules, &second);
     const errors = try ErrorTypes.create(a, &modules);
     defer errors.destroy();
     try std.testing.expect(try errors.hasError(first_module, bad));
@@ -2069,9 +2815,12 @@ test "Boxy error reachability matches old traversal for late-positive cycles and
             try store.fillSyntheticTypeRoot(a, id, .{ .tuple = items });
         }
     }
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(a);
+    defer empty_modules.deinit(a);
     var modules = Modules{ .allocator = a };
     defer modules.deinit();
-    const module = try addErrorTestModule(&modules, &store);
+    const module = try addErrorTestModule(&empty_modules, &modules, &store);
     for (0..2) |order| {
         const errors = try ErrorTypes.create(a, &modules);
         defer errors.destroy();
@@ -2157,9 +2906,12 @@ test "Boxy error reachability preserves value-error edges and field-kind semanti
     tags[0] = .{ .name = tag, .args = try a.dupe(checked.CheckedTypeId, &.{bad}) };
     const tag_bad = try store.appendSyntheticPayloadRoot(a, .{ .tag_union = .{ .tags = tags, .ext = empty_tags } });
     const tag_ext_bad = try store.appendSyntheticPayloadRoot(a, .{ .tag_union = .{ .tags = &.{}, .ext = bad } });
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(a);
+    defer empty_modules.deinit(a);
     var modules = Modules{ .allocator = a };
     defer modules.deinit();
-    const module = try addErrorTestModule(&modules, &store);
+    const module = try addErrorTestModule(&empty_modules, &modules, &store);
     const errors = try ErrorTypes.create(a, &modules);
     defer errors.destroy();
     for ([_]checked.CheckedTypeId{ good, empty_tags, pending, flex, rigid, alias_good, nominal_good, kind_only }) |id| {
@@ -2187,9 +2939,12 @@ test "Boxy error reachability propagates OOM and retries without stale proofs" {
     const second = try store.reserveSyntheticTypeRoot(a);
     try store.fillSyntheticTypeRoot(a, first, .{ .tuple = try a.dupe(checked.CheckedTypeId, &.{ second, bad }) });
     try store.fillSyntheticTypeRoot(a, second, .{ .tuple = try a.dupe(checked.CheckedTypeId, &.{first}) });
+    var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+    try empty_modules.init(a);
+    defer empty_modules.deinit(a);
     var modules = Modules{ .allocator = a };
     defer modules.deinit();
-    const module = try addErrorTestModule(&modules, &store);
+    const module = try addErrorTestModule(&empty_modules, &modules, &store);
     try std.testing.checkAllAllocationFailures(a, errorTypesAllocationCase, .{ &modules, module, @as([]const checked.CheckedTypeId, &.{ first, second, bad }) });
     // Fail during edge expansion after retaining a completed leaf proof.
     var failing = std.testing.FailingAllocator.init(a, .{});
@@ -2220,9 +2975,12 @@ test "Boxy error reachability work stays bounded by shared graph nodes" {
             try store.fillSyntheticTypeRoot(a, id, .{ .tuple = try a.dupe(checked.CheckedTypeId, &.{ child, child }) });
         }
         try store.fillSyntheticTypeRoot(a, ids[count - 1], .empty_record);
+        var empty_modules: Common.EmptyCheckedModulesForTest = undefined;
+        try empty_modules.init(a);
+        defer empty_modules.deinit(a);
         var modules = Modules{ .allocator = a };
         defer modules.deinit();
-        const module = try addErrorTestModule(&modules, &store);
+        const module = try addErrorTestModule(&empty_modules, &modules, &store);
         const errors = try ErrorTypes.create(a, &modules);
         defer errors.destroy();
         try std.testing.expect(!try errors.hasError(module, ids[0]));

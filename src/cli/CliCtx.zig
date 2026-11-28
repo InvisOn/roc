@@ -119,6 +119,12 @@ pub const OutputStream = enum {
     stderr,
 };
 
+/// ANSI capabilities of the destinations where a watch run will be replayed.
+pub const AnsiStreams = struct {
+    stdout: bool = false,
+    stderr: bool = false,
+};
+
 /// If output should use colors
 pub const ColorMode = enum {
     auto,
@@ -225,6 +231,9 @@ pub const CliCtx = struct {
     no_color: bool,
     /// Lazily loaded once because color environment variables are process-wide.
     color_policy: ?ColorPolicy,
+    /// When replayed by a watcher, color is rendered for its destinations,
+    /// not for the pipes connecting this child to the watcher.
+    replay_ansi: ?AnsiStreams = null,
 
     const Self = @This();
 
@@ -265,7 +274,9 @@ pub const CliCtx = struct {
     fn baseReportConfig(self: *const Self) ReportingConfig {
         var config = ReportingConfig.initColorTerminal();
         // Reporting must still work if the working directory is inaccessible.
-        config.source_path_base = self.coreCtx().canonicalize(".", self.arena) catch null;
+        if (self.coreCtx().canonicalize(".", self.arena)) |dir| {
+            config.source_path_base = .{ .dir = dir, .ctx = self, .canonicalize = canonicalizeDisplayedPath };
+        } else |_| {}
         if (self.coreCtx().terminalWidth()) |cols| {
             if (cols > 0) config.max_line_width = cols;
         }
@@ -293,6 +304,29 @@ pub const CliCtx = struct {
         });
         self.color_policy = policy;
         return policy;
+    }
+
+    /// The canonical spelling of an absolute path being displayed, so
+    /// `reporting.displayPath` compares it with the canonical working
+    /// directory. A path that does not exist (a missing root file, an output
+    /// not yet written) keeps its unresolved tail after the canonical spelling
+    /// of its deepest ancestor that resolves.
+    fn canonicalizeDisplayedPath(ctx: *const anyopaque, path: []const u8, gpa: Allocator) Allocator.Error!?[]const u8 {
+        const self: *const Self = @ptrCast(@alignCast(ctx));
+        var ancestor = path;
+        while (true) {
+            if (self.coreCtx().canonicalize(ancestor, gpa)) |canonical| {
+                if (ancestor.len == path.len) return canonical;
+                defer gpa.free(canonical);
+                const tail = std.mem.trimStart(u8, path[ancestor.len..], std.fs.path.sep_str);
+                return try std.fs.path.join(gpa, &.{ canonical, tail });
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.FileNotFound, error.AccessDenied, error.IoError => {
+                    ancestor = std.fs.path.dirname(ancestor) orelse return null;
+                },
+            }
+        }
     }
 
     /// Spell `path` the way reports do: relative to the working directory.
@@ -324,9 +358,14 @@ pub const CliCtx = struct {
         return config;
     }
 
-    fn streamSupportsAnsi(self: *const Self, stream: OutputStream) bool {
+    /// Detect ANSI support before applying the user's color preferences.
+    pub fn streamSupportsAnsi(self: *const Self, stream: OutputStream) bool {
         if (comptime builtin.target.cpu.arch == .wasm32 or builtin.target.os.tag == .freestanding) return false;
 
+        if (self.replay_ansi) |ansi| return switch (stream) {
+            .stdout => ansi.stdout,
+            .stderr => ansi.stderr,
+        };
         const file = switch (stream) {
             .stdout => std.Io.File.stdout(),
             .stderr => std.Io.File.stderr(),

@@ -38,6 +38,7 @@ const layout = @import("layout");
 const lir = @import("lir");
 const GuardedList = lir.LirStore.GuardedList;
 const llvm_compile = @import("llvm_compile");
+const backend = @import("backend");
 
 const ModuleEnv = can.ModuleEnv;
 const BuildEnv = compile.BuildEnv;
@@ -72,6 +73,40 @@ pub const GlueArgs = struct {
     /// is the only plugin considered: its stamp must verify, and a mismatch
     /// is an explicit error (reinstall), never a rebuild.
     installed_plugin_path: ?[]const u8 = null,
+    /// The caller builds and loads the glue spec itself, from unit images
+    /// (design.md "Unit-Image Glue Execution"), instead of this module
+    /// compiling a plugin object. Asked for the generator only once the
+    /// platform has been checked and its types collected.
+    generator: ?GeneratorSource = null,
+};
+
+/// `roc_make_glue` in the `(ret_ptr, args_ptr)` convention: the result buffer,
+/// then the address of the one `List(Types)` argument.
+pub const GlueEntryFn = *const fn ([*]u8, ?*anyopaque) callconv(.c) void;
+
+/// The host boundary of `roc_make_glue`: the committed layouts values cross
+/// it at, and the named schemas that locate their fields and tags.
+pub const GlueBoundary = struct {
+    layouts: *const layout.Store,
+    schemas: *const lir.CheckedPipeline.RuntimeValueSchemaStore,
+    types_layout: layout.Idx,
+    ret_layout: layout.Idx,
+};
+
+/// A glue spec loaded into this process, ready to call. Whatever `entry`
+/// points into, and everything `boundary` borrows, outlives the copying of
+/// the generator's result: returned values can borrow the generator's
+/// immutable data.
+pub const LoadedGenerator = struct {
+    entry: GlueEntryFn,
+    boundary: GlueBoundary,
+};
+
+/// A caller-owned glue spec, built and loaded when `load` is called. `load`
+/// reports its own diagnostics.
+pub const GeneratorSource = struct {
+    context: *anyopaque,
+    load: *const fn (context: *anyopaque) GlueError!LoadedGenerator,
 };
 
 /// Error types for glue generation operations.
@@ -149,7 +184,9 @@ fn rocGlueInner(gpa: Allocator, stderr: *std.Io.Writer, stdout: *std.Io.Writer, 
         return error.BuildEnvInit;
     };
     defer gpa.free(cwd);
-    var build_env = BuildEnv.init(gpa, .single_threaded, 1, RocTarget.detectNative(), cwd, std_io) catch {
+    // `.lss` is the strategy the platform's ABI layouts are lowered under
+    // (`attachAbiLayouts`).
+    var build_env = BuildEnv.init(gpa, .single_threaded, 1, RocTarget.detectNative(), cwd, std_io, .lss) catch {
         return error.BuildEnvInit;
     };
     defer build_env.deinit();
@@ -231,8 +268,8 @@ fn rocGlueInner(gpa: Allocator, stderr: *std.Io.Writer, stdout: *std.Io.Writer, 
         const artifact = mod.semantic.checked_artifact orelse return error.ModuleRetrieval;
         type_table.clearVarMap();
 
-        try provides_entries.ensureUnusedCapacity(gpa, artifact.provided_exports.exports.len);
-        for (artifact.provided_exports.exports) |provided| {
+        try provides_entries.ensureUnusedCapacity(gpa, artifact.provided_exports.exports.items().len);
+        for (artifact.provided_exports.exports.items()) |provided| {
             const source_name, const ffi_symbol = switch (provided) {
                 .procedure => |procedure| .{ procedure.source_name, procedure.ffi_symbol },
                 .data => |data| .{ data.source_name, data.ffi_symbol },
@@ -266,54 +303,50 @@ fn rocGlueInner(gpa: Allocator, stderr: *std.Io.Writer, stdout: *std.Io.Writer, 
         error.HostedFunctionNotBound => return error.CompilationFailed,
     };
 
-    // 5. Compile glue spec through checked artifacts and lower to LIR.
-    var spec = try compileGlueSpec(gpa, stderr, args.glue_spec, args.no_cache, args.report_config, args.specialization_strategy, std_io);
-    defer spec.deinit(gpa);
-    const lowered = &spec.lowered;
-    const root_artifact = spec.root_artifact;
-    const glue_proc = spec.glue_proc;
-    const arg_layouts = spec.arg_layouts;
-
-    // 6. Construct List(Types) using the exact committed LIR layout and invoke the requested backend.
+    // 5. Take the caller's loaded glue spec, or compile it through checked
+    // artifacts, lower it to LIR and load its plugin object.
     var runtime_env = eval_mod.RuntimeHostEnv.init(gpa);
     defer runtime_env.deinit();
-    const glue_writer = GlueRocValueWriter{
-        .layouts = &lowered.lir_result.layouts,
-        .schemas = &lowered.runtime_value_schemas,
-        .roc_ops = runtime_env.get_ops(),
+    var spec: ?CompiledGlueSpec = null;
+    defer if (spec) |*compiled| compiled.deinit(gpa);
+    var plugin: ?BuiltGluePlugin = null;
+    defer if (plugin) |built| built.deinit(gpa);
+    var plugin_image: ?eval_mod.object_image.Image = null;
+    defer if (plugin_image) |*image| image.deinit();
+    var dev_code: ?*DevGlueCode = null;
+    defer if (dev_code) |code| code.destroy();
+    var installed: ?InstalledGlueSpec = null;
+    defer if (installed) |*spec_plugin| spec_plugin.deinit(gpa);
+    const generator: LoadedGenerator = if (args.generator) |source|
+        try source.load(source.context)
+    else loaded: {
+        if (builtin.target.os.tag == .freestanding) return error.GluePluginUnavailable;
+        // An installed plugin is already compiled, so its spec is only
+        // checked; otherwise `--opt=dev` means the dev backend, and the
+        // optimized levels mean LLVM.
+        if (args.installed_plugin_path) |installed_path| {
+            installed = .{};
+            try installed.?.load(gpa, stderr, args, installed_path, std_io);
+            break :loaded installed.?.generator();
+        }
+        spec = try compileGlueSpec(gpa, stderr, args.glue_spec, args.no_cache, args.report_config, args.specialization_strategy, std_io);
+        const compiled = &spec.?;
+        if (args.opt == .dev) {
+            dev_code = try DevGlueCode.create(gpa, compiled);
+            break :loaded .{ .entry = dev_code.?.entry(), .boundary = compiled.boundary() };
+        }
+        const stamp = gluePluginStamp(compiled.root_artifact.executableIdentity(), args.specialization_strategy);
+        plugin = .{ .bytes = try buildGluePlugin(gpa, &compiled.lowered, .{
+            .root = CheckedArtifact.loweringViewWithRelations(compiled.root_artifact, compiled.relation_artifacts),
+            .imports = compiled.imported_artifacts,
+        }, compiled.glue_proc, compiled.arg_layouts, stamp, args.opt, std_io) };
+        plugin_image = try loadVerifiedGluePlugin(gpa, stderr, plugin.?, &stamp, true);
+        const entry = plugin_image.?.lookup(GlueEntryFn, builtins.shim_symbols.roc_make_glue) orelse return error.GluePluginUnavailable;
+        break :loaded .{ .entry = entry, .boundary = compiled.boundary() };
     };
-    var types_list = constructTypesRocList(&glue_writer, collected_modules.items, provides_entries.items, &type_table, arg_layouts[0]);
 
-    const proc = lowered.lir_result.store.getProcSpec(glue_proc);
-    const ret_size_align = lowered.lir_result.layouts.layoutSizeAlign(lowered.lir_result.layouts.getLayout(proc.ret_layout));
-    const ret_alignment = std.mem.Alignment.fromByteUnits(ret_size_align.alignment.toByteUnits());
-    const result_ptr = gpa.rawAlloc(ret_size_align.size, ret_alignment, @returnAddress()) orelse {
-        return error.OutOfMemory;
-    };
-    const result_buf = result_ptr[0..ret_size_align.size];
-    defer gpa.rawFree(result_buf, ret_alignment, @returnAddress());
-    if (result_buf.len > 0) @memset(result_buf, 0);
-
-    const glue_result = switch (args.opt) {
-        .dev, .size, .speed => try runGlueSpecPlugin(
-            gpa,
-            stderr,
-            lowered,
-            .{
-                .root = CheckedArtifact.loweringViewWithRelations(root_artifact, spec.relation_artifacts),
-                .imports = spec.imported_artifacts,
-            },
-            glue_proc,
-            arg_layouts,
-            &types_list,
-            result_buf.ptr,
-            &glue_writer,
-            &runtime_env,
-            root_artifact.executableIdentity(),
-            args,
-            std_io,
-        ),
-    };
+    // 6. Construct List(Types) at the boundary's committed layout and call the generator.
+    const glue_result = try runGenerator(gpa, stderr, generator, &runtime_env, collected_modules.items, provides_entries.items, &type_table);
     defer glue_result.deinit();
     try writeHostEvents(stderr, &runtime_env);
 
@@ -367,6 +400,16 @@ const CompiledGlueSpec = struct {
     arg_layouts: []const layout.Idx,
     root_artifact: *const CheckedArtifact.CheckedModuleArtifact,
 
+    /// The boundary this lowering committed for `roc_make_glue`.
+    fn boundary(self: *const CompiledGlueSpec) GlueBoundary {
+        return .{
+            .layouts = &self.lowered.lir_result.layouts,
+            .schemas = &self.lowered.runtime_value_schemas,
+            .types_layout = self.arg_layouts[0],
+            .ret_layout = self.lowered.lir_result.store.getProcSpec(self.glue_proc).ret_layout,
+        };
+    }
+
     fn deinit(self: *CompiledGlueSpec, gpa: Allocator) void {
         gpa.free(self.arg_layouts);
         self.lowered.deinit();
@@ -378,9 +421,35 @@ const CompiledGlueSpec = struct {
     }
 };
 
-/// Compile a glue spec (an app on the compiler-owned glue platform) and
-/// lower it to LIR, ready for plugin codegen or interpretation.
-fn compileGlueSpec(
+/// A glue spec checked through the module cache: its checked modules and
+/// the platform entrypoints they provide, with nothing lowered.
+const CheckedGlueSpec = struct {
+    build_env: *BuildEnv,
+    imported_artifacts: []check.CheckedArtifact.ImportedModuleView,
+    relation_artifacts: []check.CheckedArtifact.ImportedModuleView,
+    lir_roots: []check.CheckedModule.RootRequest,
+    root_artifact: *const CheckedArtifact.CheckedModuleArtifact,
+
+    /// The module set a lowering of the spec's entrypoints reads.
+    fn modules(self: *const CheckedGlueSpec) lir.CheckedPipeline.CheckedModuleSet {
+        return .{
+            .root = CheckedArtifact.loweringViewWithRelations(self.root_artifact, self.relation_artifacts),
+            .imports = self.imported_artifacts,
+        };
+    }
+
+    fn deinit(self: *CheckedGlueSpec, gpa: Allocator) void {
+        gpa.free(self.lir_roots);
+        gpa.free(self.relation_artifacts);
+        gpa.free(self.imported_artifacts);
+        self.build_env.deinit();
+        gpa.destroy(self.build_env);
+    }
+};
+
+/// Check a glue spec (an app on the compiler-owned glue platform),
+/// rendering its diagnostics.
+fn checkGlueSpec(
     gpa: Allocator,
     stderr: *std.Io.Writer,
     glue_spec: []const u8,
@@ -388,7 +457,7 @@ fn compileGlueSpec(
     report_config: reporting.ReportingConfig,
     specialization_strategy: base.SpecializationStrategy,
     std_io: std.Io,
-) GlueError!CompiledGlueSpec {
+) GlueError!CheckedGlueSpec {
     std.Io.Dir.cwd().access(std_io, glue_spec, .{}) catch {
         return error.GlueSpecNotFound;
     };
@@ -405,11 +474,10 @@ fn compileGlueSpec(
 
     const build_env = gpa.create(BuildEnv) catch return error.OutOfMemory;
     errdefer gpa.destroy(build_env);
-    build_env.* = BuildEnv.init(gpa, .single_threaded, 1, RocTarget.detectNative(), glue_cwd, std_io) catch {
+    build_env.* = BuildEnv.init(gpa, .single_threaded, 1, RocTarget.detectNative(), glue_cwd, std_io, specialization_strategy) catch {
         return error.BuildEnvInit;
     };
     errdefer build_env.deinit();
-    build_env.setSpecializationStrategy(specialization_strategy);
     if (!no_cache) build_env.enableDefaultCacheManager(false) catch {
         return error.BuildEnvInit;
     };
@@ -433,10 +501,45 @@ fn compileGlueSpec(
     };
     errdefer gpa.free(relation_artifacts);
 
-    const lir_roots = lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_artifact.root_requests.runtime_requests) catch {
+    const lir_roots = lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_artifact.root_requests.runtime_requests.items()) catch {
         return error.OutOfMemory;
     };
-    errdefer gpa.free(lir_roots);
+    return .{
+        .build_env = build_env,
+        .imported_artifacts = imported_artifacts,
+        .relation_artifacts = relation_artifacts,
+        .lir_roots = lir_roots,
+        .root_artifact = root_artifact,
+    };
+}
+
+/// Why a checked app is not a glue spec, reported against its path.
+fn reportNotGlueSpec(gpa: Allocator, stderr: *std.Io.Writer, glue_spec: []const u8, report_config: reporting.ReportingConfig, comptime reason: []const u8) GlueError {
+    printPath(gpa, stderr, "Error: '{s}' is not a glue spec: " ++ reason ++ "\n", glue_spec, report_config) catch {};
+    return error.CompilationFailed;
+}
+
+const no_make_glue_reason = "its platform does not provide `" ++ builtins.shim_symbols.roc_make_glue ++ "`.";
+const make_glue_arity_reason = "`" ++ builtins.shim_symbols.roc_make_glue ++ "` must take exactly one argument.";
+
+/// Compile a glue spec (an app on the compiler-owned glue platform) and
+/// lower it to LIR, ready for dev-backend or plugin codegen.
+fn compileGlueSpec(
+    gpa: Allocator,
+    stderr: *std.Io.Writer,
+    glue_spec: []const u8,
+    no_cache: bool,
+    report_config: reporting.ReportingConfig,
+    specialization_strategy: base.SpecializationStrategy,
+    std_io: std.Io,
+) GlueError!CompiledGlueSpec {
+    var checked_spec = try checkGlueSpec(gpa, stderr, glue_spec, no_cache, report_config, specialization_strategy, std_io);
+    errdefer checked_spec.deinit(gpa);
+    const build_env = checked_spec.build_env;
+    const root_artifact = checked_spec.root_artifact;
+    const imported_artifacts = checked_spec.imported_artifacts;
+    const relation_artifacts = checked_spec.relation_artifacts;
+    const lir_roots = checked_spec.lir_roots;
 
     // The width the glue *script* executes at on this machine. This is a runner
     // implementation detail: the emitted ABI facts inside the Types payload were
@@ -459,16 +562,16 @@ fn compileGlueSpec(
     };
     errdefer lowered.deinit();
 
+    // Any app is a well-formed program, but only one whose platform provides
+    // `roc_make_glue` over one argument is a glue spec.
     const glue_proc = selectGlueSpecRootProc(root_artifact, &lowered, builtins.shim_symbols.roc_make_glue) orelse
-        glueInvariant("glue spec produced no published make_glue platform root", .{});
+        return reportNotGlueSpec(gpa, stderr, glue_spec, report_config, no_make_glue_reason);
 
     const arg_layouts = argLayoutsForProc(gpa, &lowered.lir_result.store, glue_proc) catch {
         return error.OutOfMemory;
     };
     errdefer gpa.free(arg_layouts);
-    if (arg_layouts.len != 1) {
-        glueInvariant("make_glue expected one List(Types) argument, got {d}", .{arg_layouts.len});
-    }
+    if (arg_layouts.len != 1) return reportNotGlueSpec(gpa, stderr, glue_spec, report_config, make_glue_arity_reason);
 
     return .{
         .build_env = build_env,
@@ -541,10 +644,10 @@ fn buildGlueSpecPluginFileInner(
 ) GlueError!void {
     if (builtin.target.os.tag == .freestanding) return error.GluePluginUnavailable;
 
-    var spec = try compileGlueSpec(gpa, stderr, glue_spec, false, report_config, .lss, std_io);
+    var spec = try compileGlueSpec(gpa, stderr, glue_spec, false, report_config, InstalledGlueSpec.strategy, std_io);
     defer spec.deinit(gpa);
 
-    const stamp = gluePluginStamp(spec.root_artifact.executableIdentity(), .lss);
+    const stamp = gluePluginStamp(spec.root_artifact.executableIdentity(), InstalledGlueSpec.strategy);
     const object = try buildGluePlugin(gpa, &spec.lowered, .{
         .root = CheckedArtifact.loweringViewWithRelations(spec.root_artifact, spec.relation_artifacts),
         .imports = spec.imported_artifacts,
@@ -582,33 +685,34 @@ const BuiltGluePlugin = struct {
     }
 };
 
-/// Copy the returned files before unloading the plugin: Roc results can borrow
-/// immutable bytes from its image, whereas the caller owns the extracted files.
-fn runGlueSpecPlugin(
+/// Marshal the collected platform types across `generator`'s boundary, call
+/// it, and copy the files it returns: Roc results can borrow immutable bytes
+/// from the generator's image, whereas the caller owns the extracted files.
+fn runGenerator(
     gpa: Allocator,
     stderr: *std.Io.Writer,
-    lowered: *lir.CheckedPipeline.LoweredProgram,
-    modules: compile.static_data_exports.ModuleViews,
-    glue_proc: lir.LirProcSpecId,
-    arg_layouts: []const layout.Idx,
-    types_list: *RocList,
-    result_ptr: [*]u8,
-    writer: *const GlueRocValueWriter,
+    generator: LoadedGenerator,
     runtime_env: *eval_mod.RuntimeHostEnv,
-    executable_identity: [32]u8,
-    args: GlueArgs,
-    std_io: std.Io,
+    collected_modules: []const CollectedModuleTypeInfo,
+    provides_entries: []const CollectedProvidesEntry,
+    type_table: *const TypeTable,
 ) GlueError!GlueResultFiles {
-    if (builtin.target.os.tag == .freestanding) return error.GluePluginUnavailable;
+    const boundary = generator.boundary;
+    const writer = GlueRocValueWriter{
+        .layouts = boundary.layouts,
+        .schemas = boundary.schemas,
+        .roc_ops = runtime_env.get_ops(),
+    };
+    var types_list = constructTypesRocList(&writer, collected_modules, provides_entries, type_table, boundary.types_layout);
 
-    const stamp = gluePluginStamp(executable_identity, args.specialization_strategy);
-    const plugin = try getOrBuildGluePlugin(gpa, lowered, modules, glue_proc, arg_layouts, stamp, args, std_io);
-    defer plugin.deinit(gpa);
-    var lib = try loadVerifiedGluePlugin(gpa, stderr, plugin, &stamp, true);
-    defer lib.deinit();
-
-    const GlueEntryFn = *const fn ([*]u8, ?*anyopaque) callconv(.c) void;
-    const entry = lib.lookup(GlueEntryFn, builtins.shim_symbols.roc_make_glue) orelse return error.GluePluginUnavailable;
+    const ret_size_align = boundary.layouts.layoutSizeAlign(boundary.layouts.getLayout(boundary.ret_layout));
+    const ret_alignment = std.mem.Alignment.fromByteUnits(ret_size_align.alignment.toByteUnits());
+    const result_ptr = gpa.rawAlloc(ret_size_align.size, ret_alignment, @returnAddress()) orelse {
+        return error.OutOfMemory;
+    };
+    const result_buf = result_ptr[0..ret_size_align.size];
+    defer gpa.rawFree(result_buf, ret_alignment, @returnAddress());
+    if (result_buf.len > 0) @memset(result_buf, 0);
 
     runtime_env.resetObservation();
     var crash_boundary = runtime_env.enterCrashBoundary();
@@ -626,7 +730,7 @@ fn runGlueSpecPlugin(
             self.entry(self.result, self.types);
         }
     };
-    var glue_call: GlueCall = .{ .entry = entry, .result = result_ptr, .types = @ptrCast(types_list) };
+    var glue_call: GlueCall = .{ .entry = generator.entry, .result = result_buf.ptr, .types = @ptrCast(&types_list) };
     _ = try crash_boundary.run(GlueCall, &glue_call, GlueCall.call);
 
     switch (runtime_env.crashState()) {
@@ -636,26 +740,188 @@ fn runGlueSpecPlugin(
             return error.CompilationFailed;
         },
     }
-    return try extractGlueResult(gpa, writer, result_ptr, lowered.lir_result.store.getProcSpec(glue_proc).ret_layout);
+    return try extractGlueResult(gpa, &writer, result_buf.ptr, boundary.ret_layout);
 }
 
-fn getOrBuildGluePlugin(
+/// A glue spec's whole lowered program compiled by the dev backend into this
+/// process's executable memory, with its frozen data beside it: what a
+/// `--opt=dev` glue run executes when its spec does not run from unit images.
+/// Nothing here is persisted. It outlives the copying of the generator's
+/// result, which can borrow the frozen data and static strings.
+const DevGlueCode = if (backend.host_lir_codegen_available) struct {
     gpa: Allocator,
-    lowered: *lir.CheckedPipeline.LoweredProgram,
-    modules: compile.static_data_exports.ModuleViews,
-    glue_proc: lir.LirProcSpecId,
-    arg_layouts: []const layout.Idx,
-    stamp: GluePluginStampV1,
-    args: GlueArgs,
-    std_io: std.Io,
-) GlueError!BuiltGluePlugin {
-    if (args.installed_plugin_path) |installed_path| {
-        const bytes = readPluginFile(gpa, installed_path, std_io) orelse return error.GluePluginUnavailable;
-        return .{ .bytes = bytes };
+    static_data: []compile.static_data_exports.StaticDataExport,
+    static_strings: backend.StaticStringData.Table,
+    static_image: backend.StaticDataImage,
+    executable: backend.ExecutableMemory,
+
+    const Self = @This();
+
+    fn create(gpa: Allocator, spec: *CompiledGlueSpec) GlueError!*Self {
+        const lowered = &spec.lowered;
+        const store = &lowered.lir_result.store;
+        const static_data = compile.static_data_exports.buildStaticDataForWidth(gpa, .{
+            .root = CheckedArtifact.loweringViewWithRelations(spec.root_artifact, spec.relation_artifacts),
+            .imports = spec.imported_artifacts,
+        }, lowered, base.target.TargetUsize.native, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedTarget => unreachable, // Glue executes at the supported native pointer width.
+        };
+        errdefer compile.static_data_exports.deinitStaticData(gpa, static_data);
+
+        var static_strings = try backend.StaticStringData.build(gpa, store, backend.dev.LirCodeGenMod.host_lir_codegen_target);
+        errdefer static_strings.deinit();
+        var static_image = backend.StaticDataImage.init(gpa, static_data) catch |err| return frozenDataError(err);
+        errdefer static_image.deinit();
+        const addresses = static_image.lirValueAddresses(gpa, lowered.lir_result.static_data_values.items.len) catch |err| return frozenDataError(err);
+        defer gpa.free(addresses);
+
+        var codegen = try backend.HostLirCodeGen.initWithCapturePrefix(
+            gpa,
+            store,
+            &lowered.lir_result.layouts,
+            static_strings.view(),
+            lowered.lir_result.erased_capture_prefix,
+            roc_target.host_cpu.level(),
+        );
+        defer codegen.deinit();
+        codegen.setNativeStaticData(addresses);
+        try codegen.compileAllProcSpecs(store.getProcSpecs());
+        const helpers = try backend.collectRequiredRcHelpers(gpa, static_data);
+        defer gpa.free(helpers);
+        try codegen.compileStaticDataRcHelpers(helpers);
+        const wrapper = try codegen.generateEntrypointWrapper(
+            builtins.shim_symbols.roc_make_glue,
+            spec.glue_proc,
+            spec.arg_layouts,
+            store.getProcSpec(spec.glue_proc).ret_layout,
+        );
+        try codegen.finishImage();
+        var executable = backend.ExecutableMemory.initWithEntryOffsetAndUnwindInfo(
+            codegen.getGeneratedCode(),
+            wrapper.offset,
+            codegen.getUnwindFunctions(),
+        ) catch return error.OutOfMemory;
+        errdefer executable.deinit();
+
+        const Resolver = struct {
+            codegen: *const backend.HostLirCodeGen,
+            executable: *const backend.ExecutableMemory,
+
+            fn resolve(raw: ?*anyopaque, relocation: backend.StaticDataRelocation) ?usize {
+                const self: *@This() = @ptrCast(@alignCast(raw.?));
+                const address = @intFromPtr(self.executable.codePtr());
+                if (relocation.rc_helper) |helper| return address + (self.codegen.compiledStaticDataRcHelperOffset(helper) orelse return null);
+                const proc_id = relocation.procedure.get() orelse return null;
+                return address + (self.codegen.compiledProcSymbol(proc_id) orelse return null).code_start;
+            }
+        };
+        var resolver = Resolver{ .codegen = &codegen, .executable = &executable };
+        static_image.resolveFunctionRelocations(.{ .context = &resolver, .resolve = Resolver.resolve }) catch |err| return frozenDataError(err);
+
+        const self = try gpa.create(Self);
+        self.* = .{
+            .gpa = gpa,
+            .static_data = static_data,
+            .static_strings = static_strings,
+            .static_image = static_image,
+            .executable = executable,
+        };
+        return self;
     }
 
-    return .{ .bytes = try buildGluePlugin(gpa, lowered, modules, glue_proc, arg_layouts, stamp, args.opt, std_io) };
-}
+    /// The frozen graph is compiler output, so only allocation can fail.
+    fn frozenDataError(err: backend.StaticDataImageError) Allocator.Error {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.DuplicateStaticDataSymbol,
+            error.InvalidStaticDataAlignment,
+            error.InvalidStaticDataRelocation,
+            error.MissingStaticDataSymbol,
+            error.UnresolvedStaticFunction,
+            => glueInvariant("invalid frozen data graph for a glue spec: {s}", .{@errorName(err)}),
+        };
+    }
+
+    fn entry(self: *const Self) GlueEntryFn {
+        return @ptrCast(@alignCast(self.executable.entryPtr()));
+    }
+
+    fn destroy(self: *Self) void {
+        const gpa = self.gpa;
+        self.executable.deinit();
+        self.static_image.deinit();
+        self.static_strings.deinit();
+        compile.static_data_exports.deinitStaticData(gpa, self.static_data);
+        gpa.destroy(self);
+    }
+} else struct {
+    const Self = @This();
+
+    fn create(_: Allocator, _: *CompiledGlueSpec) GlueError!*Self {
+        return error.DevBackendUnavailable;
+    }
+
+    fn entry(_: *const Self) GlueEntryFn {
+        unreachable; // `create` never returns one on a host without the dev backend
+    }
+
+    fn destroy(_: *Self) void {}
+};
+
+/// An installed glue spec: its prebuilt plugin object, loaded and verified
+/// against the spec's checked modules, and the host boundary values cross
+/// `roc_make_glue` under. The plugin was compiled at install time, so nothing
+/// is lowered here: the stamp needs only the checked root's identity, and
+/// the boundary is the entrypoint's (`BoxyEntrypointBoundary`), which commits
+/// the host ABI layouts every strategy's entrypoint wrapper is compiled
+/// against.
+const InstalledGlueSpec = struct {
+    checked_spec: ?CheckedGlueSpec = null,
+    boundary: ?lir.CheckedPipeline.BoxyEntrypointBoundary = null,
+    plugin: ?BuiltGluePlugin = null,
+    image: ?eval_mod.object_image.Image = null,
+    entry: ?GlueEntryFn = null,
+
+    /// The strategy `buildGlueSpecPluginFile` builds and stamps plugins under.
+    const strategy: base.SpecializationStrategy = .lss;
+
+    fn load(self: *InstalledGlueSpec, gpa: Allocator, stderr: *std.Io.Writer, args: GlueArgs, installed_path: []const u8, std_io: std.Io) GlueError!void {
+        self.checked_spec = try checkGlueSpec(gpa, stderr, args.glue_spec, args.no_cache, args.report_config, strategy, std_io);
+        const checked_spec = &self.checked_spec.?;
+        const request = for (checked_spec.lir_roots) |root| {
+            const symbol = checked_spec.root_artifact.providedEntrypointName(root) orelse continue;
+            if (std.mem.eql(u8, symbol, builtins.shim_symbols.roc_make_glue)) break root;
+        } else return reportNotGlueSpec(gpa, stderr, args.glue_spec, args.report_config, no_make_glue_reason);
+        self.boundary = try lir.CheckedPipeline.BoxyEntrypointBoundary.init(gpa, checked_spec.modules(), request, base.target.TargetUsize.native);
+        if (self.boundary.?.argLayouts().len != 1) return reportNotGlueSpec(gpa, stderr, args.glue_spec, args.report_config, make_glue_arity_reason);
+
+        const stamp = gluePluginStamp(checked_spec.root_artifact.executableIdentity(), strategy);
+        self.plugin = .{ .bytes = readPluginFile(gpa, installed_path, std_io) orelse return error.GluePluginUnavailable };
+        self.image = try loadVerifiedGluePlugin(gpa, stderr, self.plugin.?, &stamp, true);
+        self.entry = self.image.?.lookup(GlueEntryFn, builtins.shim_symbols.roc_make_glue) orelse return error.GluePluginUnavailable;
+    }
+
+    fn generator(self: *const InstalledGlueSpec) LoadedGenerator {
+        const boundary = &self.boundary.?;
+        return .{
+            .entry = self.entry.?,
+            .boundary = .{
+                .layouts = boundary.layouts(),
+                .schemas = &boundary.runtime_value_schemas,
+                .types_layout = boundary.argLayouts()[0],
+                .ret_layout = boundary.retLayout(),
+            },
+        };
+    }
+
+    fn deinit(self: *InstalledGlueSpec, gpa: Allocator) void {
+        if (self.image) |*image| image.deinit();
+        if (self.plugin) |plugin| plugin.deinit(gpa);
+        if (self.boundary) |*boundary| boundary.deinit();
+        if (self.checked_spec) |*checked_spec| checked_spec.deinit(gpa);
+    }
+};
 
 /// The bytes of a plugin object file, or null when it cannot be read.
 fn readPluginFile(gpa: Allocator, path: []const u8, std_io: std.Io) ?[]u8 {
@@ -699,6 +965,12 @@ fn buildGluePlugin(
         codegen.plugin_stamp_bytes = std.mem.asBytes(&stamp);
         codegen.plugin_stamp_alignment = @alignOf(GluePluginStampV1);
         codegen.emit_debug_info = opt == .dev;
+        codegen.optimization = switch (opt) {
+            .dev => .none,
+            // Only a linked object's build marks its functions `minsize`,
+            // which the size selection relies on.
+            .size, .speed => .speed,
+        };
         defer codegen.deinit();
 
         codegen.embed_static_data = true;
@@ -783,8 +1055,10 @@ fn glueLlvmCompileOptions(opt: GlueOpt) llvm_compile.CompileOptions {
         .debug = opt == .dev,
         .target_ptr_width_bits = targetPtrWidthBits(base.target.TargetUsize.native),
         // The target machine names no CPU features, so LLVM assumes only its
-        // default CPU for the triple, which has no SHA-256 instructions.
+        // default CPU for the triple, which has no SHA-256 instructions. The
+        // UTF-8 kernel is the one that baseline CPU supports.
         .sha256_rounds = .portable,
+        .utf8_kernel = builtins.utf8.Kernel.forCpu(std.Target.Cpu.baseline(builtin.cpu.arch, builtin.os)),
     };
 }
 
@@ -912,7 +1186,7 @@ fn hostedProcForDef(
     table: *const CheckedArtifact.HostedProcTable,
     def_idx: CIR.Def.Idx,
 ) ?CheckedArtifact.HostedProc {
-    for (table.procs) |proc| {
+    for (table.procs.items()) |proc| {
         if (proc.def_idx == def_idx) return proc;
     }
     return null;
@@ -933,7 +1207,7 @@ fn collectHostedProcGlobalIndices(
     errdefer indices.deinit(allocator);
 
     if (platformArtifact(modules)) |platform| {
-        const bindings = platform.hosted_bindings.bindings;
+        const bindings = platform.hosted_bindings.bindings.items();
         try indices.ensureTotalCapacity(allocator, bindings.len);
         for (bindings, 0..) |binding, dispatch_index| {
             indices.appendAssumeCapacity(.{
@@ -962,7 +1236,7 @@ fn collectHostedProcGlobalIndices(
     for (modules) |mod| {
         if (!(mod.is_platform_sibling or mod.is_platform_main)) continue;
         const artifact = mod.semantic.checked_artifact orelse continue;
-        for (artifact.hosted_procs.procs) |hosted| {
+        for (artifact.hosted_procs.procs.items()) |hosted| {
             try candidates.append(allocator, .{
                 .artifact_key = artifact.key,
                 .def_idx = hosted.def_idx,
@@ -1228,6 +1502,9 @@ const CollectedTypeRepr = union(enum) {
     erased_callable: struct { signature: ?CollectedFunctionSignature },
     record: struct { name: []const u8, anonymous: bool, fields: []const CollectedRecordField },
     tag_union: struct { name: []const u8, tags: []const CollectedTagInfo },
+    /// An opaque pointer target: a list element or box payload with no
+    /// committed layout (see `ValuePosition`). `name` is its Roc type as
+    /// written, for display only.
     unknown: struct { name: []const u8 },
 };
 
@@ -1342,6 +1619,30 @@ const CollectedTypeInfo = struct {
     /// has selected this entry's layout. Every entry has one before the type
     /// table is handed to a glue spec.
     abi: ?CollectedAbiLayout = null,
+    /// Assigned by `assignHostRcPlans` once every entry has its layout.
+    rc: HostRcPlan = .noop,
+    /// Index of the first entry describing the same host type, assigned by
+    /// `assignShapeIds`. Entries with equal shape ids agree on their repr,
+    /// layout and ownership at every depth, so a generator emits one
+    /// declaration for all of them, and two entries that share a name but not
+    /// a shape id are different host types that need different names.
+    shape_id: u64 = 0,
+};
+
+/// What a host that owns a value of a glue type has to do about the Roc
+/// references inside it.
+const HostRcPlan = enum {
+    /// The value holds no Roc reference.
+    noop,
+    /// The value holds Roc references, and the host can release all of them.
+    refcounted,
+    /// The value holds a reference to an opaque heap target (a `Box` payload
+    /// or `List` item with no committed layout), directly or through anything
+    /// it owns. Releasing such a reference means tearing down the target and
+    /// freeing an allocation whose header depends on the target's layout, and
+    /// only compiled Roc code knows either. The host can move the value,
+    /// retain it, and pass it back to Roc; it cannot release it.
+    roc_released,
 };
 
 /// Maps checked artifact keys to artifacts. Populated once from the compiled
@@ -1352,9 +1653,16 @@ const ArtifactKeyMap = std.AutoHashMap(CheckedArtifact.CheckedModuleDigest, *con
 /// Where a checked type sits inside the value being converted.
 ///
 /// A type held by value, including a boundary argument, result, or provided
-/// value, must have a committed layout of its own. Behind a
-/// heap indirection (a list element or a box payload) the host only ever sees
-/// a pointer, so a variable can remain an opaque pointer target.
+/// value, must have a committed layout of its own, and so must everything it
+/// holds by value in turn: record fields, tuple elements, tag payloads, and
+/// nominal backings. Behind a heap indirection (a list element or a box
+/// payload) the host only ever sees a pointer, so a type with no committed
+/// layout is an opaque pointer target there. That covers a bare unresolved
+/// variable and equally any aggregate holding one by value at any depth,
+/// since one field of unknown size leaves the aggregate's size and every
+/// later offset unknown. Each heap indirection decides this for its own
+/// target, so a variable behind a further indirection inside a payload
+/// (`Box({ items : List(model) })`) leaves that payload fully described.
 const ValuePosition = enum {
     by_value,
     heap_indirect,
@@ -1800,9 +2108,10 @@ const TypeTable = struct {
     ) Allocator.Error!void {
         const name = TypeTable.getTypeDisplayName(artifact.canonical_names.typeNameText(nominal.name));
         try buf.appendSlice(self.gpa, name);
-        if (nominal.args.len == 0) return;
+        const args = artifact.checked_types.nominalDeclaredArgs(nominal);
+        if (args.len == 0) return;
         try buf.append(self.gpa, '(');
-        for (nominal.args, 0..) |arg, i| {
+        for (args, 0..) |arg, i| {
             if (i > 0) try buf.appendSlice(self.gpa, ", ");
             try self.writeTypeStringBound(artifact, arg, buf, active);
         }
@@ -2056,7 +2365,7 @@ const TypeTable = struct {
         const value_name = self.boundary_value_name orelse "";
         self.unresolved_error = try std.fmt.allocPrint(
             self.gpa,
-            "The type `{s}` from module `{s}`{s}{s}{s} still has an unresolved type variable, so it has no committed memory layout and glue cannot generate bindings for it. Give the type a concrete layout (for example, box the value across the host boundary) so its size is known.",
+            "The type `{s}` from module `{s}`{s}{s}{s} still has an unresolved type variable, so it has no committed memory layout and glue cannot generate bindings for it. The host holds this value directly, so its size must be known. Put the type variable, or any value that contains it, in a `Box`: the host then holds only an opaque pointer.",
             .{
                 type_name,
                 module_name,
@@ -2255,13 +2564,31 @@ const TypeTable = struct {
             self.gpa.free(popped.arg_keys);
         };
 
-        const repr = self.convertCheckedType(artifact, checked_type, position) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.UnresolvedByValue => {
-                // The innermost composite holding the variable by value is the
-                // type the user can act on; outer types keep its message.
-                try self.recordUnresolvedByValue(artifact, checked_type);
-                return error.UnresolvedByValue;
+        const repr: CollectedTypeRepr = switch (position) {
+            .by_value => self.convertCheckedType(artifact, checked_type) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnresolvedByValue => {
+                    // The innermost composite holding the variable by value is the
+                    // type the user can act on; outer types keep its message.
+                    try self.recordUnresolvedByValue(artifact, checked_type);
+                    return error.UnresolvedByValue;
+                },
+            },
+            .heap_indirect => repr: {
+                // Whether the target has a committed layout is decided by
+                // attempting its conversion. On failure everything the attempt
+                // registered is undone, so no partial description of the
+                // target survives, and the entry reserved above becomes the
+                // opaque pointer target.
+                const mark = self.beginSpeculation();
+                defer self.endSpeculation();
+                break :repr self.convertCheckedType(artifact, checked_type) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnresolvedByValue => {
+                        self.rollbackSpeculation(mark);
+                        break :repr .{ .unknown = .{ .name = try self.typeStringAllocBound(artifact, checked_type) } };
+                    },
+                };
             },
         };
 
@@ -2380,10 +2707,7 @@ const TypeTable = struct {
     ///
     /// Each root's checked type is requested from one compiler lowering of the
     /// artifact that owns it, and that lowering's layout store is the only
-    /// authority for every layout fact glue emits. A root's own layout is the
-    /// type's intrinsic layout, so a root whose layout is a box over a
-    /// by-value repr (an opaque record holding a callable) becomes a box over
-    /// a payload entry before any walk starts. From each root the walk then
+    /// authority for every layout fact glue emits. From each root the walk
     /// descends the entry graph in lockstep with the committed layout: struct
     /// fields by original index, tag payloads by discriminant, list elements
     /// and box payloads by child layout. A slot the compiler boxed while the
@@ -2406,12 +2730,6 @@ const TypeTable = struct {
             const lowering = findLowering(lowerings.items, root.artifact) orelse unreachable; // the loop above lowered every root's artifact
             const layout_idx = lowering.root_layouts.get(root.checked_type) orelse
                 glueInvariant("compiler emitted no layout for requested glue root checked type {d}", .{@backingInt(root.checked_type)});
-            try self.boxRootInPlace(lowering.abi_layouts.layouts(), entry_idx, layout_idx);
-        }
-
-        for (self.roots.keys(), self.roots.values()) |entry_idx, root| {
-            const lowering = findLowering(lowerings.items, root.artifact) orelse unreachable; // the first loop lowered every root's artifact
-            const layout_idx = lowering.root_layouts.get(root.checked_type) orelse unreachable; // the previous loop checked every root's layout exists
             try self.attachEntryLayout(lowering.abi_layouts.layouts(), entry_idx, layout_idx);
         }
 
@@ -2419,6 +2737,237 @@ const TypeTable = struct {
             if (entry.abi == null) {
                 glueInvariant("missing compiler-emitted ABI layout for glue type id {d}", .{idx});
             }
+        }
+
+        try self.assignHostRcPlans();
+        try self.assignShapeIds();
+    }
+
+    /// Decide each entry's `HostRcPlan`.
+    ///
+    /// An entry holds an opaque heap target when it is a box or list over an
+    /// `unknown` entry, or when anything it owns does. Ownership follows box
+    /// payloads, list items, record fields and tag payloads; an erased
+    /// callable releases its own captures, so its signature is not followed.
+    /// The committed layout cannot answer this: it was selected with the
+    /// application's type variables sealed, so it reports `Box(model)` as a
+    /// box over nothing and `Box({ model : model, n : U64 })` as a box over a
+    /// struct. Both are one Roc reference the host owns and cannot release.
+    fn assignHostRcPlans(self: *TypeTable) Allocator.Error!void {
+        const holds_opaque = try self.gpa.alloc(bool, self.entries.items.len);
+        defer self.gpa.free(holds_opaque);
+        @memset(holds_opaque, false);
+
+        // Least fixed point: a recursive type holds an opaque target only if
+        // some entry in its group reaches one.
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.entries.items, holds_opaque) |entry, *holds| {
+                if (holds.*) continue;
+                if (!self.ownsOpaqueTarget(entry.repr, holds_opaque)) continue;
+                holds.* = true;
+                changed = true;
+            }
+        }
+
+        for (self.entries.items, holds_opaque) |*entry, holds| {
+            const abi = &entry.abi.?;
+            if (holds) {
+                abi.contains_refcounted = true;
+                entry.rc = .roc_released;
+            } else {
+                entry.rc = if (abi.contains_refcounted) .refcounted else .noop;
+            }
+        }
+    }
+
+    fn ownsOpaqueTarget(self: *const TypeTable, repr: CollectedTypeRepr, holds_opaque: []const bool) bool {
+        switch (repr) {
+            .box => |box| return self.isOpaqueOrHolds(box.inner_id, holds_opaque),
+            .list => |list_repr| return self.isOpaqueOrHolds(list_repr.elem_id, holds_opaque),
+            .record => |rec| {
+                for (rec.fields) |field| {
+                    if (!field.is_padding and holds_opaque[@intCast(field.type_id)]) return true;
+                }
+                return false;
+            },
+            .tag_union => |tu| {
+                for (tu.tags) |tag| {
+                    for (tag.payload_ids) |payload_id| {
+                        if (holds_opaque[@intCast(payload_id)]) return true;
+                    }
+                }
+                return false;
+            },
+            .erased_callable, .unknown, .unit, .bool_, .dec, .f32_, .f64_, .i8_, .i16_, .i32_, .i64_, .i128_, .u8_, .u16_, .u32_, .u64_, .u128_, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, .str_ => return false,
+        }
+    }
+
+    fn isOpaqueOrHolds(self: *const TypeTable, target: u64, holds_opaque: []const bool) bool {
+        return self.entries.items[@intCast(target)].repr == .unknown or holds_opaque[@intCast(target)];
+    }
+
+    /// Assign every entry its `shape_id` by partition refinement.
+    ///
+    /// Entries start grouped by everything a generator reads from one entry
+    /// alone (repr variant, names, layout facts, ownership plan). Each round
+    /// splits a group whose members' children fall in different groups, and
+    /// the partition is final once a round splits nothing. Two entries end in
+    /// the same group exactly when no path through their children ever tells
+    /// them apart, which is the equality recursive types need: comparing the
+    /// two graphs field by field would never terminate on them.
+    fn assignShapeIds(self: *TypeTable) Allocator.Error!void {
+        const count = self.entries.items.len;
+        if (count == 0) return;
+
+        var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        var classes = try arena.alloc(u32, count);
+        var next_classes = try arena.alloc(u32, count);
+        var first_entries = std.ArrayList(u64).empty;
+        var key = std.ArrayList(u8).empty;
+
+        var class_count: usize = 0;
+        {
+            var interned = std.StringHashMap(u32).init(arena);
+            for (self.entries.items, 0..) |entry, idx| {
+                key.clearRetainingCapacity();
+                try appendEntryShapeKey(arena, &key, entry);
+                const slot = try interned.getOrPut(key.items);
+                if (!slot.found_existing) {
+                    slot.key_ptr.* = try arena.dupe(u8, key.items);
+                    slot.value_ptr.* = @intCast(interned.count() - 1);
+                }
+                classes[idx] = slot.value_ptr.*;
+            }
+            class_count = interned.count();
+        }
+
+        while (true) {
+            var interned = std.StringHashMap(u32).init(arena);
+            first_entries.clearRetainingCapacity();
+            for (self.entries.items, 0..) |entry, idx| {
+                key.clearRetainingCapacity();
+                try appendShapeInt(arena, &key, classes[idx]);
+                try appendChildClasses(arena, &key, entry.repr, classes);
+                const slot = try interned.getOrPut(key.items);
+                if (!slot.found_existing) {
+                    slot.key_ptr.* = try arena.dupe(u8, key.items);
+                    slot.value_ptr.* = @intCast(interned.count() - 1);
+                    try first_entries.append(arena, idx);
+                }
+                next_classes[idx] = slot.value_ptr.*;
+            }
+            const refined_count = interned.count();
+            std.mem.swap([]u32, &classes, &next_classes);
+            // A round only ever splits groups, so an unchanged count means an
+            // unchanged partition.
+            if (refined_count == class_count) break;
+            class_count = refined_count;
+        }
+
+        for (self.entries.items, classes) |*entry, class| {
+            entry.shape_id = first_entries.items[class];
+        }
+    }
+
+    fn appendShapeInt(gpa: Allocator, key: *std.ArrayList(u8), value: u64) Allocator.Error!void {
+        try key.appendSlice(gpa, std.mem.asBytes(&value));
+    }
+
+    fn appendShapeText(gpa: Allocator, key: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
+        try appendShapeInt(gpa, key, text.len);
+        try key.appendSlice(gpa, text);
+    }
+
+    fn appendShapeFields(gpa: Allocator, key: *std.ArrayList(u8), fields: []const CollectedAbiFieldLayout) Allocator.Error!void {
+        try appendShapeInt(gpa, key, fields.len);
+        for (fields) |field| {
+            try appendShapeText(gpa, key, field.name);
+            for ([_]u64{ field.original_index, @intFromBool(field.is_padding), field.offset32, field.offset64, field.size32, field.alignment32, field.size64, field.alignment64 }) |fact| {
+                try appendShapeInt(gpa, key, fact);
+            }
+        }
+    }
+
+    /// Everything a generator reads from `entry` itself, with every reference
+    /// to another entry left out; `appendChildClasses` covers those.
+    fn appendEntryShapeKey(gpa: Allocator, key: *std.ArrayList(u8), entry: CollectedTypeInfo) Allocator.Error!void {
+        try appendShapeInt(gpa, key, @backingInt(std.meta.activeTag(entry.repr)));
+        try appendShapeInt(gpa, key, @backingInt(entry.rc));
+        switch (entry.repr) {
+            .record => |rec| {
+                try appendShapeText(gpa, key, rec.name);
+                try appendShapeInt(gpa, key, @intFromBool(rec.anonymous));
+                try appendShapeInt(gpa, key, rec.fields.len);
+                for (rec.fields) |field| {
+                    try appendShapeText(gpa, key, field.name);
+                    try appendShapeInt(gpa, key, @intFromBool(field.is_padding));
+                }
+            },
+            .tag_union => |tu| {
+                try appendShapeText(gpa, key, tu.name);
+                try appendShapeInt(gpa, key, tu.tags.len);
+                for (tu.tags) |tag| {
+                    try appendShapeText(gpa, key, tag.name);
+                    try appendShapeInt(gpa, key, tag.payload_ids.len);
+                }
+            },
+            .unknown => |unknown| try appendShapeText(gpa, key, unknown.name),
+            .erased_callable => |callable| {
+                const arity: u64 = if (callable.signature) |signature| signature.arg_ids.len + 1 else 0;
+                try appendShapeInt(gpa, key, arity);
+            },
+            .box, .list, .unit, .bool_, .dec, .f32_, .f64_, .i8_, .i16_, .i32_, .i64_, .i128_, .u8_, .u16_, .u32_, .u64_, .u128_, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, .str_ => {},
+        }
+
+        const abi = entry.abi.?;
+        for ([_]u64{ abi.size_align.size32, abi.size_align.alignment32, abi.size_align.size64, abi.size_align.alignment64, @intFromBool(abi.contains_refcounted) }) |fact| {
+            try appendShapeInt(gpa, key, fact);
+        }
+        switch (abi.details) {
+            .builtin => {},
+            .record => |fields| try appendShapeFields(gpa, key, fields),
+            .tag_union => |tu| {
+                for ([_]u64{ tu.discriminant_size, tu.discriminant_offset32, tu.discriminant_offset64, @intFromBool(tu.has_payload), tu.tags.len }) |fact| {
+                    try appendShapeInt(gpa, key, fact);
+                }
+                for (tu.tags) |tag| {
+                    try appendShapeText(gpa, key, tag.name);
+                    for ([_]u64{ tag.discriminant, tag.payload_size32, tag.payload_alignment32, tag.payload_size64, tag.payload_alignment64 }) |fact| {
+                        try appendShapeInt(gpa, key, fact);
+                    }
+                    try appendShapeFields(gpa, key, tag.payload_fields);
+                }
+            },
+        }
+    }
+
+    /// The current classes of the entries `repr` refers to, in repr order.
+    fn appendChildClasses(gpa: Allocator, key: *std.ArrayList(u8), repr: CollectedTypeRepr, classes: []const u32) Allocator.Error!void {
+        switch (repr) {
+            .box => |box| try appendShapeInt(gpa, key, classes[@intCast(box.inner_id)]),
+            .list => |list_repr| try appendShapeInt(gpa, key, classes[@intCast(list_repr.elem_id)]),
+            .record => |rec| {
+                for (rec.fields) |field| {
+                    if (!field.is_padding) try appendShapeInt(gpa, key, classes[@intCast(field.type_id)]);
+                }
+            },
+            .tag_union => |tu| {
+                for (tu.tags) |tag| {
+                    for (tag.payload_ids) |payload_id| try appendShapeInt(gpa, key, classes[@intCast(payload_id)]);
+                }
+            },
+            .erased_callable => |callable| {
+                if (callable.signature) |signature| {
+                    for (signature.arg_ids) |arg_id| try appendShapeInt(gpa, key, classes[@intCast(arg_id)]);
+                    try appendShapeInt(gpa, key, classes[@intCast(signature.ret_id)]);
+                }
+            },
+            .unknown, .unit, .bool_, .dec, .f32_, .f64_, .i8_, .i16_, .i32_, .i64_, .i128_, .u8_, .u16_, .u32_, .u64_, .u128_, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, .str_ => {},
         }
     }
 
@@ -2477,40 +3026,21 @@ const TypeTable = struct {
         return layout_val.tag == .box or layout_val.tag == .box_of_zst;
     }
 
-    /// A root whose own committed layout is a box over a by-value repr is a
-    /// type the compiler stores behind a compiler-owned box everywhere (an
-    /// opaque nominal record that holds a callable, whose box doubles as the
-    /// recursive-slot storage for closures that capture the record). The host
-    /// sees the box, so the entry becomes the box and its repr moves to a new
-    /// payload entry. Runs before any edge walk so every slot of the type
-    /// already finds the box repr.
-    fn boxRootInPlace(
-        self: *TypeTable,
-        store: *const layout.Store,
-        entry_idx: u64,
-        layout_idx: layout.Idx,
-    ) Allocator.Error!void {
-        if (self.entries.items[@intCast(entry_idx)].abi != null) return;
-        if (!layoutIsBox(store.getLayout(layout_idx))) return;
-        const repr = self.entries.items[@intCast(entry_idx)].repr;
-        if (repr == .box) return;
-        const payload_idx: u64 = @intCast(self.entries.items.len);
-        try self.entries.append(self.gpa, .{ .repr = repr });
-        self.entries.items[@intCast(entry_idx)].repr = .{ .box = .{ .inner_id = payload_idx } };
-    }
-
     /// The entry a parent slot references for a committed child layout. When
     /// the compiler boxed the slot but the child's repr is a by-value type,
     /// the slot gets the child's box wrapper entry and that wrapper is what is
     /// attached with the box layout; the child itself is attached with the
-    /// payload layout through the wrapper.
+    /// payload layout through the wrapper. An opaque pointer target is never
+    /// wrapped: the layout committed for its type describes nothing the host
+    /// can rely on, boxed or not.
     fn childSlotFor(
         self: *TypeTable,
         store: *const layout.Store,
         child: u64,
         layout_idx: layout.Idx,
     ) Allocator.Error!ChildSlot {
-        if (layoutIsBox(store.getLayout(layout_idx)) and self.entries.items[@intCast(child)].repr != .box) {
+        const child_repr = self.entries.items[@intCast(child)].repr;
+        if (layoutIsBox(store.getLayout(layout_idx)) and child_repr != .box and child_repr != .unknown) {
             const slot = try self.box_wrappers.getOrPut(self.gpa, child);
             if (!slot.found_existing) {
                 const wrapper: u64 = @intCast(self.entries.items.len);
@@ -2534,6 +3064,17 @@ const TypeTable = struct {
         entry_idx: u64,
         layout_idx: layout.Idx,
     ) Allocator.Error!void {
+        if (self.entries.items[@intCast(entry_idx)].repr == .unknown) {
+            // An opaque pointer target has no host-knowable layout. Whatever
+            // the compiler committed for its type stands in for variables the
+            // application has yet to choose, so none of it is a fact about the
+            // value the host will hold a pointer to, and the entry carries no
+            // size of its own.
+            if (self.entries.items[@intCast(entry_idx)].abi == null) {
+                self.entries.items[@intCast(entry_idx)].abi = try self.abiForLayout(store, .zst, self.entries.items[@intCast(entry_idx)].repr);
+            }
+            return;
+        }
         const layout_val = store.getLayout(layout_idx);
         if (self.entries.items[@intCast(entry_idx)].abi) |abi| {
             const size_align = abiSizeAlign(store, layout_val);
@@ -2667,7 +3208,7 @@ const TypeTable = struct {
                 }
                 self.entries.items[@intCast(entry_idx)].abi = try self.abiForLayout(store, layout_idx, self.entries.items[@intCast(entry_idx)].repr);
             },
-            .unknown,
+            .unknown => unreachable, // answered before the committed layout is read
             .unit,
             .bool_,
             .dec,
@@ -3040,18 +3581,16 @@ const TypeTable = struct {
         self: *TypeTable,
         artifact: *const CheckedArtifact.CheckedModuleArtifact,
         checked_type: CheckedArtifact.CheckedTypeId,
-        position: ValuePosition,
     ) TypeTableError!CollectedTypeRepr {
         const payload = checkedTypePayload(artifact, checked_type);
         return switch (payload) {
             .pending => glueInvariant("pending checked type reached glue type table", .{}),
             .field_kind, .err => glueInvariant("erroneous checked type reached glue type table", .{}),
-            .flex => |variable| try self.convertTypeVariable(variable, position, "flex"),
-            .rigid => |variable| try self.convertTypeVariable(variable, position, "rigid"),
-            .alias => |alias| try self.convertCheckedType(artifact, alias.backing, position),
+            .flex, .rigid => |variable| try convertTypeVariable(variable),
+            .alias => |alias| try self.convertCheckedType(artifact, alias.backing),
             .record => |record| try self.convertRecord(artifact, record.fields, record.ext),
             .tuple => |items| try self.convertTuple(artifact, items),
-            .nominal => |nominal| try self.convertNominal(artifact, nominal, position),
+            .nominal => |nominal| try self.convertNominal(artifact, nominal),
             .function => |func| try self.convertFunc(artifact, func),
             .empty_record, .empty_tag_union => .unit,
             .tag_union => |tag_union| try self.convertTagUnion(artifact, tag_union.tags, tag_union.ext),
@@ -3060,25 +3599,16 @@ const TypeTable = struct {
 
     /// A checked type variable that checking left unresolved. One with a
     /// default has the representation `defaultedVariableRepr` assigns; one
-    /// without is only representable behind a heap indirection.
-    fn convertTypeVariable(
-        self: *TypeTable,
-        variable: CheckedArtifact.CheckedTypeVariable,
-        position: ValuePosition,
-        kind_name: []const u8,
-    ) TypeTableError!CollectedTypeRepr {
-        if (defaultedVariableRepr(variable)) |repr| return repr;
-        return switch (position) {
-            .heap_indirect => .{ .unknown = .{ .name = try self.gpa.dupe(u8, kind_name) } },
-            .by_value => error.UnresolvedByValue,
-        };
+    /// without has no committed layout, which `getOrInsert` answers according
+    /// to the position of the type holding it.
+    fn convertTypeVariable(variable: CheckedArtifact.CheckedTypeVariable) error{UnresolvedByValue}!CollectedTypeRepr {
+        return defaultedVariableRepr(variable) orelse error.UnresolvedByValue;
     }
 
     fn convertNominal(
         self: *TypeTable,
         artifact: *const CheckedArtifact.CheckedModuleArtifact,
         nominal: CheckedArtifact.CheckedNominalType,
-        position: ValuePosition,
     ) TypeTableError!CollectedTypeRepr {
         const display_name = TypeTable.getTypeDisplayName(artifact.canonical_names.typeNameText(nominal.name));
 
@@ -3091,20 +3621,9 @@ const TypeTable = struct {
                     return .{ .unknown = .{ .name = try self.gpa.dupe(u8, "List") } };
                 },
                 .box => {
-                    if (nominal.args.len >= 1) {
-                        var payload = try self.substituteFormal(artifact, nominal.args[0]);
-                        const sequence = while (true) {
-                            switch (checkedTypePayload(payload.artifact, payload.checked_type)) {
-                                .alias => |alias| payload = try self.substituteFormal(payload.artifact, alias.backing),
-                                .nominal => |inner| break inner.builtin == .iter or inner.builtin == .stream,
-                                .pending, .field_kind, .err, .record, .tuple, .function, .empty_record, .tag_union, .empty_tag_union, .flex, .rigid => break false,
-                            }
-                        };
-                        // The host owns an erased step allocation, not a
-                        // readable iterator record or a callable public API.
-                        if (sequence) return .{ .erased_callable = .{ .signature = null } };
-                        return .{ .box = .{ .inner_id = try self.getOrInsert(artifact, nominal.args[0], .heap_indirect) } };
-                    }
+                    if (nominal.args.len >= 1) return .{ .box = .{
+                        .inner_id = try self.getOrInsert(artifact, nominal.args[0], .heap_indirect),
+                    } };
                     return .{ .unknown = .{ .name = try self.gpa.dupe(u8, "Box") } };
                 },
                 .parse_tag_union_spec,
@@ -3203,7 +3722,7 @@ const TypeTable = struct {
             // The backing may itself be a formal (`Wrapper(a) := a`), which the
             // bindings just established resolve to the application's argument.
             const backing = try self.substituteFormal(lookup.artifact, decl.backing);
-            break :open_blk try self.convertCheckedType(backing.artifact, backing.checked_type, position);
+            break :open_blk try self.convertCheckedType(backing.artifact, backing.checked_type);
         } else glueInvariant("nominal glue conversion could not find declaration backing", .{});
 
         if (backing_repr == .record) {
@@ -3639,12 +4158,11 @@ const GlueRocValueWriter = struct {
         }
 
         const elem_alignment = self.alignmentOf(elem_layout);
-        if (elem_alignment > std.math.maxInt(u32)) {
+        const elem_alignment32 = std.math.cast(u32, elem_alignment) orelse
             glueInvariant("glue list element alignment {d} exceeds Roc allocation ABI", .{elem_alignment});
-        }
         const bytes = builtins.utils.allocateWithRefcount(
             len * elem_size,
-            @intCast(elem_alignment),
+            elem_alignment32,
             elements_refcounted,
             self.roc_ops,
         );
@@ -3904,10 +4422,14 @@ fn writeHostRcPlan(
     writer: *const GlueRocValueWriter,
     value_base: [*]u8,
     rc_layout_idx: layout.Idx,
-    contains_refcounted: bool,
+    plan: HostRcPlan,
 ) void {
     writer.zeroValue(value_base, rc_layout_idx);
-    const tag_name: []const u8 = if (contains_refcounted) "RcRefcounted" else "RcNoop";
+    const tag_name: []const u8 = switch (plan) {
+        .noop => "RcNoop",
+        .refcounted => "RcRefcounted",
+        .roc_released => "RcRocReleased",
+    };
     writer.writeTagDiscriminant(value_base, rc_layout_idx, writer.tagIndex("HostRcPlan", tag_name));
 }
 
@@ -4009,8 +4531,9 @@ fn writeTypeInfo(
     const rc_slot = writer.recordField(value_base, type_info_layout, "TypeInfo", "rc");
     const repr_slot = writer.recordField(value_base, type_info_layout, "TypeInfo", "repr");
     writeAbiLayout(writer, layout_slot.ptr, layout_slot.layout_idx, abi);
-    writeHostRcPlan(writer, rc_slot.ptr, rc_slot.layout_idx, abi.contains_refcounted);
+    writeHostRcPlan(writer, rc_slot.ptr, rc_slot.layout_idx, entry.rc);
     writeTypeRepr(writer, repr_slot.ptr, repr_slot.layout_idx, entry.repr);
+    writer.writeField(value_base, type_info_layout, "TypeInfo", "shape_id", u64, entry.shape_id);
 }
 
 fn writeFunctionInfo(
@@ -4436,9 +4959,10 @@ fn writeNominalTypeString(
 ) Allocator.Error!void {
     const name = TypeTable.getTypeDisplayName(artifact.canonical_names.typeNameText(nominal.name));
     try buf.appendSlice(gpa, name);
-    if (nominal.args.len == 0) return;
+    const args = artifact.checked_types.nominalDeclaredArgs(nominal);
+    if (args.len == 0) return;
     try buf.append(gpa, '(');
-    for (nominal.args, 0..) |arg, i| {
+    for (args, 0..) |arg, i| {
         if (i > 0) try buf.appendSlice(gpa, ", ");
         try writeTypeString(gpa, artifact, arg, buf, active);
     }
@@ -4565,7 +5089,7 @@ fn collectModuleTypeInfo(
 ) TypeTableError!?CollectedModuleTypeInfo {
     var main_type_str: []const u8 = try gpa.dupe(u8, "");
     errdefer gpa.free(main_type_str);
-    for (artifact.checked_types.nominal_declarations.items) |declaration| {
+    for (artifact.checked_types.nominal_declarations.items()) |declaration| {
         const type_name = TypeTable.getTypeDisplayName(artifact.canonical_names.typeNameText(artifact.checked_types.nominalDeclarationName(declaration)));
         if (std.mem.eql(u8, type_name, module_name)) {
             gpa.free(main_type_str);
@@ -4610,11 +5134,11 @@ fn collectModuleTypeInfo(
     const module_env = artifact.moduleEnvConst();
     var member_by_def = std.AutoHashMap(can.CIR.Def.Idx, can.ModuleEnv.MethodKey).init(gpa);
     defer member_by_def.deinit();
-    for (module_env.method_defs.entries.items) |member_entry| {
+    for (module_env.method_defs.entries.items()) |member_entry| {
         try member_by_def.put(member_entry.value.def_idx, member_entry.key);
     }
 
-    for (artifact.top_level_values.entries) |entry| {
+    for (artifact.top_level_values.entries.items()) |entry| {
         const def_idx = entry.def;
 
         // A platform module's own hosted declaration is a plain top-level
@@ -4709,14 +5233,14 @@ test "issue 12760: boundary layout requirements survive memoization and callable
         \\
         \\Alias(a) :: a
         \\Wrapper(a) := a
-        \\probe : Model, Alias(Model), Wrapper(Model), Box(Model), Box((Model -> Model)), Box((U64 -> U64)) -> Model
-        \\probe = |model, _, _, _, _, _| model
+        \\probe : Model, Alias(Model), Wrapper(Model), { value : Model, tag : I32 }, Box(Model), Box((Model -> Model)), Box((U64 -> U64)), Box({ value : Model, tag : I32 }) -> Model
+        \\probe = |model, _, _, _, _, _, _, _| model
     });
     const cwd = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(cwd);
     const path = try tmp.dir.realPathFileAlloc(io, "main.roc", gpa);
     defer gpa.free(path);
-    var env = try BuildEnv.init(gpa, .single_threaded, 1, RocTarget.detectNative(), cwd, io);
+    var env = try BuildEnv.init(gpa, .single_threaded, 1, RocTarget.detectNative(), cwd, io, .lss);
     defer env.deinit();
     try env.build(path);
     var diagnostics = std.Io.Writer.Allocating.init(gpa);
@@ -4735,10 +5259,10 @@ test "issue 12760: boundary layout requirements survive memoization and callable
         if (mod.is_platform_main) platform = artifact;
     }
     const artifact = platform orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), artifact.provided_exports.exports.len);
-    const procedure = artifact.provided_exports.exports[0].procedure;
+    try std.testing.expectEqual(@as(usize, 1), artifact.provided_exports.exports.items().len);
+    const procedure = artifact.provided_exports.exports.items()[0].procedure;
     const signature = CheckedArtifact.checkedFunctionPayload(&artifact.checked_types, procedure.checked_type, "test provided procedure");
-    try std.testing.expectEqual(@as(usize, 6), signature.args.len);
+    try std.testing.expectEqual(@as(usize, 8), signature.args.len);
 
     // Signature conversion visits the result first. Both kinds of procedure
     // boundary reject an unresolved result, before registering any arguments.
@@ -4755,9 +5279,10 @@ test "issue 12760: boundary layout requirements survive memoization and callable
         try std.testing.expect(std.mem.find(u8, result_table.unresolved_error.?, "probe") != null);
     }
 
-    // Exercise bare variables, aliases and nominal backings in both memo
-    // tables, with either the opaque use or the rejected value use first.
-    for (signature.args[0..3]) |ty| {
+    // Exercise bare variables, aliases, nominal backings and an aggregate
+    // holding the variable by value in both memo tables, with either the
+    // opaque use or the rejected value use first.
+    for (signature.args[0..4]) |ty| {
         for ([_]u32{ 0, 1 }) |open_ctx| {
             for ([_]bool{ false, true }) |opaque_first| {
                 var table = TypeTable.init(gpa, &artifacts);
@@ -4792,24 +5317,113 @@ test "issue 12760: boundary layout requirements survive memoization and callable
     // The same unknown type can still be carried behind a real box. A
     // directly boxed callable stays representable, but a callable over the
     // unknown type must not advertise a fabricated ABI.
-    const boxed = try table.getOrInsertRoot(artifact, signature.args[3]);
+    const boxed = try table.getOrInsertRoot(artifact, signature.args[4]);
     try std.testing.expect(table.entries.items[@intCast(boxed)].repr == .box);
     const before_callable = table.entries.items.len;
-    const opaque_box = try table.getOrInsertRoot(artifact, signature.args[4]);
+    const opaque_box = try table.getOrInsertRoot(artifact, signature.args[5]);
     const opaque_callable = table.entries.items[@intCast(opaque_box)].repr.box.inner_id;
     try std.testing.expect(table.entries.items[@intCast(opaque_callable)].repr.erased_callable.signature == null);
     try std.testing.expect(table.unresolved_error == null);
     try std.testing.expectEqual(before_callable + 2, table.entries.items.len);
-    const concrete_box = try table.getOrInsertRoot(artifact, signature.args[5]);
+    const concrete_box = try table.getOrInsertRoot(artifact, signature.args[6]);
     const concrete_callable = table.entries.items[@intCast(concrete_box)].repr.box.inner_id;
     try std.testing.expect(table.entries.items[@intCast(concrete_callable)].repr.erased_callable.signature != null);
     try std.testing.expect(table.unresolved_error == null);
-    try std.testing.expectEqual(boxed, try table.getOrInsertRoot(artifact, signature.args[3]));
+    try std.testing.expectEqual(boxed, try table.getOrInsertRoot(artifact, signature.args[4]));
+
+    // A box over an aggregate holding the unknown type by value is a box over
+    // one opaque target. Nothing of the aggregate's partial description (its
+    // `tag` field) stays in the table.
+    const before_record_box = table.entries.items.len;
+    const record_box = try table.getOrInsertRoot(artifact, signature.args[7]);
+    const record_payload = table.entries.items[@intCast(record_box)].repr.box.inner_id;
+    try std.testing.expect(table.entries.items[@intCast(record_payload)].repr == .unknown);
+    try std.testing.expect(table.unresolved_error == null);
+    try std.testing.expectEqual(before_record_box + 2, table.entries.items.len);
 
     // Checking's defaults still commit a standalone representation.
-    try std.testing.expect((try table.convertTypeVariable(.{ .row_default = .empty_record }, .by_value, "flex")) == .unit);
-    try std.testing.expect((try table.convertTypeVariable(.{ .row_default = .empty_tag_union }, .by_value, "rigid")) == .unit);
-    try std.testing.expect((try table.convertTypeVariable(.{ .numeric_default_phase = .mono_specialization }, .by_value, "flex")) == .dec);
+    try std.testing.expect((try TypeTable.convertTypeVariable(.{ .row_default = .empty_record })) == .unit);
+    try std.testing.expect((try TypeTable.convertTypeVariable(.{ .row_default = .empty_tag_union })) == .unit);
+    try std.testing.expect((try TypeTable.convertTypeVariable(.{ .numeric_default_phase = .mono_specialization })) == .dec);
+    try std.testing.expectError(error.UnresolvedByValue, TypeTable.convertTypeVariable(.{}));
+}
+
+// A dev glue plugin is LLVM code at O0, where nothing inlines the builtins'
+// call into the UTF-8 validation payload linked for this machine's CPU, so
+// the call's result crosses the ABI between the wasm-compiled builtins and the
+// natively compiled payload.
+test "Str.from_utf8 in a dev glue plugin accepts well-formed text and rejects ill-formed text" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.roc", .data =
+        \\platform "utf8-probe"
+        \\    requires {} { main : U64 -> U64 }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "roc_probe": probe }
+        \\    targets: {}
+        \\
+        \\probe : U64 -> U64
+        \\probe = |n| main(n)
+    });
+    // Every input is built from the type list the plugin receives, so the
+    // validation runs in the plugin rather than at compile time. The lengths
+    // put the end of the ASCII prefix before, at and after each 16- and
+    // 32-byte block boundary.
+    try tmp.dir.writeFile(io, .{ .sub_path = "Spec.roc", .data =
+        \\app [make_glue] { pf: platform glue }
+        \\
+        \\import pf.Types
+        \\import pf.File
+        \\
+        \\check : List(U8) -> Str
+        \\check = |bytes| match Str.from_utf8(bytes) {
+        \\    Ok(_) => "ok"
+        \\    Err(_) => "err"
+        \\}
+        \\
+        \\make_glue : List(Types) -> Try(List(File), Str)
+        \\make_glue = |types_list| {
+        \\    zero = types_list.len() - types_list.len()
+        \\    var $out = ""
+        \\    for len in [0, 1, 15, 16, 17, 31, 32, 33, 64] {
+        \\        ascii = List.repeat('a', len + zero)
+        \\        multi = ascii.concat(Str.to_utf8("é漢🎉"))
+        \\        $out = "${$out}${check(ascii)} ${check(multi)} ${check(ascii.append(0xFF))}\n"
+        \\    }
+        \\    Ok([{ name: "from_utf8.txt", content: $out }])
+        \\}
+    });
+    const spec_path = try tmp.dir.realPathFileAlloc(io, "Spec.roc", gpa);
+    defer gpa.free(spec_path);
+    const platform_path = try tmp.dir.realPathFileAlloc(io, "main.roc", gpa);
+    defer gpa.free(platform_path);
+    const out_dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(out_dir);
+
+    var stderr = std.Io.Writer.Allocating.init(gpa);
+    defer stderr.deinit();
+    var stdout = std.Io.Writer.Allocating.init(gpa);
+    defer stdout.deinit();
+    rocGlue(gpa, &stderr.writer, &stdout.writer, .{
+        .glue_spec = spec_path,
+        .output_dir = out_dir,
+        .platform_path = platform_path,
+        .report_config = reporting.ReportingConfig.initMarkdown(),
+        .opt = .dev,
+        .no_cache = true,
+    }, io) catch |err| {
+        std.debug.print("{s}", .{stderr.written()});
+        return err;
+    };
+
+    const result = try tmp.dir.readFileAlloc(io, "from_utf8.txt", gpa, .limited(4096));
+    defer gpa.free(result);
+    var expected: [9 * "ok ok err\n".len]u8 = undefined;
+    for (0..9) |line| @memcpy(expected[line * "ok ok err\n".len ..][0.."ok ok err\n".len], "ok ok err\n");
+    try std.testing.expectEqualStrings(&expected, result);
 }
 
 // Lock the schema-directed marshaller against the actual checked glue platform.
@@ -4824,7 +5438,53 @@ test "glue platform marshalling schema matches checked Roc records" {
             return err;
         };
         defer spec.deinit(gpa);
-        try checkGluePlatformMarshallingSchema(&spec);
+        try checkGluePlatformMarshallingSchema(spec.boundary());
+    }
+}
+
+/// The host boundary of `spec`'s `roc_make_glue` entrypoint, which a glue
+/// run from unit images marshals under instead of a lowered program's layouts.
+fn testEntrypointBoundary(gpa: Allocator, spec: *const CompiledGlueSpec) Allocator.Error!lir.CheckedPipeline.BoxyEntrypointBoundary {
+    const request = for (spec.lir_roots) |root| {
+        const symbol = spec.root_artifact.providedEntrypointName(root) orelse continue;
+        if (std.mem.eql(u8, symbol, builtins.shim_symbols.roc_make_glue)) break root;
+    } else unreachable; // compileGlueSpec selected a `roc_make_glue` root from these requests
+    return lir.CheckedPipeline.BoxyEntrypointBoundary.init(
+        gpa,
+        .{ .root = CheckedArtifact.loweringViewWithRelations(spec.root_artifact, spec.relation_artifacts), .imports = spec.imported_artifacts },
+        request,
+        base.target.TargetUsize.native,
+    );
+}
+
+fn glueBoundaryOf(boundary: *const lir.CheckedPipeline.BoxyEntrypointBoundary) GlueBoundary {
+    return .{
+        .layouts = boundary.layouts(),
+        .schemas = &boundary.runtime_value_schemas,
+        .types_layout = boundary.argLayouts()[0],
+        .ret_layout = boundary.retLayout(),
+    };
+}
+
+// A glue run from unit images, or from an installed plugin, lowers no
+// program, so the entrypoint boundary is its only source of layouts. It must
+// pass the same lock as the programs both strategies lower, and marshal every
+// value of the protocol to the same bytes: the generator on the other side
+// was compiled against one of those programs.
+test "glue entrypoint boundary marshals as the lowered program of either strategy does" {
+    const gpa = std.testing.allocator;
+    var diagnostics = std.Io.Writer.Allocating.init(gpa);
+    defer diagnostics.deinit();
+    for ([_]base.SpecializationStrategy{ .lss, .boxy }) |strategy| {
+        var spec = compileGlueSpec(gpa, &diagnostics.writer, "src/glue/src/DebugGlue.roc", true, reporting.ReportingConfig.initMarkdown(), strategy, std.testing.io) catch |err| {
+            std.debug.print("{s}", .{diagnostics.written()});
+            return err;
+        };
+        defer spec.deinit(gpa);
+        var boundary = try testEntrypointBoundary(gpa, &spec);
+        defer boundary.deinit();
+        try std.testing.expectEqual(@as(usize, 1), boundary.argLayouts().len);
+        try std.testing.expectEqual(try glueWireDigest(spec.boundary()), try glueWireDigest(glueBoundaryOf(&boundary)));
     }
 }
 
@@ -4840,6 +5500,21 @@ fn expectGlueSchemaEqual(expected: anytype, actual: anytype) GlueSchemaLockError
 const GlueProtocolLock = struct {
     schemas: *const lir.CheckedPipeline.RuntimeValueSchemaStore,
     layouts: *const layout.Store,
+    /// When set, digests the bytes the marshaller depends on at every record
+    /// and tag union the walk reaches: sizes, alignments, each named field's
+    /// offset and each named tag's discriminant. Two boundaries with equal
+    /// digests marshal every value identically.
+    wire: ?*std.hash.Wyhash = null,
+
+    fn digest(self: @This(), values: []const u64) void {
+        const hasher = self.wire orelse return;
+        hasher.update(std.mem.sliceAsBytes(values));
+    }
+
+    fn digestSizeAlign(self: @This(), idx: layout.Idx) void {
+        const size_align = self.layouts.layoutSizeAlign(self.layouts.getLayout(idx));
+        self.digest(&[_]u64{ size_align.size, size_align.alignment.toByteUnits() });
+    }
 
     const Type = enum {
         u64_,
@@ -4923,7 +5598,7 @@ const GlueProtocolLock = struct {
                 .{ .name = "ret_type_id", .type = .u64_ },                  .{ .name = "type_str", .type = .str_ },
             }),
             .record_field_info => try self.record(idx, "RecordFieldInfo", &.{ .{ .name = "name", .type = .str_ }, .{ .name = "type_str", .type = .str_ } }),
-            .type_info => try self.record(idx, "TypeInfo", &.{ .{ .name = "layout", .type = .abi_layout }, .{ .name = "rc", .type = .rc_plan }, .{ .name = "repr", .type = .type_repr } }),
+            .type_info => try self.record(idx, "TypeInfo", &.{ .{ .name = "layout", .type = .abi_layout }, .{ .name = "rc", .type = .rc_plan }, .{ .name = "repr", .type = .type_repr }, .{ .name = "shape_id", .type = .u64_ } }),
             .file => try self.record(idx, "File", &.{ .{ .name = "content", .type = .str_ }, .{ .name = "name", .type = .str_ } }),
             .abi_layout => try self.record(idx, "AbiLayout", &.{
                 .{ .name = "alignment32", .type = .u64_ },    .{ .name = "alignment64", .type = .u64_ }, .{ .name = "contains_refcounted", .type = .bool_ },
@@ -4947,7 +5622,7 @@ const GlueProtocolLock = struct {
                 .{ .name = "payload_fields", .type = .list_abi_field }, .{ .name = "payload_alignment32", .type = .u64_ }, .{ .name = "payload_alignment64", .type = .u64_ },
                 .{ .name = "payload_size32", .type = .u64_ },           .{ .name = "payload_size64", .type = .u64_ },
             }),
-            .rc_plan => try self.tagUnion(idx, "HostRcPlan", &.{ .{ .name = "RcNoop", .type = .unit }, .{ .name = "RcRefcounted", .type = .unit } }),
+            .rc_plan => try self.tagUnion(idx, "HostRcPlan", &.{ .{ .name = "RcNoop", .type = .unit }, .{ .name = "RcRefcounted", .type = .unit }, .{ .name = "RcRocReleased", .type = .unit } }),
             .type_repr => try self.tagUnion(idx, "TypeRepr", &.{
                 .{ .name = "RocBool", .type = .unit },                         .{ .name = "RocBox", .type = .u64_ },   .{ .name = "RocDec", .type = .unit },
                 .{ .name = "RocErasedCallable", .type = .callable_signature }, .{ .name = "RocF32", .type = .unit },   .{ .name = "RocF64", .type = .unit },
@@ -4981,9 +5656,11 @@ const GlueProtocolLock = struct {
         } else return error.GlueSchemaMismatch;
         try expectGlueSchemaEqual(fields.len, schema.fields.len);
         try expectGlueSchemaEqual(fields.len, self.layouts.getStructInfo(value).fields.len);
+        self.digestSizeAlign(idx);
         inline for (fields) |field| {
             const logical_index = schema.fieldLogicalIndex(field.name) orelse return error.GlueSchemaMismatch;
             const field_layout = self.layouts.getStructFieldLayoutByOriginalIndex(value.getStruct().idx, logical_index);
+            self.digest(&[_]u64{self.layouts.getStructFieldOffsetByOriginalIndex(value.getStruct().idx, logical_index)});
             try self.check(field_layout, field.type);
         }
     }
@@ -4997,20 +5674,32 @@ const GlueProtocolLock = struct {
         const info = self.layouts.getTagUnionInfo(value);
         try expectGlueSchemaEqual(tags.len, schema.tags.len);
         try expectGlueSchemaEqual(tags.len, info.variants.len);
+        self.digestSizeAlign(idx);
         inline for (tags) |tag| {
             const discriminant = schema.tagDiscriminant(tag.name) orelse return error.GlueSchemaMismatch;
             if (discriminant >= info.variants.len) return error.GlueSchemaMismatch;
+            self.digest(&[_]u64{discriminant});
+            self.digestSizeAlign(info.variants.get(discriminant).payload_layout);
             try self.check(info.variants.get(discriminant).payload_layout, tag.type);
         }
     }
 };
 
-fn checkGluePlatformMarshallingSchema(spec: *const CompiledGlueSpec) GlueSchemaLockError!void {
-    const lock = GlueProtocolLock{ .schemas = &spec.lowered.runtime_value_schemas, .layouts = &spec.lowered.lir_result.layouts };
-    try expectGlueSchemaEqual(@as(usize, 1), spec.arg_layouts.len);
-    try lock.check(spec.arg_layouts[0], .list_types);
-    const proc = spec.lowered.lir_result.store.getProcSpec(spec.glue_proc);
-    try lock.tagUnion(proc.ret_layout, "Builtin.Try", &.{ .{ .name = "Err", .type = .str_ }, .{ .name = "Ok", .type = .list_file } });
+fn checkGluePlatformMarshallingSchema(boundary: GlueBoundary) GlueSchemaLockError!void {
+    return lockGluePlatformMarshalling(boundary, null);
+}
+
+/// Check `boundary` against the protocol and digest its wire layout.
+fn glueWireDigest(boundary: GlueBoundary) GlueSchemaLockError!u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    try lockGluePlatformMarshalling(boundary, &hasher);
+    return hasher.final();
+}
+
+fn lockGluePlatformMarshalling(boundary: GlueBoundary, wire: ?*std.hash.Wyhash) GlueSchemaLockError!void {
+    const lock = GlueProtocolLock{ .schemas = boundary.schemas, .layouts = boundary.layouts, .wire = wire };
+    try lock.check(boundary.types_layout, .list_types);
+    try lock.tagUnion(boundary.ret_layout, "Builtin.Try", &.{ .{ .name = "Err", .type = .str_ }, .{ .name = "Ok", .type = .list_file } });
 }
 
 // Deliberately mutate checked Roc declarations, not a handwritten layout table.
@@ -5024,11 +5713,12 @@ test "glue platform schema lock rejects field rename addition and type mutation"
         .{ .path = "ProvidedExport.roc", .source = "import FunctionSignature\nProvidedExport := [ProvidedData(U32), ProvidedProcedure(FunctionSignature)]" },
         .{ .path = "FunctionSignature.roc", .source = "FunctionSignature := { args : List(U64), result : U64 }" },
         .{ .path = "CallableSignature.roc", .source = "import FunctionSignature\nCallableSignature := [Known(FunctionSignature), Opaque(U64)]" },
-        .{ .path = "TypeInfo.roc", .source = "import AbiLayout\nimport HostRcPlan\nimport TypeRepr\nTypeInfo := { layout : AbiLayout, rc : Bool, repr : TypeRepr }" },
-        .{ .path = "TypeInfo.roc", .source = "import HostRcPlan\nimport TypeRepr\nTypeInfo := { layout : U64, rc : HostRcPlan, repr : TypeRepr }" },
-        .{ .path = "TypeInfo.roc", .source = "import AbiLayout\nimport HostRcPlan\nTypeInfo := { layout : AbiLayout, rc : HostRcPlan, repr : U64 }" },
+        .{ .path = "TypeInfo.roc", .source = "import AbiLayout\nimport HostRcPlan\nimport TypeRepr\nTypeInfo := { layout : AbiLayout, rc : Bool, repr : TypeRepr, shape_id : U64 }" },
+        .{ .path = "TypeInfo.roc", .source = "import HostRcPlan\nimport TypeRepr\nTypeInfo := { layout : U64, rc : HostRcPlan, repr : TypeRepr, shape_id : U64 }" },
+        .{ .path = "TypeInfo.roc", .source = "import AbiLayout\nimport HostRcPlan\nTypeInfo := { layout : AbiLayout, rc : HostRcPlan, repr : U64, shape_id : U64 }" },
+        .{ .path = "TypeInfo.roc", .source = "import AbiLayout\nimport HostRcPlan\nimport TypeRepr\nTypeInfo := { layout : AbiLayout, rc : HostRcPlan, repr : TypeRepr, shape_id : U32 }" },
         .{ .path = "RecordField.roc", .source = "RecordField := { is_padding : Bool, name : Str, type_id : U32 }" },
-        .{ .path = "HostRcPlan.roc", .source = "HostRcPlan := [RcNoop(U64), RcRefcounted]" },
+        .{ .path = "HostRcPlan.roc", .source = "HostRcPlan := [RcNoop(U64), RcRefcounted, RcRocReleased]" },
     };
     for (mutations) |mutation| {
         var tmp = std.testing.tmpDir(.{});
@@ -5065,6 +5755,9 @@ test "glue platform schema lock rejects field rename addition and type mutation"
             return err;
         };
         defer spec.deinit(gpa);
-        try std.testing.expectError(error.GlueSchemaMismatch, checkGluePlatformMarshallingSchema(&spec));
+        try std.testing.expectError(error.GlueSchemaMismatch, checkGluePlatformMarshallingSchema(spec.boundary()));
+        var boundary = try testEntrypointBoundary(gpa, &spec);
+        defer boundary.deinit();
+        try std.testing.expectError(error.GlueSchemaMismatch, checkGluePlatformMarshallingSchema(glueBoundaryOf(&boundary)));
     }
 }

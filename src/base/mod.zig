@@ -27,6 +27,7 @@ comptime {
 pub const RegionInfo = @import("RegionInfo.zig");
 pub const SourceLoc = @import("source_loc.zig").SourceLoc;
 pub const SourceFileEntry = @import("source_loc.zig").SourceFileEntry;
+pub const StagedSourceMap = @import("source_loc.zig").StagedSourceMap;
 pub const Scratch = @import("Scratch.zig").Scratch;
 pub const parallel = @import("parallel.zig");
 pub const post_check_task_executor = @import("post_check_task_executor.zig");
@@ -51,6 +52,8 @@ pub const recursive_digest = @import("recursive_digest.zig");
 /// SHA-256 on the CPU's SHA-256 instructions, interchangeable with `std.crypto.hash.sha2.Sha256`.
 pub const Sha256 = @import("sha256.zig").Sha256;
 pub const ModuleIdentity = @import("module_identity.zig");
+/// BLAKE3-256 of one input file's bytes, computed once per file read.
+pub const SourceDigest = @import("SourceDigest.zig");
 
 /// Single-threaded arena allocator, re-exported from `collections` for callers
 /// that already depend on `base`.
@@ -86,7 +89,7 @@ pub const byte_encoding = @import("byte_encoding.zig");
 pub const line_record = @import("line_record.zig");
 
 /// Allocator wrapper that recycles freed large blocks instead of unmapping them.
-pub const LargeBlockAllocator = @import("LargeBlockAllocator.zig");
+pub const LargeBlockAllocator = @import("LargeBlockAllocator.zig").LargeBlockAllocator;
 /// Logical CPU counts used to size worker pools.
 pub const cpu_count = @import("cpu_count.zig");
 /// Developer-only environment variables, read only by compilers built with developer diagnostics.
@@ -94,7 +97,14 @@ pub const dev_diagnostics = @import("dev_diagnostics.zig");
 /// Settings only tests may change; production builds fix them at compile time.
 pub const TestSwitch = @import("test_switch.zig").TestSwitch;
 
-var default_large_blocks: LargeBlockAllocator = LargeBlockAllocator.init(defaultBackingGpa());
+var default_large_blocks: LargeBlockAllocator(defaultBackingGpa()) = .{};
+
+/// The Debug-build allocator wrapper that makes stale borrows fail; see
+/// `src/stale_borrow_allocator.zig`.
+pub const StaleBorrowAllocator = @import("stale_borrow_allocator");
+
+var default_stale_borrow: if (StaleBorrowAllocator.available) StaleBorrowAllocator else void =
+    if (StaleBorrowAllocator.available) StaleBorrowAllocator.init(default_large_blocks.allocator(), .{}) else {};
 
 fn defaultBackingGpa() std.mem.Allocator {
     if (builtin.link_libc and !builtin.target.abi.isMusl()) return std.heap.c_allocator;
@@ -105,9 +115,11 @@ fn defaultBackingGpa() std.mem.Allocator {
 /// Large blocks are recycled by `LargeBlockAllocator`; everything else goes to libc's
 /// malloc (its ASan/Valgrind/LD_PRELOAD tooling, and on LLVM paths it's the allocator
 /// LLVM already uses)—except on musl, whose malloc is slow, where smp_allocator wins.
-/// Without libc it is smp_allocator, and wasm_allocator on freestanding.
+/// Without libc it is smp_allocator, and wasm_allocator on freestanding. Debug builds
+/// off freestanding wrap it in `StaleBorrowAllocator`.
 pub fn defaultGpa() std.mem.Allocator {
     if (builtin.target.os.tag == .freestanding) return std.heap.wasm_allocator;
+    if (StaleBorrowAllocator.available) return default_stale_borrow.allocator();
     return default_large_blocks.allocator();
 }
 
@@ -116,7 +128,7 @@ test {
     const module_path_mod = @import("module_path.zig");
     std.testing.refAllDecls(ident);
     std.testing.refAllDecls(TextRankCache);
-    std.testing.refAllDecls(LargeBlockAllocator);
+    std.testing.refAllDecls(@import("LargeBlockAllocator.zig"));
     std.testing.refAllDecls(cpu_count);
     std.testing.refAllDecls(dev_diagnostics);
     std.testing.refAllDecls(TypeDigestHasher);
@@ -126,6 +138,7 @@ test {
     std.testing.refAllDecls(@import("roc_version.zig"));
     std.testing.refAllDecls(@import("typo.zig"));
     std.testing.refAllDecls(line_record);
+    std.testing.refAllDecls(@import("source_loc.zig"));
 }
 
 /// Whether a function calls itself.
@@ -208,12 +221,14 @@ test "base tests" {
     std.testing.refAllDecls(@import("DataSpan.zig"));
     std.testing.refAllDecls(@import("eval_stack.zig"));
     std.testing.refAllDecls(@import("death_test.zig"));
+    if (StaleBorrowAllocator.available) std.testing.refAllDecls(@import("stale_borrow_test.zig"));
     std.testing.refAllDecls(@import("Ident.zig"));
     std.testing.refAllDecls(@import("ice_context.zig"));
     std.testing.refAllDecls(@import("InternedBytes.zig"));
     std.testing.refAllDecls(@import("LowLevel.zig"));
     std.testing.refAllDecls(@import("memory_fault.zig"));
     std.testing.refAllDecls(@import("module_identity.zig"));
+    std.testing.refAllDecls(@import("SourceDigest.zig"));
     std.testing.refAllDecls(@import("parallel.zig"));
     std.testing.refAllDecls(post_check_task_executor);
     std.testing.refAllDecls(@import("Region.zig"));

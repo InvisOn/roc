@@ -48,15 +48,20 @@ const child_name_width: usize = name_width - 2;
 /// frame), which the totals row pads past so its duration shares the column.
 const row_marker_width: usize = 4;
 
-/// Maximum number of top-level phases a single operation reports.
-const max_phases: usize = 16;
-const max_subphases: usize = 32;
-// Shared lowering and a runtime continuation each report nine lowering groups
-// and native emission. Also reserve compile-time roots, test result admission,
-// dev test emission, completed compilation, completed test command, and the
-// native test artifact cache, and frontend checking work.
-const max_counter_groups: usize = 2 * 10 + 7;
-const max_counters_per_group: usize = 42;
+/// Maximum number of top-level phases a single operation reports, including
+/// the detail phases `--timings` adds beneath post-check stages.
+const max_phases: usize = 40;
+const max_subphases: usize = 40;
+/// The most sub-timings one phase shows.
+pub const max_subphase_rows = max_subphases;
+// Shared lowering and a runtime continuation each report nine lowering groups,
+// native emission, and up to eight detailed work groups. Also reserve
+// compile-time roots, test result admission, dev test emission, completed
+// compilation, completed test command, the native test artifact cache,
+// frontend checking work, and compile-time evaluation work.
+const max_counter_groups: usize = 2 * 18 + 8;
+/// The most counters one counter group holds.
+pub const max_counters_per_group: usize = 42;
 /// Rows in the ranked timing list printed after the phases.
 const max_ranked_timings: usize = 10;
 /// Bytes reserved for copies of the ranked rows' names, which the caller's
@@ -91,6 +96,27 @@ const CounterGroup = struct {
     len: u8 = 0,
 };
 
+/// Tables of per-item durations printed after the ranked timings.
+const max_tables: usize = 4;
+/// The most columns one duration table holds.
+pub const max_table_columns: usize = 16;
+const max_table_rows: usize = 16;
+const table_name_capacity: usize = 1024;
+
+/// One row of a duration table: a name and one duration per column.
+pub const TableRow = struct {
+    name: []const u8,
+    ns: [max_table_columns]u64 = @splat(0),
+};
+
+const Table = struct {
+    name: []const u8 = "",
+    columns: []const []const u8 = &.{},
+    rows: [max_table_rows]TableRow = undefined,
+    len: u8 = 0,
+    name_bytes: [table_name_capacity]u8 = undefined,
+};
+
 const RankedTimings = struct {
     name: []const u8 = "",
     rows: [max_ranked_timings]SubTiming = undefined,
@@ -115,6 +141,9 @@ const Phase = struct {
     /// Per-sub memory ranges, filled only for sequential breakdowns by
     /// slicing the sample buffer over each sub's reconstructed window.
     sub_mem: [max_subphases]Reporter.MemRange = @splat(.{}),
+    /// Preformatted text written beneath the phase's rows (for example LLVM's
+    /// per-pass timing report). Owned by the caller of `attachDetail`.
+    detail: []const u8 = "",
 };
 
 /// Configuration for a `Reporter`.
@@ -156,6 +185,8 @@ pub const Reporter = struct {
     counter_groups: [max_counter_groups]CounterGroup = undefined,
     counter_group_count: usize = 0,
     ranked: RankedTimings = .{},
+    tables: [max_tables]Table = undefined,
+    table_count: usize = 0,
     active: ?usize = null,
     displaying: bool = false,
     pending_partial: bool = false,
@@ -330,6 +361,65 @@ pub const Reporter = struct {
         }
     }
 
+    /// Record a table of durations, one row per item and one column per
+    /// `columns` entry, printed in milliseconds after the phases. Like
+    /// counters, tables are explicit `--timings` output. Row names are
+    /// copied; `name` and `columns` must outlive the reporter.
+    pub fn recordTable(self: *Reporter, name: []const u8, columns: []const []const u8, rows: []const TableRow) void {
+        if (!self.always) return;
+        std.debug.assert(columns.len <= max_table_columns);
+        self.mutex.lockUncancelable(self.std_io);
+        defer self.mutex.unlock(self.std_io);
+        if (self.finished or self.table_count >= max_tables) return;
+        const table = &self.tables[self.table_count];
+        table.* = .{ .name = name, .columns = columns };
+        var name_bytes_used: usize = 0;
+        for (rows[0..@min(rows.len, max_table_rows)]) |row| {
+            const copied_len = @min(row.name.len, table.name_bytes.len - name_bytes_used);
+            const copied = table.name_bytes[name_bytes_used..][0..copied_len];
+            @memcpy(copied, row.name[0..copied_len]);
+            name_bytes_used += copied_len;
+            table.rows[table.len] = .{ .name = copied, .ns = row.ns };
+            table.len += 1;
+        }
+        self.table_count += 1;
+    }
+
+    fn writeTables(self: *Reporter) void {
+        for (self.tables[0..self.table_count]) |*table| {
+            if (table.len == 0) continue;
+            var width: usize = 0;
+            for (table.rows[0..table.len]) |row| width = @max(width, row.name.len);
+            self.writer.print("  {s} (ms)\n", .{table.name}) catch {};
+            const header: PaddedName = .{ .name = "", .width = width };
+            self.writer.print("      {f}", .{header}) catch {};
+            for (table.columns) |column| self.writer.print(" {s: >9}", .{column}) catch {};
+            self.writer.print("\n", .{}) catch {};
+            for (table.rows[0..table.len]) |row| {
+                const padded: PaddedName = .{ .name = row.name, .width = width };
+                self.writer.print("      {f}", .{padded}) catch {};
+                for (row.ns[0..table.columns.len]) |ns| {
+                    var buf: [24]u8 = undefined;
+                    const text = std.fmt.bufPrint(&buf, "{d}.{d}", .{ ns / std.time.ns_per_ms, (ns % std.time.ns_per_ms) / (std.time.ns_per_ms / 10) }) catch "?";
+                    self.writer.print(" {s: >9}", .{text}) catch {};
+                }
+                self.writer.print("\n", .{}) catch {};
+            }
+        }
+    }
+
+    /// Attach preformatted text to the active phase, written beneath its rows
+    /// once it ends. Like counters, it is explicit `--timings` output. The
+    /// text is not copied, so it must outlive `finish`.
+    pub fn attachDetail(self: *Reporter, text: []const u8) void {
+        if (!self.always) return;
+        self.mutex.lockUncancelable(self.std_io);
+        defer self.mutex.unlock(self.std_io);
+        if (self.finished) return;
+        const idx = self.active orelse return;
+        self.phases[idx].detail = text;
+    }
+
     fn endActiveLocked(self: *Reporter, subs: []const SubTiming) void {
         self.endActiveExcludingLocked(subs, 0);
     }
@@ -367,6 +457,7 @@ pub const Reporter = struct {
         }
         if (self.always) {
             self.writeRankedTimings();
+            self.writeTables();
             self.writeCounterGroups();
         }
         self.writer.flush() catch {};
@@ -565,8 +656,29 @@ pub const Reporter = struct {
         self.writer.flush() catch {};
     }
 
-    /// Write a finished phase as one or more committed rows. Caller holds mutex.
+    /// Write a finished phase as one or more committed rows, followed by its
+    /// attached detail text. Caller holds mutex.
     fn writeCommittedPhase(self: *Reporter, idx: usize) void {
+        self.writeCommittedRows(idx);
+        self.writeDetail(self.phases[idx].detail);
+    }
+
+    /// Write detail text indented to the sub-timing column. Caller holds mutex.
+    fn writeDetail(self: *Reporter, detail: []const u8) void {
+        const text = std.mem.trimEnd(u8, detail, " \r\n");
+        if (text.len == 0) return;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |raw_line| {
+            const line = std.mem.trimEnd(u8, raw_line, " \r");
+            if (line.len == 0) {
+                self.writer.writeAll("\n") catch {};
+            } else {
+                self.writer.print("      {s}\n", .{line}) catch {};
+            }
+        }
+    }
+
+    fn writeCommittedRows(self: *Reporter, idx: usize) void {
         const p = self.phases[idx];
         const check = if (self.is_tty) ansi.green ++ "\u{2713}" ++ ansi.reset else "\u{2713}";
         var mem_buf: [48]u8 = undefined;
@@ -907,6 +1019,51 @@ test "ranked timings print copied names in the order given" {
     try testing.expect(slow < fast);
     try testing.expect(std.mem.find(u8, out, "Slowest Module Type Inference") != null);
     try testing.expect(std.mem.find(u8, out, "1_500ms") != null);
+}
+
+test "attached detail prints beneath its phase row" {
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    var reporter = Reporter.init(.{
+        .std_io = std.Io.Threaded.global_single_threaded.io(),
+        .writer = &buf.writer,
+        .op_label = "roc build",
+        .timings_flag = true,
+        .is_tty = false,
+    });
+    defer reporter.deinit();
+    reporter.start();
+    reporter.begin("LLVM Optimize + Emit");
+    reporter.attachDetail("  Total Execution Time: 1.0 seconds  \n\n  0.5 (50.0%)  InstCombinePass\n\n");
+    reporter.end();
+    reporter.begin("Linking");
+    reporter.end();
+    reporter.finish();
+    const out = buf.written();
+    const row = std.mem.find(u8, out, "LLVM Optimize + Emit") orelse return error.TestUnexpectedResult;
+    const pass = std.mem.find(u8, out, "\n        0.5 (50.0%)  InstCombinePass\n") orelse return error.TestUnexpectedResult;
+    const linking = std.mem.find(u8, out, "Linking") orelse return error.TestUnexpectedResult;
+    try testing.expect(row < pass and pass < linking);
+    try testing.expect(std.mem.find(u8, out, "Total Execution Time: 1.0 seconds\n\n") != null);
+}
+
+test "attached detail is omitted without --timings" {
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    var reporter = Reporter.init(.{
+        .std_io = std.Io.Threaded.global_single_threaded.io(),
+        .writer = &buf.writer,
+        .op_label = "roc build",
+        .timings_flag = false,
+        .is_tty = false,
+    });
+    defer reporter.deinit();
+    reporter.start();
+    reporter.begin("LLVM Optimize + Emit");
+    reporter.attachDetail("InstCombinePass");
+    reporter.end();
+    reporter.finish();
+    try testing.expect(std.mem.find(u8, buf.written(), "InstCombinePass") == null);
 }
 
 test "ranked timings are omitted without --timings" {

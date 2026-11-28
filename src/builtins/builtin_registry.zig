@@ -55,6 +55,7 @@ pub const BuiltinFn = enum {
     str_count_utf8_bytes,
     str_get_utf8_byte_unsafe,
     str_substring_unsafe,
+    str_find_delimiter,
     str_split_first,
     str_split_last,
     str_drop_prefix_caseless_ascii,
@@ -85,7 +86,6 @@ pub const BuiltinFn = enum {
     str_escape_and_quote,
     crash_str,
     dbg_str,
-    debug_invalid_local,
     expect_err_str,
     checked_error_crashed,
     checked_error_crash_str,
@@ -105,6 +105,7 @@ pub const BuiltinFn = enum {
     list_prepend,
     list_sublist,
     list_sublist_borrowed,
+    list_clear,
     list_drop_at,
     list_replace,
     list_set,
@@ -118,16 +119,17 @@ pub const BuiltinFn = enum {
     list_decref_with,
     list_decref_with_single_thread,
     list_free_with,
+    list_drop_queued,
     box_prepare_update,
     box_decref_with,
     box_decref_with_single_thread,
     box_free_with,
+    box_drop_queued,
     erased_callable_incref,
+    erased_callable_incref_single_thread,
     erased_callable_decref,
     erased_callable_decref_single_thread,
     erased_callable_repack,
-    boxed_sequence_pack,
-    boxed_sequence_unpack,
     native_callable_call,
     native_callable_defer,
     native_callable_drive,
@@ -144,7 +146,6 @@ pub const BuiltinFn = enum {
     decref_data_ptr,
     decref_data_ptr_single_thread,
     free_data_ptr,
-    str_from_literal,
     dec_to_str,
     dec_to_i64_trunc,
     i64_to_dec,
@@ -171,6 +172,7 @@ pub const BuiltinFn = enum {
     i128_to_dec_try_unsafe,
     u128_to_dec_try_unsafe,
     dec_mul,
+    dec_mul_saturated,
     dec_div,
     dec_div_trunc,
     dec_pow,
@@ -301,19 +303,20 @@ pub const BuiltinFn = enum {
             .allocate_with_refcount,
             .box_decref_with,
             .box_decref_with_single_thread,
+            .box_drop_queued,
             .box_free_with,
             .box_prepare_update,
             .checked_error_crash_str,
             .checked_error_crashed,
             .crash_str,
             .dbg_str,
-            .debug_invalid_local,
             .decref_data_ptr,
             .decref_data_ptr_single_thread,
             .erased_callable_decref,
             .erased_callable_decref_single_thread,
             .erased_callable_free,
             .erased_callable_incref,
+            .erased_callable_incref_single_thread,
             .erased_callable_repack,
             .native_callable_call,
             .native_callable_defer,
@@ -339,7 +342,9 @@ pub const BuiltinFn = enum {
             .list_decref_str,
             .list_decref_with,
             .list_decref_with_single_thread,
+            .list_clear,
             .list_drop_at,
+            .list_drop_queued,
             .list_free_with,
             .list_incref,
             .list_incref_single_thread,
@@ -373,9 +378,9 @@ pub const BuiltinFn = enum {
             .str_equal_static_small,
             .str_escape_and_quote,
             .str_get_utf8_byte_unsafe,
+            .str_find_delimiter,
             .str_split_first,
             .str_split_last,
-            .str_from_literal,
             .str_from_utf8,
             .str_from_utf8_lossy,
             .str_from_utf8_validated,
@@ -457,7 +462,6 @@ pub const BuiltinFn = enum {
             .str_from_utf32_be_short,
             .str_from_utf8_lossy,
             .str_escape_and_quote,
-            .str_from_literal,
             .list_with_capacity,
             .list_append_unsafe,
             .list_concat,
@@ -469,6 +473,7 @@ pub const BuiltinFn = enum {
             .list_prepend,
             .list_sublist,
             .list_sublist_borrowed,
+            .list_clear,
             .list_drop_at,
             .list_replace,
             .list_set,
@@ -500,6 +505,50 @@ pub const BuiltinFn = enum {
     /// must not be listed.
     pub fn writesResultWordTriple(self: BuiltinFn) bool {
         return writes_result_word_triple[@backingInt(self)];
+    }
+
+    /// The `ParamWidths` of every builtin's wrapper, indexed by the builtin.
+    /// It is built once at compile time, so `paramWidths` is a table lookup.
+    const param_widths = blk: {
+        @setEvalBranchQuota(100_000);
+        var result: [@typeInfo(BuiltinFn).@"enum".field_names.len]ParamWidths = undefined;
+        for (std.meta.tags(BuiltinFn)) |builtin| {
+            result[@backingInt(builtin)] = .of(@TypeOf(@field(dev_wrappers, symbol_prefix ++ @tagName(builtin))));
+        }
+        break :blk result;
+    };
+
+    /// How many parameters this builtin's wrapper has, and which are `u64`
+    /// or `i64` (see `ParamWidths`).
+    pub fn paramWidths(self: BuiltinFn) ParamWidths {
+        return param_widths[@backingInt(self)];
+    }
+};
+
+/// How many parameters a C function has, and which of them are `u64` or
+/// `i64`.
+///
+/// The dev backend uses this to check its calls in debug builds. A `u64` or
+/// `i64` is 64 bits on every target, so the backend must pass it with a
+/// `…Wide64` builder method. The call builder notes which arguments it got
+/// that way, and `assertArgWidths` compares them with this.
+pub const ParamWidths = struct {
+    /// The number of parameters.
+    count: u8,
+    /// Bit i is set when parameter i is a `u64` or `i64`.
+    wide64: u64,
+
+    /// The parameters of the function type `F`, computed at compile time.
+    pub fn of(comptime F: type) ParamWidths {
+        return comptime blk: {
+            const params = @typeInfo(F).@"fn".param_types;
+            if (params.len > 64) @compileError("a builtin with more than 64 parameters does not fit `ParamWidths.wide64`");
+            var wide64: u64 = 0;
+            for (params, 0..) |T, i| {
+                if (T == u64 or T == i64) wide64 |= @as(u64, 1) << i;
+            }
+            break :blk .{ .count = params.len, .wide64 = wide64 };
+        };
     }
 };
 
@@ -595,6 +644,16 @@ comptime {
             @compileError("dev_wrappers." ++ decl ++ " is not registered; add BuiltinFn." ++ decl[symbol_prefix.len..] ++ " to builtin_registry.zig");
         }
     }
+}
+
+test "ParamWidths marks the u64 and i64 parameters, in order" {
+    const widths = ParamWidths.of(fn (*u64, u64, usize, i64, f64, u32) callconv(.c) void);
+    try std.testing.expectEqual(6, widths.count);
+    try std.testing.expectEqual(0b1010, widths.wide64);
+
+    const capacity = BuiltinFn.list_with_capacity.paramWidths();
+    try std.testing.expectEqual(5, capacity.count);
+    try std.testing.expectEqual(0b10, capacity.wide64);
 }
 
 test "symbol names round-trip through the registry" {

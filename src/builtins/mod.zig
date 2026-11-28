@@ -14,8 +14,7 @@ pub const stack_guard = @import("stack_guard.zig");
 pub const sha256 = @import("sha256.zig");
 pub const dev_wrappers = @import("dev_wrappers.zig");
 pub const erased_callable = @import("erased_callable.zig");
-/// Owning opaque iterator and stream handles.
-pub const boxed_sequence = @import("boxed_sequence.zig");
+/// Monomorphic indirect calls and pending erased tail calls.
 pub const native_callable = @import("native_callable.zig");
 pub const float_bits = @import("float_bits.zig");
 pub const float_math_f32 = @import("float_math/f32.zig");
@@ -28,9 +27,14 @@ pub const numeric_conversions = @import("numeric_conversions.zig");
 pub const rc_callback_abi = @import("rc_callback_abi.zig");
 pub const simd = @import("simd.zig");
 pub const str = @import("str.zig");
+pub const delimiter = @import("delimiter.zig");
+/// UTF-8 validation kernels and the CPU features that select them.
+pub const utf8 = @import("utf8.zig");
 pub const utils = @import("utils.zig");
 
 test "builtins tests" {
+    std.testing.refAllDecls(@import("atomic_rc_test.zig"));
+    std.testing.refAllDecls(@import("drop_queue_test.zig"));
     std.testing.refAllDecls(@import("builtin_registry.zig"));
     std.testing.refAllDecls(@import("crypto.zig"));
     std.testing.refAllDecls(@import("blake3_iterative.zig"));
@@ -38,7 +42,6 @@ test "builtins tests" {
     std.testing.refAllDecls(@import("decimal_parse.zig"));
     std.testing.refAllDecls(@import("dev_wrappers.zig"));
     std.testing.refAllDecls(@import("erased_callable.zig"));
-    std.testing.refAllDecls(@import("boxed_sequence.zig"));
     std.testing.refAllDecls(@import("native_callable.zig"));
     std.testing.refAllDecls(@import("float_bits.zig"));
     std.testing.refAllDecls(@import("float_math/f32.zig"));
@@ -57,5 +60,7 @@ test "builtins tests" {
     std.testing.refAllDecls(@import("sha256.zig"));
     std.testing.refAllDecls(@import("simd.zig"));
     std.testing.refAllDecls(@import("str.zig"));
+    std.testing.refAllDecls(delimiter);
+    std.testing.refAllDecls(@import("utf8.zig"));
     std.testing.refAllDecls(@import("utils.zig"));
 }

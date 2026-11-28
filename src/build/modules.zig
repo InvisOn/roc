@@ -139,6 +139,23 @@ fn targetMatchesHost(target: ResolvedTarget) bool {
         target.result.abi == builtin.target.abi;
 }
 
+/// The watch module uses real macOS FSEvents (CoreFoundation/CoreServices) when building
+/// natively for macOS, and kernel32 for directory-change notifications on Windows. Any step
+/// that compiles the watch module (the roc exe and the tests that import it) must link these.
+///
+/// The frameworks come from stubs in src/build/darwin/Frameworks, not the macOS SDK, so the
+/// dylib versions recorded in the binary don't depend on the build machine's Xcode, and a
+/// release target (which skips SDK detection, see `getReleaseTargetQuery`) can find them.
+pub fn linkWatchPlatformLibs(step: *Step.Compile, target: ResolvedTarget) void {
+    if (target.result.os.tag == .macos and targetMatchesHost(target)) {
+        step.root_module.addFrameworkPath(step.step.owner.path("src/build/darwin/Frameworks"));
+        step.root_module.linkFramework("CoreFoundation", .{});
+        step.root_module.linkFramework("CoreServices", .{});
+    } else if (target.result.os.tag == .windows) {
+        step.root_module.linkSystemLibrary("kernel32", .{});
+    }
+}
+
 /// Represents a test module's compilation step.
 ///
 /// Deliberately does not carry a pre-made `Step.Run`. Every run of these
@@ -171,6 +188,14 @@ pub const Tests = union(enum) {
         /// build through `std.testing.refAllDecls`. A filtered run keeps them,
         /// so the inner tests the filter names still get compiled.
         aggregators: []const []const u8 = &.{},
+        /// The test binary's root file, when it is not the module's own root.
+        /// That file imports the module under the module's name. A module
+        /// built with `no_builtin` names one: a test binary takes its root
+        /// module's options for `std` as well, and all of `std` built without
+        /// builtin recognition expands every large copy inline (on 32-bit ARM
+        /// a 2 MB `std.Progress` buffer copy made instruction selection run
+        /// for hours).
+        root: ?[]const u8 = null,
     },
     /// The module is the spec list of a test runner that build.zig wires to
     /// `run-test-zig-module-<name>` itself.
@@ -266,6 +291,7 @@ pub const ModuleType = enum {
             .base => .{
                 .root = "src/base/mod.zig",
                 .deps = &.{ .collections, .builtins, .build_options },
+                .extra_imports = &.{"stale_borrow_allocator"},
                 .tests = .{ .unit = .{ .aggregators = &.{"base tests"} } },
             },
             .collections => .{
@@ -276,6 +302,8 @@ pub const ModuleType = enum {
             .types => .{
                 .root = "src/types/mod.zig",
                 .deps = &.{ .tracy, .base, .collections },
+                // Numeric literal float conversion uses the vendored Eisel-Lemire.
+                .extra_imports = &.{"vendor_parse_float"},
                 .tests = .{ .unit = .{} },
             },
             .reporting => .{
@@ -295,7 +323,7 @@ pub const ModuleType = enum {
             },
             .check => .{
                 .root = "src/check/mod.zig",
-                .deps = &.{ .tracy, .builtins, .collections, .base, .parse, .types, .can, .reporting, .build_options, .fmt },
+                .deps = &.{ .tracy, .builtins, .collections, .base, .parse, .types, .can, .reporting, .build_options, .fmt, .layout_shape },
                 .tests = .{ .unit = .{ .aggregators = &.{"check tests"} } },
             },
             .tracy => .{
@@ -367,7 +395,7 @@ pub const ModuleType = enum {
             },
             .lir_core => .{
                 .root = "src/lir/core.zig",
-                .deps = &.{ .base, .collections, .layout, .types, .can, .check },
+                .deps = &.{ .base, .builtins, .collections, .layout, .types, .can, .check },
                 .tests = .{ .unit = .{ .aggregators = &.{"lir core declarations are referenced"} } },
             },
             // Shared by the post-check lowerers; it imports nothing from the
@@ -495,7 +523,7 @@ pub const ModuleType = enum {
             // tested as it is built: with its stores kept as stores.
             .fast_memset => .{
                 .root = "src/fast_memset.zig",
-                .tests = .{ .unit = .{} },
+                .tests = .{ .unit = .{ .root = "src/fast_memset_test.zig" } },
                 .no_builtin = true,
             },
         };
@@ -531,6 +559,7 @@ const extra_modules = [_]ExtraModule{
     .{ .name = "shim_symbols", .root = "src/builtins/shim_symbols.zig" },
     .{ .name = "raw_pages", .root = "src/raw_pages.zig" },
     .{ .name = "memory_fault", .root = "src/base/memory_fault.zig" },
+    .{ .name = "stale_borrow_allocator", .root = "src/stale_borrow_allocator.zig" },
     .{ .name = "vendor_parse_float", .root = "vendor/parse_float/parse_float.zig" },
     .{ .name = "vendor_ryu", .root = "vendor/ryu.zig" },
     .{ .name = "vendor_relocatable_loader", .root = "vendor/relocatable_loader/mod.zig" },
@@ -631,6 +660,11 @@ pub const RocModules = struct {
     // through `base.memory_fault`, so both report a stack overflow by one rule.
     memory_fault: *Module,
 
+    // The Debug-build allocator wrapper that makes stale borrows fail
+    // (`src/stale_borrow_allocator.zig`), shared by `base` and Roc's unit test
+    // runner, which gives it to `std.testing.allocator` as its backing.
+    stale_borrow_allocator: *Module,
+
     // Vendored-from-Zig modules. The sources live under `vendor/`.
     vendor_parse_float: *Module,
     vendor_ryu: *Module,
@@ -690,8 +724,10 @@ pub const RocModules = struct {
         self.embedded_lld.addImport("collections", self.collections);
 
         // The vendored Mach-O code-signing helpers use the build-time `tracy`
-        // tracing shim.
+        // tracing shim and the compiler's SHA-256 (`base.Sha256`), which
+        // hashes on the CPU's instructions where the host has them.
         self.vendor_macho.addImport("tracy", self.tracy);
+        self.vendor_macho.addImport("base", self.base);
 
         return self;
     }
@@ -776,13 +812,15 @@ pub const RocModules = struct {
 
         inline for (comptime std.enums.values(ModuleType)) |module_type| {
             if (comptime module_type.info().tests != .unit) continue;
+            const test_root = comptime module_type.info().tests.unit.root;
+            comptime std.debug.assert(!module_type.info().no_builtin or test_root != null);
             const module = self.getModule(module_type);
             const filter_injection = ensureAggregatorFilters(b, module_type, test_filters);
             forced_passes += filter_injection.forced_count;
             const test_step = b.addTest(.{
                 .name = b.fmt("{s}", .{@tagName(module_type)}),
                 .root_module = b.createModule(.{
-                    .root_source_file = module.root_source_file.?,
+                    .root_source_file = if (test_root) |root| b.path(root) else module.root_source_file.?,
                     .target = target,
                     .optimize = optimize,
                     // Zig 0.16 requires explicit link_libc on any compile unit that references
@@ -792,10 +830,10 @@ pub const RocModules = struct {
                     // modules import ctx/unbundle transitively. It's simpler (and has no
                     // practical cost for native-only tests) to enable link_libc uniformly.
                     .link_libc = true,
-                    .no_builtin = if (comptime module_type.info().no_builtin) true else null,
                 }),
                 .filters = filter_injection.filters,
             });
+            if (test_root != null) test_step.root_module.addImport(@tagName(module_type), module);
 
             // The eval module's host-call trampoline is implemented in assembly;
             // the test compile has its own root module, so it needs the file too.
@@ -803,12 +841,7 @@ pub const RocModules = struct {
                 test_step.root_module.addAssemblyFile(b.path("src/eval/host_trampoline.S"));
             }
 
-            // Watch module needs Core Foundation and FSEvents on macOS (only when not cross-compiling)
-            // These frameworks provide the FSEvents API for proper event-driven file system monitoring on macOS.
-            if (module_type == .watch and target.result.os.tag == .macos and targetMatchesHost(target)) {
-                test_step.root_module.linkFramework("CoreFoundation", .{});
-                test_step.root_module.linkFramework("CoreServices", .{});
-            }
+            if (module_type == .watch) linkWatchPlatformLibs(test_step, target);
 
             // Add only the necessary dependencies for each module test
             self.addModuleDependencies(test_step, module_type);

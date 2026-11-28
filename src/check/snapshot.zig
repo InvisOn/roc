@@ -39,6 +39,7 @@ pub const SnapshotFlex = struct {
     name: ?Ident.Idx,
     var_: Var,
     constraints: SnapshotStaticDispatchConstraintSafeList.Range,
+    literal: types.Flex.Literal = .none,
 };
 
 /// A snapshotted rigid (bound) type variable with name and constraints.
@@ -146,6 +147,7 @@ pub const SnapshotStaticDispatchConstraint = struct {
     fn_content: SnapshotContentIdx,
     source_fn_var: Var,
     origin: @FieldType(types.StaticDispatchConstraint, "origin"),
+    receiver: types.StaticDispatchConstraint.Receiver = .holder,
 };
 
 const Var = types.Var;
@@ -240,6 +242,7 @@ const IdentityFrame = struct {
     fill: SnapshotFill,
     result: SnapshotIdentityResult,
     name: ?Ident.Idx,
+    literal: types.Flex.Literal = .none,
     constraints: []const types.StaticDispatchConstraint,
     idx: u32 = 0,
     scratch_top: u32,
@@ -331,6 +334,9 @@ pub const Store = struct {
     /// A completed node is shared throughout this capture. Back edges in its
     /// structural view are recursion markers with preserved graph identity.
     captured_nodes: std.AutoHashMapUnmanaged(CaptureKey, SnapshotContentIdx) = .empty,
+    /// The snapshot records the effect at capture time, not references into
+    /// a live formula which may change or be poisoned before display.
+    effects: types.effect_solver.Solver,
 
     /// Suspended steps of the snapshot walk, innermost last. The walk descends
     /// on this heap stack rather than the native one, so snapshot depth is
@@ -359,15 +365,28 @@ pub const Store = struct {
     render_graphs: std.ArrayList(?*RenderGraph) = .empty,
     active_capture: u32 = 0,
     format_context: ?FormatContext = null,
+    /// Classes the capture in progress shows as undetermined variables
+    /// instead of their solved content (`snapshotVarForErrorWithFlexViews`).
+    flex_views: ?*const FlexViews = null,
     test_capture_steps: if (@import("builtin").is_test) usize else void = if (@import("builtin").is_test) 0 else {},
     test_format_work: if (@import("builtin").is_test) usize else void = if (@import("builtin").is_test) 0 else {},
 
     const CaptureKey = struct { var_: Var, polarity: types.Polarity };
 
+    /// How a capture shows a class as an undetermined variable.
+    pub const FlexView = struct {
+        name: ?Ident.Idx,
+        constraints: []const types.StaticDispatchConstraint,
+    };
+
+    /// The classes a capture shows as undetermined variables, by root.
+    pub const FlexViews = std.AutoArrayHashMapUnmanaged(Var, FlexView);
+
     pub fn initCapacity(gpa: Allocator, capacity: usize) std.mem.Allocator.Error!Self {
         return .{
             .gpa = gpa,
             .contents = try SnapshotContentList.initCapacity(gpa, capacity),
+            .effects = .init(gpa),
             .seen_vars = .empty,
             .frames = .empty,
             .pending_values = try base.Scratch(SnapshotContentIdx).init(gpa),
@@ -409,6 +428,7 @@ pub const Store = struct {
         }
 
         self.contents.deinit(self.gpa);
+        self.effects.deinit();
         self.seen_vars.deinit(self.gpa);
         self.captured_nodes.deinit(self.gpa);
         self.frames.deinit(self.gpa);
@@ -522,11 +542,11 @@ pub const Store = struct {
         self.captures.shrinkRetainingCapacity(m.captures_len);
         self.node_formats.shrinkRetainingCapacity(m.contents_len);
 
-        self.contents.items.shrinkRetainingCapacity(m.contents_len);
-        self.content_indexes.items.shrinkRetainingCapacity(m.content_indexes_len);
-        self.record_fields.items.shrinkRetainingCapacity(m.record_fields_len);
-        self.tags.items.shrinkRetainingCapacity(m.tags_len);
-        self.static_dispatch_constraints.items.shrinkRetainingCapacity(m.static_dispatch_constraints_len);
+        self.contents.shrinkRetainingCapacity(m.contents_len);
+        self.content_indexes.shrinkRetainingCapacity(m.content_indexes_len);
+        self.record_fields.shrinkRetainingCapacity(m.record_fields_len);
+        self.tags.shrinkRetainingCapacity(m.tags_len);
+        self.static_dispatch_constraints.shrinkRetainingCapacity(m.static_dispatch_constraints_len);
     }
 
     /// Freeze a type graph before poisoning. No nested type or tag is formatted
@@ -541,6 +561,7 @@ pub const Store = struct {
 
         const frames_base = self.frames.items.len;
         const values_base = self.pending_values.top();
+        self.effects.reset();
         self.captured_nodes.clearRetainingCapacity();
         const capture_mark = self.mark();
         errdefer self.truncateToMark(capture_mark);
@@ -596,6 +617,36 @@ pub const Store = struct {
         return self.pending_values.pop().?;
     }
 
+    /// `snapshotVarForError`, showing each class `views` names, by root, as
+    /// the undetermined variable its view describes rather than its solved
+    /// content. The store is only read.
+    pub fn snapshotVarForErrorWithFlexViews(
+        self: *Self,
+        store: *const TypesStore,
+        type_writer: *TypeWriter,
+        var_: types.Var,
+        views: *const FlexViews,
+    ) std.mem.Allocator.Error!SnapshotContentIdx {
+        std.debug.assert(self.flex_views == null);
+        self.flex_views = views;
+        defer self.flex_views = null;
+        return self.snapshotVarForError(store, type_writer, var_);
+    }
+
+    /// The content a capture reads for a resolved class: its solved content,
+    /// or the undetermined variable a flex view shows it as.
+    fn viewedContent(self: *const Self, resolved: types.ResolvedVarDesc) ViewedContent {
+        if (self.flex_views) |views| {
+            if (views.get(resolved.var_)) |view| return .{ .flex_view = view };
+        }
+        return .{ .solved = resolved.desc.content };
+    }
+
+    const ViewedContent = union(enum) {
+        solved: types.Content,
+        flex_view: FlexView,
+    };
+
     /// Snapshot one var's head: hand back a recursion marker for a var already
     /// on the path, and otherwise mark it as being visited and either record
     /// its content immediately (contents with no children) or push the frame
@@ -612,8 +663,9 @@ pub const Store = struct {
         // If we've already reached this variable on the current path, then
         // return it as a recursive type. Try to extract the name from the
         // content for better error messages.
+        const viewed = self.viewedContent(resolved);
         if (self.seen_vars.contains(resolved.var_)) {
-            const recursive_name: ?Ident.Idx = switch (resolved.desc.content) {
+            const recursive_name: ?Ident.Idx = if (viewed == .flex_view) viewed.flex_view.name else switch (resolved.desc.content) {
                 .flex => |flex| flex.name,
                 .rigid => |rigid| rigid.name,
                 .alias => |alias| alias.ident.ident_idx,
@@ -639,17 +691,51 @@ pub const Store = struct {
             .resolved_var = resolved.var_,
             .polarity = polarity,
         };
+        if (viewed == .flex_view) {
+            const view = viewed.flex_view;
+            // An uncommitted record tail reads as the closed row it stands
+            // for (design.md "Uncommitted Record Tails").
+            if (resolved.desc.flags.forKind(.flex).uncommitted_record_tail) {
+                try self.finishFrame(fill, SnapshotContent{ .structure = .empty_record });
+                return true;
+            }
+            if (view.constraints.len == 0) {
+                try self.finishFrame(fill, SnapshotContent{ .flex = SnapshotFlex{
+                    .name = view.name,
+                    .var_ = resolved.var_,
+                    .constraints = try self.static_dispatch_constraints.appendSlice(self.gpa, &.{}),
+                    .literal = .none,
+                } });
+                return true;
+            }
+            try self.frames.append(self.gpa, .{ .identity = .{
+                .fill = fill,
+                .result = .flex,
+                .name = view.name,
+                .literal = .none,
+                .constraints = view.constraints,
+                .scratch_top = self.scratch_static_dispatch_constraints.top(),
+            } });
+            return false;
+        }
         switch (resolved.desc.content) {
             .err => {
                 try self.finishFrame(fill, SnapshotContent.err);
                 return true;
             },
             .flex => |flex| {
+                // An uncommitted record tail reads as the closed row it stands
+                // for (design.md "Uncommitted Record Tails").
+                if (resolved.desc.flags.uncommitted_record_tail) {
+                    try self.finishFrame(fill, SnapshotContent{ .structure = .empty_record });
+                    return true;
+                }
                 if (flex.constraints.len() == 0) {
                     try self.finishFrame(fill, SnapshotContent{ .flex = SnapshotFlex{
                         .name = flex.name,
                         .var_ = resolved.var_,
                         .constraints = try self.static_dispatch_constraints.appendSlice(self.gpa, &.{}),
+                        .literal = flex.literal,
                     } });
                     return true;
                 }
@@ -657,6 +743,7 @@ pub const Store = struct {
                     .fill = fill,
                     .result = .flex,
                     .name = flex.name,
+                    .literal = flex.literal,
                     .constraints = store.sliceStaticDispatchConstraints(flex.constraints),
                     .scratch_top = self.scratch_static_dispatch_constraints.top(),
                 } });
@@ -742,7 +829,11 @@ pub const Store = struct {
                 },
                 .fn_pure => |func| return try self.pushFunc(store, fill, .pure, func),
                 .fn_effectful => |func| return try self.pushFunc(store, fill, .effectful, func),
-                .fn_unbound => |func| return try self.pushFunc(store, fill, .unbound, func),
+                .fn_unbound => |func| return self.pushFunc(store, fill, switch (try self.effects.resolve(store, resolved.var_)) {
+                    .pure => .pure,
+                    .effectful => .effectful,
+                    .unresolved => .unbound,
+                }, func),
                 .record => |record| {
                     try self.frames.append(self.gpa, .{ .record = .{
                         .fill = fill,
@@ -832,6 +923,7 @@ pub const Store = struct {
                             .name = frame.name,
                             .var_ = frame.fill.resolved_var,
                             .constraints = range,
+                            .literal = frame.literal,
                         } },
                         .rigid => SnapshotContent{ .rigid = SnapshotRigid{
                             .name = frame.name.?,
@@ -847,6 +939,7 @@ pub const Store = struct {
                         .fn_content = self.pending_values.pop().?,
                         .source_fn_var = frame.constraints[frame.idx].fn_var,
                         .origin = frame.constraints[frame.idx].origin,
+                        .receiver = frame.constraints[frame.idx].receiver,
                     });
                     frame.idx += 1;
                     frame.stage = .head;
@@ -1194,7 +1287,7 @@ pub const Store = struct {
             switch (unwrapped.structure) {
                 .record => |record| {
                     // Gather all fields into fields_out
-                    const fields_out_top: u32 = @intCast(fields_out.items.len);
+                    const fields_out_top: u32 = @intCast(fields_out.len());
                     try self.gatherRecordFieldsHelp(record, gpa, fields_out);
                     const fields_out_range = fields_out.rangeToEnd(fields_out_top);
 
@@ -1384,7 +1477,7 @@ test "snapshotting a spine deeper than any native-stack budget" {
             .{ .ident_idx = alias_ident },
             current,
             &.{},
-            base.ModuleIdentity.Idx.NONE,
+            @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         ));
     }
 
@@ -1492,7 +1585,7 @@ test "diagnostic snapshots render frozen identities after poisoning and naming s
         .{ .ident_idx = alias_name },
         root,
         &.{},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
     ));
     const later = try snapshots.snapshotVarForError(&store, &writer, alias);
     try std.testing.expectEqualStrings(&long_name, try snapshots.formatType(later));

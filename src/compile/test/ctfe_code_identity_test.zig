@@ -88,10 +88,10 @@ test "linked Boxy CTFE roots omit unrelated workers while both producer modes ex
         build_options.compiler_compatibility_id,
         null,
         CoreCtx.os(allocator, allocator, io),
+        .boxy,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
-    coord.specialization_strategy = .boxy;
     var arena = base.SingleThreadArena.init(allocator);
     defer arena.deinit();
     try coord.start();
@@ -132,23 +132,23 @@ test "linked Boxy CTFE roots omit unrelated workers while both producer modes ex
     defer static_data_exports.deinitStaticData(allocator, producer.static_data);
     for (producer.lir_result.exported_procs.items) |proc| {
         const identity = producer.lir_result.store.getProcSpec(proc).identity;
-        _ = try interfaces.putProc(&producer.lir_result.store, proc, producer.lir_result.boxy_table_needs.get(identity) orelse &.{});
+        _ = try interfaces.putProc(&producer.lir_result.store, proc, producer.lir_result.boxy_table_needs.get(identity) orelse &.{}, producer.lir_result.boxy_exports.get(identity).?);
     }
 
     // Identify the worker from the checked declaration, independently of the
     // lowering's export inventory. Its generic argument also requires a table
     // contract in producer mode, even though no root calls it.
-    const unrelated_template = for (library.checked_procedure_templates.templates.items) |template| {
+    const unrelated_template = for (library.checked_procedure_templates.templates.items()) |template| {
         const name = library.canonical_names.procBase(template.proc_base).export_name.get() orelse continue;
         if (std.mem.eql(u8, library.canonical_names.exportNameText(name), "unrelated")) break template.template_id;
     } else return error.TestUnexpectedResult;
-    const unrelated_identity = lir.CheckedPipeline.boxyTemplateWorkerIdentity(names.of(library_view), unrelated_template);
-    const used_template = for (library.checked_procedure_templates.templates.items) |template| {
+    const unrelated_identity = lir.CheckedPipeline.boxyTemplateWorkerIdentity(names.of(&library_view), library_view.templateName(unrelated_template));
+    const used_template = for (library.checked_procedure_templates.templates.items()) |template| {
         const name = library.canonical_names.procBase(template.proc_base).export_name.get() orelse continue;
         if (std.mem.eql(u8, library.canonical_names.exportNameText(name), "used")) break template.template_id;
     } else return error.TestUnexpectedResult;
-    const used_identity = lir.CheckedPipeline.boxyTemplateWorkerIdentity(names.of(library_view), used_template);
-    const roots = library.root_requests.compile_time_requests;
+    const used_identity = lir.CheckedPipeline.boxyTemplateWorkerIdentity(names.of(&library_view), library_view.templateName(used_template));
+    const roots = library.root_requests.compile_time_requests.items();
     try std.testing.expect(roots.len != 0);
 
     const Case = struct {
@@ -175,14 +175,14 @@ test "linked Boxy CTFE roots omit unrelated workers while both producer modes ex
         // fresh analysis slots. Preparation must not demand every visible
         // module's bodies; this unit emits only Library's workers.
         var lazy_library = library.*;
-        lazy_library.body_analyses = try check.BodyAnalyses.BodyAnalyses.create(allocator, io, library.moduleEnvConst(), library.checked_procedure_templates.promoted);
+        lazy_library.body_analyses = try check.BodyAnalyses.BodyAnalyses.create(allocator, io, library.moduleEnvConst(), library.checked_procedure_templates.promoted.items());
         defer lazy_library.body_analyses.?.destroy();
         const lazy_imports = try allocator.dupe(check.CheckedArtifact.ImportedModuleView, imports);
         defer allocator.free(lazy_imports);
         var initialized: usize = 0;
         defer for (lazy_imports[0..initialized]) |view| view.checked_bodies.analyses.destroy();
         for (lazy_imports) |*view| {
-            view.checked_bodies.analyses = try check.BodyAnalyses.BodyAnalyses.create(allocator, io, view.module_env, view.checked_procedure_templates.promoted);
+            view.checked_bodies.analyses = try check.BodyAnalyses.BodyAnalyses.create(allocator, io, view.module_env, view.checked_procedure_templates.promoted.items());
             initialized += 1;
         }
         try std.testing.expect(lazy_imports.len != 0);
@@ -338,6 +338,7 @@ test "every procedure compile-time evaluation shares with a dev build is the bui
         build_options.compiler_compatibility_id,
         null,
         CoreCtx.os(allocator, allocator, io),
+        .lss,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
@@ -368,7 +369,6 @@ test "every procedure compile-time evaluation shares with a dev build is the bui
             .prove_ranges = false,
             .reuse_boxes = false,
             .thread_confined_rc = false,
-            .proc_debug_names = true,
         },
     };
     try coord.finishCheckedProgram(.executable_artifacts);

@@ -29,20 +29,22 @@ pub const Layouts = struct {
     layouts: *layout.Store,
     memo: collections.DenseMapUnmanaged(TypeId, Committed) = .empty,
     /// The recursive component of each open type `recursiveComponent` has
-    /// placed, or `no_component` for one in no cycle.
-    components: collections.DenseMapUnmanaged(TypeId, u32) = .empty,
+    /// placed, absent for one in no cycle.
+    components: collections.DenseMapUnmanaged(TypeId, collections.OptionalU32) = .empty,
     /// The recursive component of each open type over size edges alone
-    /// (`sizeComponent`), or `no_component` for one in no such cycle.
-    size_components: collections.DenseMapUnmanaged(TypeId, u32) = .empty,
+    /// (`sizeComponent`), absent for one in no such cycle.
+    size_components: collections.DenseMapUnmanaged(TypeId, collections.OptionalU32) = .empty,
     /// The members of each recursive component that a pointer slot of the
     /// component points at, by component.
     component_targets: std.ArrayList([]const TypeId) = .empty,
     /// The type variables of each recursive member asked about.
     member_vars: collections.DenseMapUnmanaged(TypeId, []const TypeId) = .empty,
+    /// `onSizeCycle`'s answer for each type asked about.
+    size_cycles: collections.DenseMapUnmanaged(TypeId, bool) = .empty,
+    /// Whether all inline paths end before a cycle or a substitution.
+    bounded_inline: collections.DenseMapUnmanaged(TypeId, bool) = .empty,
 
     const Committed = struct { idx: layout.Idx, digest: ?layout.GraphDigest };
-
-    const no_component = std.math.maxInt(u32);
 
     /// A component a type's descriptor composes from: one stored inline, in
     /// a struct slot (a record field or tuple element), as a tag's payload,
@@ -74,6 +76,8 @@ pub const Layouts = struct {
         var vars = self.member_vars.valueIterator();
         while (vars.next()) |slice| self.allocator.free(slice.*);
         self.member_vars.deinit(self.allocator);
+        self.size_cycles.deinit(self.allocator);
+        self.bounded_inline.deinit(self.allocator);
     }
 
     /// The components `ty`'s descriptor composes from: those it stores
@@ -114,11 +118,10 @@ pub const Layouts = struct {
     /// components, or null when `ty` is in no cycle. Every type of a
     /// component reaches every other, so all are open when one is.
     pub fn recursiveComponent(self: *Layouts, ty: TypeId) Allocator.Error!?u32 {
-        if (self.components.get(ty)) |component| return if (component == no_component) null else component;
+        if (self.components.get(ty)) |component| return component.get();
         if (try self.converter.representationClosed(ty)) return null;
         try self.placeComponents(ty, .all);
-        const component = self.components.get(ty).?;
-        return if (component == no_component) null else component;
+        return self.components.get(ty).?.get();
     }
 
     /// The recursive component of the open type `ty` in the graph of the
@@ -127,16 +130,22 @@ pub const Layouts = struct {
     /// a cycle that would otherwise place a type inside itself, so a type
     /// recursive only through a list or box has no boxed slot.
     fn sizeComponent(self: *Layouts, ty: TypeId) Allocator.Error!?u32 {
-        if (self.size_components.get(ty)) |component| return if (component == no_component) null else component;
+        if (self.size_components.get(ty)) |component| return component.get();
         if (try self.converter.representationClosed(ty)) return null;
         try self.placeComponents(ty, .size);
-        const component = self.size_components.get(ty).?;
-        return if (component == no_component) null else component;
+        return self.size_components.get(ty).?.get();
     }
 
     /// Whether the closed type `ty` stores itself inline, through its
     /// components: the cycles a committed layout breaks with recursion boxes.
     pub fn onSizeCycle(self: *Layouts, ty: TypeId) Allocator.Error!bool {
+        if (self.size_cycles.get(ty)) |answer| return answer;
+        const answer = try self.findSizeCycle(ty);
+        try self.size_cycles.put(self.allocator, ty, answer);
+        return answer;
+    }
+
+    fn findSizeCycle(self: *Layouts, ty: TypeId) Allocator.Error!bool {
         var seen: collections.DenseMapUnmanaged(TypeId, void) = .empty;
         defer seen.deinit(self.allocator);
         var pending: std.ArrayList(TypeId) = .empty;
@@ -156,12 +165,59 @@ pub const Layouts = struct {
         return false;
     }
 
+    /// Whether the type's inline size is bounded independently of all
+    /// substitutions. Such a type cannot be a node on a recursive size
+    /// cycle in any instantiation, even if it contains generic lists.
+    pub fn alwaysInlineComponent(self: *Layouts, ty: TypeId) Allocator.Error!bool {
+        if (self.inlineBound(ty)) |bound| return bound;
+        const Frame = struct { ty: TypeId, end: usize };
+        var frames: std.ArrayList(Frame) = .empty;
+        defer frames.deinit(self.allocator);
+        var edges: std.ArrayList(InlineEdge) = .empty;
+        defer edges.deinit(self.allocator);
+        var current = ty;
+        descend: while (true) {
+            const start = edges.items.len;
+            // An edge back to an active frame closes a size cycle. Every
+            // active ancestor then has an unbounded inline path.
+            try self.bounded_inline.put(self.allocator, current, false);
+            try frames.append(self.allocator, .{ .ty = current, .end = start });
+            try self.inlineEdges(current, &edges);
+            while (frames.getLastOrNull()) |frame| {
+                while (edges.items.len > frame.end) {
+                    const edge = edges.pop().?;
+                    if (!edge.placesInline()) continue;
+                    if (self.inlineBound(edge.child)) |bound| {
+                        if (!bound) return false;
+                    } else {
+                        current = edge.child;
+                        continue :descend;
+                    }
+                }
+                self.bounded_inline.getPtr(frame.ty).?.* = true;
+                _ = frames.pop();
+            }
+            return true;
+        }
+    }
+
+    fn inlineBound(self: *Layouts, ty: TypeId) ?bool {
+        return switch (self.store.get(ty)) {
+            .primitive, .empty_record, .list, .box, .function => true,
+            .variable => false,
+            .record => |r| if (r.ext != .none) false else self.bounded_inline.get(ty),
+            .tag_union => |u| if (u.ext != null) false else self.bounded_inline.get(ty),
+            .nominal => |n| if (!n.has_backing) false else self.bounded_inline.get(ty),
+            .tuple => self.bounded_inline.get(ty),
+        };
+    }
+
     /// Whether `parent` stores `edge.child` in a recursion box: a struct
     /// slot or a non-struct tag payload leading back into `parent`'s size
     /// component, which the shared layout store boxes.
     pub fn boxedEdge(self: *Layouts, parent: TypeId, edge: InlineEdge) Allocator.Error!bool {
         const component = try self.sizeComponent(parent) orelse return false;
-        if (self.size_components.get(edge.child) != component) return false;
+        if ((self.size_components.get(edge.child) orelse .none) != collections.OptionalU32.some(component)) return false;
         return switch (edge.slot) {
             .field => true,
             .payload => switch (self.store.get(edge.child)) {
@@ -179,7 +235,7 @@ pub const Layouts = struct {
     pub fn pointerEdge(self: *Layouts, parent: TypeId, edge: InlineEdge) Allocator.Error!bool {
         if (edge.placesInline()) return try self.boxedEdge(parent, edge);
         const component = try self.recursiveComponent(parent) orelse return false;
-        return self.components.get(edge.child) == component;
+        return (self.components.get(edge.child) orelse .none) == collections.OptionalU32.some(component);
     }
 
     /// Tarjan's strongly connected components over the open types reachable
@@ -266,9 +322,9 @@ pub const Layouts = struct {
             if (!cyclic) for (frame.edges) |edge| {
                 if (edge.child == frame.ty) cyclic = true;
             };
-            const component: u32 = switch (edges_followed) {
-                .all => if (cyclic) @intCast(self.component_targets.items.len) else no_component,
-                .size => if (cyclic) counter else no_component,
+            const component: collections.OptionalU32 = if (!cyclic) .none else switch (edges_followed) {
+                .all => .some(@intCast(self.component_targets.items.len)),
+                .size => .some(counter),
             };
             for (members) |member| {
                 _ = on_stack.remove(member);
@@ -357,13 +413,28 @@ pub const Layouts = struct {
 
     /// The committed layout of the closed type `ty`.
     pub fn layoutOf(self: *Layouts, ty: TypeId) Allocator.Error!layout.Idx {
-        if (!try self.converter.representationClosed(ty)) types.invariant("asked for the committed layout of an open type");
+        if (std.debug.runtime_safety) {
+            if (!try self.converter.representationClosed(ty)) types.invariant("asked for the committed layout of an open type");
+        }
         if (self.memo.get(ty)) |committed| return committed.idx;
         if (try self.directLayout(ty)) |idx| {
             try self.memo.put(self.allocator, ty, .{ .idx = idx, .digest = null });
             return idx;
         }
+        return self.commitLayout(.value, ty);
+    }
 
+    /// Generic hosted externs have the declared container layout, but an open
+    /// box is opaque to the host. Only closed Roc types enter the value-layout cache.
+    pub fn hostAbiLayout(self: *Layouts, ty: TypeId) Allocator.Error!layout.Idx {
+        if (try self.converter.representationClosed(ty)) return self.layoutOf(ty);
+        if (self.store.get(ty) == .box) return self.layouts.insertBox(.opaque_ptr);
+        return self.commitLayout(.host, ty);
+    }
+
+    const LayoutUse = enum { value, host };
+
+    fn commitLayout(self: *Layouts, comptime use: LayoutUse, ty: TypeId) Allocator.Error!layout.Idx {
         var graph = layout.Graph{};
         defer graph.deinit(self.allocator);
         var nodes: collections.DenseMapUnmanaged(TypeId, layout.GraphNodeId) = .empty;
@@ -373,18 +444,19 @@ pub const Layouts = struct {
 
         // Reserve one node per reachable type that needs one; fill every
         // node once all are reserved, so back edges resolve to their node.
-        const root = try self.input(&graph, &nodes, &order, ty);
+        const root = try self.input(use, &graph, &nodes, &order, ty);
         var cursor: usize = 0;
         while (cursor < order.items.len) : (cursor += 1) {
             const node_ty = order.items[cursor];
             const node = nodes.get(node_ty).?;
-            const content = try self.nodeContent(&graph, &nodes, &order, node_ty);
+            const content = try self.nodeContent(use, &graph, &nodes, &order, node_ty);
             graph.setNode(node, content);
         }
 
         var commit = try self.layouts.commitGraph(&graph, root);
         defer commit.deinit(self.allocator);
         if (layout.graphInputCommitted(root)) |idx| return idx;
+        if (use == .host) return commit.value_layouts[@backingInt(layout.graphInputLocal(root).?)];
         var it = nodes.iterator();
         while (it.next()) |entry| {
             const index = @backingInt(entry.value_ptr.*);
@@ -409,7 +481,7 @@ pub const Layouts = struct {
         };
     }
 
-    fn input(self: *Layouts, graph: *layout.Graph, nodes: *collections.DenseMapUnmanaged(TypeId, layout.GraphNodeId), order: *std.ArrayList(TypeId), ty: TypeId) Allocator.Error!layout.GraphInput {
+    fn input(self: *Layouts, comptime use: LayoutUse, graph: *layout.Graph, nodes: *collections.DenseMapUnmanaged(TypeId, layout.GraphNodeId), order: *std.ArrayList(TypeId), ty: TypeId) Allocator.Error!layout.GraphInput {
         if (nodes.get(ty)) |node| return layout.localGraphInput(node);
         if (self.memo.get(ty)) |committed| {
             if (committed.digest) |digest| {
@@ -419,6 +491,9 @@ pub const Layouts = struct {
             }
             return layout.committedGraphInput(committed.idx);
         }
+        if (use == .host and self.store.get(ty) == .box and !try self.converter.representationClosed(ty)) {
+            return layout.committedGraphInput(try self.layouts.insertBox(.opaque_ptr));
+        }
         if (try self.directLayout(ty)) |idx| return layout.committedGraphInput(idx);
         const node = try graph.reserveNode(self.allocator);
         try nodes.put(self.allocator, ty, node);
@@ -426,17 +501,17 @@ pub const Layouts = struct {
         return layout.localGraphInput(node);
     }
 
-    fn nodeContent(self: *Layouts, graph: *layout.Graph, nodes: *collections.DenseMapUnmanaged(TypeId, layout.GraphNodeId), order: *std.ArrayList(TypeId), ty: TypeId) Allocator.Error!layout.GraphNode {
+    fn nodeContent(self: *Layouts, comptime use: LayoutUse, graph: *layout.Graph, nodes: *collections.DenseMapUnmanaged(TypeId, layout.GraphNodeId), order: *std.ArrayList(TypeId), ty: TypeId) Allocator.Error!layout.GraphNode {
         switch (self.store.get(ty)) {
-            .list => |elem| return .{ .list = try self.input(graph, nodes, order, elem) },
-            .box => |payload| return .{ .box = try self.input(graph, nodes, order, payload) },
+            .list => |elem| return .{ .list = try self.input(use, graph, nodes, order, elem) },
+            .box => |payload| return .{ .box = try self.input(use, graph, nodes, order, payload) },
             .tuple => |items_span| {
                 const items = try self.allocator.dupe(TypeId, self.store.span(items_span));
                 defer self.allocator.free(items);
                 const fields = try self.allocator.alloc(layout.GraphField, items.len);
                 defer self.allocator.free(fields);
                 for (items, fields, 0..) |item, *field, index| {
-                    field.* = .{ .index = @intCast(index), .child = try self.input(graph, nodes, order, item) };
+                    field.* = .{ .index = @intCast(index), .child = try self.input(use, graph, nodes, order, item) };
                 }
                 return .{ .struct_ = try graph.appendFields(self.allocator, fields) };
             },
@@ -448,12 +523,12 @@ pub const Layouts = struct {
                 defer self.allocator.free(fields);
                 if (record.declared.get()) |declared| {
                     for (self.store.declaredSlots(declared), fields) |slot, *field| {
-                        field.* = .{ .index = slot, .child = try self.input(graph, nodes, order, storage[slot]), .is_padding = slot >= record.fields.len };
+                        field.* = .{ .index = slot, .child = try self.input(use, graph, nodes, order, storage[slot]), .is_padding = slot >= record.fields.len };
                     }
                     return .{ .struct_ = graph.declaredOrder(try graph.appendFields(self.allocator, fields)) };
                 }
                 for (storage, fields, 0..) |slot_ty, *field, index| {
-                    field.* = .{ .index = @intCast(index), .child = try self.input(graph, nodes, order, slot_ty) };
+                    field.* = .{ .index = @intCast(index), .child = try self.input(use, graph, nodes, order, slot_ty) };
                 }
                 return .{ .struct_ = try graph.appendFields(self.allocator, fields) };
             },
@@ -467,7 +542,7 @@ pub const Layouts = struct {
                     const payloads = try self.allocator.dupe(TypeId, self.store.span(tag.payloads));
                     defer self.allocator.free(payloads);
                     ref.* = if (try self.tagPayload(payloads)) |payload|
-                        try self.input(graph, nodes, order, payload)
+                        try self.input(use, graph, nodes, order, payload)
                     else
                         layout.committedGraphInput(.zst);
                 }
@@ -476,7 +551,7 @@ pub const Layouts = struct {
             .nominal => |nominal| {
                 if (!nominal.has_backing) types.invariant("an opaque type without a backing reached committed layout selection");
                 const backing = try self.converter.backing(ty);
-                return .{ .nominal = try self.input(graph, nodes, order, backing) };
+                return .{ .nominal = try self.input(use, graph, nodes, order, backing) };
             },
             .primitive, .empty_record, .function, .variable => unreachable, // `directLayout` answers these
         }

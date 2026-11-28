@@ -1,8 +1,12 @@
 //! Read-only validation of host-visible callable values.
 //!
-//! Boxing is a property of an occurrence, not an ancestor: only the immediate
-//! payload may be an erased callable or an opaque iterator handle. Scoped type
-//! views preserve that occurrence through generic declarations without mutating
+//! A function the host passes or receives must be the immediate payload of a
+//! `Box`, which makes it a callable the host may invoke. Any other `Box` payload
+//! is held by the host as one allocation of a statically known size, and every
+//! function a `Box` holds is an erased callable, so functions anywhere inside
+//! such a payload, including the step function of an `Iter` or `Stream`, are
+//! accepted and their signatures are not host-visible. Scoped type views preserve
+//! every occurrence's position through generic declarations without mutating
 //! the solver. Paths are retained as parent links and rendered only on failure.
 
 const std = @import("std");
@@ -11,12 +15,27 @@ const base = @import("base");
 const TypeView = @import("type_view.zig");
 
 /// Builtin identities whose payload visibility differs from a user nominal.
-pub const Builtin = enum { box, list, iter, stream, other };
-/// The value that needs its own immediate Box.
-pub const Kind = enum { function, iter, stream };
-/// A rejected occurrence and its allocator-owned source-level path.
-pub const Violation = struct { kind: Kind, path: []u8 };
-const Position = enum { signature, value, box_payload };
+pub const Builtin = enum { box, list, other };
+/// A rejected unboxed function and its allocator-owned source-level path.
+pub const Violation = struct { path: []u8 };
+const Position = enum {
+    /// The root of a host-visible declaration's type.
+    signature,
+    /// A value the host passes, receives, or reads.
+    value,
+    /// The immediate payload of a `Box`.
+    box_payload,
+    /// A part of a non-function `Box` payload, which the host only holds.
+    held,
+
+    /// The position of a value nested inside a value at this position.
+    fn part(self: Position) Position {
+        return switch (self) {
+            .signature, .value => .value,
+            .box_payload, .held => .held,
+        };
+    }
+};
 const Key = struct { var_: types.Var, position: Position };
 const Part = union(enum) {
     root,
@@ -64,50 +83,46 @@ pub fn findViolation(
             .alias => |alias| try append(allocator, &nodes, cursor, view.getAliasBackingVar(alias), key.position, .backing),
             .structure => |flat| switch (flat) {
                 .fn_pure, .fn_effectful, .fn_unbound => |func| {
-                    if (key.position == .value) return .{
-                        .kind = .function,
-                        .path = try renderPath(allocator, nodes.items, cursor, context),
-                    };
+                    switch (key.position) {
+                        .value => return .{
+                            .path = try renderPath(allocator, nodes.items, cursor, context),
+                        },
+                        // The enclosing Box erases this function, and the host
+                        // never calls it, so its signature is Roc's alone.
+                        .held => continue,
+                        .signature, .box_payload => {},
+                    }
                     for (view.sliceVars(func.args), 0..) |arg, index|
                         try append(allocator, &nodes, cursor, arg, .value, .{ .argument = index });
                     try append(allocator, &nodes, cursor, func.ret, .value, .result);
                 },
                 .nominal_type => |nominal| {
                     const builtin = context.builtin(nominal);
-                    if (builtin == .iter or builtin == .stream) {
-                        if (key.position != .box_payload) return .{
-                            .kind = if (builtin == .iter) .iter else .stream,
-                            .path = try renderPath(allocator, nodes.items, cursor, context),
-                        };
-                        // The handle's state, including its item type and step
-                        // closure, is private to Roc.
-                        continue;
-                    }
                     const args = view.sliceNominalArgs(nominal);
                     if (builtin == .box or builtin == .list) {
-                        for (args) |arg| try append(allocator, &nodes, cursor, arg, if (builtin == .box) .box_payload else .value, .payload);
+                        for (args) |arg| try append(allocator, &nodes, cursor, arg, if (builtin == .box) .box_payload else key.position.part(), .payload);
                     } else if (context.hasBacking(nominal)) {
                         if (try view.openNominalBacking(nominal)) |backing|
-                            try append(allocator, &nodes, cursor, backing, .value, .backing);
+                            try append(allocator, &nodes, cursor, backing, key.position.part(), .backing);
                     }
                 },
                 .record => |record| {
                     const fields = view.getRecordFieldsSlice(record.fields);
                     for (fields.items(.name), fields.items(.presence)) |name, presence|
-                        try append(allocator, &nodes, cursor, presence.typeVar(), .value, .{ .field = name });
-                    try append(allocator, &nodes, cursor, record.ext, .value, .backing);
+                        try append(allocator, &nodes, cursor, presence.typeVar(), key.position.part(), .{ .field = name });
+                    try append(allocator, &nodes, cursor, record.ext, key.position.part(), .backing);
                 },
                 .tuple => |tuple| {
                     for (view.sliceVars(tuple.elems), 0..) |elem, index|
-                        try append(allocator, &nodes, cursor, elem, .value, .{ .element = index });
+                        try append(allocator, &nodes, cursor, elem, key.position.part(), .{ .element = index });
                 },
                 .tag_union => |tags| {
                     const slice = view.getTagsSlice(tags.tags);
                     for (slice.items(.args)) |args| {
                         for (view.sliceVars(args), 0..) |arg, index|
-                            try append(allocator, &nodes, cursor, arg, .value, .{ .element = index });
+                            try append(allocator, &nodes, cursor, arg, key.position.part(), .{ .element = index });
                     }
-                    try append(allocator, &nodes, cursor, tags.ext, .value, .backing);
+                    try append(allocator, &nodes, cursor, tags.ext, key.position.part(), .backing);
                 },
                 .empty_record, .empty_tag_union => {},
             },

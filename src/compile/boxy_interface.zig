@@ -23,6 +23,7 @@ const Artifact = CheckedArtifact.CheckedModuleArtifact;
 const ConstStore = check.ConstStore;
 const canonical = check.CanonicalNames;
 const ModuleNames = eval.CompileTimeFinalization.ModuleNames;
+const EmbeddedUnits = @import("boxy_embedded_units.zig").Units;
 
 const Key = [32]u8;
 const Digest = [32]u8;
@@ -41,6 +42,14 @@ pub const Digests = struct {
     /// `interfaceOf` and `objectInput` (`prepare`), which then add only
     /// the imports' digests.
     prepared: std.AutoHashMapUnmanaged(Key, Prepared) = .empty,
+    /// The object inputs of the modules whose digests the compiler carries
+    /// in its binary (`embedded`), which import nothing; their interfaces
+    /// are in `interfaces` from the moment they are added.
+    object_inputs: std.AutoHashMapUnmanaged(Key, Digest) = .empty,
+    /// The digests the compiler carries in its binary (design.md "Embedded
+    /// Units"): a module of the link whose checked artifact and link name
+    /// they were computed for takes them instead of hashing itself.
+    embedded: EmbeddedUnits = .none,
     /// Guards `interfaces`, `exports` and `prepared`, which the units of a
     /// link read and record from their lanes.
     mutex: Mutex = .init,
@@ -70,24 +79,44 @@ pub const Digests = struct {
     };
 
     /// The digests of `artifacts`, every module of the link.
-    pub fn init(gpa: Allocator, io: std.Io, artifacts: []const *const Artifact) Allocator.Error!Digests {
+    pub fn init(gpa: Allocator, io: std.Io, artifacts: []const *const Artifact, embedded: EmbeddedUnits) Allocator.Error!Digests {
         const views = try gpa.alloc(CheckedArtifact.ImportedModuleView, artifacts.len);
         defer gpa.free(views);
         for (artifacts, views) |artifact, *view| view.* = CheckedArtifact.importedView(artifact);
-        var digests: Digests = .{ .gpa = gpa, .io = io, .names = try ModuleNames.fromViews(gpa, views) };
+        var digests: Digests = .{ .gpa = gpa, .io = io, .names = try ModuleNames.fromViews(gpa, views), .embedded = embedded };
         errdefer digests.deinit();
         for (artifacts) |artifact| _ = try digests.add(artifact);
         return digests;
     }
 
-    /// Add `artifact` to the link; false when it is already there.
+    /// Add `artifact` to the link; false when it is already there. A module
+    /// whose digests the compiler carries for its checked artifact and its
+    /// name in this link takes them.
     pub fn add(self: *Digests, artifact: *const Artifact) Allocator.Error!bool {
-        self.link_mutex.lockUncancelable(self.io);
-        defer self.link_mutex.unlock(self.io);
-        const entry = try self.artifacts.getOrPut(self.gpa, artifact.key.bytes);
-        if (entry.found_existing) return false;
-        entry.value_ptr.* = artifact;
-        try self.module_names.put(self.gpa, artifact.key.bytes, self.names.of(CheckedArtifact.importedView(artifact)));
+        const name = name: {
+            self.link_mutex.lockUncancelable(self.io);
+            defer self.link_mutex.unlock(self.io);
+            const entry = try self.artifacts.getOrPut(self.gpa, artifact.key.bytes);
+            if (entry.found_existing) return false;
+            entry.value_ptr.* = artifact;
+            const name = self.names.of(&CheckedArtifact.importedView(artifact));
+            try self.module_names.put(self.gpa, artifact.key.bytes, name);
+            break :name name;
+        };
+        const embedded = self.embedded.moduleDigests(artifact.key.bytes, name) orelse return true;
+        // The compiler's build embeds the digests of modules that import
+        // nothing, whose digests are therefore their own part alone.
+        std.debug.assert(artifact.direct_import_module_keys.items().len == 0);
+        if (base.dev_diagnostics.isSet(.verify_boxy_object_reuse)) {
+            var prepared = try self.prepare(artifact);
+            if (!std.mem.eql(u8, &prepared.interface.finalResult(), &embedded.interface) or !std.mem.eql(u8, &prepared.object_input.finalResult(), &embedded.object_input)) {
+                base.invariant("the embedded digests of module {s} differ from hashing it: they miss an input", .{artifact.moduleEnvConst().module_name});
+            }
+        }
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.interfaces.put(self.gpa, artifact.key.bytes, embedded.interface);
+        try self.object_inputs.put(self.gpa, artifact.key.bytes, embedded.object_input);
         return true;
     }
 
@@ -111,6 +140,7 @@ pub const Digests = struct {
         self.interfaces.deinit(self.gpa);
         self.exports.deinit(self.gpa);
         self.prepared.deinit(self.gpa);
+        self.object_inputs.deinit(self.gpa);
     }
 
     /// Hash the part of `artifact`'s digests that is a function of the
@@ -119,7 +149,7 @@ pub const Digests = struct {
     /// a link hash their own parts in parallel.
     pub fn ensurePrepared(self: *Digests, artifact: *const Artifact) Allocator.Error!void {
         self.mutex.lockUncancelable(self.io);
-        const known = self.prepared.contains(artifact.key.bytes);
+        const known = self.prepared.contains(artifact.key.bytes) or self.object_inputs.contains(artifact.key.bytes);
         self.mutex.unlock(self.io);
         if (known) return;
         const prepared = try self.prepare(artifact);
@@ -134,7 +164,7 @@ pub const Digests = struct {
     /// names, so it runs on any thread while nothing adds to the link.
     fn prepare(self: *Digests, artifact: *const Artifact) Allocator.Error!Prepared {
         var interface = Sha256.init(.{});
-        interface.update("roc.boxy.interface.v1");
+        interface.update("roc.boxy.interface.v2");
         interface.update(&self.nameOf(artifact.key.bytes));
         try self.hashPublicSurface(&interface, artifact);
         var object_input = Sha256.init(.{});
@@ -167,7 +197,7 @@ pub const Digests = struct {
     fn interfaceOfLocked(self: *Digests, artifact: *const Artifact) Allocator.Error!Digest {
         if (self.interfaces.get(artifact.key.bytes)) |known| return known;
         var hasher = (try self.preparedOf(artifact)).interface;
-        for (artifact.direct_import_module_keys) |key| {
+        for (artifact.direct_import_module_keys.items()) |key| {
             const imported = self.artifactOf(key.bytes);
             hasher.update(&try self.interfaceOfLocked(imported));
         }
@@ -195,14 +225,14 @@ pub const Digests = struct {
         switch (part) {
             .name => hasher.update(&self.nameOf(artifact.key.bytes)),
             .checking => hasher.update(&artifact.moduleEnvConst().checking_dependency.digest),
-            .templates => for (artifact.exported_procedure_templates.templates) |exported| self.hashTemplateRef(hasher, artifact, exported.template),
+            .templates => for (artifact.exported_procedure_templates.templates.items()) |exported| self.hashTemplateRef(hasher, artifact, exported.template),
             .bindings => self.hashBindings(hasher, artifact),
-            .methods => self.hashMethods(hasher, artifact),
+            .methods => try self.hashMethods(hasher, artifact),
             .defaults => hasher.update(std.mem.asBytes(&@as(u32, @intCast(try artifact.bodies().defaultExprCount(self.gpa))))),
-            .nominals => hashNominals(hasher, artifact),
+            .nominals => try self.hashNominals(hasher, artifact),
             .consts => try self.hashConsts(hasher, artifact),
             .values => try self.hashStoredValues(hasher, artifact, .read_by_importers),
-            .imports => for (artifact.direct_import_module_keys) |key| {
+            .imports => for (artifact.direct_import_module_keys.items()) |key| {
                 const imported = self.artifactOf(key.bytes);
                 hasher.update(&try self.interfaceOfLocked(imported));
             },
@@ -238,8 +268,9 @@ pub const Digests = struct {
     pub fn objectInput(self: *Digests, artifact: *const Artifact) Allocator.Error!Digest {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.object_inputs.get(artifact.key.bytes)) |embedded| return embedded;
         var hasher = (try self.preparedOf(artifact)).object_input;
-        for (artifact.direct_import_module_keys) |key| {
+        for (artifact.direct_import_module_keys.items()) |key| {
             const imported = self.artifactOf(key.bytes);
             hasher.update(&try self.interfaceOfLocked(imported));
         }
@@ -256,7 +287,7 @@ pub const Digests = struct {
         var values = Sha256.init(.{});
         try self.hashStoredValues(&values, artifact, .every_root);
         var imports = Sha256.init(.{});
-        for (artifact.direct_import_module_keys) |key| {
+        for (artifact.direct_import_module_keys.items()) |key| {
             const imported = self.artifactOf(key.bytes);
             imports.update(&try self.interfaceOfLocked(imported));
         }
@@ -276,7 +307,7 @@ pub const Digests = struct {
 
     /// Called with the mutex held.
     fn hashImportedExports(self: *const Digests, hasher: *Sha256, artifact: *const Artifact) void {
-        for (artifact.direct_import_module_keys) |key| {
+        for (artifact.direct_import_module_keys.items()) |key| {
             if (self.exports.get(key.bytes)) |digest| hasher.update(&digest);
         }
     }
@@ -287,19 +318,19 @@ pub const Digests = struct {
     /// they name, and the stored values they restore.
     fn hashPublicSurface(self: *Digests, hasher: *Sha256, artifact: *const Artifact) Allocator.Error!void {
         hasher.update(&artifact.moduleEnvConst().checking_dependency.digest);
-        for (artifact.exported_procedure_templates.templates) |exported| {
+        for (artifact.exported_procedure_templates.templates.items()) |exported| {
             self.hashTemplateRef(hasher, artifact, exported.template);
         }
         self.hashBindings(hasher, artifact);
-        self.hashMethods(hasher, artifact);
+        try self.hashMethods(hasher, artifact);
         hasher.update(std.mem.asBytes(&@as(u32, @intCast(try artifact.bodies().defaultExprCount(self.gpa)))));
-        hashNominals(hasher, artifact);
+        try self.hashNominals(hasher, artifact);
         try self.hashConsts(hasher, artifact);
         try self.hashStoredValues(hasher, artifact, .read_by_importers);
     }
 
     fn hashBindings(self: *Digests, hasher: *Sha256, artifact: *const Artifact) void {
-        for (artifact.exported_procedure_bindings.bindings) |binding| {
+        for (artifact.exported_procedure_bindings.bindings.items()) |binding| {
             hashTag(hasher, @tagName(std.meta.activeTag(binding.body)));
             switch (binding.body) {
                 .direct_template => |direct| switch (direct.template) {
@@ -311,50 +342,149 @@ pub const Digests = struct {
         }
     }
 
-    fn hashMethods(self: *Digests, hasher: *Sha256, artifact: *const Artifact) void {
-        for (artifact.method_registry.entries) |entry| {
-            const target = entry.target orelse {
-                hashTag(hasher, "rejected");
-                continue;
-            };
-            hashTag(hasher, @tagName(std.meta.activeTag(target.kind)));
-            switch (target.kind) {
-                .procedure => |procedure| self.hashTemplateRef(hasher, artifact, procedure.template),
-                .callable_binding => |binding| hashBytes(hasher, std.mem.asBytes(&@backingInt(binding.template))),
-                .local_proc, .structural => {},
-            }
-        }
-    }
-
-    fn hashNominals(hasher: *Sha256, artifact: *const Artifact) void {
+    /// `artifact`'s registered methods, each by its owner (a builtin, or a
+    /// nominal type by its name and its position among the module's
+    /// declarations sharing that name, as a lowering names it), its method
+    /// name, and its target, in an order none of their checked ids decides.
+    fn hashMethods(self: *Digests, hasher: *Sha256, artifact: *const Artifact) Allocator.Error!void {
+        const entries = artifact.method_registry.entries.items();
+        if (entries.len == 0) return;
+        const names = &artifact.canonical_names;
         const checked_types = artifact.typesView();
-        for (checked_types.nominal_declarations) |declaration| {
-            hashBytes(hasher, artifact.canonical_names.typeNameText(checked_types.nominalDeclarationName(declaration)));
+        const declarations = checked_types.nominal_declarations;
+        // Each declaration's place among the declarations of its name,
+        // then the declarations by key for the owners' lookups.
+        const by_name = try self.gpa.alloc(u32, declarations.len);
+        defer self.gpa.free(by_name);
+        for (by_name, 0..) |*slot, index| slot.* = @intCast(index);
+        std.mem.sort(u32, by_name, checked_types, struct {
+            fn lessThan(types_view: CheckedArtifact.CheckedTypeStoreView, a: u32, b: u32) bool {
+                const name_a = @backingInt(types_view.nominalDeclarationName(types_view.nominal_declarations[a]));
+                const name_b = @backingInt(types_view.nominalDeclarationName(types_view.nominal_declarations[b]));
+                return name_a < name_b or (name_a == name_b and a < b);
+            }
+        }.lessThan);
+        const Owner = struct { key: canonical.NominalTypeKey, name: canonical.TypeNameId, ordinal: u32 };
+        const owners = try self.gpa.alloc(Owner, declarations.len);
+        defer self.gpa.free(owners);
+        for (by_name, 0..) |index, at| {
+            const name = checked_types.nominalDeclarationName(declarations[index]);
+            const same = at != 0 and checked_types.nominalDeclarationName(declarations[by_name[at - 1]]) == name;
+            owners[at] = .{ .key = declarations[index].nominal, .name = name, .ordinal = if (same) owners[at - 1].ordinal + 1 else 0 };
+        }
+        const keyOrder = struct {
+            fn lessThan(_: void, a: Owner, b: Owner) bool {
+                return keyLess(a.key, b.key);
+            }
+            fn keyLess(a: canonical.NominalTypeKey, b: canonical.NominalTypeKey) bool {
+                const module_a = @backingInt(a.module);
+                const module_b = @backingInt(b.module);
+                return module_a < module_b or (module_a == module_b and a.source_decl < b.source_decl);
+            }
+            fn order(key: canonical.NominalTypeKey, owner: Owner) std.math.Order {
+                if (keyLess(key, owner.key)) return .lt;
+                if (keyLess(owner.key, key)) return .gt;
+                return .eq;
+            }
+        };
+        std.mem.sort(Owner, owners, {}, keyOrder.lessThan);
+        const digests = try self.gpa.alloc([32]u8, entries.len);
+        defer self.gpa.free(digests);
+        for (entries, digests) |entry, *digest| {
+            var entry_hasher = Sha256.init(.{});
+            switch (entry.key.owner) {
+                .builtin => |builtin| hashTag(&entry_hasher, @tagName(builtin)),
+                .nominal => |key| {
+                    const found = std.sort.binarySearch(Owner, owners, key, keyOrder.order) orelse
+                        base.invariant("a registered method's owner is no nominal declaration of its module", .{});
+                    hashBytes(&entry_hasher, names.typeNameText(owners[found].name));
+                    entry_hasher.update(std.mem.asBytes(&owners[found].ordinal));
+                },
+            }
+            hashBytes(&entry_hasher, names.methodNameText(entry.key.method));
+            if (entry.target) |target| {
+                hashTag(&entry_hasher, @tagName(std.meta.activeTag(target.kind)));
+                switch (target.kind) {
+                    .procedure => |procedure| self.hashTemplateRef(&entry_hasher, artifact, procedure.template),
+                    .callable_binding => |binding| hashBytes(&entry_hasher, std.mem.asBytes(&@backingInt(binding.template))),
+                    .local_proc, .structural => {},
+                }
+            } else hashTag(&entry_hasher, "rejected");
+            digest.* = entry_hasher.finalResult();
+        }
+        std.mem.sort([32]u8, digests, {}, struct {
+            fn lessThan(_: void, a: [32]u8, b: [32]u8) bool {
+                return std.mem.order(u8, &a, &b) == .lt;
+            }
+        }.lessThan);
+        for (digests) |digest| hasher.update(&digest);
+    }
+
+    /// The names a lowering gives `artifact`'s nominal declarations: each
+    /// is its name and its position among the declarations sharing it
+    /// (`types.Converter.declName`), so this hashes each name with the
+    /// number of declarations of it, in name order. Where a declaration of
+    /// another name lies changes no name.
+    fn hashNominals(self: *Digests, hasher: *Sha256, artifact: *const Artifact) Allocator.Error!void {
+        const checked_types = artifact.typesView();
+        const names = try self.gpa.alloc(canonical.TypeNameId, checked_types.nominal_declarations.len);
+        defer self.gpa.free(names);
+        for (names, checked_types.nominal_declarations) |*name, declaration| name.* = checked_types.nominalDeclarationName(declaration);
+        std.mem.sort(canonical.TypeNameId, names, &artifact.canonical_names, struct {
+            fn lessThan(store: *const canonical.CanonicalNameStore, a: canonical.TypeNameId, b: canonical.TypeNameId) bool {
+                return std.mem.order(u8, store.typeNameText(a), store.typeNameText(b)) == .lt;
+            }
+        }.lessThan);
+        var at: usize = 0;
+        while (at < names.len) {
+            var count: u32 = 1;
+            while (at + count < names.len and names[at + count] == names[at]) count += 1;
+            hashBytes(hasher, artifact.canonical_names.typeNameText(names[at]));
+            hasher.update(std.mem.asBytes(&count));
+            at += count;
         }
     }
 
+    /// `artifact`'s exposed constants, the only ones another unit reads: an
+    /// importer's reference resolves to an exported constant
+    /// (`importedConstTemplateForDef`), and a private constant is read only
+    /// by its own module's code, whose object holds its value. A function
+    /// value compile-time evaluation stored for an exposed constant is read
+    /// whatever its template says.
     fn hashConsts(self: *Digests, hasher: *Sha256, artifact: *const Artifact) Allocator.Error!void {
-        const exported_consts = artifact.exported_const_templates.templates;
-        for (exported_consts) |exported| try self.hashConstTemplate(hasher, artifact, exported.template);
-        for (artifact.const_templates.templates.items) |template| switch (template.owner) {
-            .top_level_binding => try self.hashConstTemplate(hasher, artifact, template),
-            .hoisted_root => {},
-        };
+        for (artifact.exported_const_templates.templates.items()) |exported| {
+            try self.hashConstTemplate(hasher, artifact, exported.template);
+            const root_id = switch (exported.template.owner) {
+                .top_level_binding => |top_level| artifact.compile_time_roots.lookupIdByPattern(top_level.pattern) orelse continue,
+                .hoisted_root => continue,
+            };
+            const root = artifact.compile_time_roots.root(root_id);
+            if (root.boxy_value != null) try self.hashRootValue(hasher, artifact, root);
+        }
     }
 
-    /// The name of `ref`'s worker, and the hidden inputs a call to it
-    /// passes when `artifact` declares it. An imported template's are part of
-    /// its own module's interface.
+    /// The name of `ref`'s worker (its module's link name and the
+    /// template's name, `ImportedModuleView.templateName`, never its
+    /// position), and the hidden inputs a call to it passes when `artifact`
+    /// declares it. An imported template's are part of its own module's
+    /// interface.
     fn hashTemplateRef(self: *Digests, hasher: *Sha256, artifact: *const Artifact, ref: canonical.ProcedureTemplateRef) void {
         hasher.update(&self.nameOf(ref.artifact.bytes));
-        hasher.update(std.mem.asBytes(&@as(u32, @backingInt(ref.template))));
-        if (!std.mem.eql(u8, &ref.artifact.bytes, &artifact.key.bytes)) return;
+        const own = std.mem.eql(u8, &ref.artifact.bytes, &artifact.key.bytes);
+        const owner = if (own) artifact else self.artifactOf(ref.artifact.bytes);
+        hashTemplateName(hasher, CheckedArtifact.importedView(owner).templateName(ref.template));
+        if (!own) return;
         const templates = &artifact.checked_procedure_templates;
-        const template = templates.templates.items[@backingInt(ref.template)];
+        const template = templates.templates.items()[@backingInt(ref.template)];
         hasher.update(std.mem.asBytes(&template.scheme_vars.len));
-        for (templates.evidence_params_pool[template.evidence_params.start..][0..template.evidence_params.len]) |param| {
+        // An importer's worker for the template takes a hidden input per
+        // closed row node.
+        hasher.update(std.mem.asBytes(&template.closed_row_nodes.len));
+        for (templates.evidence_params_pool.items()[template.evidence_params.start..][0..template.evidence_params.len]) |param| {
             hashBytes(hasher, artifact.canonical_names.methodNameText(param.method));
-            hasher.update(std.mem.asBytes(&(param.slot.get() orelse @as(u32, std.math.maxInt(u32)))));
+            const slot = param.slot.get();
+            hasher.update(&.{@intFromBool(slot != null)});
+            if (slot) |present| hasher.update(std.mem.asBytes(&present));
         }
         hasher.update(std.mem.asBytes(&@as(u32, @intCast(templates.templateLiteralRequirements(&template).len))));
     }
@@ -377,17 +507,29 @@ pub const Digests = struct {
     }
 
     /// `read_by_importers` names the roots an importer restores whatever
-    /// their constant template says: callable bindings, and function values
-    /// a `.boxy` program stored (design.md "Stored Function Values").
+    /// their constant template says: callable bindings, whose stored
+    /// function values a method bound to one or an exposed binding restores
+    /// (design.md "Stored Function Values"), and polymorphic constant
+    /// instances, which an importer deriving an instance from its types
+    /// restores from whichever module holds it (design.md "Polymorphic
+    /// Constants"). An exposed constant's stored function value is in
+    /// `hashConsts`.
     const RootScope = enum { every_root, read_by_importers };
 
     /// The values of `artifact`'s compile-time roots in `scope`. A module's
     /// own object stores all of them.
     fn hashStoredValues(self: *Digests, hasher: *Sha256, artifact: *const Artifact, scope: RootScope) Allocator.Error!void {
-        for (artifact.compile_time_roots.roots) |root| {
+        for (artifact.compile_time_roots.roots.items()) |root| {
             switch (scope) {
                 .every_root => {},
-                .read_by_importers => if (root.kind != .callable_binding and root.boxy_value == null) continue,
+                .read_by_importers => switch (root.kind) {
+                    .callable_binding => {},
+                    .literal_argument => {
+                        const argument = root.literal_argument orelse base.invariant("a literal argument root records no literal argument", .{});
+                        if (argument.site.kind != .constant_instance or argument.sealed) continue;
+                    },
+                    .constant, .hoisted_constant, .hoisted_validation, .expect, .numeral_conversion, .quote_conversion, .interpolation_conversion, .repl_expr => continue,
+                },
             }
             try self.hashRootValue(hasher, artifact, root);
         }
@@ -398,7 +540,12 @@ pub const Digests = struct {
         const payload = root.payloadFor(.boxy);
         hashTag(hasher, @tagName(std.meta.activeTag(payload)));
         switch (payload) {
-            .const_node => |node| try artifact.const_store.hashGraph(self.gpa, node, hasher, context),
+            // A value that is data alone names itself by the digest its
+            // image was stored with, which nothing recomputes.
+            .const_node => |node| if (artifact.const_store.imageOf(node)) |image| {
+                hashTag(hasher, "image");
+                hasher.update(&artifact.const_store.image(image).digest);
+            } else try artifact.const_store.hashGraph(self.gpa, node, hasher, context),
             .fn_value => |id| hasher.update(&context.fnValueDigest(id)),
             .pending, .unevaluated, .discarded, .expect, .runtime => {},
         }
@@ -421,6 +568,17 @@ const ValueContext = struct {
         return self.artifact.key.bytes;
     }
 };
+
+fn hashTemplateName(hasher: *Sha256, name: CheckedArtifact.TemplateName) void {
+    hashTag(hasher, @tagName(std.meta.activeTag(name)));
+    switch (name) {
+        .definition, .constant => |named| {
+            hashBytes(hasher, named.text);
+            hasher.update(std.mem.asBytes(&named.shadow));
+        },
+        .position => |index| hasher.update(std.mem.asBytes(&index)),
+    }
+}
 
 fn hashTag(hasher: *Sha256, tag: []const u8) void {
     hasher.update(tag);

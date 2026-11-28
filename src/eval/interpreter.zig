@@ -570,7 +570,9 @@ pub const Interpreter = struct {
     const FrameSlotColumn = collections.OptionalIndexColumn(FrameSlotId);
 
     const FrameSlotIndex = struct {
-        span: LIR.LocalSpan,
+        /// The frame-local span this index was built from; absent while it
+        /// is not built.
+        span: collections.OptionalStruct(LIR.LocalSpan, "start"),
         base: u32,
         slot_of: FrameSlotColumn,
         /// The slots of the frame's zero-sized locals.
@@ -581,11 +583,15 @@ pub const Interpreter = struct {
         storage_sizes: []u32 = &.{},
         storage_size: usize = 0,
         storage_alignment: layout_mod.RocAlignment = .@"1",
-        /// The slots of the frame's `frame`-storage dynamic locals, whose
-        /// bytes the procedure's `frame_alloc` places.
+        /// The slots of the frame's `frame`- and `frame_callable`-storage
+        /// dynamic locals, whose bytes the procedure's `frame_alloc` places.
         dyn_frame_slots: []u32 = &.{},
+        /// The storage of each frame packing (`PackedErasedFnData.frame`),
+        /// sorted by statement.
+        frame_callables: []FrameCallableSlot = &.{},
 
         fn deinit(self: *FrameSlotIndex, allocator: Allocator) void {
+            allocator.free(self.frame_callables);
             self.slot_of.deinit(allocator);
             allocator.free(self.zst_slots);
             allocator.free(self.dyn_frame_slots);
@@ -593,6 +599,18 @@ pub const Interpreter = struct {
             allocator.free(self.storage_sizes);
         }
     };
+
+    /// Where in its frame's storage one frame packing builds its callable:
+    /// the callable's refcount word sits just before `offset +
+    /// frame_callable_prefix`, its data pointer.
+    const FrameCallableSlot = struct {
+        stmt: CFStmtId,
+        offset: u32,
+    };
+
+    /// Bytes of frame-callable storage before the callable's data pointer,
+    /// whose last word is the refcount word.
+    const frame_callable_prefix: u32 = builtins.erased_callable.payload_alignment;
 
     const Frame = struct {
         proc_id: LirProcSpecId,
@@ -616,6 +634,8 @@ pub const Interpreter = struct {
         storage_sizes: []const u32,
         /// See `FrameSlotIndex.dyn_frame_slots`.
         dyn_frame_slots: []const u32,
+        /// See `FrameSlotIndex.frame_callables`.
+        frame_callables: []const FrameCallableSlot,
         /// The result storage the caller passed, for a procedure whose result
         /// is dynamic (`LirProcSpec.dyn_result`).
         dyn_result: ?[*]u8 = null,
@@ -1030,9 +1050,9 @@ pub const Interpreter = struct {
     pub fn getFailedSourceFile(self: *const LirInterpreter) ?base.SourceFileEntry {
         if (!self.failed_stmt_loc.hasLocation()) return null;
         return .{
-            .name = self.store.sourceFileName(self.failed_stmt_loc.file),
-            .qualified_name = self.store.sourceFileQualifiedName(self.failed_stmt_loc.file),
-            .module_identity = self.store.sourceFileModuleIdentity(self.failed_stmt_loc.file),
+            .name = self.store.sourceFileName(self.failed_stmt_loc.fileIndex()),
+            .qualified_name = self.store.sourceFileQualifiedName(self.failed_stmt_loc.fileIndex()),
+            .module_identity = self.store.sourceFileModuleIdentity(self.failed_stmt_loc.fileIndex()),
         };
     }
 
@@ -1528,12 +1548,12 @@ pub const Interpreter = struct {
                 if (self.active_stmt_id) |stmt_id| {
                     const loc = self.store.stmtLoc(stmt_id);
                     if (loc.hasLocation()) {
-                        debugPrint("  source={s}:{d}:{d}\n", .{ self.store.sourceFileName(loc.file), loc.line, loc.column });
+                        debugPrint("  source={s}:{d}:{d}\n", .{ self.store.sourceFileName(loc.fileIndex()), loc.line, loc.column });
                     }
                 }
                 const proc_loc = self.store.procLoc(frame.proc_id);
                 if (proc_loc.hasLocation()) {
-                    debugPrint("  proc_source={s}:{d}:{d}\n", .{ self.store.sourceFileName(proc_loc.file), proc_loc.line, proc_loc.column });
+                    debugPrint("  proc_source={s}:{d}:{d}\n", .{ self.store.sourceFileName(proc_loc.fileIndex()), proc_loc.line, proc_loc.column });
                 }
                 const params = self.store.getLocalSpan(proc.args);
                 debugPrint("  proc params:", .{});
@@ -1851,6 +1871,11 @@ pub const Interpreter = struct {
                     );
                 }
 
+                // A tag union local whose residual shell names its one slot
+                // copies a payload whose stored unit has left; only its tag
+                // is readable.
+                if (path_len == 0 and residual_shell_absent_fields.len != 0) return;
+
                 const payload_layout = tag_union_info.variants.get(disc).payload_layout;
                 if (self.helper.sizeOf(payload_layout) == 0) return;
 
@@ -2084,7 +2109,7 @@ pub const Interpreter = struct {
         defer self.call_depth -= 1;
 
         var frame = try self.initFrame(proc_id, proc_spec);
-        defer self.frame_stack.restore(frame.stack_mark);
+        defer self.leaveFrame(&frame);
         frame.caller_drives = self.erased_caller_drives;
         self.erased_caller_drives = false;
         if (proc_spec.dyn_result.get()) |result_local| {
@@ -2273,8 +2298,70 @@ pub const Interpreter = struct {
             .storage_offsets = slot_index.storage_offsets,
             .storage_sizes = slot_index.storage_sizes,
             .dyn_frame_slots = slot_index.dyn_frame_slots,
+            .frame_callables = slot_index.frame_callables,
             .stack_mark = stack_mark,
         };
+    }
+
+    /// The data pointer of the callable frame packing `stmt` builds in
+    /// `frame`'s storage.
+    fn frameCallableData(frame: *const Frame, stmt: CFStmtId) [*]u8 {
+        var low: usize = 0;
+        var high: usize = frame.frame_callables.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const slot = frame.frame_callables[mid];
+            if (slot.stmt == stmt) return frame.storage + slot.offset + frame_callable_prefix;
+            if (@backingInt(slot.stmt) < @backingInt(stmt)) low = mid + 1 else high = mid;
+        }
+        base.invariant("LIR/interpreter invariant violated: frame packing {d} has no frame storage", .{@backingInt(stmt)});
+    }
+
+    /// End `frame`: in a debug build, retire its frame callables first, so a
+    /// callable that outlived its frame fails when anything retains,
+    /// releases or calls it.
+    fn leaveFrame(self: *LirInterpreter, frame: *const Frame) void {
+        if (std.debug.runtime_safety) {
+            for (frame.frame_callables) |slot| builtins.erased_callable.retireFrame(frame.storage + slot.offset + frame_callable_prefix);
+        }
+        self.frame_stack.restore(frame.stack_mark);
+    }
+
+    /// The bytes one frame packing's storage takes: the refcount prefix, the
+    /// erased-callable header and the capture, as `evalPackedErasedFn`
+    /// lays them out.
+    fn frameCallableBytes(self: *LirInterpreter, data: LIR.PackedErasedFnData) usize {
+        const capture_value_size: usize = if (data.capture_layout.get()) |capture_layout| self.helper.sizeOf(capture_layout) else 0;
+        return frame_callable_prefix + builtins.erased_callable.payloadSize(erased_callable_context_capture_offset + capture_value_size);
+    }
+
+    /// The bytes a frame closure whose capture record `desc` describes takes
+    /// in the dynamic frame region, laid out as `allocInterpreterClosure`
+    /// lays out a heap one, after the refcount prefix.
+    fn frameClosureBytes(desc: *const boxy.TypeDesc) usize {
+        return frame_callable_prefix + builtins.erased_callable.payloadSize(erased_callable_context_capture_offset + desc.size);
+    }
+
+    /// The frame packings of `proc_id`'s body, sorted by statement.
+    fn collectFramePackings(self: *LirInterpreter, proc_id: LirProcSpecId) Allocator.Error![]const CFStmtId {
+        const spec = self.store.getProcSpecImmediate(proc_id);
+        if (!spec.shapes.erased_pack) return &.{};
+        const body = spec.body.get() orelse return &.{};
+        var packs = std.ArrayList(CFStmtId).empty;
+        errdefer packs.deinit(self.allocator);
+        var walk = try lir.BodyClone.ReachableStmts.initWithAllocator(self.store, body, self.allocator);
+        defer walk.deinit();
+        while (try walk.next()) |stmt_id| {
+            const stmt = self.store.getCFStmt(stmt_id);
+            if (stmt != .assign_packed_erased_fn) continue;
+            if (self.store.stmtRow(stmt.assign_packed_erased_fn.data).frame) try packs.append(self.allocator, stmt_id);
+        }
+        std.mem.sort(CFStmtId, packs.items, {}, struct {
+            fn lessThan(_: void, a: CFStmtId, b: CFStmtId) bool {
+                return @backingInt(a) < @backingInt(b);
+            }
+        }.lessThan);
+        return packs.toOwnedSlice(self.allocator);
     }
 
     /// The slot index of `proc_id`, built from its sorted frame locals on
@@ -2287,14 +2374,16 @@ pub const Interpreter = struct {
     ) Allocator.Error!FrameSlotIndex {
         const entry = try self.frame_slot_indexes.getOrPut(proc_id);
         if (entry.found_existing) {
-            if (entry.value_ptr.span.start == span.start and entry.value_ptr.span.len == span.len) return entry.value_ptr.*;
+            if (entry.value_ptr.span.get()) |built| {
+                if (built.start == span.start and built.len == span.len) return entry.value_ptr.*;
+            }
             entry.value_ptr.deinit(self.allocator);
         }
-        // Until the index is built, the entry names a span no procedure has,
-        // so a failed build is rebuilt on the next entry.
-        entry.value_ptr.* = .{ .span = .{ .start = std.math.maxInt(u32), .len = std.math.maxInt(u32) }, .base = 0, .slot_of = .{} };
+        // Until the index is built, the entry names no span, so a failed
+        // build is rebuilt on the next entry.
+        entry.value_ptr.* = .{ .span = .none, .base = 0, .slot_of = .{} };
         if (locals.len == 0) {
-            entry.value_ptr.span = span;
+            entry.value_ptr.span = .some(span);
             return entry.value_ptr.*;
         }
         const base_id = @backingInt(GuardedList.at(locals, 0));
@@ -2309,7 +2398,7 @@ pub const Interpreter = struct {
             const local = self.store.getLocal(local_id);
             if (self.layout_store.getLayout(local.layout_idx).tag == .zst) zst_count += 1;
             if (local.dyn) |dyn| {
-                if (dyn.storage == .frame) dyn_frame_count += 1;
+                if (dyn.storage == .frame or dyn.storage == .frame_callable) dyn_frame_count += 1;
             }
         }
         const zst_slots = try self.allocator.alloc(u32, zst_count);
@@ -2332,7 +2421,7 @@ pub const Interpreter = struct {
                 next_zst += 1;
             }
             if (self.store.getLocal(local_id).dyn) |dyn| {
-                if (dyn.storage == .frame) {
+                if (dyn.storage == .frame or dyn.storage == .frame_callable) {
                     dyn_frame_slots[next_dyn_frame] = @intCast(slot);
                     next_dyn_frame += 1;
                 }
@@ -2344,8 +2433,21 @@ pub const Interpreter = struct {
             storage_size += sa.size;
             storage_alignment = maxRocAlignment(storage_alignment, sa.alignment);
         }
+        const packs = try self.collectFramePackings(proc_id);
+        defer self.allocator.free(packs);
+        const frame_callables = try self.allocator.alloc(FrameCallableSlot, packs.len);
+        errdefer self.allocator.free(frame_callables);
+        if (packs.len != 0) {
+            const callable_alignment: layout_mod.RocAlignment = .fromByteUnits(builtins.erased_callable.payload_alignment);
+            storage_alignment = maxRocAlignment(storage_alignment, callable_alignment);
+            for (packs, frame_callables) |pack, *slot| {
+                storage_size = std.mem.alignForward(usize, storage_size, builtins.erased_callable.payload_alignment);
+                slot.* = .{ .stmt = pack, .offset = std.math.cast(u32, storage_size) orelse return error.OutOfMemory };
+                storage_size += self.frameCallableBytes(self.store.stmtRow(self.store.getCFStmtImmediate(pack).assign_packed_erased_fn.data));
+            }
+        }
         entry.value_ptr.* = .{
-            .span = span,
+            .span = .some(span),
             .base = base_id,
             .slot_of = slot_of,
             .zst_slots = zst_slots,
@@ -2354,6 +2456,7 @@ pub const Interpreter = struct {
             .storage_size = storage_size,
             .storage_alignment = storage_alignment,
             .dyn_frame_slots = dyn_frame_slots,
+            .frame_callables = frame_callables,
         };
         return entry.value_ptr.*;
     }
@@ -2381,7 +2484,21 @@ pub const Interpreter = struct {
             switch (self.store.getCFStmtImmediate(current).*) {
                 .assign_ref => |assign| {
                     if (assign.op.kind == .field and self.store.getLocal(assign.op.source).dyn != null) {
-                        try self.execDyn(frame, current, assign.target, .{ .field_addr = .{ .base = assign.op.source, .desc = self.store.getLocal(assign.op.source).dyn.?.desc, .field_index = .{ .immediate = assign.op.index } } });
+                        const record_desc = self.store.getLocal(assign.op.source).dyn.?.desc;
+                        try self.execDyn(frame, current, assign.target, .{ .field_addr = .{ .base = assign.op.source, .desc = record_desc, .field_index = .{ .immediate = assign.op.index } } });
+                        // Release the slot a stamped field take left
+                        // (`LIR.RefExtra.releases_recursion_box`).
+                        if (self.store.stmtRowOrDefault(assign.extra).releases_recursion_box) {
+                            boxy.compiled.fieldReleaseBox(try self.descAt(frame, record_desc), try self.localBytes(frame, assign.op.source), assign.op.index, &self.roc_ops);
+                        }
+                        current = assign.next;
+                        continue;
+                    }
+                    if (assign.op.kind == .tag_payload_struct and self.store.getLocal(assign.op.source).dyn != null) {
+                        try self.execDyn(frame, current, assign.target, .{ .tag_payload_addr = .{ .base = assign.op.source, .desc = self.store.getLocal(assign.op.source).dyn.?.desc, .payload_index = 0 } });
+                        if (self.store.stmtRowOrDefault(assign.extra).releases_recursion_box) {
+                            boxy.compiled.tagPayloadReleaseBox(try self.descAt(frame, self.store.getLocal(assign.op.source).dyn.?.desc), try self.localBytes(frame, assign.op.source), &self.roc_ops);
+                        }
                         current = assign.next;
                         continue;
                     }
@@ -2548,7 +2665,7 @@ pub const Interpreter = struct {
                         frame,
                         current,
                         assign_stmt.target,
-                        try self.evalPackedErasedFn(frame, assign, self.store.getLocal(assign_stmt.target).layout_idx),
+                        try self.evalPackedErasedFn(frame, current, assign, self.store.getLocal(assign_stmt.target).layout_idx),
                         false,
                     );
                     current = assign_stmt.next;
@@ -3072,15 +3189,24 @@ pub const Interpreter = struct {
             builtins.erased_callable.payload_alignment,
             builtins.erased_callable.allocation_has_refcounted_children,
         );
+        if (self.retained_owner) |owner| owner.retain();
+        self.writeInterpreterClosure(data_ptr, proc, record, record_desc, self.retained_owner);
+        return data_ptr;
+    }
+
+    /// Write the header, context and capture of an interpreter closure whose
+    /// capture is the dynamic record `record` into `data_ptr`. A frame
+    /// closure holds no owner.
+    fn writeInterpreterClosure(self: *LirInterpreter, data_ptr: [*]u8, proc: LirProcSpecId, record: [*]const u8, record_desc: *const boxy.TypeDesc, owner: ?*Retained) void {
+        const capture_size = erased_callable_context_capture_offset + record_desc.size;
         builtins.erased_callable.payloadPtr(data_ptr).* = .{
             .callable_fn_ptr = &interpreterErasedCallableTrampoline,
             .on_drop = &interpreterErasedCallableOnDrop,
             .on_copy = &interpreterErasedCallableOnCopy,
             .capture_size = capture_size,
         };
-        if (self.retained_owner) |owner| owner.retain();
         erasedCallableInterpreterContextFromPayload(data_ptr).* = .{
-            .owner = self.retained_owner,
+            .owner = owner,
             .interpreter = self,
             .proc_id = @backingInt(proc),
             .drop_layout_plus_one = 0,
@@ -3091,12 +3217,15 @@ pub const Interpreter = struct {
         const capture = erasedCallableInterpreterCaptureValuePtr(data_ptr);
         @memcpy(capture[0..record_desc.size], record[0..record_desc.size]);
         @as(*align(1) usize, @ptrCast(capture + @sizeOf(usize))).* = record_desc.size;
-        return data_ptr;
     }
 
     /// Invoke `closure` with its own capture; `reuse` is the allocation an
     /// owned call transfers to it, which is `closure` or null.
     fn invokeErasedInto(self: *LirInterpreter, closure: [*]u8, ret: ?[*]u8, args: ?[*]const u8, reuse: ?[*]u8) Error!void {
+        if (std.debug.runtime_safety) {
+            const count = @as(*const isize, @ptrCast(@alignCast(closure - @sizeOf(usize)))).*;
+            if (count == builtins.utils.POISON_VALUE) self.invariantFailed("LIR/interpreter invariant violated: a frame callable was called after its frame returned", .{});
+        }
         var out_desc: ?*const anyopaque = null;
         if (interpretedCallable(closure)) |callable| {
             self.erased_caller_drives = true;
@@ -3795,22 +3924,23 @@ pub const Interpreter = struct {
     fn evalPackedErasedFn(
         self: *LirInterpreter,
         frame: *Frame,
+        stmt_id: CFStmtId,
         assign: anytype,
         target_layout: layout_mod.Idx,
     ) Error!Value {
-        const has_capture = assign.capture != null;
-        if (has_capture != (assign.capture_layout != null)) {
+        const has_capture = assign.capture != .none;
+        if (has_capture != (assign.capture_layout != .none)) {
             return self.invariantFailedError(
                 "LIR/interpreter invariant violated: packed erased fn capture/layout presence differed",
                 .{},
             );
         }
 
-        const capture_value_size: usize = if (assign.capture_layout) |capture_layout|
+        const capture_value_size: usize = if (assign.capture_layout.get()) |capture_layout|
             self.helper.sizeOf(capture_layout)
         else
             0;
-        if (assign.capture_layout) |capture_layout| {
+        if (assign.capture_layout.get()) |capture_layout| {
             const capture_align = self.helper.sizeAlignOf(capture_layout).alignment.toByteUnits();
             if (capture_align > builtins.erased_callable.capture_alignment) {
                 return self.invariantFailedError(
@@ -3821,7 +3951,13 @@ pub const Interpreter = struct {
         }
         const result = try self.alloc(target_layout);
         const capture_size = erased_callable_context_capture_offset + capture_value_size;
-        const data_ptr = if (assign.reuse) |reuse_local| blk: {
+        const data_ptr = if (assign.frame) blk: {
+            // The callable lives in this frame; its refcount word is the
+            // frame marker, so retains and releases of it do nothing.
+            const data = frameCallableData(frame, stmt_id);
+            @as(*isize, @ptrCast(@alignCast(data - @sizeOf(usize)))).* = builtins.utils.REFCOUNT_FRAME;
+            break :blk data;
+        } else if (assign.reuse.get()) |reuse_local| blk: {
             const reuse_value = try self.getLocalChecked(frame, reuse_local);
             if (self.readBoxedDataPointer(reuse_value)) |reuse_ptr| {
                 if (builtins.erased_callable.payloadPtr(reuse_ptr).capture_size >= capture_size and
@@ -3859,7 +3995,10 @@ pub const Interpreter = struct {
             .none => null,
             .rc_helper => |helper| helper.layout_idx,
         };
-        const on_drop: ?builtins.erased_callable.OnDropFn = if (self.retained_owner != null or capture_drop_kind != .none)
+        // A frame callable is never dropped: the procedure releases its
+        // capture record, and it holds no owner.
+        const owner = if (assign.frame) null else self.retained_owner;
+        const on_drop: ?builtins.erased_callable.OnDropFn = if (owner != null or capture_drop_kind != .none)
             &interpreterErasedCallableOnDrop
         else
             null;
@@ -3872,13 +4011,13 @@ pub const Interpreter = struct {
         };
 
         const context = erasedCallableInterpreterContextFromPayload(data_ptr);
-        const capture_value = if (assign.capture) |capture_local|
+        const capture_value = if (assign.capture.get()) |capture_local|
             try self.getLocalChecked(frame, capture_local)
         else
             null;
-        if (self.retained_owner) |owner| owner.retain();
+        if (owner) |retained| retained.retain();
         context.* = .{
-            .owner = self.retained_owner,
+            .owner = owner,
             .interpreter = self,
             .proc_id = @backingInt(assign.proc),
             .drop_layout_plus_one = if (drop_layout) |layout_idx| @backingInt(layout_idx) + 1 else 0,
@@ -3888,7 +4027,7 @@ pub const Interpreter = struct {
         };
 
         if (capture_value) |value| {
-            const capture_layout = assign.capture_layout orelse self.invariantFailed(
+            const capture_layout = assign.capture_layout.get() orelse self.invariantFailed(
                 "LIR/interpreter invariant violated: erased callable proc {d} has a capture but no capture layout",
                 .{@backingInt(assign.proc)},
             );
@@ -4195,10 +4334,10 @@ pub const Interpreter = struct {
                 args_buf.ptr,
                 arg_offsets,
                 ret_buf.ptr,
-            ) catch |err| return self.invariantFailedError(
-                "hosted call C-ABI lowering failed for proc {d}: {s}",
-                .{ @backingInt(proc_id), @errorName(err) },
-            );
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedArch => unreachable, // this branch is compiled only where the trampoline is available
+            };
         } else {
             const hosted_fn = self.roc_ops.hosted_fns.fns[hosted.dispatch_index];
             // Architectures without a register-image trampoline (e.g. wasm32, where
@@ -4546,7 +4685,7 @@ pub const Interpreter = struct {
                 .{@backingInt(helper.layout_idx)},
             );
         }
-        self.layoutRuntime().performRcPlan(self.valueHooks(), plan, val, count, atomicity);
+        self.layoutRuntime().performRcPlan(self.valueHooks(), plan, val, count, atomicity, null);
     }
 
     // ── RcEffect conformance observation (debug builds only) ──
@@ -4574,15 +4713,17 @@ pub const Interpreter = struct {
                 if (rs.isSmallStr()) break :blk null;
                 break :blk rc_conformance.allocationAt(rs.getAllocationPtr());
             },
-            .list_decref => rc_conformance.allocationAt(valueToRocList(val).getAllocationDataPtr(&self.roc_ops)),
-            .box_decref, .erased_callable_decref => rc_conformance.allocationAt(val.read(?[*]u8)),
+            .list_decref, .list_decref_queued => rc_conformance.allocationAt(valueToRocList(val).getAllocationDataPtr(&self.roc_ops)),
+            .box_decref, .box_decref_queued, .erased_callable_decref => rc_conformance.allocationAt(val.read(?[*]u8)),
             .noop,
             .str_incref,
             .str_free,
             .list_incref,
             .list_free,
+            .list_free_queued,
             .box_incref,
             .box_free,
+            .box_free_queued,
             .erased_callable_incref,
             .erased_callable_free,
             .struct_,
@@ -4640,16 +4781,16 @@ pub const Interpreter = struct {
         switch (plan) {
             // The walk always asks for decref plans, so the incref and free
             // shapes of each plan never reach here.
-            .noop, .str_incref, .list_incref, .box_incref, .erased_callable_incref, .str_free, .list_free, .box_free, .erased_callable_free => {},
+            .noop, .str_incref, .list_incref, .box_incref, .erased_callable_incref, .str_free, .list_free, .list_free_queued, .box_free, .box_free_queued, .erased_callable_free => {},
             .str_decref => {
                 const rs = valueToRocStr(val);
                 if (rs.isSmallStr()) return;
                 if (rc_conformance.allocationAt(rs.getAllocationPtr())) |found| sink.add(found.rc_addr);
             },
-            .list_decref => |list_plan| {
+            inline .list_decref, .list_decref_queued => |list_plan| {
                 const rl = valueToRocList(val);
                 if (rc_conformance.allocationAt(rl.getAllocationDataPtr(&self.roc_ops))) |found| sink.add(found.rc_addr);
-                const child_key = list_plan.child orelse return;
+                const child_key = @as(?layout_mod.RcHelperKey, list_plan.child) orelse return;
                 const bytes = rl.bytes orelse return;
                 const child_plan = self.layout_store.rcHelperPlan(child_key);
                 for (0..rl.len()) |index| {
@@ -4657,10 +4798,10 @@ pub const Interpreter = struct {
                     self.conformanceCollectPlan(child_plan, elem, sink, depth + 1);
                 }
             },
-            .box_decref => |box_plan| {
+            inline .box_decref, .box_decref_queued => |box_plan| {
                 const alloc_ptr = val.read(?[*]u8);
                 if (rc_conformance.allocationAt(alloc_ptr)) |found| sink.add(found.rc_addr);
-                const child_key = box_plan.child orelse return;
+                const child_key = @as(?layout_mod.RcHelperKey, box_plan.child) orelse return;
                 const data_ptr = self.readBoxedDataPointer(val) orelse return;
                 self.conformanceCollectPlan(self.layout_store.rcHelperPlan(child_key), .{ .ptr = data_ptr }, sink, depth + 1);
             },
@@ -4904,9 +5045,11 @@ pub const Interpreter = struct {
         };
     }
 
-    /// The canonical allocation-free representation of a ZST list.
+    /// A list of `len` zero-sized items and no spare capacity. A list of
+    /// zero-sized items holds no allocation, so its capacity is a count alone
+    /// (design.md "Static Lists And Strings Keep Their Capacity").
     fn canonicalZstList(len: usize) RocList {
-        return .{ .bytes = null, .length = len, .capacity_or_alloc_ptr = 0 };
+        return RocList.zeroSized(len, len);
     }
 
     fn zstSublistLen(size: usize, start_u64: u64, len_u64: u64) usize {
@@ -5044,7 +5187,7 @@ pub const Interpreter = struct {
         const elems_rc = self.builtinListElemRc(list_elems);
         const list_val = self.listValue(list_elems, ll.args[0]);
         if (info.width == 0) {
-            return self.listResult(ll, canonicalZstList(list_val.len()));
+            return self.listResult(ll, list_val.zeroSizedReserving(ll.args[1].read(u64)));
         }
         var crash_boundary = self.enterCrashBoundary();
         defer crash_boundary.deinit();
@@ -5077,18 +5220,6 @@ pub const Interpreter = struct {
         const list_elems = listElemSource(ll, arg_layout);
 
         return switch (ll.op) {
-            .boxed_sequence_pack => blk: {
-                const result = try self.alloc(ll.ret_layout);
-                const handle = builtins.boxed_sequence.pack(args[0].ptr, self.helper.sizeOf(ll.arg_layouts[0]), args[1].read(u32), &self.roc_ops);
-                self.writeBoxedDataPointer(result, handle);
-                break :blk result;
-            },
-            .boxed_sequence_unpack => blk: {
-                const step = self.readBoxedDataPointer(args[0]) orelse self.invariantFailed("boxed sequence has a null step", .{});
-                const result = try self.alloc(ll.ret_layout);
-                builtins.boxed_sequence.unpack(result.ptr, step, self.helper.sizeOf(ll.ret_layout));
-                break :blk result;
-            },
             .num_plus, .num_minus, .num_times => unreachable, // lowering resolves source-policy arithmetic to a family member, and verifyArithmeticBoundary rejects it in LIR
             .list_prefetched => unreachable, // LIR lowering splits this into an alias and `list_prefetch`
             // ── String ops ──
@@ -5441,9 +5572,6 @@ pub const Interpreter = struct {
             .list_capacity => blk: {
                 const rl = self.listValue(list_elems, args[0]);
                 const val = try self.alloc(ll.ret_layout);
-                // A list of zero-width elements never allocates, so its stored
-                // capacity is zero however many elements it holds. Report the
-                // stored capacity as it is.
                 val.write(u64, @intCast(rl.getCapacity()));
                 break :blk val;
             },
@@ -5473,7 +5601,7 @@ pub const Interpreter = struct {
                 const info = self.listElemInfo(list_elems);
                 const list_val = self.listValue(list_elems, args[0]);
                 if (info.width == 0) {
-                    break :blk self.listResult(ll, canonicalZstList(list_val.len() + 1));
+                    break :blk self.listResult(ll, list_val.zeroSizedKeeping(list_val.len() + 1));
                 }
                 const result = builtins.list.listAppendUnsafe(
                     list_val,
@@ -5490,7 +5618,7 @@ pub const Interpreter = struct {
                 const list_b = self.listValue(list_elems, args[1]);
                 if (info.width == 0) {
                     const total_len = list_a.len() + list_b.len();
-                    break :blk self.listResult(ll, canonicalZstList(total_len));
+                    break :blk self.listResult(ll, list_a.zeroSizedKeeping(total_len));
                 }
                 var crash_boundary = self.enterCrashBoundary();
                 defer crash_boundary.deinit();
@@ -5521,7 +5649,7 @@ pub const Interpreter = struct {
                 const list_val = self.listValue(list_elems, args[0]);
                 const count = args[2].read(u64);
                 if (info.width == 0) {
-                    break :blk self.listResult(ll, canonicalZstList(list_val.len() + @as(usize, @intCast(count))));
+                    break :blk self.listResult(ll, list_val.zeroSizedKeeping(list_val.len() + @as(usize, @intCast(count))));
                 }
                 if (count == 0) {
                     break :blk self.listResult(ll, list_val);
@@ -5580,7 +5708,7 @@ pub const Interpreter = struct {
                 const list_val = self.listValue(list_elems, args[0]);
                 const count = args[2].read(u64);
                 if (info.width == 0) {
-                    break :blk self.listResult(ll, canonicalZstList(list_val.len() + @as(usize, @intCast(count))));
+                    break :blk self.listResult(ll, list_val.zeroSizedKeeping(list_val.len() + @as(usize, @intCast(count))));
                 }
                 if (count == 0) {
                     break :blk self.listResult(ll, list_val);
@@ -5622,7 +5750,7 @@ pub const Interpreter = struct {
                 const src_val = self.listValue(list_elems, args[1]);
                 const count = args[3].read(u64);
                 if (info.width == 0) {
-                    break :blk self.listResult(ll, canonicalZstList(list_val.len() + @as(usize, @intCast(count))));
+                    break :blk self.listResult(ll, list_val.zeroSizedKeeping(list_val.len() + @as(usize, @intCast(count))));
                 }
                 var crash_boundary = self.enterCrashBoundary();
                 defer crash_boundary.deinit();
@@ -5650,7 +5778,7 @@ pub const Interpreter = struct {
                 const elems_rc = self.builtinListElemRc(list_elems);
                 const list_val = self.listValue(list_elems, args[0]);
                 if (info.width == 0) {
-                    break :blk self.listResult(ll, canonicalZstList(list_val.len() + 1));
+                    break :blk self.listResult(ll, list_val.zeroSizedKeeping(list_val.len() + 1));
                 }
                 var crash_boundary = self.enterCrashBoundary();
                 defer crash_boundary.deinit();
@@ -5678,7 +5806,7 @@ pub const Interpreter = struct {
                 const list_val = self.listValue(list_elems, args[0]);
                 if (info.width == 0) {
                     // ZST elements: swap is a no-op on observable contents; length unchanged.
-                    break :blk self.listResult(ll, canonicalZstList(list_val.len()));
+                    break :blk self.listResult(ll, list_val.zeroSizedKeeping(list_val.len()));
                 }
                 var crash_boundary = self.enterCrashBoundary();
                 defer crash_boundary.deinit();
@@ -5800,7 +5928,7 @@ pub const Interpreter = struct {
                     const len = source_list.len();
                     const drop_index = args[1].read(u64);
                     const result_len = if (drop_index >= @as(u64, @intCast(len))) len else len -| 1;
-                    break :blk self.listResult(ll, canonicalZstList(result_len));
+                    break :blk self.listResult(ll, source_list.zeroSizedKeeping(result_len));
                 }
                 var crash_boundary = self.enterCrashBoundary();
                 defer crash_boundary.deinit();
@@ -5834,7 +5962,7 @@ pub const Interpreter = struct {
                 if (info.width == 0) {
                     // ZST element: list is unchanged, value field is zero-sized so we don't write to it.
                     const source_list = self.listValue(list_elems, args[0]);
-                    const unchanged = canonicalZstList(source_list.len());
+                    const unchanged = source_list.zeroSizedKeeping(source_list.len());
                     @memcpy(val.offset(list_field_off).ptr[0..@sizeOf(RocList)], std.mem.asBytes(&unchanged));
                     break :blk val;
                 }
@@ -5884,7 +6012,7 @@ pub const Interpreter = struct {
                 const elems_rc = self.builtinListElemRc(list_elems);
                 if (info.width == 0) {
                     const source_list = self.listValue(list_elems, args[0]);
-                    break :blk self.listResult(ll, canonicalZstList(source_list.len()));
+                    break :blk self.listResult(ll, source_list.zeroSizedKeeping(source_list.len()));
                 }
                 var crash_boundary = self.enterCrashBoundary();
                 defer crash_boundary.deinit();
@@ -5927,7 +6055,7 @@ pub const Interpreter = struct {
                 const result_elems = listElemSource(ll, ll.ret_layout);
                 const info = self.listElemInfo(result_elems);
                 if (info.width == 0) {
-                    break :blk self.listResult(ll, canonicalZstList(0));
+                    break :blk self.listResult(ll, RocList.zeroSized(0, args[0].read(u64)));
                 }
                 const elems_rc = self.builtinListElemRc(result_elems);
                 var crash_boundary = self.enterCrashBoundary();
@@ -5951,19 +6079,17 @@ pub const Interpreter = struct {
                 const elems_rc = self.builtinListElemRc(list_elems);
                 const source_list = self.listValue(list_elems, args[0]);
                 if (info.width == 0) {
-                    break :blk self.listResult(ll, canonicalZstList(0));
+                    break :blk self.listResult(ll, source_list.zeroSizedKeeping(0));
                 }
                 var crash_boundary = self.enterCrashBoundary();
                 defer crash_boundary.deinit();
                 if (crash_boundary.set() != 0) return self.crashError();
                 var elem_rc_ctx = self.listElementRcContext(list_elems);
-                const result = builtins.list.listSublist(
+                const result = builtins.list.listClear(
                     source_list,
                     info.alignment,
                     info.width,
                     elems_rc,
-                    0,
-                    0,
                     if (elems_rc) @ptrCast(&elem_rc_ctx) else null,
                     if (elems_rc) &listElementDecref else &builtins.utils.rcNone,
                     updateModeForArg0(ll.unique_args),
@@ -5996,8 +6122,6 @@ pub const Interpreter = struct {
                 );
                 break :blk self.listResult(ll, result);
             },
-            .list_take_first => self.evalListSublist(ll, list_elems, args[0], updateModeForArg0(ll.unique_args), 0, args[1].read(u64)),
-            .list_take_last => self.evalListTakeLast(ll, list_elems, args[0], args[1], updateModeForArg0(ll.unique_args)),
             .list_reverse => self.evalListReverse(ll, list_elems, args[0], updateModeForArg0(ll.unique_args)),
 
             // ── Arithmetic ──
@@ -6017,6 +6141,13 @@ pub const Interpreter = struct {
             .num_float_add => self.numBinOp(args[0], args[1], ll.ret_layout, arg_layout, .add, null),
             .num_float_sub => self.numBinOp(args[0], args[1], ll.ret_layout, arg_layout, .sub, null),
             .num_float_mul, .dec_mul => self.numBinOp(args[0], args[1], ll.ret_layout, arg_layout, .mul, null),
+            .dec_mul_saturated => blk: {
+                const val = try self.alloc(ll.ret_layout);
+                const a = RocDec{ .num = args[0].read(i128) };
+                const b = RocDec{ .num = args[1].read(i128) };
+                val.write(i128, a.mulSaturated(b).num);
+                break :blk val;
+            },
             .num_div_by => self.numBinOp(args[0], args[1], ll.ret_layout, arg_layout, .div, null),
             .num_div_by_checked => self.numBinOp(args[0], args[1], ll.ret_layout, arg_layout, .div, .num_div_by_checked),
             .num_div_trunc_by => self.numBinOp(args[0], args[1], ll.ret_layout, arg_layout, .div_trunc, null),
@@ -6400,7 +6531,7 @@ pub const Interpreter = struct {
             .box_box => try self.layoutRuntime().boxBox(self.valueHooks(), args[0], ll.ret_layout),
             .box_unbox, .box_unbox_borrowed => try self.evalBoxUnbox(args[0], ll.ret_layout),
             .box_prepare_update => try self.evalBoxPrepareUpdate(args[0], ll.ret_layout, ll.unique_args),
-            .erased_capture_load => try self.evalErasedCaptureLoad(args[0], ll.ret_layout),
+            .erased_capture_load, .erased_capture_load_borrowed => try self.evalErasedCaptureLoad(args[0], ll.ret_layout),
             .ptr_alloca => try self.evalPtrAlloca(ll.ret_layout),
             .box_alloc_zeroed => try self.evalBoxAllocZeroed(ll.ret_layout),
             .ptr_store => try self.evalPtrStore(args[0], args[1], ll.arg_layouts[1]),
@@ -7538,45 +7669,11 @@ pub const Interpreter = struct {
 
     // ── List operation helpers ──
 
-    /// Keep `len` elements of the list starting at `start`, releasing the rest.
-    fn evalListSublist(self: *LirInterpreter, ll: LowLevelEvalInput, list_elems: ListElemSource, list_arg: Value, update_mode: UpdateMode, start: u64, len: u64) Error!Value {
-        const rl = self.listValue(list_elems, list_arg);
-        const info = self.listElemInfo(list_elems);
-        if (info.width == 0) {
-            return self.listResult(ll, canonicalZstList(zstSublistLen(rl.len(), start, len)));
-        }
-        const elems_rc = self.builtinListElemRc(list_elems);
-        var crash_boundary = self.enterCrashBoundary();
-        defer crash_boundary.deinit();
-        if (crash_boundary.set() != 0) return self.crashError();
-        var elem_rc_ctx = self.listElementRcContext(list_elems);
-        const result = builtins.list.listSublist(
-            rl,
-            info.alignment,
-            info.width,
-            elems_rc,
-            start,
-            len,
-            if (elems_rc) @ptrCast(&elem_rc_ctx) else null,
-            if (elems_rc) &listElementDecref else &builtins.utils.rcNone,
-            update_mode,
-            &self.roc_ops,
-        );
-        return self.listResult(ll, result);
-    }
-
-    fn evalListTakeLast(self: *LirInterpreter, ll: LowLevelEvalInput, list_elems: ListElemSource, list_arg: Value, count_arg: Value, update_mode: UpdateMode) Error!Value {
-        const len = self.listValue(list_elems, list_arg).len();
-        const take = count_arg.read(u64);
-        const start = if (take >= len) 0 else len - @as(usize, @intCast(take));
-        return self.evalListSublist(ll, list_elems, list_arg, update_mode, @intCast(start), take);
-    }
-
     fn evalListReverse(self: *LirInterpreter, ll: LowLevelEvalInput, list_elems: ListElemSource, list_arg: Value, update_mode: UpdateMode) Error!Value {
         const rl = self.listValue(list_elems, list_arg);
         const info = self.listElemInfo(list_elems);
         const elems_rc = self.builtinListElemRc(list_elems);
-        if (info.width == 0) return self.listResult(ll, canonicalZstList(rl.len()));
+        if (info.width == 0) return self.listResult(ll, rl.zeroSizedKeeping(rl.len()));
         var crash_boundary = self.enterCrashBoundary();
         defer crash_boundary.deinit();
         if (crash_boundary.set() != 0) return self.crashError();
@@ -8372,7 +8469,13 @@ pub const Interpreter = struct {
         var size: usize = 0;
         var alignment: u32 = 1;
         for (frame.dyn_frame_slots) |slot| {
-            const desc = try self.localDesc(frame, GuardedList.at(frame.locals, slot));
+            const local = GuardedList.at(frame.locals, slot);
+            const desc = try self.localDesc(frame, local);
+            if (self.store.localDyn(local).?.storage == .frame_callable) {
+                size = std.mem.alignForward(usize, size, frame_callable_prefix) + frameClosureBytes(desc);
+                alignment = @max(alignment, frame_callable_prefix);
+                continue;
+            }
             if (desc.size == 0) continue;
             size = std.mem.alignForward(usize, size, desc.alignment) + desc.size;
             alignment = @max(alignment, desc.alignment);
@@ -8382,6 +8485,13 @@ pub const Interpreter = struct {
         for (frame.dyn_frame_slots) |slot| {
             const local = GuardedList.at(frame.locals, slot);
             const desc = try self.localDesc(frame, local);
+            if (self.store.localDyn(local).?.storage == .frame_callable) {
+                // A frame closure's storage; the local is its data pointer.
+                offset = std.mem.alignForward(usize, offset, frame_callable_prefix);
+                bindDynAddress(frame, local, region + offset + frame_callable_prefix);
+                offset += frameClosureBytes(desc);
+                continue;
+            }
             if (desc.size == 0) {
                 bindDynAddress(frame, local, boxy.walk.zeroSizedPtr());
                 continue;
@@ -8671,7 +8781,14 @@ pub const Interpreter = struct {
                 boxy.compiled.adapt(plan, dst, src, &self.roc_ops);
                 try self.finishResultStorage(frame, stmt_id, target, dst);
             },
-            .closure => |c| {
+            .closure => |c| if (c.frame) |storage| {
+                const record = try self.localBytes(frame, c.capture);
+                const record_desc: *const boxy.TypeDesc = @ptrFromInt(@as(*const usize, @ptrCast(@alignCast(record))).*);
+                const data = try self.localBytes(frame, storage);
+                @as(*isize, @ptrCast(@alignCast(data - @sizeOf(usize)))).* = builtins.utils.REFCOUNT_FRAME;
+                self.writeInterpreterClosure(data, c.proc, record, record_desc, null);
+                try self.setWordTarget(frame, stmt_id, target, @intFromPtr(data));
+            } else {
                 const record = try self.localBytes(frame, c.capture);
                 const record_desc: *const boxy.TypeDesc = @ptrFromInt(@as(*const usize, @ptrCast(@alignCast(record))).*);
                 const reuse: ?[*]u8 = if (c.reuse) |reuse_local| blk: {

@@ -281,9 +281,8 @@ const Extractor = struct {
 
         const stmts_slice = module_env.store.sliceStatements(module_env.all_statements);
         for (stmts_slice) |stmt_idx| {
-            const stmt = module_env.store.getStatement(stmt_idx);
-            if (stmt != .s_alias_decl) continue;
-            const header = module_env.store.getTypeHeader(stmt.s_alias_decl.header);
+            const stmt = module_env.store.statementAs(stmt_idx, .s_alias_decl) orelse continue;
+            const header = module_env.store.getTypeHeader(stmt.header);
             const name = module_env.getIdentText(header.relative_name);
             if (!inputIncludesName(input, &exposed_names, module_env.module_kind, name)) continue;
 
@@ -300,7 +299,7 @@ const Extractor = struct {
             const payload = view.payload(root);
             if (payload != .alias) continue;
             const alias = payload.alias;
-            const nominal = self.unnamedNominalBehind(view, names, alias.backing) orelse continue;
+            const nominal = self.unnamedNominalBehind(&view, names, alias.backing) orelse continue;
             if (!std.mem.eql(CheckedTypeId, nominal.args, alias.args)) continue;
 
             const gop = try renames.getOrPut(self.gpa, .{
@@ -322,7 +321,7 @@ const Extractor = struct {
     /// private aliases are seen through, if no public namespace names it.
     fn unnamedNominalBehind(
         self: *Extractor,
-        view: CheckedTypeStoreView,
+        view: *const CheckedTypeStoreView,
         names: *const check.CanonicalNames.CanonicalNameStore,
         id: CheckedTypeId,
     ) ?CheckedArtifact.CheckedNominalType {
@@ -422,7 +421,7 @@ const Extractor = struct {
             const root = (try view.rootForKey(key)) orelse
                 return self.fail(.unpublished_public_type, "exposed type declaration has no published checked root");
 
-            const kind = try self.itemKindForTypeDecl(view, names, root);
+            const kind = try self.itemKindForTypeDecl(&view, names, root);
             try self.api.addItem(module_index, .{ .path = path, .kind = kind });
         }
 
@@ -431,15 +430,15 @@ const Extractor = struct {
         const defs_slice = module_env.store.sliceDefs(module_env.all_defs);
         for (defs_slice) |def_idx| {
             const def = module_env.store.getDef(def_idx);
-            const pattern = module_env.store.getPattern(def.pattern);
+            const pattern = module_env.store.patternAs(def.pattern, .assign);
             // Type declarations reach defs through nominal patterns; the
             // statement walk above already covered them.
-            if (pattern != .assign) continue;
-            const ident = pattern.assign.ident;
+            if (pattern == null) continue;
+            const ident = pattern.?.ident;
             const name = module_env.getIdentText(ident);
-            if (!inputIncludesName(input, &exposed_names, module_env.module_kind, name)) continue;
+            if (!inputIncludesValue(input, &exposed_names, def_idx, name)) continue;
 
-            const path = try publicItemPath(self.api.allocator(), input, name);
+            const path = try publicValuePath(self.api.allocator(), input, name);
             self.current_item = path;
             const gop = try seen_paths.getOrPut(self.gpa, path);
             if (gop.found_existing) continue;
@@ -449,7 +448,7 @@ const Extractor = struct {
 
             var memo = ConvertMemo.empty;
             defer memo.deinit(self.gpa);
-            const ty = try self.convertType(view, names, root, &memo);
+            const ty = try self.convertType(&view, names, root, &memo);
             try self.api.addItem(module_index, .{ .path = path, .kind = .{ .value = ty } });
         }
     }
@@ -458,7 +457,7 @@ const Extractor = struct {
     /// checked root, which must be an alias or nominal payload.
     fn itemKindForTypeDecl(
         self: *Extractor,
-        view: CheckedTypeStoreView,
+        view: *const CheckedTypeStoreView,
         names: *const check.CanonicalNames.CanonicalNameStore,
         root: CheckedTypeId,
     ) ExtractError!PackageApi.Item.Kind {
@@ -499,7 +498,7 @@ const Extractor = struct {
     /// normalization assigns per-item binding positions.
     fn convertType(
         self: *Extractor,
-        view: CheckedTypeStoreView,
+        view: *const CheckedTypeStoreView,
         names: *const check.CanonicalNames.CanonicalNameStore,
         id: CheckedTypeId,
         memo: *ConvertMemo,
@@ -632,7 +631,7 @@ const Extractor = struct {
 
     fn convertFieldKind(
         self: *Extractor,
-        view: CheckedTypeStoreView,
+        view: *const CheckedTypeStoreView,
         names: *const check.CanonicalNames.CanonicalNameStore,
         kind: CheckedArtifact.CheckedFieldKind,
         memo: *ConvertMemo,
@@ -695,7 +694,7 @@ const Extractor = struct {
     /// modeled as null; anything else (a variable, a chained row) is kept.
     fn convertExt(
         self: *Extractor,
-        view: CheckedTypeStoreView,
+        view: *const CheckedTypeStoreView,
         names: *const check.CanonicalNames.CanonicalNameStore,
         ext: CheckedTypeId,
         closed_tag: std.meta.Tag(CheckedArtifact.CheckedTypePayload),
@@ -710,7 +709,7 @@ const Extractor = struct {
     /// Nominals and dependency identities retain the named-reference contract.
     fn convertNamedType(
         self: *Extractor,
-        view: CheckedTypeStoreView,
+        view: *const CheckedTypeStoreView,
         names: *const check.CanonicalNames.CanonicalNameStore,
         origin_module: check.CanonicalNames.ModuleIdentityId,
         owner_module: CheckedArtifact.ModuleId,
@@ -848,9 +847,8 @@ const Extractor = struct {
 };
 
 fn typeDeclName(module_env: *const ModuleEnv, statement_idx: can.CIR.Statement.Idx) ?[]const u8 {
-    const statement = module_env.store.getStatement(statement_idx);
-    const header_idx = switch (statement) {
-        inline .s_alias_decl, .s_nominal_decl, .s_where_alias_decl => |decl| decl.header,
+    const header_idx = switch (module_env.store.statementKind(statement_idx)) {
+        inline .s_alias_decl, .s_nominal_decl, .s_where_alias_decl => |kind| @field(module_env.store.statementView(statement_idx), @tagName(kind)).get(.header),
         .s_decl,
         .s_var,
         .s_var_uninitialized,
@@ -938,6 +936,54 @@ fn inputIncludesName(
     return module_kind != .type_module or nameIsPublic(name, input.exposed_name);
 }
 
+/// The type declaration whose namespace `input` presents, if it presents
+/// one type's: its exact public type, or a type module's main type.
+fn namespaceRootDecl(input: ModuleInput) ?can.CIR.Statement.Idx {
+    if (input.public_type_decl) |root_statement| return root_statement;
+    const module_env = input.module_env;
+    return switch (module_env.module_kind) {
+        .type_module => |main_type_ident| blk: {
+            const node_idx = module_env.getExposedTypeNodeIndexById(main_type_ident) orelse
+                base.invariant("bump invariant violated: type module '{s}' does not expose its main type", .{module_env.module_name});
+            break :blk @as(can.CIR.Statement.Idx, @fromBackingInt(@intCast(node_idx)));
+        },
+        .default_app, .app, .package, .platform, .hosted, .module, .malformed => null,
+    };
+}
+
+/// Whether the value `def_idx`, named `name`, belongs to `input`'s
+/// namespace. A value a type owns is declared inside that type's
+/// declaration, so the declaration's region decides it: the name alone
+/// cannot, because a value owned by a type declared beside a type module's
+/// main type is named under the module's name too.
+fn inputIncludesValue(
+    input: ModuleInput,
+    exposed_names: *const std.StringHashMapUnmanaged(void),
+    def_idx: can.CIR.Def.Idx,
+    name: []const u8,
+) bool {
+    if (input.exposed_names != null) return exposed_names.contains(exposedRootName(name));
+    const module_env = input.module_env;
+    const root_statement = namespaceRootDecl(input) orelse return true;
+    const root_region = module_env.store.getStatementRegion(root_statement);
+    const def_region = module_env.store.getNodeRegion(ModuleEnv.nodeIdxFrom(def_idx));
+    return def_region.start.offset >= root_region.start.offset and def_region.end.offset <= root_region.end.offset;
+}
+
+/// The public path of a value `inputIncludesValue` accepted. The value's
+/// source name spells the type that owns it relative to the module, except
+/// that a type declared beside a type module's main type is spelled with the
+/// module's name first.
+fn publicValuePath(alloc: Allocator, input: ModuleInput, source_name: []const u8) Allocator.Error![]const u8 {
+    const root_statement = input.public_type_decl orelse return try alloc.dupe(u8, source_name);
+    const root_name = publicTypeDeclName(input, root_statement);
+    if (nameIsPublic(source_name, root_name)) return try publicItemPath(alloc, input, source_name);
+    const module_name = input.module_env.module_name;
+    std.debug.assert(nameIsPublic(source_name, module_name) and source_name.len > module_name.len and
+        nameIsPublic(source_name[module_name.len + 1 ..], root_name));
+    return try std.fmt.allocPrint(alloc, "{s}{s}", .{ input.exposed_name, source_name[module_name.len + 1 + root_name.len ..] });
+}
+
 fn exposedRootName(name: []const u8) []const u8 {
     return if (std.mem.findScalar(u8, name, '.')) |dot| name[0..dot] else name;
 }
@@ -965,8 +1011,9 @@ fn qualifiedPath(
     if (origin == .builtin) {
         // Builtin type names may arrive pre-qualified ("Builtin.Str"); users
         // never write that namespace, so drop it (same policy as docs).
-        const bare = if (std.mem.startsWith(u8, type_name, "Builtin."))
-            type_name["Builtin.".len..]
+        const builtin_prefix = "Builtin.";
+        const bare = if (std.mem.startsWith(u8, type_name, builtin_prefix))
+            type_name[builtin_prefix.len..]
         else
             type_name;
         return try alloc.dupe(u8, bare);

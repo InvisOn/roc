@@ -486,6 +486,9 @@ var debug_allocator: std.heap.DebugAllocator(.{ .stack_trace_frames = build_opti
     .backing_allocator = std.heap.page_allocator,
 };
 
+/// In a Debug build, the wrapper over `debug_allocator` that makes stale borrows fail.
+var stale_borrow_allocator: if (base.StaleBorrowAllocator.available) base.StaleBorrowAllocator else void = undefined;
+
 const default_snapshot_max_threads = 4;
 
 fn defaultSnapshotThreadCount() usize {
@@ -500,7 +503,12 @@ pub fn main(init: std.process.Init) SnapshotError!void {
     // Always use the debug allocator with the snapshot tool to help find allocation bugs.
     var gpa_tracy: tracy.TracyAllocator(null) = undefined;
     var gpa = debug_allocator.allocator();
+    if (base.StaleBorrowAllocator.available) {
+        stale_borrow_allocator = .init(gpa, .{});
+        gpa = stale_borrow_allocator.allocator();
+    }
     defer {
+        if (base.StaleBorrowAllocator.available) stale_borrow_allocator.flush();
         std.debug.assert(build_options.debugGpaOk(debug_allocator.deinit()));
     }
 
@@ -944,7 +952,7 @@ fn initSnapshotChecker(
     try can.resolveDeferredImports(env, .{
         .imports = .{ .resolved_store = imported_envs },
     });
-    return Check.init(allocator, &env.types, env, imported_envs, module_envs, &env.store.regions, .{
+    return Check.init(allocator, &env.types, env, imported_envs, module_envs, .{
         .bool_stmt = config.builtin_indices.bool_type,
         .try_stmt = config.builtin_indices.try_type,
         .str_stmt = config.builtin_indices.str_type,
@@ -1099,8 +1107,8 @@ fn processSnapshotContent(
 
     // Build builtin_modules array in the same order as can_ir.imports
     // Dict and Set are now nested inside Builtin, so we only have one module to add
-    const import_count = can_ir.imports.imports.items.items.len;
-    for (can_ir.imports.imports.items.items[0..import_count]) |str_idx| {
+    const import_count = can_ir.imports.imports.items().len;
+    for (can_ir.imports.imports.items()[0..import_count]) |str_idx| {
         const import_name = can_ir.getString(str_idx);
 
         // Match the import name to the corresponding loaded builtin module
@@ -3411,7 +3419,8 @@ fn processDocsSnapshot(
     const BuildEnv = compile.BuildEnv;
     const native_target = roc_target.RocTarget.detectNative();
 
-    var build_env = BuildEnv.init(allocator, .single_threaded, 1, native_target, config.cwd, app_io) catch |err| {
+    // Documentation has no runtime consumer, as in `roc docs`.
+    var build_env = BuildEnv.init(allocator, .single_threaded, 1, native_target, config.cwd, app_io, .boxy) catch |err| {
         std.log.err("Failed to init BuildEnv: {}", .{err});
         return false;
     };
@@ -3469,6 +3478,7 @@ fn processDocsSnapshot(
             const source_decl = mod.public_type_decl orelse continue;
             try public_type_projections.append(allocator, .{
                 .public_name = mod.name,
+                .page_name = mod.name,
                 .package_name = build_env.displayNameForPackage(mod.package_name),
                 .source_env = mod.checked.env,
                 .source_identity = &mod.checked.checked_artifact.module_identity.stable_hash,
@@ -3476,6 +3486,27 @@ fn processDocsSnapshot(
                 .public_order = mod.public_order,
             });
         }
+    }
+    // A public alias that renames a nominal type documents that type, so
+    // every such type joins the projections.
+    var renamed_names = std.heap.ArenaAllocator.init(allocator);
+    defer renamed_names.deinit();
+    {
+        var documented = std.ArrayList(docs_mod.extract.DocumentedModule).empty;
+        defer documented.deinit(allocator);
+        for (modules) |documented_module| {
+            try documented.append(allocator, .{
+                .name = documented_module.name,
+                .package_name = build_env.displayNameForPackage(documented_module.package_name),
+                .env = documented_module.checked.env,
+                .public_type_decl = documented_module.public_type_decl,
+                .exposed_names = documented_module.docs_exposed_names,
+                .public_order = documented_module.public_order,
+            });
+        }
+        const package_envs = try build_env.getRootPackageModuleEnvs(allocator);
+        defer allocator.free(package_envs);
+        try docs_mod.extract.adoptRenamedNominals(allocator, renamed_names.allocator(), documented.items, package_envs, &public_type_projections);
     }
     docs_mod.extract.sortPublicTypeProjections(public_type_projections.items);
 
@@ -3487,6 +3518,7 @@ fn processDocsSnapshot(
             .exposed_names = mod.docs_exposed_names,
             .public_type = if (mod.public_type_decl) |source_decl| .{
                 .public_name = mod.name,
+                .page_name = mod.name,
                 .package_name = display_pkg_name,
                 .source_env = mod.checked.env,
                 .source_identity = &mod.checked.checked_artifact.module_identity.stable_hash,
@@ -3720,7 +3752,7 @@ fn snapshotRootRequestByOrder(
     root_artifact: *const check.CheckedArtifact.CheckedModuleArtifact,
     order: u32,
 ) check.CheckedArtifact.RootRequest {
-    for (root_artifact.root_requests.requests) |request| {
+    for (root_artifact.root_requests.requests.items()) |request| {
         if (request.order == order) return request;
     }
     base.invariant("snapshot invariant violated: missing root request order {d}", .{order});
@@ -3732,7 +3764,7 @@ fn snapshotProvidedEntrypointName(
 ) []const u8 {
     const def_idx = switch (root.source) {
         .def => |def| def,
-        .expr, .statement, .required_binding, .hoisted, .literal => {
+        .expr, .statement, .required_binding, .hoisted, .literal, .literal_argument => {
             base.invariant("snapshot invariant violated: exported platform root is not a definition", .{});
         },
     };
@@ -3740,7 +3772,7 @@ fn snapshotProvidedEntrypointName(
         base.invariant("snapshot invariant violated: exported platform root has no published top-level value", .{});
     };
 
-    for (root_artifact.provides_requires.provides) |entry| {
+    for (root_artifact.provides_requires.provides.items()) |entry| {
         if (entry.source_name == top_level.source_name) {
             return root_artifact.canonical_names.externalSymbolNameText(entry.ffi_symbol);
         }
@@ -3812,7 +3844,7 @@ fn snapshotNativeEntrypoints(
 fn snapshotHasProvidedProcedureExports(
     root_artifact: *const check.CheckedArtifact.CheckedModuleArtifact,
 ) bool {
-    for (root_artifact.provided_exports.exports) |provided| {
+    for (root_artifact.provided_exports.exports.items()) |provided| {
         switch (provided) {
             .procedure => return true,
             .data, .checked_error => {},
@@ -3824,7 +3856,7 @@ fn snapshotHasProvidedProcedureExports(
 fn snapshotHasProvidedDataExports(
     root_artifact: *const check.CheckedArtifact.CheckedModuleArtifact,
 ) bool {
-    for (root_artifact.provided_exports.exports) |provided| {
+    for (root_artifact.provided_exports.exports.items()) |provided| {
         switch (provided) {
             .data => return true,
             .procedure, .checked_error => {},
@@ -3851,7 +3883,8 @@ fn processDevObjectSnapshot(
     const BuildEnv = compile.BuildEnv;
     const native_target = roc_target.RocTarget.detectNative();
 
-    var build_env = BuildEnv.init(allocator, .single_threaded, 1, native_target, config.cwd, app_io) catch |err| {
+    // `.lss` is the strategy each target's program lowers under below.
+    var build_env = BuildEnv.init(allocator, .single_threaded, 1, native_target, config.cwd, app_io, .lss) catch |err| {
         std.log.err("Failed to init BuildEnv: {}", .{err});
         return false;
     };
@@ -3911,7 +3944,7 @@ fn processDevObjectSnapshot(
             }
 
             const target_usize = base.target.TargetUsize.fromPtrBitWidth(target.ptrBitWidth());
-            const build_roots = try lir.CheckedPipeline.selectPlatformExportRoots(allocator, root_artifact.root_requests.runtime_requests);
+            const build_roots = try lir.CheckedPipeline.selectPlatformExportRoots(allocator, root_artifact.root_requests.runtime_requests.items());
             defer allocator.free(build_roots);
 
             var lowered = try lir.CheckedPipeline.lowerCheckedModulesToLir(
@@ -4597,6 +4630,7 @@ fn isTypeCheckError(err: SnapshotError) bool {
         error.UnwindRegistrationFailed,
         error.VirtualAllocFailed,
         error.VirtualProtectFailed,
+        error.FlushInstructionCacheFailed,
         error.WasmExecFailed,
         error.WouldBlock,
         error.WriteFailed,
@@ -4672,7 +4706,7 @@ fn renderSnapshotReplTypeProblems(
 
     var imported_envs = std.array_list.Managed(*const ModuleEnv).init(allocator);
     defer imported_envs.deinit();
-    for (can_ir.imports.imports.items.items) |str_idx| {
+    for (can_ir.imports.imports.items()) |str_idx| {
         const import_name = can_ir.getString(str_idx);
         if (CIR.Import.isCompilerBuiltinImportName(import_name)) {
             try imported_envs.append(builtin_env);
@@ -5128,7 +5162,7 @@ test "a snapshot reports what a build reports for the same module" {
     defer gpa.free(module_path);
 
     // The reports `roc check` collects.
-    var build_env = try compile.BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), dir_path, app_io);
+    var build_env = try compile.BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), dir_path, app_io, .boxy);
     defer build_env.deinit();
     try build_env.build(module_path);
     const drained = try build_env.drainReports();

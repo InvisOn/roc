@@ -5,6 +5,7 @@
 //! - Redundant patterns produce REDUNDANT PATTERN warnings
 //! - Exhaustive matches pass without errors
 
+const std = @import("std");
 const TestEnv = @import("TestEnv.zig");
 
 // Basic Tag Union Exhaustiveness
@@ -155,6 +156,24 @@ test "non-exhaustive - guarded-only match needs unguarded fallback" {
 
 // Redundancy Checking
 
+test "issue 13294 - second wildcard on an open union result is redundant" {
+    const source =
+        \\mk : Bool -> [A, B]
+        \\mk = |flag| if flag A else B
+        \\
+        \\f = |flag| match mk(flag) {
+        \\    A => "a"
+        \\    _ => "other"
+        \\    _ => "unreachable"
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeWarning("Redundant Pattern");
+    try test_env.assertOneTypeProblemMsgContains("Redundant Pattern", "_ => \"unreachable\"");
+}
+
 test "redundant - pattern after wildcard" {
     const source =
         \\x : Try(I64, Str)
@@ -205,6 +224,26 @@ test "redundant - duplicate integer literal" {
 }
 
 // Record Pattern Exhaustiveness
+
+test "issue 13295 - a missing record pattern names only source fields" {
+    const source =
+        \\f : { b : [A, B], c : I64 } -> U64
+        \\f = |x| match x {
+        \\    { c: -1, .. } => 0
+        \\    { b: B, .. } => 1
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    const report = try test_env.allocOneTypeProblemMsg("Non Exhaustive Match");
+    defer test_env.gpa.free(report);
+    try std.testing.expect(std.mem.find(u8, report, "b: A") != null);
+    if (std.mem.find(u8, report, "#others") != null) {
+        std.debug.print("unexpected internal field in report:\n{s}\n", .{report});
+        return error.TestUnexpectedResult;
+    }
+}
 
 test "exhaustive - record destructuring" {
     const source =
@@ -338,10 +377,66 @@ test "non-exhaustive - nested Try missing inner Err" {
     var test_env = try TestEnv.init("Test", source);
     defer test_env.deinit();
 
-    try test_env.assertOneTypeError("Non Exhaustive Match");
+    try test_env.assertOneTypeProblemMsgContains("Non Exhaustive Match", "Ok(Err(_))");
+}
+
+test "non-exhaustive - missing tag with multiple payloads" {
+    const source =
+        \\classify : [Empty, Pair(Bool, Bool)] -> Str
+        \\classify = |value| match value {
+        \\    Empty => "empty"
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeProblemMsgContains("Non Exhaustive Match", "Pair(_, _)");
 }
 
 // Tuple exhaustiveness
+
+test "issue 13291 - missing nested payload on an open union result" {
+    const source =
+        \\mk : Bool -> ([A([X, Y])], Bool)
+        \\mk = |flag| if flag (A(X), True) else (A(Y), False)
+        \\
+        \\f = |flag| match mk(flag) {
+        \\    (A(X), _) => "first"
+        \\    (_, True) => "second"
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeProblemMsgContains("Non Exhaustive Match", "(A(Y), False)");
+}
+
+test "issue 13291 - a partial wildcard leaves an inferred tail closed to the named tags" {
+    const source =
+        \\pick = |tag, flag| match (tag, flag) {
+        \\    (A, _) => 1.U64
+        \\    (_, True) => 2.U64
+        \\}
+        \\example = |_| pick(B, False)
+    ;
+    var env = try TestEnv.init("Test", source);
+    defer env.deinit();
+    try env.assertOneTypeErrorHighlightsWithin("Type Mismatch", .{ .line = 5, .start_column = 20, .end_column = 22 });
+}
+
+test "issue 13291 - a partial wildcard does not cover an annotated open remainder" {
+    const source =
+        \\pick : [A, ..], Bool -> U64
+        \\pick = |tag, flag| match (tag, flag) {
+        \\    (A, _) => 1.U64
+        \\    (_, True) => 2.U64
+        \\}
+        \\example = |_| pick(B, False)
+    ;
+    var env = try TestEnv.init("Test", source);
+    defer env.deinit();
+    try env.assertOneTypeError("Non Exhaustive Match");
+}
 
 test "exhaustive - tuple with Try" {
     const source =
@@ -363,6 +458,85 @@ test "exhaustive - tuple with Try" {
 // Uninhabited Types - Empty Tag Union Handling
 // These tests verify that empty tag unions (like []) are recognized as uninhabited,
 // making patterns on them unnecessary.
+
+test "uninhabited - issue 13289 - Ok literal leaves other numbers uncovered" {
+    const source =
+        \\describe : Try(U64, []) -> Str
+        \\describe = |r| match r {
+        \\    Ok(0) => "zero"
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeError("Non Exhaustive Match");
+}
+
+test "uninhabited - issue 13289 - wildcard after Ok literal covers other numbers" {
+    const source =
+        \\describe : Try(U64, []) -> Str
+        \\describe = |r| match r {
+        \\    Ok(0) => "zero"
+        \\    _ => "other"
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+}
+
+test "uninhabited - issue 13290 - wildcard on an empty union cannot miss a value" {
+    const source =
+        \\f : [] -> U64
+        \\f = |x| match x {
+        \\    _ => 0
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    // The branch can be warned about, but the match is exhaustive.
+    for (test_env.checker.problems.problems.items) |problem| {
+        try std.testing.expectEqual(.unmatchable_pattern, std.meta.activeTag(problem));
+    }
+    try std.testing.expectEqual(@as(usize, 0), try test_env.typeProblemCount());
+}
+
+test "uninhabited - issue 13292 - guarded Ok needs an unguarded fallback" {
+    const source =
+        \\size : Try(U64, []) -> Str
+        \\size = |r| match r {
+        \\    Ok(n) if n > 5 => "big"
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeError("Non Exhaustive Match");
+}
+
+test "uninhabited - issue 13293 - inline map callback can destructure Ok" {
+    const source =
+        \\inline : List(Try(U64, [])) -> List(U64)
+        \\inline = |xs| xs.map(|Ok(n)| n)
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+}
+
+test "issue 13293 - a forwarded callback cannot generalize an unmatched tag tail" {
+    const source =
+        \\preserve = |f| f
+        \\get = |_| preserve(|Only(n)| n)
+        \\bad = |_| get({})(Other)
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+    try test_env.assertOneTypeErrorHighlightsWithin("Type Mismatch", .{ .line = 3, .start_column = 19, .end_column = 24 });
+}
 
 test "exhaustive - empty error type means only Ok needed" {
     // When the error type is an empty tag union [], the Err case is uninhabited
@@ -518,7 +692,7 @@ test "exhaustive - direct Try.Ok match only needs Ok" {
     try test_env.assertLastDefType("Str");
 }
 
-test "unmatchable - Err pattern first on inferred wildcard error type is unreachable" {
+test "exhaustive - an Err pattern on an inferred wildcard error type leaves the payload undecided" {
     const source =
         \\x : Try(I64, _)
         \\x = Ok(42)
@@ -531,7 +705,7 @@ test "unmatchable - Err pattern first on inferred wildcard error type is unreach
     var test_env = try TestEnv.init("Test", source);
     defer test_env.deinit();
 
-    try test_env.assertFirstTypeError("Unmatchable Pattern");
+    try test_env.assertNoErrors();
 }
 
 test "exhaustive - structural tag with inferred wildcard payload is not required" {
@@ -1284,4 +1458,355 @@ test "non-exhaustive - missing tuple reports the uncovered value of each element
         \\
         \\
     );
+}
+
+// Builtin inhabitedness: a builtin type has values exactly when its declared
+// backing does, like any other nominal type. A user type that shares a
+// builtin's name is an ordinary type.
+
+/// Checks `source`, expecting only builtin-shadowing warnings and no type problems.
+fn expectShadowingOnlyAndNoTypeProblems(source: []const u8) TestEnv.TestEnvError!void {
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    const diagnostics = try test_env.module_env.getDiagnostics();
+    defer test_env.gpa.free(diagnostics);
+    for (diagnostics) |diagnostic| {
+        try std.testing.expectEqual(std.meta.activeTag(diagnostic), .builtin_type_shadowed_warning);
+    }
+    try std.testing.expectEqual(@as(usize, 0), test_env.checker.problems.problems.items.len);
+}
+
+test "exhaustive - an empty user nominal named like a number needs no Err" {
+    try expectShadowingOnlyAndNoTypeProblems(
+        \\U8 :: []
+        \\
+        \\f : Try(Str, U8) -> Str
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\}
+    );
+}
+
+test "exhaustive - an empty user alias named like a number needs no Err" {
+    try expectShadowingOnlyAndNoTypeProblems(
+        \\U8 : []
+        \\
+        \\f : Try(Str, U8) -> Str
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\}
+    );
+}
+
+test "exhaustive - an empty user nominal with an ordinary name needs no Err" {
+    try expectShadowingOnlyAndNoTypeProblems(
+        \\V8 :: []
+        \\
+        \\f : Try(Str, V8) -> Str
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\}
+    );
+}
+
+test "non-exhaustive - the builtin U8 error payload requires Err" {
+    const source =
+        \\f : Try(Str, U8) -> Str
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeError("Non Exhaustive Match");
+}
+
+test "non-exhaustive - a builtin number reached through a user alias requires Err" {
+    const source =
+        \\Byte : U8
+        \\
+        \\f : Try(Str, Byte) -> Str
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeError("Non Exhaustive Match");
+}
+
+/// Checks that a `match` with only an `Ok` branch on `Try(Str, <error_type>)`
+/// is rejected for its missing `Err` branch, which is what an error type that
+/// has values requires.
+fn expectErrBranchRequired(comptime error_type: []const u8) TestEnv.TestEnvError!void {
+    const body =
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\}
+    ;
+    const source = "f : Try(Str, " ++ error_type ++ ") -> Str\n" ++ body;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeError("Non Exhaustive Match");
+}
+
+test "non-exhaustive - every builtin number error payload requires Err" {
+    inline for (.{ "U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64", "U128", "I128", "F32", "F64", "Dec" }) |number| {
+        try expectErrBranchRequired(number);
+    }
+}
+
+test "non-exhaustive - a builtin number inside a structure requires Err" {
+    try expectErrBranchRequired("{ code : U16, message : Str }");
+    try expectErrBranchRequired("(I64, F64)");
+    try expectErrBranchRequired("[Code(U8)]");
+}
+
+test "non-exhaustive - a compiler-provided builtin error payload requires Err" {
+    try expectErrBranchRequired("Str");
+    try expectErrBranchRequired("U8x16");
+    try expectErrBranchRequired("Box(U8)");
+}
+
+test "non-exhaustive - a collection of an empty type requires Err because the empty collection exists" {
+    try expectErrBranchRequired("List([])");
+    try expectErrBranchRequired("Set([])");
+    try expectErrBranchRequired("Dict([], Str)");
+    try expectErrBranchRequired("Dict(Str, [])");
+    try expectErrBranchRequired("Iter([])");
+}
+
+// `Box(item)` has a value exactly when `item` does, exactly like the user
+// wrapper `MyBox(a) := [B(a)]`.
+
+/// Checks that a `match` with only an `Ok` branch on `Try(Str, <error_type>)`
+/// is accepted, which is what an error type without values allows.
+fn expectNoErrBranchNeeded(comptime declarations: []const u8, comptime error_type: []const u8) TestEnv.TestEnvError!void {
+    const body =
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\}
+    ;
+    const source = declarations ++ "f : Try(Str, " ++ error_type ++ ") -> Str\n" ++ body;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+}
+
+/// Checks that an `Err` branch on `Try(Str, <error_type>)` is reported as
+/// unmatchable.
+fn expectErrBranchUnmatchable(comptime declarations: []const u8, comptime error_type: []const u8) TestEnv.TestEnvError!void {
+    const body =
+        \\f = |t| match t {
+        \\    Ok(s) => s
+        \\    Err(_) => ""
+        \\}
+    ;
+    const source = declarations ++ "f : Try(Str, " ++ error_type ++ ") -> Str\n" ++ body;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeWarning("Unmatchable Pattern");
+}
+
+const my_box = "MyBox(a) := [B(a)]\n\n";
+
+test "exhaustive - a Box of an empty type needs no Err, like a user wrapper" {
+    try expectNoErrBranchNeeded("", "Box([])");
+    try expectNoErrBranchNeeded(my_box, "MyBox([])");
+}
+
+test "unmatchable - an Err branch on a Box of an empty type, like a user wrapper" {
+    try expectErrBranchUnmatchable("", "Box([])");
+    try expectErrBranchUnmatchable(my_box, "MyBox([])");
+}
+
+test "non-exhaustive - a Box of a type with values requires Err, like a user wrapper" {
+    try expectErrBranchRequired("Box(Str)");
+    try expectErrBranchRequired("Box(List([]))");
+    try expectErrBranchRequired("Box({})");
+}
+
+test "exhaustive - a Box is empty through nested structure" {
+    try expectNoErrBranchNeeded("", "Box(Box([]))");
+    try expectNoErrBranchNeeded("", "Box({ a : [], b : Str })");
+    try expectNoErrBranchNeeded("", "Box((Str, []))");
+    try expectNoErrBranchNeeded("E := []\n\n", "Box(E)");
+    try expectNoErrBranchNeeded("", "{ boxed : Box([]) }");
+}
+
+test "non-exhaustive - a list of boxes of an empty type requires Err" {
+    try expectErrBranchRequired("List(Box([]))");
+}
+
+// A free `_` in a `Box` payload is decided exactly as one in the payload of the
+// user wrapper `MyBox(a) := [B(a)]`: a use decides it, and a top-level value no
+// use decides closes it to `[]` when the module finishes.
+
+/// Checks `body`, with `W` standing for the wrapper, once for `Box` and once
+/// for the user twin, expecting both to be accepted.
+fn expectBoxAndTwinAccepted(comptime body: []const u8) TestEnv.TestEnvError!void {
+    inline for (.{ .{ "", "Box" }, .{ my_box, "MyBox" } }) |wrapper| {
+        const source = wrapper[0] ++ comptime replaceWrapper(body, wrapper[1]);
+        var test_env = try TestEnv.init("Test", source);
+        defer test_env.deinit();
+
+        try test_env.assertNoErrors();
+    }
+}
+
+fn replaceWrapper(comptime body: []const u8, comptime wrapper: []const u8) []const u8 {
+    comptime var result: []const u8 = "";
+    comptime var start: usize = 0;
+    inline for (body, 0..) |byte, index| {
+        if (byte == '@') {
+            result = result ++ body[start..index] ++ wrapper;
+            start = index + 1;
+        }
+    }
+    return result ++ body[start..];
+}
+
+const absent_payload_top_level =
+    \\x : Try(Str, @(PAYLOAD))
+    \\x = Ok("a")
+    \\
+    \\y : Try(Str, @(U8))
+    \\y = x
+;
+
+const absent_payload_local =
+    \\f : Str -> Try(Str, @(U8))
+    \\f = |s| {
+    \\    x : Try(Str, @(PAYLOAD))
+    \\    x = Ok(s)
+    \\    x
+    \\}
+;
+
+const absent_payload_if_branches =
+    \\f : Str, @(U8) -> Try(Str, @(U8))
+    \\f = |s, b| {
+    \\    x : Try(Str, @(PAYLOAD))
+    \\    x = Ok(s)
+    \\    if s == "" Err(b) else x
+    \\}
+;
+
+fn withPayload(comptime body: []const u8, comptime payload: []const u8) []const u8 {
+    comptime var result: []const u8 = "";
+    comptime var start: usize = 0;
+    comptime var index: usize = 0;
+    inline while (index < body.len) : (index += 1) {
+        if (index + 7 <= body.len and std.mem.eql(u8, body[index..][0..7], "PAYLOAD")) {
+            result = result ++ body[start..index] ++ payload;
+            start = index + 7;
+        }
+    }
+    return result ++ body[start..];
+}
+
+test "a use decides an Err payload's Box(_) like a user wrapper's" {
+    try expectBoxAndTwinAccepted(comptime withPayload(absent_payload_top_level, "_"));
+    try expectBoxAndTwinAccepted(comptime withPayload(absent_payload_local, "_"));
+    try expectBoxAndTwinAccepted(comptime withPayload(absent_payload_if_branches, "_"));
+}
+
+test "a Box of a written payload type with values is accepted like a user wrapper's" {
+    try expectBoxAndTwinAccepted(comptime withPayload(absent_payload_top_level, "U8"));
+    try expectBoxAndTwinAccepted(comptime withPayload(absent_payload_local, "U8"));
+    try expectBoxAndTwinAccepted(comptime withPayload(absent_payload_if_branches, "U8"));
+}
+
+test "a constant's undecided Box(_) Err payload is quantified like a user wrapper's" {
+    // The payload variable carries no requirement, so the constant quantifies
+    // it (design.md "Polymorphic Constants"); each use closes its own copy.
+    inline for (.{ .{ "", "Box", "_a" }, .{ my_box, "MyBox", "_b" } }) |wrapper| {
+        var test_env = try TestEnv.init("Test", wrapper[0] ++ "x : Try(Str, " ++ wrapper[1] ++ "(_))\nx = Ok(\"a\")\n");
+        defer test_env.deinit();
+
+        try test_env.assertDefType("x", "Try(Str, " ++ wrapper[1] ++ "(" ++ wrapper[2] ++ "))");
+    }
+}
+
+test "exhaustive - a call result's tags covered around a wildcard row" {
+    const source =
+        \\pick : U8 -> [A, B]
+        \\pick = |n| if n == 0 A else B
+        \\
+        \\describe : U8 -> U8
+        \\describe = |n|
+        \\    match (pick(n), n) {
+        \\        (A, _) => 1
+        \\        (_, 0) => 2
+        \\        (B, _) => 3
+        \\    }
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+}
+
+test "exhaustive - call results' nested tags covered beside a guarded row" {
+    const source =
+        \\held : U8 -> Try([A, B], Str)
+        \\held = |n| if n == 0 Ok(A) else Ok(B)
+        \\
+        \\digest : U8 -> Try(U8, [NoDigest])
+        \\digest = |n| Ok(n)
+        \\
+        \\describe : U8 -> U8
+        \\describe = |n|
+        \\    match (held(n), digest(n)) {
+        \\        (Ok(A), _) => 1
+        \\        (Ok(B), _) => 2
+        \\        (Err(message), _) if message != "not held" => 3
+        \\        (_, Ok(x)) => x
+        \\        (_, Err(NoDigest)) => 4
+        \\    }
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+}
+
+test "non-exhaustive - an inferred tail a wildcard row misses closes" {
+    const source =
+        \\describe = |g, n|
+        \\    match (g, n) {
+        \\        (A, _) => 1
+        \\        (_, 0) => 2
+        \\        (B, _) => 3
+        \\    }
+        \\
+        \\result = describe(C, 5)
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertOneTypeError("Type Mismatch");
+}
+
+test "exhaustive - a wildcard covering an inferred tail keeps it open" {
+    const source =
+        \\describe = |g|
+        \\    match g {
+        \\        A => 1
+        \\        _ => 2
+        \\    }
+        \\
+        \\result : U8
+        \\result = describe(C)
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
 }

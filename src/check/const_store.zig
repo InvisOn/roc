@@ -1,9 +1,11 @@
 //! Checked compile-time constant store.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const base = @import("base");
 const can = @import("can");
 const collections = @import("collections");
+const layout_shape = @import("layout_shape");
 
 const checked_ids = @import("checked_ids.zig");
 const names = @import("canonical_names.zig");
@@ -41,8 +43,8 @@ pub const ConstScalar = union(enum) {
     dec_bits: i128,
 };
 
-/// Target-independent scalar encoding used by a packed constant list.
-/// Multi-byte values use canonical little-endian bytes in `ConstStore`.
+/// Target-independent scalar encoding of a packed list literal's items
+/// (`Monotype.Ast` bytes literals), little-endian.
 pub const ConstPackedScalar = enum(u8) {
     i8,
     i16,
@@ -99,20 +101,6 @@ pub const CaptureId = checked_ids.CaptureId;
 /// circular file import (`checked_artifact.zig` itself imports this file).
 pub const Primitive = @import("checked_artifact.zig").CheckedPrimitive;
 
-/// Checker-authored identities for the public iterator representation.
-pub const IteratorTopology = struct {
-    len_field: names.RecordFieldNameId,
-    step_field: names.RecordFieldNameId,
-    ok_tag: names.TagNameId,
-    err_tag: names.TagNameId,
-    unknown_tag: names.TagNameId,
-    done_tag: names.TagNameId,
-    one_tag: names.TagNameId,
-    skip_tag: names.TagNameId,
-    item_field: names.RecordFieldNameId,
-    rest_field: names.RecordFieldNameId,
-};
-
 /// Named type definition owner for stored monomorphic type evidence.
 pub const TypeDef = struct {
     /// Deep content identity of the declaring module (dense id in the owning
@@ -123,27 +111,7 @@ pub const TypeDef = struct {
     /// Declaring statement: within-module discriminator for same-named
     /// block-local declarations.
     source_decl: collections.OptionalU32 = .none,
-    /// Compiler-generated specialization identity for internal nominals minted
-    /// after checking while preserving the public declaration identity.
-    generated: ?names.TypeDigest = null,
-    iterator_representation: IteratorRepresentation = .none,
-    iterator_kind: IteratorKind = .none,
-    iterator_depth: u8 = 0,
-    iterator_topology: OptionalIteratorTopology = .none,
 };
-
-/// An optional `IteratorTopology` at its own size.
-pub const OptionalIteratorTopology = collections.OptionalStruct(IteratorTopology, "len_field");
-
-/// Target-independent Monotype iterator tier preserved across constant storage.
-pub const IteratorRepresentation = enum(u8) {
-    none,
-    minted,
-    forced_dynamic,
-};
-
-/// Producer or adapter that minted a stored iterator representation.
-pub const IteratorKind = static_dispatch.IteratorKind;
 
 /// How much of a stored named type's backing type later stages may inspect.
 pub const TypeBackingUse = enum {
@@ -201,7 +169,7 @@ pub const TypeTag = struct {
     payloads: ConstRange,
 };
 
-/// Declared field-order entry for stored nominal record type evidence.
+/// Explicit layout-order entry for a stored nominal record with padding.
 pub const TypeDeclaredField = union(enum) {
     named: names.RecordFieldNameId,
     padding: ConstTypeId,
@@ -300,11 +268,15 @@ pub const ConstFnCallableInstantiation = struct {
 /// function is restored after compile-time evaluation.
 pub const ConstFnStructuralEvidence = struct {
     callable_contracts: u32 = 0,
+    /// How many evidence trees follow the callable contracts: the evidence
+    /// of each forwarded call of the codec contract, in the order lowering
+    /// lists those calls.
+    forwarded: u32 = 0,
     derivation: static_dispatch.StructuralDerivation,
     checked: ?CheckedStructuralEdge = null,
 
     pub fn identityEql(left: ConstFnStructuralEvidence, right: ConstFnStructuralEvidence) bool {
-        if (left.callable_contracts != right.callable_contracts) return false;
+        if (left.callable_contracts != right.callable_contracts or left.forwarded != right.forwarded) return false;
         if (!std.meta.eql(left.derivation, right.derivation) or (left.checked == null) != (right.checked == null)) return false;
         const a = left.checked orelse return true;
         const b = right.checked.?;
@@ -452,6 +424,15 @@ pub const ConstFnEvidenceVector = struct {
     /// The structural payload of a `.structural` entry.
     pub fn structural(self: ConstFnEvidenceVector, index: u32) *const ConstFnStructuralEvidence {
         return &self.structurals[index];
+    }
+
+    /// How many evidence trees follow `entry`'s nested evidence: its
+    /// callable contracts, then a structural entry's forwarded evidence.
+    pub fn trailingTrees(self: ConstFnEvidenceVector, entry: ConstFnEvidence) u32 {
+        return self.callableContracts(entry) + switch (entry) {
+            .structural => |index| self.structurals[index].forwarded,
+            .target, .from_callable, .from_scheme, .unreachable_value, .checked_error => 0,
+        };
     }
 
     /// How many callable-contract trees follow `entry`'s nested evidence.
@@ -626,39 +607,136 @@ pub const FnDef = union(enum) {
 /// so equal strings share it and no string is a view into a longer one.
 pub const ConstStr = ConstBlobDataId;
 
-/// Packed list with little-endian scalar leaves in semantic field order.
-/// Product bytes omit padding. `blobData(bytes).len == len * byteWidth()`.
-pub const ConstPackedList = struct {
-    bytes: ConstBlobDataId,
-    len: u32,
-    /// Null for products; the stored checked type supplies their field structure.
-    element: ?ConstPackedScalar,
-    /// Sum of scalar leaf widths in checked field order, excluding all padding.
-    product_width: u32 = 0,
+/// A list's items: its child nodes, or none. A list holding no function is
+/// part of an image, so a list stored as nodes holds a function.
+pub const ConstListItems = union(enum) {
+    nodes: []const ConstNodeId,
+    empty,
 
-    /// Canonical byte width of one item, excluding product padding.
-    pub fn byteWidth(self: ConstPackedList) u32 {
-        return if (self.element) |scalar| scalar.byteWidth() else self.product_width;
+    /// The number of items.
+    pub fn len(self: ConstListItems) u64 {
+        return switch (self) {
+            .nodes => |items| items.len,
+            .empty => 0,
+        };
     }
 };
 
-/// List data stored either as child nodes or packed fixed-product bytes.
-pub const ConstList = union(enum) {
-    nodes: []const ConstNodeId,
-    packed_bytes: ConstPackedList,
-    /// An empty list, with the capacity it was evaluated with. A frozen or
-    /// restored descriptor cannot carry a capacity beyond its length, so the
-    /// request travels on the value and the runtime rebuilds the list as
-    /// the `with_capacity` it came from.
-    empty: u64,
+/// A list: its items and the capacity it was evaluated with.
+pub const ConstList = struct {
+    items: ConstListItems,
+    /// How many items the list had room for when its evaluation finished,
+    /// never fewer than it holds. Capacity is part of the value: the
+    /// descriptor a runtime program reads records it, and the copy that
+    /// first gives the program storage of its own keeps it, so a list
+    /// built by `List.with_capacity` at compile time still reserves once.
+    capacity: u64,
+
+    /// A list holding `items` with no spare capacity.
+    pub fn exact(items: ConstListItems) ConstList {
+        return .{ .items = items, .capacity = items.len() };
+    }
+};
+
+/// Identifier for a stored image (`ConstStore.image`).
+pub const ConstImageId = enum(u32) { _ };
+
+/// Width of every pointer word in a stored image: images are at the 64-bit
+/// little-endian layout.
+pub const image_word_size = 8;
+
+/// A value that is data alone, stored as the memory it occupies: one block
+/// holding the value at offset 0 and then every allocation it reaches, at
+/// the 64-bit little-endian layout of the value's stored type. A word that
+/// points at an allocation holds the block offset of the address it points
+/// at, and `pointers` lists every such word. Allocations carry static
+/// refcount headers, lists and strings keep their capacity, NaNs are Roc's
+/// one NaN, and nothing is a seamless slice, so a reader copies the block
+/// and relocates each listed word by the block's address, and does no work
+/// per value.
+pub const ConstImage = struct {
+    /// The block, in `ConstStore.image_bytes`.
+    bytes: ConstRange,
+    /// Block offsets of the pointer words, ascending, in
+    /// `ConstStore.image_pointers`.
+    pointers: ConstRange,
+    /// The block's alignment: the largest alignment of anything in it.
+    alignment: u32,
+    /// The size of the value at offset 0; the rest of the block is its
+    /// allocations.
+    root_size: u32,
+    /// The type the value was stored at, in `ConstStore.type_store`: the
+    /// type its bytes are read through.
+    root_type: ConstTypeId,
+    /// The content digest (`layout.digest`) of the value's layout, which is
+    /// a function of its structure alone, the same in every program.
+    layout_digest: [32]u8,
+    /// The digest of the value: of `layout_digest`, the bytes, and the
+    /// pointer offsets, computed once as the image is written. Everything
+    /// that names the value by content reads it from here.
+    digest: [32]u8,
+};
+
+/// A stored image with its pools resolved (`ConstStore.image`).
+pub const ConstImageView = struct {
+    bytes: []const u8,
+    pointers: []const u32,
+    alignment: u32,
+    root_size: u32,
+    root_type: ConstTypeId,
+    layout_digest: [32]u8,
+    digest: [32]u8,
+
+    /// The bytes of the value at offset 0.
+    pub fn rootBytes(self: ConstImageView) []const u8 {
+        return self.bytes[0..self.root_size];
+    }
+
+    /// The bytes of the `Str` whose 64-bit descriptor (bytes pointer,
+    /// capacity shifted left by one, length) is at block offset `offset`:
+    /// inline in a small string's descriptor, otherwise at the block offset
+    /// its pointer word holds.
+    pub fn strAt(self: ConstImageView, offset: u32) []const u8 {
+        const descriptor = self.bytes[offset..][0 .. 3 * image_word_size];
+        const last = descriptor[descriptor.len - 1];
+        if (last & 0x80 != 0) return descriptor[0..(last & 0x7f)];
+        const len = std.mem.readInt(u64, descriptor[2 * image_word_size ..][0..image_word_size], .little);
+        if (len == 0) return &.{};
+        const start = std.mem.readInt(u64, descriptor[0..image_word_size], .little);
+        return self.bytes[@intCast(start)..][0..@intCast(len)];
+    }
+
+    /// The capacity of the `Str` whose 64-bit descriptor is at block offset
+    /// `offset`: its length when it is held in its descriptor, otherwise
+    /// its capacity word decoded (no image string is a seamless slice).
+    pub fn strCapacityAt(self: ConstImageView, offset: u32) u64 {
+        const descriptor = self.bytes[offset..][0 .. 3 * image_word_size];
+        const last = descriptor[descriptor.len - 1];
+        if (last & 0x80 != 0) return last & 0x7f;
+        return std.mem.readInt(u64, descriptor[image_word_size..][0..image_word_size], .little) >> 1;
+    }
+};
+
+/// A stored value that every reader keeps as a literal in LIR rather than as
+/// static data, read from its image through the image's root type
+/// (design.md "Stored Images"): a number (a vector's scalar is its 128
+/// bits), a payload-free tag of a union
+/// whose every payload is zero-sized, or a string. A reader decides from
+/// its own layout whether a tag or string stays a literal.
+pub const ImageLiteral = union(enum) {
+    scalar: ConstScalar,
+    /// The tag, as the root type's tag union names it.
+    tag: names.TagNameId,
+    str: struct { bytes: []const u8, capacity: u64 },
 };
 
 /// Compile-time constant stored in checked module data.
 pub const ConstValue = union(enum) {
     pending,
-    zst,
-    scalar: ConstScalar,
-    str: ConstStr,
+    /// A value that is data alone, as its image. Only a compile-time root's
+    /// own node is one: a value holding a function or a failure is the only
+    /// value stored as other nodes.
+    image: ConstImageId,
     list: ConstList,
     box: ConstNodeId,
     tuple: []const ConstNodeId,
@@ -691,13 +769,13 @@ pub const ConstValue = union(enum) {
 /// (with slices) is reconstructed on demand by `get`.
 const StoredValue = union(enum) {
     pending,
-    zst,
-    scalar: ConstScalar,
-    str: ConstStr,
-    list: union(enum) {
-        nodes: ConstRange,
-        packed_bytes: ConstPackedList,
-        empty: u64,
+    image: ConstImageId,
+    list: struct {
+        items: union(enum) {
+            nodes: ConstRange,
+            empty,
+        },
+        capacity: u64,
     },
     box: ConstNodeId,
     tuple: ConstRange,
@@ -748,59 +826,57 @@ pub const StoredConstType = union(enum) {
 pub const ConstNamedType = @FieldType(ConstType, "named");
 
 comptime {
-    std.debug.assert(@sizeOf(TypeDef) == 88);
-    std.debug.assert(@sizeOf(ConstNamedType) == 148);
+    std.debug.assert(@sizeOf(TypeDef) == 12);
+    std.debug.assert(@sizeOf(ConstNamedType) == 72);
     std.debug.assert(@sizeOf(TypeField) == 20);
 }
 
 /// Store of monomorphic type evidence attached to compile-time constants.
 pub const ConstTypeStore = struct {
     allocator: Allocator,
-    types: std.ArrayList(StoredConstType),
+    types: collections.SafeList(StoredConstType),
     /// Out-of-line payloads of `named` and `erased` nodes.
-    named_pool: std.ArrayList(ConstNamedType),
-    erased_pool: std.ArrayList(names.TypeDigest),
+    named_pool: collections.SafeList(ConstNamedType),
+    erased_pool: collections.SafeList(names.TypeDigest),
     /// Flat pool of `ConstTypeId`s for tuple/function args and tag payloads.
-    type_pool: std.ArrayList(ConstTypeId),
+    type_pool: collections.SafeList(ConstTypeId),
     /// Flat pool of record fields.
-    field_pool: std.ArrayList(TypeField),
+    field_pool: collections.SafeList(TypeField),
     /// Flat pool of tag-union variants.
-    tag_pool: std.ArrayList(TypeTag),
+    tag_pool: collections.SafeList(TypeTag),
     /// Flat pool of nominal declared field entries.
-    declared_field_pool: std.ArrayList(TypeDeclaredField),
-    /// True for a store reconstructed from a serialized buffer.
-    serialized: bool = false,
+    declared_field_pool: collections.SafeList(TypeDeclaredField),
 
     pub fn init(allocator: Allocator) ConstTypeStore {
         return .{
             .allocator = allocator,
-            .types = .empty,
-            .named_pool = .empty,
-            .erased_pool = .empty,
-            .type_pool = .empty,
-            .field_pool = .empty,
-            .tag_pool = .empty,
-            .declared_field_pool = .empty,
+            .types = .{},
+            .named_pool = .{},
+            .erased_pool = .{},
+            .type_pool = .{},
+            .field_pool = .{},
+            .tag_pool = .{},
+            .declared_field_pool = .{},
         };
     }
 
     pub fn reserve(self: *ConstTypeStore) Allocator.Error!ConstTypeId {
-        const id: ConstTypeId = @fromBackingInt(@intCast(@as(u32, @intCast(self.types.items.len))));
-        try self.types.append(self.allocator, .zst);
+        const id: ConstTypeId = @fromBackingInt(@intCast(@as(u32, @intCast(self.types.items().len))));
+        _ = try self.types.append(self.allocator, .zst);
         return id;
     }
 
     /// Install the content of a node `reserve` returned.
     pub fn fill(self: *ConstTypeStore, id: ConstTypeId, ty: ConstType) Allocator.Error!void {
-        self.types.items[@backingInt(id)] = switch (ty) {
+        self.types.items()[@backingInt(id)] = switch (ty) {
             .named => |named| blk: {
-                const index: u32 = @intCast(self.named_pool.items.len);
-                try self.named_pool.append(self.allocator, named);
+                const index: u32 = @intCast(self.named_pool.items().len);
+                _ = try self.named_pool.append(self.allocator, named);
                 break :blk .{ .named = index };
             },
             .erased => |digest| blk: {
-                const index: u32 = @intCast(self.erased_pool.items.len);
-                try self.erased_pool.append(self.allocator, digest);
+                const index: u32 = @intCast(self.erased_pool.items().len);
+                _ = try self.erased_pool.append(self.allocator, digest);
                 break :blk .{ .erased = index };
             },
             inline .primitive, .record, .tuple, .tag_union, .list, .box, .func, .zst => |payload, tag| @unionInit(StoredConstType, @tagName(tag), payload),
@@ -814,7 +890,7 @@ pub const ConstTypeStore = struct {
     }
 
     pub fn typeCount(self: *const ConstTypeStore) usize {
-        return self.types.items.len;
+        return self.types.items().len;
     }
 
     pub fn appendTypeSpan(self: *ConstTypeStore, ids: []const ConstTypeId) Allocator.Error!ConstRange {
@@ -834,47 +910,223 @@ pub const ConstTypeStore = struct {
     }
 
     pub fn get(self: *const ConstTypeStore, id: ConstTypeId) ConstType {
-        return switch (self.types.items[@backingInt(id)]) {
-            .named => |index| .{ .named = self.named_pool.items[index] },
-            .erased => |index| .{ .erased = self.erased_pool.items[index] },
+        return switch (self.types.items()[@backingInt(id)]) {
+            .named => |index| .{ .named = self.named_pool.items()[index] },
+            .erased => |index| .{ .erased = self.erased_pool.items()[index] },
             inline .primitive, .record, .tuple, .tag_union, .list, .box, .func, .zst => |payload, tag| @unionInit(ConstType, @tagName(tag), payload),
         };
     }
 
+    /// The identity of stored type `root` as the type of a value: its
+    /// structure, with record field and tag names by their text and each
+    /// named type by its declaring module, its name, its declaring
+    /// statement and its arguments, in `names`. A named type's backing is
+    /// its declaration's, which its declaring module's identity covers.
+    pub fn identityDigest(self: *const ConstTypeStore, allocator: Allocator, type_names: *const names.CanonicalNameStore, root: ConstTypeId) Allocator.Error![32]u8 {
+        var hasher = base.Sha256.init(.{});
+        hasher.update("roc.const.type.v1");
+        var pending: std.ArrayList(ConstTypeId) = .empty;
+        defer pending.deinit(allocator);
+        try pending.append(allocator, root);
+        while (pending.pop()) |id| {
+            const ty = self.get(id);
+            hasher.update(@tagName(std.meta.activeTag(ty)));
+            hasher.update(&[_]u8{0});
+            // Children are pushed in reverse, so they are hashed in order.
+            const start = pending.items.len;
+            switch (ty) {
+                .zst => {},
+                .primitive => |primitive| hasher.update(@tagName(primitive)),
+                .erased => |digest| hasher.update(std.mem.asBytes(&digest)),
+                .list, .box => |item| try pending.append(allocator, item),
+                .tuple => |items| try pending.appendSlice(allocator, self.typeSpan(items)),
+                .func => |func| {
+                    try pending.appendSlice(allocator, self.typeSpan(func.args));
+                    try pending.append(allocator, func.ret);
+                    hasher.update(std.mem.asBytes(&func.args.len));
+                },
+                .record => |fields| {
+                    hasher.update(std.mem.asBytes(&fields.len));
+                    for (self.fieldSpan(fields)) |field| {
+                        hashIdentityText(&hasher, type_names.recordFieldLabelText(field.name));
+                        try pending.append(allocator, field.ty);
+                    }
+                },
+                .tag_union => |tags| {
+                    hasher.update(std.mem.asBytes(&tags.len));
+                    for (self.tagSpan(tags)) |tag| {
+                        hashIdentityText(&hasher, type_names.tagLabelText(tag.name));
+                        const payloads = self.typeSpan(tag.payloads);
+                        hasher.update(std.mem.asBytes(&payloads.len));
+                        try pending.appendSlice(allocator, payloads);
+                    }
+                },
+                .named => |named| {
+                    hasher.update(&named.named_type.module.bytes);
+                    hashIdentityText(&hasher, type_names.typeNameText(named.def.type_name));
+                    const decl: u32 = if (named.def.source_decl.get()) |decl| decl + 1 else 0;
+                    hasher.update(std.mem.asBytes(&decl));
+                    const args = self.typeSpan(named.args);
+                    hasher.update(std.mem.asBytes(&args.len));
+                    try pending.appendSlice(allocator, args);
+                },
+            }
+            std.mem.reverse(ConstTypeId, pending.items[start..]);
+        }
+        return hasher.finalResult();
+    }
+
+    fn hashIdentityText(hasher: *base.Sha256, text: []const u8) void {
+        hasher.update(std.mem.asBytes(&@as(u64, text.len)));
+        hasher.update(text);
+    }
+
     pub fn typeSpan(self: *const ConstTypeStore, range: ConstRange) []const ConstTypeId {
-        return self.type_pool.items[range.start .. range.start + range.len];
+        return self.type_pool.items()[range.start .. range.start + range.len];
     }
 
     pub fn fieldSpan(self: *const ConstTypeStore, range: ConstRange) []const TypeField {
-        return self.field_pool.items[range.start .. range.start + range.len];
+        return self.field_pool.items()[range.start .. range.start + range.len];
     }
 
     pub fn tagSpan(self: *const ConstTypeStore, range: ConstRange) []const TypeTag {
-        return self.tag_pool.items[range.start .. range.start + range.len];
+        return self.tag_pool.items()[range.start .. range.start + range.len];
     }
 
     pub fn declaredFieldSpan(self: *const ConstTypeStore, range: ConstRange) []const TypeDeclaredField {
-        return self.declared_field_pool.items[range.start .. range.start + range.len];
+        return self.declared_field_pool.items()[range.start .. range.start + range.len];
     }
 
+    /// What one writer has copied so far from one source store into one
+    /// target store: for each of the source's types and of the names its
+    /// types use, the copy in the target. A type or name the source refers
+    /// to again is not copied again; the reference reads its copy here. The
+    /// tables are indexed by the source's own ids and grow with it, so one
+    /// translation serves one source and one target for as long as both
+    /// only grow.
+    pub const Translation = struct {
+        allocator: Allocator,
+        types: Column(ConstTypeId) = .{},
+        record_field_names: Column(names.RecordFieldNameId) = .{},
+        tag_names: Column(names.TagNameId) = .{},
+        type_names: Column(names.TypeNameId) = .{},
+        module_identities: Column(names.ModuleIdentityId) = .{},
+
+        /// The target's id for each source id copied so far.
+        fn Column(comptime Id: type) type {
+            return struct {
+                entries: std.ArrayList(collections.OptionalId(Id)) = .empty,
+
+                fn get(self: *const @This(), source: Id) ?Id {
+                    const index = @backingInt(source);
+                    return if (index < self.entries.items.len) self.entries.items[index].get() else null;
+                }
+
+                fn put(self: *@This(), allocator: Allocator, source: Id, target: Id) Allocator.Error!void {
+                    const index = @backingInt(source);
+                    if (index >= self.entries.items.len) try self.entries.appendNTimes(allocator, .none, index + 1 - self.entries.items.len);
+                    self.entries.items[index] = .some(target);
+                }
+            };
+        }
+
+        pub fn init(allocator: Allocator) Translation {
+            return .{ .allocator = allocator };
+        }
+
+        pub fn deinit(self: *Translation) void {
+            self.types.entries.deinit(self.allocator);
+            self.record_field_names.entries.deinit(self.allocator);
+            self.tag_names.entries.deinit(self.allocator);
+            self.type_names.entries.deinit(self.allocator);
+            self.module_identities.entries.deinit(self.allocator);
+        }
+
+        /// Forget every type whose copy is the target's node `first` or a
+        /// later one: a copy that failed part way leaves those nodes
+        /// unfinished.
+        fn forgetTypesFrom(self: *Translation, first: usize) void {
+            for (self.types.entries.items) |*entry| {
+                const target = entry.get() orelse continue;
+                if (@backingInt(target) >= first) entry.* = .none;
+            }
+        }
+    };
+
+    /// The copy in this store of `source`'s type `ty`, made now unless
+    /// `translation` already holds it, with the names `source_names` gives
+    /// its labels and types interned in `target_names`. `translation` is
+    /// this store's and `source`'s (`Translation`).
     pub fn cloneTypeFromTranslated(
         self: *ConstTypeStore,
         source: *const ConstTypeStore,
         source_names: *const names.NameStore,
         target_names: *names.NameStore,
+        translation: *Translation,
         ty: ConstTypeId,
     ) Allocator.Error!ConstTypeId {
-        var map = collections.DenseMap(ConstTypeId, ConstTypeId).init(self.allocator);
-        defer map.deinit();
-        return try self.cloneTypeFromInner(source, .{
+        const first_new = self.typeCount();
+        errdefer translation.forgetTypesFrom(first_new);
+        const copy = try self.cloneTypeFromInner(source, .{
             .source = source_names,
             .target = target_names,
-        }, ty, &map);
+            .known = translation,
+        }, ty);
+        if (builtin.mode == .debug and !try self.isCopyOf(self.allocator, target_names, copy, source, source_names, ty)) {
+            base.invariant("a stored constant type's copy differs from the type it was copied from", .{});
+        }
+        return copy;
+    }
+
+    /// Whether this store's type `copy` is the type `source` holds as `ty`,
+    /// read through each store's own names: copying each alone into an
+    /// empty store, with one name store between the two, gives the same
+    /// tables.
+    fn isCopyOf(
+        self: *const ConstTypeStore,
+        allocator: Allocator,
+        self_names: *const names.NameStore,
+        copy: ConstTypeId,
+        source: *const ConstTypeStore,
+        source_names: *const names.NameStore,
+        ty: ConstTypeId,
+    ) Allocator.Error!bool {
+        var shared_names = names.NameStore.init(allocator);
+        defer shared_names.deinit();
+        var expected = ConstTypeStore.init(allocator);
+        defer expected.deinit();
+        var actual = ConstTypeStore.init(allocator);
+        defer actual.deinit();
+        var expected_translation = Translation.init(allocator);
+        defer expected_translation.deinit();
+        var actual_translation = Translation.init(allocator);
+        defer actual_translation.deinit();
+        const expected_root = try expected.cloneTypeFromInner(source, .{ .source = source_names, .target = &shared_names, .known = &expected_translation }, ty);
+        const actual_root = try actual.cloneTypeFromInner(self, .{ .source = self_names, .target = &shared_names, .known = &actual_translation }, copy);
+        return expected_root == actual_root and
+            poolsEql(StoredConstType, &expected.types, &actual.types) and
+            poolsEql(ConstNamedType, &expected.named_pool, &actual.named_pool) and
+            poolsEql(names.TypeDigest, &expected.erased_pool, &actual.erased_pool) and
+            poolsEql(ConstTypeId, &expected.type_pool, &actual.type_pool) and
+            poolsEql(TypeField, &expected.field_pool, &actual.field_pool) and
+            poolsEql(TypeTag, &expected.tag_pool, &actual.tag_pool) and
+            poolsEql(TypeDeclaredField, &expected.declared_field_pool, &actual.declared_field_pool);
+    }
+
+    fn poolsEql(comptime T: type, left: *const collections.SafeList(T), right: *const collections.SafeList(T)) bool {
+        const left_items = left.items();
+        const right_items = right.items();
+        if (left_items.len != right_items.len) return false;
+        for (left_items, right_items) |a, b| {
+            if (!std.meta.eql(a, b)) return false;
+        }
+        return true;
     }
 
     const NameTranslation = struct {
         source: *const names.NameStore,
         target: *names.NameStore,
+        known: *Translation,
     };
 
     /// One step of cloning a type node, in the order a direct walk takes
@@ -917,16 +1169,16 @@ pub const ConstTypeStore = struct {
     fn cloneTypeFromInner(
         self: *ConstTypeStore,
         source: *const ConstTypeStore,
-        name_translation: ?NameTranslation,
+        name_translation: NameTranslation,
         root: ConstTypeId,
-        map: *collections.DenseMap(ConstTypeId, ConstTypeId),
     ) Allocator.Error!ConstTypeId {
+        const known = name_translation.known;
         var frames = std.ArrayList(CloneFrame).empty;
         defer {
             for (frames.items) |*frame| frame.deinit(self.allocator);
             frames.deinit(self.allocator);
         }
-        const result = try self.startClone(source, root, map, &frames);
+        const result = try self.startClone(source, root, known, &frames);
         while (frames.items.len > 0) {
             const top = frames.items.len - 1;
             const frame = &frames.items[top];
@@ -936,7 +1188,7 @@ pub const ConstTypeStore = struct {
                 switch (op) {
                     .child => |child| {
                         try frame.types.ensureUnusedCapacity(self.allocator, 1);
-                        const cloned = try self.startClone(source, child, map, &frames);
+                        const cloned = try self.startClone(source, child, known, &frames);
                         frames.items[top].types.appendAssumeCapacity(cloned);
                     },
                     .field_name => |name| try frame.field_names.append(self.allocator, try translateRecordFieldName(name_translation, name)),
@@ -960,13 +1212,13 @@ pub const ConstTypeStore = struct {
         self: *ConstTypeStore,
         source: *const ConstTypeStore,
         ty: ConstTypeId,
-        map: *collections.DenseMap(ConstTypeId, ConstTypeId),
+        known: *Translation,
         frames: *std.ArrayList(CloneFrame),
     ) Allocator.Error!ConstTypeId {
-        if (map.get(ty)) |existing| return existing;
+        if (known.types.get(ty)) |existing| return existing;
 
         const out = try self.reserve();
-        try map.put(ty, out);
+        try known.types.put(known.allocator, ty, out);
 
         var frame = CloneFrame{ .source_ty = ty, .out = out };
         errdefer frame.deinit(self.allocator);
@@ -1104,47 +1356,51 @@ pub const ConstTypeStore = struct {
         try self.fill(frame.out, cloned);
     }
 
-    fn translateRecordFieldName(name_translation: ?NameTranslation, id: names.RecordFieldNameId) Allocator.Error!names.RecordFieldNameId {
-        const translation = name_translation orelse return id;
-        return translation.target.internRecordFieldLabel(translation.source.recordFieldLabelText(id));
+    fn translateRecordFieldName(translation: NameTranslation, id: names.RecordFieldNameId) Allocator.Error!names.RecordFieldNameId {
+        const known = &translation.known.record_field_names;
+        if (known.get(id)) |existing| return existing;
+        const translated = try translation.target.internRecordFieldLabel(translation.source.recordFieldLabelText(id));
+        try known.put(translation.known.allocator, id, translated);
+        return translated;
     }
 
-    fn translateTagName(name_translation: ?NameTranslation, id: names.TagNameId) Allocator.Error!names.TagNameId {
-        const translation = name_translation orelse return id;
-        return translation.target.internTagLabel(translation.source.tagLabelText(id));
+    fn translateTagName(translation: NameTranslation, id: names.TagNameId) Allocator.Error!names.TagNameId {
+        const known = &translation.known.tag_names;
+        if (known.get(id)) |existing| return existing;
+        const translated = try translation.target.internTagLabel(translation.source.tagLabelText(id));
+        try known.put(translation.known.allocator, id, translated);
+        return translated;
     }
 
-    fn translateFieldDefault(name_translation: ?NameTranslation, default: ?TypeFieldDefault) Allocator.Error!?TypeFieldDefault {
+    fn translateTypeName(translation: NameTranslation, id: names.TypeNameId) Allocator.Error!names.TypeNameId {
+        const known = &translation.known.type_names;
+        if (known.get(id)) |existing| return existing;
+        const translated = try translation.target.internTypeName(translation.source.typeNameText(id));
+        try known.put(translation.known.allocator, id, translated);
+        return translated;
+    }
+
+    fn translateModuleIdentity(translation: NameTranslation, id: names.ModuleIdentityId) Allocator.Error!names.ModuleIdentityId {
+        const known = &translation.known.module_identities;
+        if (known.get(id)) |existing| return existing;
+        const translated = try translation.target.internModuleIdentity(translation.source.moduleIdentityBytes(id));
+        try known.put(translation.known.allocator, id, translated);
+        return translated;
+    }
+
+    fn translateFieldDefault(translation: NameTranslation, default: ?TypeFieldDefault) Allocator.Error!?TypeFieldDefault {
         const field_default = default orelse return null;
-        const translation = name_translation orelse return field_default;
         return .{
-            .module = try translation.target.internModuleIdentity(translation.source.moduleIdentityBytes(field_default.module)),
+            .module = try translateModuleIdentity(translation, field_default.module),
             .expr_node = field_default.expr_node,
         };
     }
 
-    fn translateTypeDef(name_translation: ?NameTranslation, def: TypeDef) Allocator.Error!TypeDef {
-        const translation = name_translation orelse return def;
+    fn translateTypeDef(translation: NameTranslation, def: TypeDef) Allocator.Error!TypeDef {
         return .{
-            .module = try translation.target.internModuleIdentity(translation.source.moduleIdentityBytes(def.module)),
-            .type_name = try translation.target.internTypeName(translation.source.typeNameText(def.type_name)),
+            .module = try translateModuleIdentity(translation, def.module),
+            .type_name = try translateTypeName(translation, def.type_name),
             .source_decl = def.source_decl,
-            .generated = def.generated,
-            .iterator_representation = def.iterator_representation,
-            .iterator_kind = def.iterator_kind,
-            .iterator_depth = def.iterator_depth,
-            .iterator_topology = .of(if (def.iterator_topology.get()) |topology| .{
-                .len_field = try translateRecordFieldName(name_translation, topology.len_field),
-                .step_field = try translateRecordFieldName(name_translation, topology.step_field),
-                .ok_tag = try translateTagName(name_translation, topology.ok_tag),
-                .err_tag = try translateTagName(name_translation, topology.err_tag),
-                .unknown_tag = try translateTagName(name_translation, topology.unknown_tag),
-                .done_tag = try translateTagName(name_translation, topology.done_tag),
-                .one_tag = try translateTagName(name_translation, topology.one_tag),
-                .skip_tag = try translateTagName(name_translation, topology.skip_tag),
-                .item_field = try translateRecordFieldName(name_translation, topology.item_field),
-                .rest_field = try translateRecordFieldName(name_translation, topology.rest_field),
-            } else null),
         };
     }
 
@@ -1167,16 +1423,16 @@ pub const ConstTypeStore = struct {
         pub const deserialize = Serde.deserializeWithAllocator;
     };
 
+    /// Free the pools this store owns. A loaded store's pools borrow the
+    /// relocated buffer, and a borrowed list frees nothing.
     pub fn deinit(self: *ConstTypeStore) void {
-        if (!self.serialized) {
-            self.types.deinit(self.allocator);
-            self.named_pool.deinit(self.allocator);
-            self.erased_pool.deinit(self.allocator);
-            self.type_pool.deinit(self.allocator);
-            self.field_pool.deinit(self.allocator);
-            self.tag_pool.deinit(self.allocator);
-            self.declared_field_pool.deinit(self.allocator);
-        }
+        self.types.deinit(self.allocator);
+        self.named_pool.deinit(self.allocator);
+        self.erased_pool.deinit(self.allocator);
+        self.type_pool.deinit(self.allocator);
+        self.field_pool.deinit(self.allocator);
+        self.tag_pool.deinit(self.allocator);
+        self.declared_field_pool.deinit(self.allocator);
         self.* = ConstTypeStore.init(self.allocator);
     }
 };
@@ -1186,83 +1442,233 @@ pub const ConstStore = struct {
     const VisitState = enum { unseen, active, done };
 
     allocator: Allocator,
-    values: std.ArrayList(StoredValue),
-    fns: std.ArrayList(StoredFn),
+    values: collections.SafeList(StoredValue),
+    fns: collections.SafeList(StoredFn),
     /// Flat pool of `ConstNodeId`s for list/tuple/record/tag-payload ranges.
-    node_pool: std.ArrayList(ConstNodeId),
+    node_pool: collections.SafeList(ConstNodeId),
     /// Flat pool of tag-name bytes.
-    tag_name_pool: std.ArrayList(u8),
+    tag_name_pool: collections.SafeList(u8),
     /// Monomorphic type evidence for roots and function captures.
     type_store: ConstTypeStore,
     /// Flat pool of function captures.
-    capture_pool: std.ArrayList(ConstCapture),
+    capture_pool: collections.SafeList(ConstCapture),
     /// Flat evidence vectors referenced by stored functions.
-    evidence_pool: std.ArrayList(ConstFnEvidence),
-    evidence_target_pool: std.ArrayList(ConstFnTargetEvidence),
-    evidence_structural_pool: std.ArrayList(ConstFnStructuralEvidence),
-    evidence_frame_pool: std.ArrayList(ConstFnEvidenceFrame),
-    /// Flat pool of immutable backing bytes shared by strings and packed lists.
-    blob_backing: std.ArrayList(u8),
+    evidence_pool: collections.SafeList(ConstFnEvidence),
+    evidence_target_pool: collections.SafeList(ConstFnTargetEvidence),
+    evidence_structural_pool: collections.SafeList(ConstFnStructuralEvidence),
+    evidence_frame_pool: collections.SafeList(ConstFnEvidenceFrame),
+    /// Flat pool of immutable backing bytes: strings', recipes' and failure
+    /// messages'.
+    blob_backing: collections.SafeList(u8),
     /// `ConstBlobDataId` -> range into `blob_backing`.
-    blob_views: std.ArrayList(ConstRange),
-    /// Build-only content index over the blobs' backing int ids. Entries hash
-    /// and compare by their bytes in `blob_backing`, read afresh on every
-    /// lookup, so the backing may move while the store is being built.
-    blob_index: std.HashMapUnmanaged(u32, void, BlobIndexContext, std.hash_map.default_max_load_percentage) = .empty,
-    /// True for a store reconstructed from a serialized buffer (pools point into
-    /// buffer-owned memory and must not be freed).
-    serialized: bool = false,
+    blob_views: collections.SafeList(ConstRange),
+    /// `ConstImageId` -> image.
+    images: collections.SafeList(ConstImage),
+    /// Flat pool of image blocks.
+    image_bytes: collections.SafeList(u8),
+    /// Flat pool of image pointer-word offsets.
+    image_pointers: collections.SafeList(u32),
+    /// Content index over the blobs, by their bytes: every blob is entered
+    /// once, so equal bytes name one blob. Stored with the store, so a
+    /// loaded store deduplicates new blobs against the ones it loaded.
+    blob_index: collections.HashedProbeTable = .{},
 
-    pub const serde_transient_fields = .{"blob_index"};
-
-    /// Hashes an indexed blob by its bytes. Indexed blobs have distinct
-    /// bytes, so two entries are equal exactly when their ids are.
-    const BlobIndexContext = struct {
-        store: *const ConstStore,
-
-        pub fn hash(self: BlobIndexContext, id: u32) u64 {
-            return std.hash.Wyhash.hash(0, self.store.blobData(@fromBackingInt(id)));
-        }
-
-        pub fn eql(_: BlobIndexContext, a: u32, b: u32) bool {
-            return a == b;
-        }
-    };
-
-    /// Looks indexed blobs up by candidate bytes.
+    /// Compares a candidate's bytes with an indexed blob's.
     const BlobBytesContext = struct {
         store: *const ConstStore,
+        bytes: []const u8,
 
-        pub fn hash(_: BlobBytesContext, bytes: []const u8) u64 {
-            return std.hash.Wyhash.hash(0, bytes);
-        }
-
-        pub fn eql(self: BlobBytesContext, bytes: []const u8, id: u32) bool {
+        pub fn eql(self: BlobBytesContext, entry: u32) bool {
             // Local byte compare: `std.mem.eql` is banned in src/check.
-            const stored = self.store.blobData(@fromBackingInt(id));
-            if (stored.len != bytes.len) return false;
-            for (stored, bytes) |x, y| {
+            const stored = self.store.blobData(@fromBackingInt(entry));
+            if (stored.len != self.bytes.len) return false;
+            for (stored, self.bytes) |x, y| {
                 if (x != y) return false;
             }
             return true;
         }
     };
 
+    fn blobHash(bytes: []const u8) u32 {
+        return @truncate(std.hash.Wyhash.hash(0, bytes));
+    }
+
     pub fn init(allocator: Allocator) ConstStore {
         return .{
             .allocator = allocator,
-            .values = .empty,
-            .fns = .empty,
-            .node_pool = .empty,
-            .tag_name_pool = .empty,
+            .values = .{},
+            .fns = .{},
+            .node_pool = .{},
+            .tag_name_pool = .{},
             .type_store = ConstTypeStore.init(allocator),
-            .capture_pool = .empty,
-            .evidence_pool = .empty,
-            .evidence_target_pool = .empty,
-            .evidence_structural_pool = .empty,
-            .evidence_frame_pool = .empty,
-            .blob_backing = .empty,
-            .blob_views = .empty,
+            .capture_pool = .{},
+            .evidence_pool = .{},
+            .evidence_target_pool = .{},
+            .evidence_structural_pool = .{},
+            .evidence_frame_pool = .{},
+            .blob_backing = .{},
+            .blob_views = .{},
+            .images = .{},
+            .image_bytes = .{},
+            .image_pointers = .{},
+        };
+    }
+
+    /// What an image is made of (`appendImage`).
+    pub const ImageInput = struct {
+        bytes: []const u8,
+        pointers: []const u32,
+        alignment: u32,
+        root_size: u32,
+        root_type: ConstTypeId,
+        layout_digest: [32]u8,
+        /// The identity of `root_type` (`ConstTypeStore.identityDigest`).
+        type_digest: [32]u8,
+    };
+
+    /// The digest of an image: of its type's identity, its layout digest,
+    /// block and pointer offsets. Two values with the same layout and bytes
+    /// at different types (`[A, B]` and `[C, D]`, or two nominal types with
+    /// one backing) are different values, so their digests differ.
+    pub fn imageDigest(input: ImageInput) [32]u8 {
+        var hasher = base.Sha256.init(.{});
+        hasher.update("roc.const.image.v2");
+        hasher.update(&input.type_digest);
+        hasher.update(&input.layout_digest);
+        hasher.update(std.mem.asBytes(&input.root_size));
+        hasher.update(std.mem.asBytes(&@as(u64, input.bytes.len)));
+        hasher.update(input.bytes);
+        hasher.update(std.mem.asBytes(&@as(u64, input.pointers.len)));
+        for (input.pointers) |offset| hasher.update(std.mem.asBytes(&offset));
+        return hasher.finalResult();
+    }
+
+    /// Store an image as the value of a new node, computing its digest.
+    pub fn appendImage(self: *ConstStore, input: ImageInput) Allocator.Error!ConstNodeId {
+        const image_id = try self.appendImageData(input);
+        const node = try self.reserve();
+        self.values.items()[@backingInt(node)] = .{ .image = image_id };
+        return node;
+    }
+
+    /// Store an image as the value of `node`, a node `reserve` returned: a
+    /// part holding no function of a value that holds one.
+    pub fn fillImage(self: *ConstStore, node: ConstNodeId, input: ImageInput) Allocator.Error!void {
+        const slot_index = @backingInt(node);
+        if (self.values.items()[slot_index] != .pending) constStoreInvariant("const node filled more than once");
+        const image_id = try self.appendImageData(input);
+        self.values.items()[slot_index] = .{ .image = image_id };
+    }
+
+    /// The image `node` holds, when it is a value stored as an image.
+    pub fn imageOf(self: *const ConstStore, node: ConstNodeId) ?ConstImageId {
+        return switch (self.values.items()[@backingInt(node)]) {
+            .image => |image_id| image_id,
+            .pending, .list, .box, .tuple, .record, .crash, .checked_error, .tag, .nominal, .fn_value, .boxy_fn => null,
+        };
+    }
+
+    /// Store an image, computing its digest.
+    pub fn appendImageData(self: *ConstStore, input: ImageInput) Allocator.Error!ConstImageId {
+        if (builtin.mode == .debug) {
+            if (input.root_size > input.bytes.len) constStoreInvariant("an image's root is larger than its block");
+            var previous: ?u32 = null;
+            for (input.pointers) |offset| {
+                if (previous) |before| if (offset <= before) constStoreInvariant("an image's pointer words are not ascending");
+                if (@as(usize, offset) + image_word_size > input.bytes.len) constStoreInvariant("an image's pointer word is past its block");
+                if (std.mem.readInt(u64, input.bytes[offset..][0..image_word_size], .little) > input.bytes.len) constStoreInvariant("an image's pointer is past its block");
+                previous = offset;
+            }
+        }
+        const bytes = try artifact_serialize.appendSpan(ConstRange, u8, &self.image_bytes, self.allocator, input.bytes);
+        const pointers = try artifact_serialize.appendSpan(ConstRange, u32, &self.image_pointers, self.allocator, input.pointers);
+        const image_id: ConstImageId = @fromBackingInt(std.math.cast(u32, self.images.items().len) orelse return error.OutOfMemory);
+        _ = try self.images.append(self.allocator, .{
+            .bytes = bytes,
+            .pointers = pointers,
+            .alignment = input.alignment,
+            .root_size = input.root_size,
+            .root_type = input.root_type,
+            .layout_digest = input.layout_digest,
+            .digest = imageDigest(input),
+        });
+        return image_id;
+    }
+
+    /// The image `id`, its pools resolved.
+    pub fn image(self: *const ConstStore, id: ConstImageId) ConstImageView {
+        const stored = self.images.items()[@backingInt(id)];
+        return .{
+            .bytes = self.image_bytes.items()[stored.bytes.start .. stored.bytes.start + stored.bytes.len],
+            .pointers = self.image_pointers.items()[stored.pointers.start .. stored.pointers.start + stored.pointers.len],
+            .alignment = stored.alignment,
+            .root_size = stored.root_size,
+            .root_type = stored.root_type,
+            .layout_digest = stored.layout_digest,
+            .digest = stored.digest,
+        };
+    }
+
+    /// The literal form of image `id` (`ImageLiteral`), read through its
+    /// root type, whose tag names are in its module's name store; null for a
+    /// value that has none.
+    pub fn imageLiteral(self: *const ConstStore, id: ConstImageId) ?ImageLiteral {
+        const view = self.image(id);
+        const bytes = view.rootBytes();
+        var ty = view.root_type;
+        while (true) switch (self.type_store.get(ty)) {
+            .named => |named| ty = (named.backing.get() orelse return null).ty,
+            .primitive => |primitive| return switch (primitive) {
+                .str => .{ .str = .{ .bytes = view.strAt(0), .capacity = view.strCapacityAt(0) } },
+                .u8 => .{ .scalar = .{ .u8 = bytes[0] } },
+                .i8 => .{ .scalar = .{ .i8 = @bitCast(bytes[0]) } },
+                .u16 => .{ .scalar = .{ .u16 = std.mem.readInt(u16, bytes[0..2], .little) } },
+                .i16 => .{ .scalar = .{ .i16 = std.mem.readInt(i16, bytes[0..2], .little) } },
+                .u32 => .{ .scalar = .{ .u32 = std.mem.readInt(u32, bytes[0..4], .little) } },
+                .i32 => .{ .scalar = .{ .i32 = std.mem.readInt(i32, bytes[0..4], .little) } },
+                .u64 => .{ .scalar = .{ .u64 = std.mem.readInt(u64, bytes[0..8], .little) } },
+                .i64 => .{ .scalar = .{ .i64 = std.mem.readInt(i64, bytes[0..8], .little) } },
+                .u128 => .{ .scalar = .{ .u128 = std.mem.readInt(u128, bytes[0..16], .little) } },
+                .i128 => .{ .scalar = .{ .i128 = std.mem.readInt(i128, bytes[0..16], .little) } },
+                .f32 => .{ .scalar = .{ .f32_bits = std.mem.readInt(u32, bytes[0..4], .little) } },
+                .f64 => .{ .scalar = .{ .f64_bits = std.mem.readInt(u64, bytes[0..8], .little) } },
+                .dec => .{ .scalar = .{ .dec_bits = std.mem.readInt(i128, bytes[0..16], .little) } },
+                // Bool is a named tag union in a stored type.
+                .bool => constStoreInvariant("a stored type holds a primitive Bool"),
+                // A vector's scalar is its 128 bits.
+                .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2 => .{ .scalar = .{ .u128 = std.mem.readInt(u128, bytes[0..16], .little) } },
+            },
+            .tag_union => |range| {
+                const tags = self.type_store.tagSpan(range);
+                // The union's every payload is zero-sized exactly when its
+                // value is its discriminant alone.
+                if (bytes.len != layout_shape.discriminantSize(tags.len)) return null;
+                // The discriminant is the index of the tag among the union's
+                // tags in byte-wise name order, which is the order a stored
+                // tag union lists them in; a union of one tag has none.
+                const index: usize = switch (bytes.len) {
+                    0 => 0,
+                    1 => bytes[0],
+                    2 => std.mem.readInt(u16, bytes[0..2], .little),
+                    else => constStoreInvariant("a discriminant-only tag union's image is wider than its discriminant"),
+                };
+                if (index >= tags.len) constStoreInvariant("an image's discriminant names no tag of its type");
+                const tag = tags[index];
+                if (tag.payloads.len != 0) return null;
+                return .{ .tag = tag.name };
+            },
+            .record, .tuple, .list, .box, .func, .erased, .zst => return null,
+        };
+    }
+
+    /// The primitive image `id`'s root type is, through any named types, or
+    /// null when it is not one.
+    pub fn imageRootPrimitive(self: *const ConstStore, id: ConstImageId) ?Primitive {
+        var ty = self.image(id).root_type;
+        while (true) switch (self.type_store.get(ty)) {
+            .named => |named| ty = (named.backing.get() orelse return null).ty,
+            .primitive => |primitive| return primitive,
+            .record, .tuple, .tag_union, .list, .box, .func, .erased, .zst => return null,
         };
     }
 
@@ -1271,15 +1677,15 @@ pub const ConstStore = struct {
     }
 
     pub fn reserve(self: *ConstStore) Allocator.Error!ConstNodeId {
-        const id: ConstNodeId = @fromBackingInt(std.math.cast(u32, self.values.items.len) orelse return error.OutOfMemory);
-        try self.values.append(self.allocator, .pending);
+        const id: ConstNodeId = @fromBackingInt(std.math.cast(u32, self.values.items().len) orelse return error.OutOfMemory);
+        _ = try self.values.append(self.allocator, .pending);
         return id;
     }
 
     /// Store `value` at `id`. Any slices in `value` are copied into the store's
     /// pools; the caller retains ownership of the input slices and frees them.
     pub fn fill(self: *ConstStore, id: ConstNodeId, value: ConstValue) void {
-        const slot = &self.values.items[@backingInt(id)];
+        const slot = &self.values.items()[@backingInt(id)];
         if (slot.* != .pending) constStoreInvariant("const node filled more than once");
         slot.* = self.storeValue(value) catch constStoreInvariant("out of memory storing const value");
     }
@@ -1289,20 +1695,23 @@ pub const ConstStore = struct {
             // `reserve` writes the `.pending` placeholder directly; `fill` always supplies
             // a concrete value, so filling a node *with* `.pending` is an invariant break.
             .pending => constStoreInvariant("cannot fill a const node with a pending value"),
-            .zst => .zst,
-            .scalar => |s| .{ .scalar = s },
-            .str => |s| .{ .str = s },
+            .image => constStoreInvariant("an image is stored by appendImage, which computes its digest"),
             .crash => |s| .{ .crash = s },
             .checked_error => |s| .{ .checked_error = s },
             .box => |n| .{ .box = n },
             .nominal => |n| .{ .nominal = .{ .named_type = n.named_type, .backing = n.backing } },
             .fn_value => |f| .{ .fn_value = f },
             .boxy_fn => |function| .{ .boxy_fn = .{ .recipe = function.recipe, .captures = try self.appendNodes(function.captures) } },
-            .list => |list| .{ .list = switch (list) {
-                .nodes => |items| .{ .nodes = try self.appendNodes(items) },
-                .packed_bytes => |packed_list| .{ .packed_bytes = packed_list },
-                .empty => |capacity| .{ .empty = capacity },
-            } },
+            .list => |list| blk: {
+                if (list.capacity < list.items.len()) constStoreInvariant("list capacity is below its length");
+                break :blk .{ .list = .{
+                    .items = switch (list.items) {
+                        .nodes => |items| .{ .nodes = try self.appendNodes(items) },
+                        .empty => .empty,
+                    },
+                    .capacity = list.capacity,
+                } };
+            },
             .tuple => |items| .{ .tuple = try self.appendNodes(items) },
             .record => |items| .{ .record = try self.appendNodes(items) },
             .tag => |tag| blk: {
@@ -1323,7 +1732,7 @@ pub const ConstStore = struct {
     /// retains ownership of the input `captures` slice and frees it.
     pub fn appendFn(self: *ConstStore, fn_value: ConstFn) Allocator.Error!ConstFnId {
         try validateEvidenceFrames(self.allocator, fn_value);
-        const id: ConstFnId = @fromBackingInt(std.math.cast(u32, self.fns.items.len) orelse return error.OutOfMemory);
+        const id: ConstFnId = @fromBackingInt(std.math.cast(u32, self.fns.items().len) orelse return error.OutOfMemory);
         const captures_range = try artifact_serialize.appendSpan(ConstRange, ConstCapture, &self.capture_pool, self.allocator, fn_value.captures);
         const evidence_range = try artifact_serialize.appendSpan(ConstRange, ConstFnEvidence, &self.evidence_pool, self.allocator, fn_value.evidence.nodes);
         const evidence_targets = try artifact_serialize.appendSpan(ConstRange, ConstFnTargetEvidence, &self.evidence_target_pool, self.allocator, fn_value.evidence.targets);
@@ -1332,7 +1741,7 @@ pub const ConstStore = struct {
         for (stored_structurals, fn_value.evidence.structurals) |*stored, structural| stored.* = structural.storedForm();
         const evidence_structurals = try artifact_serialize.appendSpan(ConstRange, ConstFnStructuralEvidence, &self.evidence_structural_pool, self.allocator, stored_structurals);
         const evidence_frames = try artifact_serialize.appendSpan(ConstRange, ConstFnEvidenceFrame, &self.evidence_frame_pool, self.allocator, fn_value.evidence_frames);
-        try self.fns.append(self.allocator, .{
+        _ = try self.fns.append(self.allocator, .{
             .fn_def = fn_value.fn_def,
             .source_fn_ty = fn_value.source_fn_ty,
             .source_fn_key = fn_value.source_fn_key,
@@ -1420,9 +1829,9 @@ pub const ConstStore = struct {
             if (cursor >= nodes.len) return null;
             const node = nodes[cursor];
             cursor += 1;
-            // A node's nested vector precedes its callable contracts, so the
-            // contracts wait beneath it on the stack.
-            const contracts = evidence.callableContracts(node);
+            // A node's nested vector precedes its callable contracts and
+            // forwarded evidence, so those wait beneath it on the stack.
+            const contracts = evidence.trailingTrees(node);
             if (contracts != 0) try open.append(allocator, .{ .remaining = contracts, .nested = null });
             switch (node) {
                 .target => |target| {
@@ -1469,115 +1878,110 @@ pub const ConstStore = struct {
     /// as `addBlobData` interns a copy of it; nothing else may touch the blob
     /// table in between.
     pub fn reserveBlobData(self: *ConstStore, len: usize) Allocator.Error![]u8 {
-        if (self.serialized) constStoreInvariant("cannot add blob data to a serialized const store");
-        return self.blob_backing.addManyAsSlice(self.allocator, len);
+        const start: usize = self.blob_backing.length;
+        try self.blob_backing.resize(self.allocator, start + len);
+        return self.blob_backing.items()[start..];
     }
 
     /// Intern the `len` bytes written into the space `reserveBlobData`
     /// returned, releasing that space when equal bytes are already interned.
     pub fn commitBlobData(self: *ConstStore, len: usize) Allocator.Error!ConstBlobDataId {
-        const start = self.blob_backing.items.len - len;
+        const start = self.blob_backing.items().len - len;
         errdefer self.blob_backing.shrinkRetainingCapacity(start);
-        const bytes = self.blob_backing.items[start..];
-        const entry = try self.blob_index.getOrPutContextAdapted(
-            self.allocator,
-            bytes,
-            BlobBytesContext{ .store = self },
-            BlobIndexContext{ .store = self },
-        );
-        if (entry.found_existing) {
+        const bytes = self.blob_backing.items()[start..];
+        const hash = blobHash(bytes);
+        if (self.blob_index.find(hash, BlobBytesContext{ .store = self, .bytes = bytes })) |existing| {
             self.blob_backing.shrinkRetainingCapacity(start);
-            return @fromBackingInt(entry.key_ptr.*);
+            return @fromBackingInt(existing);
         }
-        errdefer self.blob_index.removeByPtr(entry.key_ptr);
 
-        const raw_id = std.math.cast(u32, self.blob_views.items.len) orelse return error.OutOfMemory;
+        const raw_id = std.math.cast(u32, self.blob_views.items().len) orelse return error.OutOfMemory;
         // An empty blob owns no backing, as `artifact_serialize.appendSpan`
         // records it.
         const view: ConstRange = if (len == 0) .{ .start = 0, .len = 0 } else .{
             .start = std.math.cast(u32, start) orelse return error.OutOfMemory,
             .len = std.math.cast(u32, len) orelse return error.OutOfMemory,
         };
-        try self.blob_views.append(self.allocator, view);
-        entry.key_ptr.* = raw_id;
+        _ = try self.blob_views.append(self.allocator, view);
+        errdefer _ = self.blob_views.pop();
+        try self.blob_index.insertNew(self.allocator, hash, raw_id);
         return @fromBackingInt(raw_id);
     }
 
     pub fn addBlobData(self: *ConstStore, bytes: []const u8) Allocator.Error!ConstBlobDataId {
-        if (self.serialized) constStoreInvariant("cannot add blob data to a serialized const store");
-        const entry = try self.blob_index.getOrPutContextAdapted(
-            self.allocator,
-            bytes,
-            BlobBytesContext{ .store = self },
-            BlobIndexContext{ .store = self },
-        );
-        if (entry.found_existing) return @fromBackingInt(entry.key_ptr.*);
-        errdefer self.blob_index.removeByPtr(entry.key_ptr);
+        const hash = blobHash(bytes);
+        if (self.blob_index.find(hash, BlobBytesContext{ .store = self, .bytes = bytes })) |existing| return @fromBackingInt(existing);
 
-        const raw_id = std.math.cast(u32, self.blob_views.items.len) orelse return error.OutOfMemory;
-        const backing_len = self.blob_backing.items.len;
+        const raw_id = std.math.cast(u32, self.blob_views.items().len) orelse return error.OutOfMemory;
+        const backing_len = self.blob_backing.items().len;
         const view = try artifact_serialize.appendSpan(ConstRange, u8, &self.blob_backing, self.allocator, bytes);
         errdefer self.blob_backing.shrinkRetainingCapacity(backing_len);
-        try self.blob_views.append(self.allocator, view);
-        entry.key_ptr.* = raw_id;
+        _ = try self.blob_views.append(self.allocator, view);
+        errdefer _ = self.blob_views.pop();
+        try self.blob_index.insertNew(self.allocator, hash, raw_id);
         return @fromBackingInt(raw_id);
     }
 
     fn nodeSlice(self: *const ConstStore, range: ConstRange) []const ConstNodeId {
-        return self.node_pool.items[range.start .. range.start + range.len];
+        return self.node_pool.items()[range.start .. range.start + range.len];
+    }
+
+    /// How many nodes the store holds; every node id is below it.
+    pub fn nodeCount(self: *const ConstStore) usize {
+        return self.values.items().len;
     }
 
     pub fn get(self: *const ConstStore, id: ConstNodeId) ConstValue {
-        return switch (self.values.items[@backingInt(id)]) {
+        return switch (self.values.items()[@backingInt(id)]) {
             .pending => .pending,
-            .zst => .zst,
-            .scalar => |s| .{ .scalar = s },
-            .str => |s| .{ .str = s },
+            .image => |image_id| .{ .image = image_id },
             .crash => |s| .{ .crash = s },
             .checked_error => |s| .{ .checked_error = s },
             .box => |n| .{ .box = n },
             .nominal => |n| .{ .nominal = .{ .named_type = n.named_type, .backing = n.backing } },
             .fn_value => |f| .{ .fn_value = f },
             .boxy_fn => |function| .{ .boxy_fn = .{ .recipe = function.recipe, .captures = self.nodeSlice(function.captures) } },
-            .list => |list| .{ .list = switch (list) {
-                .nodes => |r| .{ .nodes = self.nodeSlice(r) },
-                .packed_bytes => |packed_list| .{ .packed_bytes = packed_list },
-                .empty => |capacity| .{ .empty = capacity },
+            .list => |list| .{ .list = .{
+                .items = switch (list.items) {
+                    .nodes => |r| .{ .nodes = self.nodeSlice(r) },
+                    .empty => .empty,
+                },
+                .capacity = list.capacity,
             } },
             .tuple => |r| .{ .tuple = self.nodeSlice(r) },
             .record => |r| .{ .record = self.nodeSlice(r) },
             .tag => |tag| .{ .tag = .{
-                .tag_name = self.tag_name_pool.items[tag.tag_name.start .. tag.tag_name.start + tag.tag_name.len],
+                .tag_name = self.tag_name_pool.items()[tag.tag_name.start .. tag.tag_name.start + tag.tag_name.len],
                 .payloads = self.nodeSlice(tag.payloads),
             } },
         };
     }
 
     pub fn getFn(self: *const ConstStore, id: ConstFnId) ConstFn {
-        const stored = self.fns.items[@backingInt(id)];
+        const stored = self.fns.items()[@backingInt(id)];
         return .{
             .fn_def = stored.fn_def,
             .source_fn_ty = stored.source_fn_ty,
             .source_fn_key = stored.source_fn_key,
             .owner_fn_ty = stored.owner_fn_ty.get(),
-            .captures = self.capture_pool.items[stored.captures.start .. stored.captures.start + stored.captures.len],
+            .captures = self.capture_pool.items()[stored.captures.start .. stored.captures.start + stored.captures.len],
             .evidence = .{
-                .nodes = self.evidence_pool.items[stored.evidence.start .. stored.evidence.start + stored.evidence.len],
-                .targets = self.evidence_target_pool.items[stored.evidence_targets.start .. stored.evidence_targets.start + stored.evidence_targets.len],
-                .structurals = self.evidence_structural_pool.items[stored.evidence_structurals.start .. stored.evidence_structurals.start + stored.evidence_structurals.len],
+                .nodes = self.evidence_pool.items()[stored.evidence.start .. stored.evidence.start + stored.evidence.len],
+                .targets = self.evidence_target_pool.items()[stored.evidence_targets.start .. stored.evidence_targets.start + stored.evidence_targets.len],
+                .structurals = self.evidence_structural_pool.items()[stored.evidence_structurals.start .. stored.evidence_structurals.start + stored.evidence_structurals.len],
             },
-            .evidence_frames = self.evidence_frame_pool.items[stored.evidence_frames.start .. stored.evidence_frames.start + stored.evidence_frames.len],
+            .evidence_frames = self.evidence_frame_pool.items()[stored.evidence_frames.start .. stored.evidence_frames.start + stored.evidence_frames.len],
             .evidence_frame_head = stored.evidence_frame_head.get(),
         };
     }
 
     pub fn blobData(self: *const ConstStore, id: ConstBlobDataId) []const u8 {
         const index = @backingInt(id);
-        if (@import("builtin").mode == .debug and index >= self.blob_views.items.len) {
+        if (@import("builtin").mode == .debug and index >= self.blob_views.items().len) {
             constStoreInvariant("blob backing id is out of range");
         }
-        const view = self.blob_views.items[index];
-        return self.blob_backing.items[view.start .. view.start + view.len];
+        const view = self.blob_views.items()[index];
+        return self.blob_backing.items()[view.start .. view.start + view.len];
     }
 
     /// Relocatable serialized form. Every field is a `SafeList`-equivalent POD
@@ -1595,10 +1999,21 @@ pub const ConstStore = struct {
         evidence_frame_pool: artifact_serialize.SerializedSlice(ConstFnEvidenceFrame) = .{},
         blob_backing: artifact_serialize.SerializedSlice(u8) = .{},
         blob_views: artifact_serialize.SerializedSlice(ConstRange) = .{},
+        blob_index: collections.HashedProbeTable.Serialized = .{},
+        images: artifact_serialize.SerializedSlice(ConstImage) = .{},
+        image_bytes: artifact_serialize.SerializedSlice(u8) = .{},
+        image_pointers: artifact_serialize.SerializedSlice(u32) = .{},
 
         comptime {
-            // 11 value/function side lists + 7 nested type-store lists.
-            std.debug.assert(artifact_serialize.relocatablePointerCount(Serialized) == 18);
+            // 14 value/function/image side lists + 7 nested type-store lists
+            // + the blob index's cells.
+            std.debug.assert(artifact_serialize.relocatablePointerCount(Serialized) == 22);
+        }
+
+        /// Every blob is indexed, so the index holds exactly as many entries
+        /// as there are blobs. Constant time.
+        pub fn validateShape(self: *const Serialized) error{CorruptArtifact}!void {
+            if (self.blob_index.len != self.blob_views.len) return error.CorruptArtifact;
         }
 
         const Serde = artifact_serialize.SliceStoreSerde(ConstStore, @This());
@@ -1632,15 +2047,13 @@ pub const ConstStore = struct {
             if (std.meta.activeTag(left) != std.meta.activeTag(right)) return false;
             switch (left) {
                 .pending, .fn_value => return false,
+                .image => |id| if (!sameBytes(&self.image(id).digest, &other.image(right.image).digest)) return false,
                 .boxy_fn => |function| {
                     const right_function = right.boxy_fn;
                     if (!sameBytes(self.blobData(function.recipe), other.blobData(right_function.recipe))) return false;
                     if (function.captures.len != right_function.captures.len) return false;
                     for (function.captures, right_function.captures) |l, r| try pending.append(scratch, .{ .left = l, .right = r });
                 },
-                .zst => {},
-                .scalar => |scalar| if (!std.meta.eql(scalar, right.scalar)) return false,
-                .str => |str| if (!sameBytes(self.blobData(str), other.blobData(right.str))) return false,
                 .crash => |str| if (!sameBytes(self.blobData(str), other.blobData(right.crash))) return false,
                 .checked_error => |str| if (!sameBytes(self.blobData(str), other.blobData(right.checked_error))) return false,
                 .box => |payload| try pending.append(scratch, .{ .left = payload, .right = right.box }),
@@ -1650,18 +2063,14 @@ pub const ConstStore = struct {
                 },
                 .list => |list| {
                     const right_list = right.list;
-                    if (std.meta.activeTag(list) != std.meta.activeTag(right_list)) return false;
-                    switch (list) {
+                    if (list.capacity != right_list.capacity) return false;
+                    if (std.meta.activeTag(list.items) != std.meta.activeTag(right_list.items)) return false;
+                    switch (list.items) {
                         .nodes => |items| {
-                            if (items.len != right_list.nodes.len) return false;
-                            for (items, right_list.nodes) |l, r| try pending.append(scratch, .{ .left = l, .right = r });
+                            if (items.len != right_list.items.nodes.len) return false;
+                            for (items, right_list.items.nodes) |l, r| try pending.append(scratch, .{ .left = l, .right = r });
                         },
-                        .packed_bytes => |packed_list| {
-                            const r = right_list.packed_bytes;
-                            if (packed_list.len != r.len or packed_list.element != r.element or packed_list.product_width != r.product_width) return false;
-                            if (!sameBytes(self.blobData(packed_list.bytes), other.blobData(r.bytes))) return false;
-                        },
-                        .empty => |capacity| if (capacity != right_list.empty) return false,
+                        .empty => {},
                     }
                 },
                 inline .tuple, .record => |items, tag| {
@@ -1685,9 +2094,16 @@ pub const ConstStore = struct {
         return @as([*]const [32]u8, @ptrCast(recipe[4..].ptr))[0..count];
     }
 
-    /// The bytes of a stored function's recipe after its table of modules.
+    /// The bytes of a stored function's recipe after its table of modules
+    /// and the table of template positions that follows it: what names the
+    /// function, its workers by identity. A template's position only
+    /// locates it in the modules the recipe was stored with, which an edit
+    /// elsewhere in its module moves, so it is no part of what the recipe
+    /// names (`postcheck.Boxy.StoredFn`).
     pub fn recipeBody(recipe: []const u8) []const u8 {
-        return recipe[4 + recipeModuleKeys(recipe).len * 32 ..];
+        const positions_at = 4 + recipeModuleKeys(recipe).len * 32;
+        const position_count = std.mem.readInt(u32, recipe[positions_at..][0..4], .little);
+        return recipe[positions_at + 4 + @as(usize, position_count) * 4 ..];
     }
 
     /// Feed `root`'s value into `hasher`, shared nodes once each. Equal
@@ -1724,27 +2140,22 @@ pub const ConstStore = struct {
             hasher.update(@tagName(std.meta.activeTag(value)));
             hasher.update(&[_]u8{0});
             switch (value) {
-                .pending, .zst => {},
+                .pending => {},
+                .image => |id| hasher.update(&self.image(id).digest),
                 .fn_value => |id| hasher.update(&context.fnValueDigest(id)),
-                .scalar => |scalar| hashScalar(hasher, scalar),
-                inline .str, .crash, .checked_error => |str| hashBytes(hasher, self.blobData(str)),
+                inline .crash, .checked_error => |str| hashBytes(hasher, self.blobData(str)),
                 .box => |payload| try pending.append(scratch, payload),
                 .nominal => |nominal| {
                     hasher.update(&context.moduleDigest(nominal.named_type.module));
                     try pending.append(scratch, nominal.backing);
                 },
-                .list => |list| switch (list) {
+                .list => |list| switch (list.items) {
                     .nodes => |items| {
+                        hasher.update(std.mem.asBytes(&list.capacity));
                         hasher.update(std.mem.asBytes(&@as(u32, @intCast(items.len))));
                         try pending.appendSlice(scratch, items);
                     },
-                    .packed_bytes => |packed_list| {
-                        hasher.update(std.mem.asBytes(&packed_list.len));
-                        hasher.update(std.mem.asBytes(&packed_list.product_width));
-                        hasher.update(if (packed_list.element) |element| @tagName(element) else "product");
-                        hashBytes(hasher, self.blobData(packed_list.bytes));
-                    },
-                    .empty => |capacity| hasher.update(std.mem.asBytes(&capacity)),
+                    .empty => hasher.update(std.mem.asBytes(&list.capacity)),
                 },
                 inline .tuple, .record => |items| {
                     hasher.update(std.mem.asBytes(&@as(u32, @intCast(items.len))));
@@ -1772,22 +2183,22 @@ pub const ConstStore = struct {
 
     pub fn verifyComplete(self: *const ConstStore) Allocator.Error!void {
         if (@import("builtin").mode != .debug) return;
-        for (self.values.items) |value| {
+        for (self.values.items()) |value| {
             if (value == .pending) base.invariant("const store invariant violated: completed store contains a pending node", .{});
         }
-        const value_state = try self.allocator.alloc(VisitState, self.values.items.len);
+        const value_state = try self.allocator.alloc(VisitState, self.values.items().len);
         defer self.allocator.free(value_state);
         @memset(value_state, .unseen);
 
-        const fn_state = try self.allocator.alloc(VisitState, self.fns.items.len);
+        const fn_state = try self.allocator.alloc(VisitState, self.fns.items().len);
         defer self.allocator.free(fn_state);
         @memset(fn_state, .unseen);
 
-        const value_delayed_depth = try self.allocator.alloc(usize, self.values.items.len);
+        const value_delayed_depth = try self.allocator.alloc(usize, self.values.items().len);
         defer self.allocator.free(value_delayed_depth);
         @memset(value_delayed_depth, 0);
 
-        const fn_delayed_depth = try self.allocator.alloc(usize, self.fns.items.len);
+        const fn_delayed_depth = try self.allocator.alloc(usize, self.fns.items().len);
         defer self.allocator.free(fn_delayed_depth);
         @memset(fn_delayed_depth, 0);
 
@@ -1799,10 +2210,10 @@ pub const ConstStore = struct {
             .value_delayed_depth = value_delayed_depth,
             .fn_delayed_depth = fn_delayed_depth,
         };
-        for (self.values.items, 0..) |_, index| {
+        for (self.values.items(), 0..) |_, index| {
             try self.verifyGraph(&pending, states, .{ .value = .{ .id = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .delayed_depth = 0 } });
         }
-        for (self.fns.items, 0..) |_, index| {
+        for (self.fns.items(), 0..) |_, index| {
             try validateEvidenceFrames(self.allocator, self.getFn(@fromBackingInt(@intCast(@as(u32, @intCast(index))))));
             try self.verifyGraph(&pending, states, .{ .fn_value = .{ .id = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .delayed_depth = 0 } });
         }
@@ -1810,20 +2221,23 @@ pub const ConstStore = struct {
 
     pub fn deinit(self: *ConstStore) void {
         self.type_store.deinit();
+        // A loaded store's pools and blob index borrow the relocated buffer, and a borrowed
+        // list frees nothing.
+        self.values.deinit(self.allocator);
+        self.fns.deinit(self.allocator);
+        self.node_pool.deinit(self.allocator);
+        self.tag_name_pool.deinit(self.allocator);
+        self.capture_pool.deinit(self.allocator);
+        self.evidence_pool.deinit(self.allocator);
+        self.evidence_target_pool.deinit(self.allocator);
+        self.evidence_structural_pool.deinit(self.allocator);
+        self.evidence_frame_pool.deinit(self.allocator);
+        self.blob_backing.deinit(self.allocator);
+        self.blob_views.deinit(self.allocator);
         self.blob_index.deinit(self.allocator);
-        if (!self.serialized) {
-            self.values.deinit(self.allocator);
-            self.fns.deinit(self.allocator);
-            self.node_pool.deinit(self.allocator);
-            self.tag_name_pool.deinit(self.allocator);
-            self.capture_pool.deinit(self.allocator);
-            self.evidence_pool.deinit(self.allocator);
-            self.evidence_target_pool.deinit(self.allocator);
-            self.evidence_structural_pool.deinit(self.allocator);
-            self.evidence_frame_pool.deinit(self.allocator);
-            self.blob_backing.deinit(self.allocator);
-            self.blob_views.deinit(self.allocator);
-        }
+        self.images.deinit(self.allocator);
+        self.image_bytes.deinit(self.allocator);
+        self.image_pointers.deinit(self.allocator);
         self.* = ConstStore.init(self.allocator);
     }
 
@@ -1859,7 +2273,7 @@ pub const ConstStore = struct {
             .exit_fn => |index| states.fn_state[index] = .done,
             .value => |node| {
                 const index = @backingInt(node.id);
-                if (index >= self.values.items.len) constStoreInvariant("completed store contains an out-of-range value id");
+                if (index >= self.values.items().len) constStoreInvariant("completed store contains an out-of-range value id");
                 switch (states.value_state[index]) {
                     .done => continue,
                     .active => {
@@ -1875,23 +2289,16 @@ pub const ConstStore = struct {
                 const mark = pending.items.len;
                 switch (self.get(node.id)) {
                     .pending => constStoreInvariant("completed store contains a pending node"),
-                    .zst, .scalar => {},
-                    .str, .crash, .checked_error => |str| {
+                    .image => {},
+                    .crash, .checked_error => |str| {
                         _ = self.strBytes(str);
                     },
                     .fn_value => |fn_id| try pending.append(self.allocator, .{ .fn_value = .{ .id = fn_id, .delayed_depth = node.delayed_depth } }),
                     .box => |child| try pending.append(self.allocator, .{ .value = .{ .id = child, .delayed_depth = node.delayed_depth } }),
                     .nominal => |nominal| try pending.append(self.allocator, .{ .value = .{ .id = nominal.backing, .delayed_depth = node.delayed_depth } }),
-                    .list => |list| switch (list) {
+                    .list => |list| switch (list.items) {
                         .nodes => |children| for (children) |child| {
                             try pending.append(self.allocator, .{ .value = .{ .id = child, .delayed_depth = node.delayed_depth } });
-                        },
-                        .packed_bytes => |packed_list| {
-                            const bytes = self.blobData(packed_list.bytes);
-                            const expected_len = @as(u64, packed_list.len) * packed_list.byteWidth();
-                            if (bytes.len != expected_len) {
-                                constStoreInvariant("packed list byte length differs from its element encoding");
-                            }
                         },
                         .empty => {},
                     },
@@ -1912,7 +2319,7 @@ pub const ConstStore = struct {
             },
             .fn_value => |node| {
                 const index = @backingInt(node.id);
-                if (index >= self.fns.items.len) constStoreInvariant("completed store contains an out-of-range function id");
+                if (index >= self.fns.items().len) constStoreInvariant("completed store contains an out-of-range function id");
                 switch (states.fn_state[index]) {
                     .done => continue,
                     .active => {
@@ -1942,6 +2349,56 @@ fn constStoreInvariant(comptime message: []const u8) noreturn {
     base.invariant("const store invariant violated: {s}", .{message});
 }
 
+/// The images of a compilation's constant stores by digest, for the
+/// constant pool a link or an in-process loader places them from (design.md
+/// "Constant Pool"). A store is registered once; an image it stores after
+/// registration is indexed at the first lookup that misses, so the index
+/// follows stores evaluation is still filling. Equal digests name equal
+/// images, so whichever store an image is found in, it is the same image.
+pub const ImageIndex = struct {
+    allocator: Allocator,
+    stores: std.ArrayList(*const ConstStore) = .empty,
+    /// For each registered store, how many of its images are indexed.
+    indexed: std.ArrayList(u32) = .empty,
+    by_digest: std.AutoHashMapUnmanaged([32]u8, Location) = .empty,
+
+    const Location = struct { store: u32, image: ConstImageId };
+
+    pub fn init(allocator: Allocator) ImageIndex {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *ImageIndex) void {
+        self.stores.deinit(self.allocator);
+        self.indexed.deinit(self.allocator);
+        self.by_digest.deinit(self.allocator);
+    }
+
+    /// Register `store`, once however often it is registered.
+    pub fn addStore(self: *ImageIndex, store: *const ConstStore) Allocator.Error!void {
+        for (self.stores.items) |existing| if (existing == store) return;
+        try self.stores.ensureUnusedCapacity(self.allocator, 1);
+        try self.indexed.ensureUnusedCapacity(self.allocator, 1);
+        self.stores.appendAssumeCapacity(store);
+        self.indexed.appendAssumeCapacity(0);
+    }
+
+    /// The image whose digest is `digest`, in any registered store.
+    pub fn find(self: *ImageIndex, digest: [32]u8) Allocator.Error!?ConstImageView {
+        if (self.by_digest.get(digest)) |found| return self.stores.items[found.store].image(found.image);
+        for (self.stores.items, self.indexed.items, 0..) |store, *indexed, store_index| {
+            const count: u32 = @intCast(store.images.items().len);
+            while (indexed.* < count) : (indexed.* += 1) {
+                const id: ConstImageId = @fromBackingInt(indexed.*);
+                const gop = try self.by_digest.getOrPut(self.allocator, store.image(id).digest);
+                if (!gop.found_existing) gop.value_ptr.* = .{ .store = @intCast(store_index), .image = id };
+            }
+        }
+        const found = self.by_digest.get(digest) orelse return null;
+        return self.stores.items[found.store].image(found.image);
+    }
+};
+
 test "const store declarations are referenced" {
     std.testing.refAllDecls(@This());
 }
@@ -1953,36 +2410,25 @@ test "ConstStore: build, serialize/relocate, and read back values, fns, strings"
     var store = ConstStore.init(gpa);
     defer store.deinit();
 
-    // Scalars + a list + a tag (exercises node_pool + tag_name_pool).
-    const a = try store.append(.{ .scalar = .{ .u64 = 7 } });
-    const b = try store.append(.{ .scalar = .{ .i32 = -3 } });
+    // Leaves + a list + a tag (exercises node_pool + tag_name_pool).
+    const a = try store.append(.{ .list = .{ .items = .empty, .capacity = 7 } });
+    const b = try store.append(.{ .list = .{ .items = .empty, .capacity = 3 } });
     // The store copies inputs into its pools and never frees them, so this test
     // owns and frees the slices it hands to `append`/`appendFn`.
     const list_items = try gpa.dupe(ConstNodeId, &.{ a, b });
     defer gpa.free(list_items);
-    const list = try store.append(.{ .list = .{ .nodes = list_items } });
+    const list = try store.append(.{ .list = .{ .items = .{ .nodes = list_items }, .capacity = 8 } });
     const tag_payloads = try gpa.dupe(ConstNodeId, &.{a});
     defer gpa.free(tag_payloads);
     const tag_name = try gpa.dupe(u8, "Ok");
     defer gpa.free(tag_name);
     const tag = try store.append(.{ .tag = .{ .tag_name = tag_name, .payloads = tag_payloads } });
-    // Strings and packed lists share one content-deduplicated blob backing.
+    // Strings share one content-deduplicated blob backing.
     const sd = try store.addBlobData("hello world");
     try std.testing.expectEqual(sd, try store.addBlobData("hello world"));
     const hello = try store.addBlobData("hello");
-    const str = try store.append(.{ .str = hello });
-    const packed_list = try store.append(.{ .list = .{ .packed_bytes = .{
-        .bytes = sd,
-        .len = 11,
-        .element = .u8,
-    } } });
-    const product_list = try store.append(.{ .list = .{ .packed_bytes = .{
-        .bytes = try store.addBlobData("ello world"),
-        .len = 2,
-        .element = null,
-        .product_width = 5,
-    } } });
-    const empty_list = try store.append(.{ .list = .{ .empty = 4096 } });
+    const str = try store.append(.{ .crash = hello });
+    const empty_list = try store.append(.{ .list = .{ .items = .empty, .capacity = 4096 } });
     // A function value with a capture (exercises capture_pool).
     const capture_ty = try store.type_store.append(.{ .primitive = .u64 });
     const private_backing_ty = try store.type_store.append(.{ .record = .{} });
@@ -2076,25 +2522,20 @@ test "ConstStore: build, serialize/relocate, and read back values, fns, strings"
     defer loaded.deinit();
 
     // Scalars
-    try std.testing.expectEqual(@as(u64, 7), loaded.get(a).scalar.u64);
-    try std.testing.expectEqual(@as(i32, -3), loaded.get(b).scalar.i32);
+    try std.testing.expectEqual(@as(u64, 7), loaded.get(a).list.capacity);
+    try std.testing.expectEqual(@as(u64, 3), loaded.get(b).list.capacity);
     // List range resolves to the same node ids
-    try std.testing.expectEqualSlices(ConstNodeId, &.{ a, b }, loaded.get(list).list.nodes);
+    try std.testing.expectEqualSlices(ConstNodeId, &.{ a, b }, loaded.get(list).list.items.nodes);
+    try std.testing.expectEqual(@as(u64, 8), loaded.get(list).list.capacity);
     // Tag name + payloads
     const loaded_tag = loaded.get(tag).tag;
     try std.testing.expectEqualStrings("Ok", loaded_tag.tag_name);
     try std.testing.expectEqualSlices(ConstNodeId, &.{a}, loaded_tag.payloads);
     // String backing
-    try std.testing.expectEqualStrings("hello", loaded.strBytes(loaded.get(str).str));
-    const loaded_packed = loaded.get(packed_list).list.packed_bytes;
-    try std.testing.expectEqual(sd, loaded_packed.bytes);
-    try std.testing.expectEqualStrings("hello world", loaded.blobData(loaded_packed.bytes));
-    const loaded_product = loaded.get(product_list).list.packed_bytes;
-    try std.testing.expectEqual(@as(?ConstPackedScalar, null), loaded_product.element);
-    try std.testing.expectEqual(@as(u32, 5), loaded_product.byteWidth());
-    try std.testing.expectEqual(@as(u64, 4096), loaded.get(empty_list).list.empty);
-    try std.testing.expectEqual(@as(u32, 2), loaded_product.len);
-    try std.testing.expectEqualStrings("ello world", loaded.blobData(loaded_product.bytes));
+    try std.testing.expectEqualStrings("hello", loaded.strBytes(loaded.get(str).crash));
+    try std.testing.expectEqualStrings("hello world", loaded.blobData(sd));
+    try std.testing.expect(loaded.get(empty_list).list.items == .empty);
+    try std.testing.expectEqual(@as(u64, 4096), loaded.get(empty_list).list.capacity);
     // Function captures
     const loaded_fn = loaded.getFn(fn_id);
     try std.testing.expectEqual(@as(usize, 2), loaded_fn.captures.len);
@@ -2166,6 +2607,154 @@ test "ConstStore: build, serialize/relocate, and read back values, fns, strings"
     try std.testing.expect(!try ConstStore.evidenceFramesValid(std.testing.allocator, corrupt_range));
 }
 
+test "an image's digest covers its type: equal bytes at unions with other tag names, or nominal types, differ" {
+    const gpa = std.testing.allocator;
+    var type_names = names.NameStore.init(gpa);
+    defer type_names.deinit();
+    var types = ConstTypeStore.init(gpa);
+    defer types.deinit();
+    const a = try type_names.internTagLabel("A");
+    const b = try type_names.internTagLabel("B");
+    const c = try type_names.internTagLabel("C");
+    const d = try type_names.internTagLabel("D");
+    const ab = try types.append(.{ .tag_union = try types.appendTagSpan(&.{
+        .{ .name = a, .checked_name = a, .payloads = .{} },
+        .{ .name = b, .checked_name = b, .payloads = .{} },
+    }) });
+    const cd = try types.append(.{ .tag_union = try types.appendTagSpan(&.{
+        .{ .name = c, .checked_name = c, .payloads = .{} },
+        .{ .name = d, .checked_name = d, .payloads = .{} },
+    }) });
+    const ab_again = try types.append(.{ .tag_union = try types.appendTagSpan(&.{
+        .{ .name = a, .checked_name = a, .payloads = .{} },
+        .{ .name = b, .checked_name = b, .payloads = .{} },
+    }) });
+    const u8_ty = try types.append(.{ .primitive = .u8 });
+    const module: [32]u8 = @splat(0x11);
+    var nominals: [2]ConstTypeId = undefined;
+    for (&nominals, [_][]const u8{ "Celsius", "Fahrenheit" }) |*nominal, name| nominal.* = try types.append(.{ .named = .{
+        .named_type = .{ .module = .{} },
+        .def = .{ .module = try type_names.internModuleIdentity(&module), .type_name = try type_names.internTypeName(name) },
+        .kind = .nominal,
+        .args = .{},
+        .backing = .some(.{ .ty = u8_ty, .use = .inspectable }),
+    } });
+
+    const digest = struct {
+        fn of(store: *const ConstTypeStore, store_names: *const names.NameStore, ty: ConstTypeId) Allocator.Error![32]u8 {
+            const bytes = [_]u8{0};
+            return ConstStore.imageDigest(.{
+                .bytes = &bytes,
+                .pointers = &.{},
+                .alignment = 1,
+                .root_size = 1,
+                .root_type = ty,
+                .layout_digest = @splat(0x77),
+                .type_digest = try store.identityDigest(std.testing.allocator, store_names, ty),
+            });
+        }
+    }.of;
+    try std.testing.expectEqual(try digest(&types, &type_names, ab), try digest(&types, &type_names, ab_again));
+    try std.testing.expect(!std.meta.eql(try digest(&types, &type_names, ab), try digest(&types, &type_names, cd)));
+    try std.testing.expect(!std.meta.eql(try digest(&types, &type_names, nominals[0]), try digest(&types, &type_names, nominals[1])));
+    try std.testing.expect(!std.meta.eql(try digest(&types, &type_names, nominals[0]), try digest(&types, &type_names, u8_ty)));
+}
+
+test "ConstTypeStore: one translation copies each shared type once and the copies survive serialization" {
+    const gpa = std.testing.allocator;
+    const CompactWriter = @import("collections").CompactWriter;
+
+    // A program's types: a row type that a list, a recursive named type and
+    // a tuple of the two all reach.
+    var source_names = names.NameStore.init(gpa);
+    defer source_names.deinit();
+    var source = ConstTypeStore.init(gpa);
+    defer source.deinit();
+    const count_ty = try source.append(.{ .primitive = .u64 });
+    const row = try source.append(.{ .record = try source.appendFieldSpan(&.{
+        .{ .name = try source_names.internRecordFieldLabel("count"), .ty = count_ty, .default = .none },
+        .{ .name = try source_names.internRecordFieldLabel("total"), .ty = count_ty, .default = .none },
+    }) });
+    const rows = try source.append(.{ .list = row });
+    const tree = try source.reserve();
+    const subtrees = try source.append(.{ .list = tree });
+    const leaf = try source_names.internTagLabel("Leaf");
+    const node = try source_names.internTagLabel("Node");
+    const tree_backing = try source.append(.{ .tag_union = try source.appendTagSpan(&.{
+        .{ .name = leaf, .checked_name = leaf, .payloads = try source.appendTypeSpan(&.{row}) },
+        .{ .name = node, .checked_name = node, .payloads = try source.appendTypeSpan(&.{subtrees}) },
+    }) });
+    const declaring_module: [32]u8 = @splat(0x2A);
+    try source.fill(tree, .{ .named = .{
+        .named_type = .{ .module = .{} },
+        .def = .{ .module = try source_names.internModuleIdentity(&declaring_module), .type_name = try source_names.internTypeName("Tree") },
+        .kind = .nominal,
+        .args = .{},
+        .backing = .some(.{ .ty = tree_backing, .use = .inspectable }),
+    } });
+    const pair = try source.append(.{ .tuple = try source.appendTypeSpan(&.{ rows, tree }) });
+
+    // The module's store names things by its own ids.
+    var target_names = names.NameStore.init(gpa);
+    defer target_names.deinit();
+    _ = try target_names.internRecordFieldLabel("unrelated");
+    _ = try target_names.internTagLabel("Unrelated");
+    var store = ConstStore.init(gpa);
+    defer store.deinit();
+
+    // One writer's translation: every root, however many times it or a type
+    // it shares is stored, adds each of the program's types once.
+    var translation = ConstTypeStore.Translation.init(gpa);
+    defer translation.deinit();
+    const roots = [_]ConstTypeId{ rows, tree, pair, row, rows, pair };
+    var copies: [roots.len]ConstTypeId = undefined;
+    for (roots, &copies) |root, *copy| {
+        copy.* = try store.type_store.cloneTypeFromTranslated(&source, &source_names, &target_names, &translation, root);
+    }
+    try std.testing.expectEqual(source.typeCount(), store.type_store.typeCount());
+    try std.testing.expectEqual(copies[0], copies[4]);
+    try std.testing.expectEqual(copies[2], copies[5]);
+    try std.testing.expectEqual(copies[3], store.type_store.get(copies[0]).list);
+    const pair_items = store.type_store.typeSpan(store.type_store.get(copies[2]).tuple);
+    try std.testing.expectEqualSlices(ConstTypeId, &.{ copies[0], copies[1] }, pair_items);
+    const row_fields = store.type_store.fieldSpan(store.type_store.get(copies[3]).record);
+    try std.testing.expectEqualStrings("count", target_names.recordFieldLabelText(row_fields[0].name));
+    try std.testing.expectEqualStrings("total", target_names.recordFieldLabelText(row_fields[1].name));
+
+    // A translation per root copies what the roots share once per root.
+    var unshared = ConstTypeStore.init(gpa);
+    defer unshared.deinit();
+    var unshared_names = names.NameStore.init(gpa);
+    defer unshared_names.deinit();
+    for (roots) |root| {
+        var own = ConstTypeStore.Translation.init(gpa);
+        defer own.deinit();
+        _ = try unshared.cloneTypeFromTranslated(&source, &source_names, &unshared_names, &own, root);
+    }
+    try std.testing.expect(unshared.typeCount() > store.type_store.typeCount());
+
+    // Serialize → aligned buffer → deserialize.
+    var arena = base.SingleThreadArena.init(gpa);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var writer = CompactWriter.init();
+    const hdr = try writer.appendAlloc(aa, ConstStore.Serialized);
+    try hdr.serialize(&store, aa, &writer);
+    const buffer = try gpa.alignedAlloc(u8, std.mem.Alignment.@"16", writer.total_bytes);
+    defer gpa.free(buffer);
+    _ = try writer.writeToBuffer(buffer);
+    const ser: *const ConstStore.Serialized = @ptrCast(@alignCast(buffer.ptr));
+    var loaded = ser.deserialize(@intFromPtr(buffer.ptr), gpa);
+    defer loaded.deinit();
+
+    // Every stored type reads back as the program's type, shared or not.
+    for (roots, copies) |root, copy| {
+        try std.testing.expect(try loaded.type_store.isCopyOf(gpa, &target_names, copy, &source, &source_names, root));
+    }
+    try std.testing.expect(!try loaded.type_store.isCopyOf(gpa, &target_names, copies[0], &source, &source_names, tree));
+    try std.testing.expect(!try loaded.type_store.isCopyOf(gpa, &target_names, copies[1], &source, &source_names, pair));
+}
+
 test "ConstStore: exact function capture back-edge survives serialization" {
     const gpa = std.testing.allocator;
     const CompactWriter = @import("collections").CompactWriter;
@@ -2216,6 +2805,42 @@ test "ConstStore: exact function capture back-edge survives serialization" {
     try loaded.verifyComplete();
 }
 
+test "a loaded ConstStore keeps its blob ids and deduplicates new blobs against them" {
+    const CompactWriter = collections.CompactWriter;
+    const gpa = std.testing.allocator;
+    var store = ConstStore.init(gpa);
+    defer store.deinit();
+    const hello = try store.addBlobData("hello");
+    const world = try store.addBlobData("world");
+    try std.testing.expectEqual(hello, try store.addBlobData("hello"));
+
+    var arena = base.SingleThreadArena.init(gpa);
+    defer arena.deinit();
+    var writer = CompactWriter.init();
+    const header = try writer.appendAlloc(arena.allocator(), ConstStore.Serialized);
+    try header.serialize(&store, arena.allocator(), &writer);
+    const buffer = try gpa.alignedAlloc(u8, std.mem.Alignment.@"16", writer.total_bytes);
+    defer gpa.free(buffer);
+    _ = try writer.writeToBuffer(buffer);
+    const serialized: *ConstStore.Serialized = @ptrCast(@alignCast(buffer.ptr));
+    try collections.validateSerializedRelocations(ConstStore.Serialized, serialized, buffer.len);
+
+    var loaded = serialized.deserialize(@intFromPtr(buffer.ptr), gpa);
+    defer loaded.deinit();
+    try std.testing.expectEqual(hello, try loaded.addBlobData("hello"));
+    try std.testing.expectEqual(world, try loaded.addBlobData("world"));
+    const fresh = try loaded.addBlobData("fresh");
+    try std.testing.expectEqual(fresh, try loaded.addBlobData("fresh"));
+    const reserved = try loaded.reserveBlobData(5);
+    @memcpy(reserved, "world");
+    try std.testing.expectEqual(world, try loaded.commitBlobData(5));
+    try std.testing.expectEqualStrings("fresh", loaded.blobData(fresh));
+    try std.testing.expectEqual(@as(usize, 3), loaded.blob_views.items().len);
+
+    serialized.blob_index.len -= 1;
+    try std.testing.expectError(error.CorruptArtifact, collections.validateSerializedRelocations(ConstStore.Serialized, serialized, buffer.len));
+}
+
 test "ConstStore.appendFn: no leak or double-free under allocation failure" {
     // `appendFn` copies `captures` into the pool and does not free the input; the
     // caller owns it. Drive every allocation in that path to fail in turn and assert
@@ -2225,7 +2850,7 @@ test "ConstStore.appendFn: no leak or double-free under allocation failure" {
         fn run(allocator: Allocator) Allocator.Error!void {
             var store = ConstStore.init(allocator);
             defer store.deinit();
-            const a = try store.append(.{ .scalar = .{ .u64 = 7 } });
+            const a = try store.append(.{ .list = .{ .items = .empty, .capacity = 7 } });
             const capture_ty = try store.type_store.append(.{ .primitive = .u64 });
             const caps = try allocator.dupe(ConstCapture, &.{
                 .{ .id = CaptureId.fromBinder(@fromBackingInt(@intCast(1))), .kind = .lexical, .ty = capture_ty, .value = a },
@@ -2254,14 +2879,6 @@ fn hashBytes(hasher: *base.Sha256, bytes: []const u8) void {
     hasher.update(bytes);
 }
 
-fn hashScalar(hasher: *base.Sha256, scalar: ConstScalar) void {
-    hasher.update(@tagName(std.meta.activeTag(scalar)));
-    hasher.update(&[_]u8{0});
-    switch (scalar) {
-        inline .i8, .i16, .i32, .i64, .i128, .u8, .u16, .u32, .u64, .u128, .f32_bits, .f64_bits, .dec_bits => |value| hasher.update(std.mem.asBytes(&value)),
-    }
-}
-
 test "ConstStore.hashGraph: walks in the caller's scratch, not the store's allocator" {
     // A completed store is hashed from several threads at once while its own
     // allocator can be a single-threaded arena owned by its module. The store
@@ -2270,7 +2887,7 @@ test "ConstStore.hashGraph: walks in the caller's scratch, not the store's alloc
     const gpa = std.testing.allocator;
     var store = ConstStore.init(gpa);
     defer store.deinit();
-    const a = try store.append(.{ .scalar = .{ .u64 = 7 } });
+    const a = try store.append(.{ .list = .{ .items = .empty, .capacity = 7 } });
     const b = try store.append(.{ .box = a });
     const payloads = [_]ConstNodeId{ a, b };
     const tag = try store.append(.{ .tag = .{ .tag_name = "Pair", .payloads = &payloads } });

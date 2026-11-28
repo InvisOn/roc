@@ -15,7 +15,8 @@ const std = @import("std");
 const invariant = @import("base").invariant;
 const dev_diagnostics = @import("base").dev_diagnostics;
 const builtin = @import("builtin");
-const isaOfOrNull = @import("isa.zig").isaOfOrNull;
+const abiOf = @import("isa.zig").abiOf;
+const abiOfOrNull = @import("isa.zig").abiOfOrNull;
 const Allocator = std.mem.Allocator;
 
 const layout = @import("layout");
@@ -68,10 +69,14 @@ pub const CompilationResult = struct {
     excerpts: ?CodeExcerpt.Set = null,
     /// The object's encoded `CodeLocations`, when the compile captured them.
     code_locations: []const u8 = &.{},
+    /// The unit image a composition built in place of an object
+    /// (`ComposeOptions.unit_image`), owned by the caller once taken.
+    image: []align(UnitImage.alignment.toByteUnits()) u8 = &.{},
 
     pub fn deinit(self: *CompilationResult) void {
         self.allocator.free(self.object_bytes);
         self.allocator.free(self.code_locations);
+        self.allocator.free(self.image);
         if (self.excerpts) |*set| set.deinit();
     }
 };
@@ -91,20 +96,28 @@ pub const ComposeOptions = struct {
     /// into its own process looks procedures up by name.
     global_procs: bool = false,
     capture_code_locations: bool = false,
-    /// Receives every code reference the assembly patched in place rather
-    /// than emitting a relocation for: an excerpt's references to other
-    /// excerpts of the object. A unit image needs them to know what each
-    /// piece of code reaches.
-    patched_refs: ?*PatchedRefs = null,
+    /// Build the composition's unit image (`UnitImage`) in place of its
+    /// relocatable object: the image `UnitImage.build` would read from the
+    /// object, built from the object's contents with no object encoded.
+    unit_image: bool = false,
+    /// With `unit_image`, also encode the object, read the image back from
+    /// it with `UnitImage.build`, and require the two images to be
+    /// identical. `ROC_DEV_UNIT_IMAGE_ROUNDTRIP` turns this on for every
+    /// unit image a diagnostics-enabled compiler builds.
+    check_unit_image: bool = false,
 };
 
 /// The code references a composition patched in place, as offsets in its
 /// text section.
-pub const PatchedRefs = struct {
+const PatchedRefs = struct {
     edges: std.ArrayList(UnitImage.CodeEdge) = .empty,
     /// Where each datum starts in the object's read-only data
     /// (`UnitImage.SymbolAtoms.data_starts`).
     data_starts: std.ArrayList(u64) = .empty,
+    /// The stored images the kept code names, which the image leaves to the
+    /// constant pool and imports (`UnitImage.BuildOptions.pool_names`), in
+    /// name order.
+    pool_names: std.ArrayList([]const u8) = .empty,
     /// Whether some excerpt also has symbolic references, which the
     /// assembly resolves without reporting them here.
     incomplete: bool = false,
@@ -112,6 +125,7 @@ pub const PatchedRefs = struct {
     pub fn deinit(self: *PatchedRefs, allocator: Allocator) void {
         self.edges.deinit(allocator);
         self.data_starts.deinit(allocator);
+        self.pool_names.deinit(allocator);
     }
 };
 
@@ -175,11 +189,37 @@ pub const ObjectFileCompiler = struct {
         object_encoding_ns: u64 = 0,
         file_io_ns: u64 = 0,
         native_emission: NativeProcCompiler.Metrics = .{},
+        /// Detailed steps, recorded only when `Timing.detail` is set.
+        /// Native procedure emission (`NativeProcCompiler.Timing`).
+        native_setup_ns: u64 = 0,
+        native_runs_ns: u64 = 0,
+        native_idle_ns: u64 = 0,
+        native_worker_setup_ns: u64 = 0,
+        native_emit_ns: u64 = 0,
+        native_extract_ns: u64 = 0,
+        native_commit_ns: u64 = 0,
+        native_resolve_ns: u64 = 0,
+        stmt_histogram: LirCodeGenMod.StmtHistogram = .{},
+        /// Lifting a unit's code into pieces: finishing the image, the data
+        /// catalog, piece extraction, content naming, and the host-visible
+        /// data closure.
+        finish_image_ns: u64 = 0,
+        catalog_ns: u64 = 0,
+        piece_extraction_ns: u64 = 0,
+        content_naming_ns: u64 = 0,
+        piece_data_ns: u64 = 0,
+        /// Building a unit's image from its composition's object contents.
+        unit_image_ns: u64 = 0,
+        /// Bytes of the composed objects and unit images built.
+        object_bytes: u64 = 0,
+        image_bytes: u64 = 0,
     };
 
     pub const Timing = struct {
         std_io: std.Io,
         snapshot_value: TimingSnapshot = .{},
+        /// Record the detailed steps as well as the phases.
+        detail: bool = false,
 
         const Phase = enum {
             backend_setup,
@@ -201,6 +241,44 @@ pub const ObjectFileCompiler = struct {
 
         fn start(self: *const Timing) i96 {
             return std.Io.Timestamp.now(self.std_io, .awake).nanoseconds;
+        }
+
+        /// A native emission timing when detail is recorded.
+        fn nativeTiming(timing: ?*Timing) ?NativeProcCompiler.Timing {
+            const active = timing orelse return null;
+            return if (active.detail) .{ .std_io = active.std_io } else null;
+        }
+
+        fn addNative(timing: ?*Timing, native: ?NativeProcCompiler.Timing) void {
+            const active = timing orelse return;
+            const measured = native orelse return;
+            const value = &active.snapshot_value;
+            value.native_setup_ns +|= measured.setup_ns;
+            value.native_runs_ns +|= measured.runs_ns;
+            value.native_idle_ns +|= measured.capacity_ns -| (measured.worker_setup_ns +| measured.emit_ns +| measured.extract_ns);
+            value.native_worker_setup_ns +|= measured.worker_setup_ns;
+            value.native_emit_ns +|= measured.emit_ns;
+            value.native_extract_ns +|= measured.extract_ns;
+            value.native_commit_ns +|= measured.commit_ns;
+            value.native_resolve_ns +|= measured.resolve_ns;
+            value.stmt_histogram.add(&measured.histogram);
+        }
+
+        /// The start of a detailed step: a clock reading, or zero when no
+        /// detail is recorded.
+        fn startDetail(timing: ?*Timing) i96 {
+            const active = timing orelse return 0;
+            return if (active.detail) active.start() else 0;
+        }
+
+        /// Add the time since `started_ns` to the detailed step `field` and
+        /// return the current time.
+        fn lapDetail(timing: ?*Timing, started_ns: i96, comptime field: []const u8) i96 {
+            const active = timing orelse return 0;
+            if (!active.detail) return 0;
+            const now = active.start();
+            @field(active.snapshot_value, field) +|= @intCast(@max(0, now - started_ns));
+            return now;
         }
 
         fn finish(self: *Timing, started_ns: i96, phase: Phase) void {
@@ -252,44 +330,41 @@ pub const ObjectFileCompiler = struct {
     /// Whole-Program Dead Code"): every procedure, helper and entrypoint
     /// wrapper lifted out of the unit's code as its own excerpt, with the
     /// constants it names under their content names. No object is encoded.
+    /// The pieces take `static_data_exports`, allocated by `self.allocator`
+    /// (`static_data.buildStaticData`), even on failure: their constants
+    /// share those exports' payload bytes rather than copying them. The
+    /// pieces keep the exports alive at least as long as themselves, so a
+    /// caller may still read them while it holds the pieces, but never
+    /// frees them.
     pub fn compileToPieces(
         self: *ObjectFileCompiler,
         lir_store: *const LirStore,
         layout_store: *const layout.Store,
         entrypoints: []const Entrypoint,
-        static_data_exports: []const StaticDataExport,
+        static_data_exports: []StaticDataExport,
         proc_specs: []const LirProcSpec,
         target: RocTarget,
     ) CompilationError!UnitPieces.Pieces {
-        const enum_info = @typeInfo(RocTarget).@"enum";
-        const default_target = target.defaultCpuTarget();
-        inline for (enum_info.field_values) |field_value| {
-            const comptime_target: RocTarget = @fromBackingInt(@intCast(field_value));
-            if (comptime comptime_target.defaultCpuTarget() != comptime_target) continue;
-            if (default_target == comptime_target) {
-                if (comptime isaOfOrNull(comptime_target) != null) {
-                    return compilePiecesWithCodeGen(
-                        LirCodeGenMod.LirCodeGen(comptime_target),
-                        self.allocator,
-                        lir_store,
-                        layout_store,
-                        entrypoints,
-                        static_data_exports,
-                        proc_specs,
-                        target,
-                        self.enable_default_platform_runtime,
-                        self.erased_capture_prefix,
-                        self.timing,
-                        self.post_check_executor,
-                        self.internal_entrypoints,
-                        self.relocatable_expect_sites,
-                    );
-                } else {
-                    return CompilationError.UnsupportedTarget;
-                }
-            }
+        const exports = try UnitExports.keep(self.allocator, lir_store, target, static_data_exports);
+        defer exports.keeper.release();
+        switch (abiOfOrNull(target) orelse return CompilationError.UnsupportedTarget) {
+            inline .x86_64_sysv, .x86_64_windows, .aarch64_aapcs, .aarch64_apple, .aarch64_windows => |abi| return compilePiecesWithCodeGen(
+                LirCodeGenMod.LirCodeGen(abi),
+                self.allocator,
+                lir_store,
+                layout_store,
+                entrypoints,
+                exports,
+                proc_specs,
+                target,
+                self.enable_default_platform_runtime,
+                self.erased_capture_prefix,
+                self.timing,
+                self.post_check_executor,
+                self.internal_entrypoints,
+                self.relocatable_expect_sites,
+            ),
         }
-        return CompilationError.UnsupportedTarget;
     }
 
     /// Compose the pieces of a program's units into one relocatable object
@@ -301,20 +376,9 @@ pub const ObjectFileCompiler = struct {
         target: RocTarget,
         options: ComposeOptions,
     ) CompilationError!CompilationResult {
-        const enum_info = @typeInfo(RocTarget).@"enum";
-        const default_target = target.defaultCpuTarget();
-        inline for (enum_info.field_values) |field_value| {
-            const comptime_target: RocTarget = @fromBackingInt(@intCast(field_value));
-            if (comptime comptime_target.defaultCpuTarget() != comptime_target) continue;
-            if (default_target == comptime_target) {
-                if (comptime isaOfOrNull(comptime_target) != null) {
-                    return composeWithCodeGen(LirCodeGenMod.LirCodeGen(comptime_target), self.allocator, inputs, target, options, self.timing, self.post_check_executor);
-                } else {
-                    return CompilationError.UnsupportedTarget;
-                }
-            }
+        switch (abiOfOrNull(target) orelse return CompilationError.UnsupportedTarget) {
+            inline .x86_64_sysv, .x86_64_windows, .aarch64_aapcs, .aarch64_apple, .aarch64_windows => |abi| return composeWithCodeGen(LirCodeGenMod.LirCodeGen(abi), self.allocator, inputs, target, options, self.timing, self.post_check_executor),
         }
-        return CompilationError.UnsupportedTarget;
     }
 
     /// Which pieces of a unit its image keeps.
@@ -343,38 +407,25 @@ pub const ObjectFileCompiler = struct {
     ) CompilationError![]align(UnitImage.alignment.toByteUnits()) u8 {
         std.debug.assert(target.toCpuArch() == .x86_64 or target.toCpuArch() == .aarch64);
         std.debug.assert(@import("mod.zig").imageOs(target.toOsTag()));
-        var patched: PatchedRefs = .{};
-        defer patched.deinit(self.allocator);
         var composed = try self.composeObject(&.{pieces}, target, .{
             .roots = switch (roots) {
                 .every_procedure => null,
                 .entrypoints => &.{},
             },
             .global_procs = true,
-            .patched_refs = &patched,
             .capture_code_locations = code_locations != null,
+            .unit_image = true,
         });
         defer composed.deinit();
-        const image = UnitImage.build(self.allocator, &.{composed.object_bytes}, .{
-            .keep_debug = true,
-            // Code reached only through references the image cannot see
-            // keeps the whole image together.
-            .atoms = if (patched.incomplete) .whole else .{ .symbols = .{ .edges = patched.edges.items, .data_starts = patched.data_starts.items } },
-        }) catch |err| switch (err) {
-            error.OutOfMemory => return CompilationError.OutOfMemory,
-            error.InvalidObject,
-            error.UnsupportedSection,
-            error.UnsupportedSymbol,
-            error.UnsupportedRelocation,
-            error.DuplicateDefinition,
-            error.RelocationOutOfRange,
-            error.ImageTooLarge,
-            => invariant("the dev backend's object for a unit is not convertible into a unit image: {s}", .{@errorName(err)}),
-        };
         if (code_locations) |out| {
             out.* = composed.code_locations;
             composed.code_locations = &.{};
         }
+        const image = composed.image;
+        composed.image = &.{};
+        if (self.timing) |timing| if (timing.detail) {
+            timing.snapshot_value.image_bytes +|= image.len;
+        };
         return image;
     }
 
@@ -534,14 +585,17 @@ fn compileWithCodeGen(
         demand.append(allocator, @fromBackingInt(@intCast(index))) catch return CompilationError.OutOfMemory;
     }
     var native_metrics: NativeProcCompiler.Metrics = .{};
+    var native_timing = ObjectFileCompiler.Timing.nativeTiming(timing);
     var retained = NativeProcCompiler.run(CodeGen, allocator, &codegen, demand.items, .{
         .target = target,
         .executor = executor,
         .reuse_same_program = reuse_same_program,
         .metrics_out = &native_metrics,
+        .timing = if (native_timing) |*native| native else null,
         .static_helpers = static_rc_helpers,
         .constant_exports = static_data_exports,
     }) catch return CompilationError.OutOfMemory;
+    ObjectFileCompiler.Timing.addNative(timing, native_timing);
     // Excerpt data remains borrowed by the destination until object encoding
     // and optional excerpt capture have finished.
     defer retained.deinit();
@@ -558,7 +612,7 @@ fn compileWithCodeGen(
     // names, into the code generator the object is encoded from.
     var symbol_relocations_started_ns = if (timing) |timings| timings.start() else 0;
     codegen.finishImage() catch return CompilationError.OutOfMemory;
-    var catalog = CodeExcerpt.PreparedData.init(allocator, static_strings.exports, static_data_exports, native_data) catch return CompilationError.OutOfMemory;
+    var catalog = CodeExcerpt.PreparedData.init(allocator, static_strings.exports, static_data_exports, .copy, native_data) catch return CompilationError.OutOfMemory;
     defer catalog.deinit();
     var staged = CodeExcerpt.extractCataloged(CodeGen, allocator, &codegen, proc_specs, layout_store, &catalog) catch |err| switch (err) {
         error.OutOfMemory => return CompilationError.OutOfMemory,
@@ -688,7 +742,7 @@ fn compileWithCodeGen(
     var symbols = std.ArrayList(SymbolDefinition).empty;
     defer symbols.deinit(allocator);
 
-    var rodata = std.ArrayList(u8).empty;
+    var rodata: Rodata = .{};
     defer rodata.deinit(allocator);
 
     var rodata_relocations = std.ArrayList(ObjectWriter.IndexedDataRelocation).empty;
@@ -775,7 +829,8 @@ fn compileWithCodeGen(
                     .uses_frame_pointer = frame.uses_frame_pointer,
                 }) catch return CompilationError.OutOfMemory;
                 dwarf_procs.append(allocator, .{
-                    .name = symbol_name,
+                    .name = if (excerpt.name.len != 0) excerpt.name else symbol_name,
+                    .linkage_name = if (excerpt.name.len != 0) symbol_name else null,
                     .code_start = start,
                     .code_size = excerpt.code.len,
                     .loc = excerpt.loc,
@@ -893,7 +948,7 @@ fn compileWithCodeGen(
     if (timing) |timings| timings.finish(symbol_relocations_started_ns, .symbol_relocations);
 
     const object_bytes: []const u8 = if (emit_object)
-        try encodeObject(allocator, lir_store, target, &final, code, rodata.items, zero_fill_size, resolved.symbols, relocations, rodata_relocations.items, dwarf_procs.items, timing)
+        try encodeObject(allocator, lir_store, target, &final, code, rodata.bytes(), zero_fill_size, resolved.symbols, relocations, rodata_relocations.items, dwarf_procs.items, timing)
     else
         &.{};
     errdefer allocator.free(object_bytes);
@@ -950,7 +1005,7 @@ fn encodeObject(
     target: RocTarget,
     codegen: anytype,
     code: []const u8,
-    rodata: []const u8,
+    rodata: UnitImage.PiecedBytes,
     zero_fill_size: u64,
     symbols: []const ObjectWriter.Symbol,
     relocations: []const IndexedRelocation,
@@ -958,24 +1013,8 @@ fn encodeObject(
     dwarf_procs: []const Dwarf.ProcEntry,
     timing: ?*ObjectFileCompiler.Timing,
 ) CompilationError![]const u8 {
-    const dwarf_started_ns = if (timing) |timings| timings.start() else 0;
-    const source_file_names = allocator.alloc([]const u8, lir_store.sourceFileCount()) catch {
-        return CompilationError.OutOfMemory;
-    };
-    defer allocator.free(source_file_names);
-    for (source_file_names, 0..) |*name, i| {
-        name.* = lir_store.sourceFileName(@intCast(i));
-    }
-    var dwarf_sections = Dwarf.build(
-        allocator,
-        "roc dev",
-        source_file_names,
-        codegen.getLineEntries(),
-        dwarf_procs,
-        code.len,
-    ) catch return CompilationError.OutOfMemory;
+    var dwarf_sections = try buildDwarf(allocator, lir_store, codegen, code, dwarf_procs, timing);
     defer dwarf_sections.deinit(allocator);
-    if (timing) |timings| timings.finish(dwarf_started_ns, .dwarf);
 
     const object_encoding_started_ns = if (timing) |timings| timings.start() else 0;
     var output = std.ArrayList(u8).empty;
@@ -1007,6 +1046,96 @@ fn encodeObject(
     const object_bytes = output.toOwnedSlice(allocator) catch return CompilationError.OutOfMemory;
     if (timing) |timings| timings.finish(object_encoding_started_ns, .object_encoding);
     return object_bytes;
+}
+
+/// The debug sections of a finished code generator's code.
+fn buildDwarf(
+    allocator: Allocator,
+    lir_store: *const LirStore,
+    codegen: anytype,
+    code: []const u8,
+    dwarf_procs: []const Dwarf.ProcEntry,
+    timing: ?*ObjectFileCompiler.Timing,
+) CompilationError!Dwarf.Sections {
+    const dwarf_started_ns = if (timing) |timings| timings.start() else 0;
+    const source_file_names = allocator.alloc([]const u8, lir_store.sourceFileCount()) catch {
+        return CompilationError.OutOfMemory;
+    };
+    defer allocator.free(source_file_names);
+    for (source_file_names, 0..) |*name, i| {
+        name.* = lir_store.sourceFileName(@intCast(i));
+    }
+    const dwarf_sections = Dwarf.build(
+        allocator,
+        "roc dev",
+        source_file_names,
+        codegen.getLineEntries(),
+        dwarf_procs,
+        code.len,
+    ) catch return CompilationError.OutOfMemory;
+    if (timing) |timings| timings.finish(dwarf_started_ns, .dwarf);
+    return dwarf_sections;
+}
+
+/// The unit image of a finished composition: its object's contents in the
+/// form `UnitImage` reads an object into (`ObjectWriter.indexedImageObject`),
+/// built with the code references its assembly patched in place.
+fn buildCompositionImage(
+    allocator: Allocator,
+    lir_store: *const LirStore,
+    target: RocTarget,
+    codegen: anytype,
+    code: []const u8,
+    rodata: UnitImage.PiecedBytes,
+    zero_fill_size: u64,
+    symbols: []const ObjectWriter.Symbol,
+    relocations: []const IndexedRelocation,
+    rodata_relocations: []const ObjectWriter.IndexedDataRelocation,
+    dwarf_procs: []const Dwarf.ProcEntry,
+    patched: *const PatchedRefs,
+    timing: ?*ObjectFileCompiler.Timing,
+) CompilationError![]align(UnitImage.alignment.toByteUnits()) u8 {
+    var dwarf_sections = try buildDwarf(allocator, lir_store, codegen, code, dwarf_procs, timing);
+    defer dwarf_sections.deinit(allocator);
+    const image_started = ObjectFileCompiler.Timing.startDetail(timing);
+    defer _ = ObjectFileCompiler.Timing.lapDetail(timing, image_started, "unit_image_ns");
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const object = ObjectWriter.indexedImageObject(arena_state.allocator(), target, code, rodata, zero_fill_size, symbols, relocations, rodata_relocations, codegen.getUnwindFunctions(), .{
+        .line = dwarf_sections.debug_line,
+        .abbrev = dwarf_sections.debug_abbrev,
+        .info = dwarf_sections.debug_info,
+        .line_relocs = dwarf_sections.line_relocs,
+        .info_relocs = dwarf_sections.info_relocs,
+    }, true) catch |err| switch (err) {
+        error.OutOfMemory => return CompilationError.OutOfMemory,
+        error.UnsupportedTarget => return CompilationError.UnsupportedTarget,
+        error.InvalidObject,
+        error.UnsupportedSection,
+        error.UnsupportedSymbol,
+        error.UnsupportedRelocation,
+        error.DuplicateDefinition,
+        error.RelocationOutOfRange,
+        error.ImageTooLarge,
+        => invariant("the dev backend's object for a unit is not convertible into a unit image: {s}", .{@errorName(err)}),
+    };
+    return UnitImage.buildObjects(allocator, &.{object}, .{
+        .keep_debug = true,
+        // Code reached only through references the image cannot see keeps
+        // the whole image together.
+        .atoms = if (patched.incomplete) .whole else .{ .symbols = .{ .edges = patched.edges.items, .data_starts = patched.data_starts.items } },
+        .pool_names = patched.pool_names.items,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return CompilationError.OutOfMemory,
+        error.InvalidObject,
+        error.UnsupportedSection,
+        error.UnsupportedSymbol,
+        error.UnsupportedRelocation,
+        error.DuplicateDefinition,
+        error.RelocationOutOfRange,
+        error.ImageTooLarge,
+        => invariant("the dev backend's object for a unit is not convertible into a unit image: {s}", .{@errorName(err)}),
+    };
 }
 
 const SymbolDefinition = struct {
@@ -1066,11 +1195,27 @@ fn resolveObjectSymbols(
     return .{ .symbols = symbols };
 }
 
+/// An object's read-only data as its writer is given it: each export a
+/// piece at its aligned offset, borrowed from the export, so the data is
+/// copied once, into what the writer writes.
+const Rodata = struct {
+    len: usize = 0,
+    pieces: std.ArrayList(UnitImage.SectionPiece) = .empty,
+
+    fn deinit(self: *Rodata, allocator: Allocator) void {
+        self.pieces.deinit(allocator);
+    }
+
+    fn bytes(self: *const Rodata) UnitImage.PiecedBytes {
+        return .{ .len = self.len, .pieces = self.pieces.items };
+    }
+};
+
 fn appendStaticDataExports(
     allocator: Allocator,
     table: *SymbolTable.Table,
     exports: []const StaticDataExport,
-    rodata: *std.ArrayList(u8),
+    rodata: *Rodata,
     zero_fill_size: *u64,
     relocations: *std.ArrayList(ObjectWriter.IndexedDataRelocation),
     symbols: *std.ArrayList(SymbolDefinition),
@@ -1086,7 +1231,7 @@ fn appendStaticDataExports(
     var helpers = std.AutoHashMap(layout.RcHelperKey, SymbolTable.Id).init(allocator);
     defer helpers.deinit();
     for (exports, data_symbols) |data_export, definition_id| {
-        const start = rodata.items.len;
+        const start = rodata.len;
         try appendStaticDataExport(allocator, data_export, definition_id, rodata, zero_fill_size, symbols);
         // A zero-fill export has no relocations, so this offset is only ever
         // used for exports placed in readonly data.
@@ -1137,7 +1282,7 @@ fn appendStaticDataExport(
     allocator: Allocator,
     data_export: StaticDataExport,
     id: SymbolTable.Id,
-    rodata: *std.ArrayList(u8),
+    rodata: *Rodata,
     zero_fill_size: *u64,
     static_data_symbols: *std.ArrayList(SymbolDefinition),
 ) CompilationError!void {
@@ -1167,13 +1312,11 @@ fn appendStaticDataExport(
         };
         return;
     }
-    const aligned_offset = std.mem.alignForward(usize, rodata.items.len, alignment);
-    rodata.appendNTimes(allocator, 0, aligned_offset - rodata.items.len) catch {
+    const aligned_offset = std.mem.alignForward(usize, rodata.len, alignment);
+    rodata.pieces.append(allocator, .{ .offset = aligned_offset, .bytes = data_export.bytes }) catch {
         return CompilationError.OutOfMemory;
     };
-    rodata.appendSlice(allocator, data_export.bytes) catch {
-        return CompilationError.OutOfMemory;
-    };
+    rodata.len = aligned_offset + data_export.bytes.len;
 
     static_data_symbols.append(allocator, .{ .id = id, .symbol = .{
         .name = data_export.symbol_name,
@@ -1204,7 +1347,7 @@ fn compileStaticDataObjectBytes(
     var symbols = std.ArrayList(SymbolDefinition).empty;
     defer symbols.deinit(allocator);
 
-    var rodata = std.ArrayList(u8).empty;
+    var rodata: Rodata = .{};
     defer rodata.deinit(allocator);
 
     var rodata_relocations = std.ArrayList(ObjectWriter.IndexedDataRelocation).empty;
@@ -1230,7 +1373,7 @@ fn compileStaticDataObjectBytes(
         allocator,
         target,
         &.{},
-        rodata.items,
+        rodata.bytes(),
         zero_fill_size,
         resolved.symbols,
         &.{},
@@ -1249,6 +1392,37 @@ fn compileStaticDataObjectBytes(
     };
 }
 
+/// A unit's literal backings and frozen constants, which the data catalogs
+/// of its pieces borrow payload bytes from: their keeper (`CodeExcerpt.
+/// DataOwner.initKeeper`) frees them when the last catalog retaining it goes.
+const UnitExports = struct {
+    allocator: Allocator,
+    literal_backings: StaticStringData.Table,
+    constants: []StaticDataExport,
+    keeper: *CodeExcerpt.DataOwner,
+
+    /// Keep `constants`, which the result owns even on failure, with the
+    /// literal backings of `lir_store`. The caller holds the keeper's first
+    /// reference.
+    fn keep(allocator: Allocator, lir_store: *const LirStore, target: RocTarget, constants: []StaticDataExport) CompilationError!*UnitExports {
+        errdefer static_data_export.deinitStaticData(allocator, constants);
+        const self = allocator.create(UnitExports) catch return CompilationError.OutOfMemory;
+        errdefer allocator.destroy(self);
+        var literal_backings = StaticStringData.build(allocator, lir_store, target) catch return CompilationError.OutOfMemory;
+        errdefer literal_backings.deinit();
+        self.* = .{ .allocator = allocator, .literal_backings = literal_backings, .constants = constants, .keeper = undefined };
+        self.keeper = CodeExcerpt.DataOwner.initKeeper(allocator, .{ .context = self, .release = release }) catch return CompilationError.OutOfMemory;
+        return self;
+    }
+
+    fn release(context: *anyopaque) void {
+        const self: *UnitExports = @ptrCast(@alignCast(context));
+        self.literal_backings.deinit();
+        static_data_export.deinitStaticData(self.allocator, self.constants);
+        self.allocator.destroy(self);
+    }
+};
+
 /// Runtime-to-comptime dispatch for compilation.
 /// Uses inline for over RocTarget enum fields to select the correct LirCodeGen instantiation.
 ///
@@ -1262,7 +1436,7 @@ fn compilePiecesWithCodeGen(
     lir_store: *const LirStore,
     layout_store: *const layout.Store,
     entrypoints: []const Entrypoint,
-    static_data_exports: []const StaticDataExport,
+    exports: *const UnitExports,
     proc_specs: []const LirProcSpec,
     target: RocTarget,
     enable_default_platform_runtime: bool,
@@ -1273,13 +1447,15 @@ fn compilePiecesWithCodeGen(
     relocatable_expect_sites: bool,
 ) CompilationError!UnitPieces.Pieces {
     const backend_setup_started_ns = if (timing) |timings| timings.start() else 0;
-    var static_strings = StaticStringData.build(allocator, lir_store, target) catch return CompilationError.OutOfMemory;
-    defer static_strings.deinit();
+    const static_data_exports = exports.constants;
+    // Every catalog of the unit borrows the payload bytes of its literal
+    // backings and constants, which the keeper holds as long as any of them.
+    const borrowed: CodeExcerpt.PreparedData.ExportPayload = .{ .borrow = exports.keeper };
     var codegen = CodeGen.initWithCapturePrefix(
         allocator,
         lir_store,
         layout_store,
-        static_strings.view(),
+        exports.literal_backings.view(),
         erased_capture_prefix,
         target.cpuLevel(),
     ) catch return CompilationError.OutOfMemory;
@@ -1299,13 +1475,17 @@ fn compilePiecesWithCodeGen(
         demand.append(allocator, @fromBackingInt(@intCast(index))) catch return CompilationError.OutOfMemory;
     }
     var native_metrics: NativeProcCompiler.Metrics = .{};
+    var native_timing = ObjectFileCompiler.Timing.nativeTiming(timing);
     var retained = NativeProcCompiler.run(CodeGen, allocator, &codegen, demand.items, .{
         .target = target,
         .executor = executor,
         .metrics_out = &native_metrics,
+        .timing = if (native_timing) |*native| native else null,
         .static_helpers = static_rc_helpers,
         .constant_exports = static_data_exports,
+        .export_payload = borrowed,
     }) catch return CompilationError.OutOfMemory;
+    ObjectFileCompiler.Timing.addNative(timing, native_timing);
     defer retained.deinit();
     if (timing) |timings| timings.snapshot_value.native_emission.add(native_metrics);
     if (timing) |timings| timings.finish(procedure_instructions_started_ns, .procedure_instructions);
@@ -1319,18 +1499,23 @@ fn compilePiecesWithCodeGen(
     codegen.generation_mode = .object_file;
     if (timing) |timings| timings.finish(entrypoint_instructions_started_ns, .entrypoint_instructions);
     const extraction_started_ns = if (timing) |timings| timings.start() else 0;
+    var detail_started = ObjectFileCompiler.Timing.startDetail(timing);
     codegen.finishImage() catch return CompilationError.OutOfMemory;
-    var catalog = CodeExcerpt.PreparedData.init(allocator, static_strings.exports, static_data_exports, &.{}) catch return CompilationError.OutOfMemory;
+    detail_started = ObjectFileCompiler.Timing.lapDetail(timing, detail_started, "finish_image_ns");
+    var catalog = CodeExcerpt.PreparedData.init(allocator, exports.literal_backings.exports, static_data_exports, borrowed, &.{}) catch return CompilationError.OutOfMemory;
     defer catalog.deinit();
+    detail_started = ObjectFileCompiler.Timing.lapDetail(timing, detail_started, "catalog_ns");
     var staged = CodeExcerpt.extractCataloged(CodeGen, allocator, &codegen, proc_specs, layout_store, &catalog) catch |err| switch (err) {
         error.OutOfMemory => return CompilationError.OutOfMemory,
         error.NestedCodeRegion, error.UncoveredCode, error.DanglingReference, error.UnsupportedRelocation => invariant("unit piece extraction failed: {s}", .{@errorName(err)}),
     };
     defer staged.deinit();
+    detail_started = ObjectFileCompiler.Timing.lapDetail(timing, detail_started, "piece_extraction_ns");
     // The unit's constants under their content names, so pieces of
     // different units can meet in one program.
     var named = CodeExcerpt.combineDistinct(allocator, &.{&staged}) catch return CompilationError.OutOfMemory;
     errdefer named.deinit();
+    detail_started = ObjectFileCompiler.Timing.lapDetail(timing, detail_started, "content_naming_ns");
     var arena = collections.SingleThreadArena.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
@@ -1370,6 +1555,12 @@ fn compilePiecesWithCodeGen(
             .identity = identity,
         };
     }
+    // The host-visible constants share the catalog's payload bytes, so the
+    // pieces retain its owner, and they retain the exports' keeper, which
+    // keeps the exports alive for the caller as long as the pieces
+    // (`compileToPieces`); nothing fallible follows.
+    const data_owners = CodeExcerpt.retainPayloadOwners(a, exported_data, exports.keeper) catch return CompilationError.OutOfMemory;
+    _ = ObjectFileCompiler.Timing.lapDetail(timing, detail_started, "piece_data_ns");
     if (timing) |timings| timings.finish(extraction_started_ns, .symbol_relocations);
     return .{
         .arena = arena,
@@ -1377,6 +1568,7 @@ fn compilePiecesWithCodeGen(
         .erased_capture_prefix = erased_capture_prefix,
         .source_files = source_files,
         .exported_data = exported_data,
+        .data_owners = data_owners,
         .helper_aliases = helper_aliases,
     };
 }
@@ -1490,7 +1682,13 @@ fn composeWithCodeGen(
     defer helper_keys.deinit();
     const starts = CodeExcerpt.assembleArranged(CodeGen, allocator, &final, &canonical.set, &procs_by_identity, &helper_keys) catch return CompilationError.OutOfMemory;
     defer allocator.free(starts);
-    if (options.patched_refs) |patched| {
+    // A unit image needs every code reference the assembly patched in place
+    // rather than emitting a relocation for (an excerpt's references to
+    // other excerpts of the object) to know what each piece of code reaches.
+    var patched_refs: PatchedRefs = .{};
+    defer patched_refs.deinit(allocator);
+    if (options.unit_image) {
+        const patched = &patched_refs;
         for (canonical.set.excerpts, starts) |excerpt, start| {
             if (excerpt.symbolic_refs.len != 0) patched.incomplete = true;
             for (excerpt.refs) |ref| {
@@ -1505,7 +1703,7 @@ fn composeWithCodeGen(
     }
     var symbols = std.ArrayList(SymbolDefinition).empty;
     defer symbols.deinit(allocator);
-    var rodata = std.ArrayList(u8).empty;
+    var rodata: Rodata = .{};
     defer rodata.deinit(allocator);
     var rodata_relocations = std.ArrayList(ObjectWriter.IndexedDataRelocation).empty;
     defer rodata_relocations.deinit(allocator);
@@ -1518,15 +1716,23 @@ fn composeWithCodeGen(
     var dwarf_procs = std.ArrayList(Dwarf.ProcEntry).empty;
     defer dwarf_procs.deinit(allocator);
     {
-        const data_exports = allocator.alloc(static_data_export.StaticDataExport, canonical.data.len) catch return CompilationError.OutOfMemory;
-        defer allocator.free(data_exports);
+        // A unit image leaves the stored images its code names to the
+        // constant pool: it defines none of them and imports each by name
+        // (design.md "Constant Pool").
+        var data_exports = std.ArrayList(static_data_export.StaticDataExport).initCapacity(allocator, canonical.data.len) catch return CompilationError.OutOfMemory;
+        defer data_exports.deinit(allocator);
         var data_relocations = std.ArrayList([]static_data_export.StaticDataRelocation).empty;
         defer {
             for (data_relocations.items) |relocations| allocator.free(relocations);
             data_relocations.deinit(allocator);
         }
-        for (canonical.data, data_exports) |datum, *out| {
+        for (canonical.data) |datum| {
             const item = datum.item;
+            if (options.unit_image and item.pool_image) {
+                patched_refs.pool_names.append(allocator, item.name) catch return CompilationError.OutOfMemory;
+                continue;
+            }
+            const out = data_exports.addOneAssumeCapacity();
             const relocations = allocator.alloc(static_data_export.StaticDataRelocation, item.relocations.len) catch return CompilationError.OutOfMemory;
             data_relocations.append(allocator, relocations) catch {
                 allocator.free(relocations);
@@ -1550,7 +1756,7 @@ fn composeWithCodeGen(
                 .relocations = relocations,
             };
         }
-        try appendStaticDataExports(allocator, &final.codegen.symbols, data_exports, &rodata, &zero_fill_size, &rodata_relocations, &symbols, if (options.patched_refs) |patched| &patched.data_starts else null);
+        try appendStaticDataExports(allocator, &final.codegen.symbols, data_exports.items, &rodata, &zero_fill_size, &rodata_relocations, &symbols, if (options.unit_image) &patched_refs.data_starts else null);
     }
     for (canonical.set.excerpts, starts) |excerpt, start| switch (excerpt.kind) {
         .proc => |identity| {
@@ -1576,7 +1782,8 @@ fn composeWithCodeGen(
                 .uses_frame_pointer = frame.uses_frame_pointer,
             }) catch return CompilationError.OutOfMemory;
             dwarf_procs.append(allocator, .{
-                .name = symbol_name,
+                .name = if (excerpt.name.len != 0) excerpt.name else symbol_name,
+                .linkage_name = if (excerpt.name.len != 0) symbol_name else null,
                 .code_start = start,
                 .code_size = excerpt.code.len,
                 .loc = excerpt.loc,
@@ -1640,7 +1847,38 @@ fn composeWithCodeGen(
     var resolved = try resolveObjectSymbols(allocator, &final.codegen.symbols, symbols.items, relocations);
     defer resolved.deinit(allocator);
     if (timing) |timings| timings.finish(symbol_relocations_started_ns, .symbol_relocations);
-    const object_bytes = try encodeObject(allocator, &store, target, &final, code, rodata.items, zero_fill_size, resolved.symbols, relocations, rodata_relocations.items, dwarf_procs.items, timing);
+    if (options.unit_image) {
+        const image = try buildCompositionImage(allocator, &store, target, &final, code, rodata.bytes(), zero_fill_size, resolved.symbols, relocations, rodata_relocations.items, dwarf_procs.items, &patched_refs, timing);
+        errdefer allocator.free(image);
+        if (options.check_unit_image or dev_diagnostics.isSet(.dev_unit_image_roundtrip)) {
+            const object_bytes = try encodeObject(allocator, &store, target, &final, code, rodata.bytes(), zero_fill_size, resolved.symbols, relocations, rodata_relocations.items, dwarf_procs.items, null);
+            defer allocator.free(object_bytes);
+            const read_back = UnitImage.build(allocator, &.{object_bytes}, .{
+                .keep_debug = true,
+                .atoms = if (patched_refs.incomplete) .whole else .{ .symbols = .{ .edges = patched_refs.edges.items, .data_starts = patched_refs.data_starts.items } },
+                .pool_names = patched_refs.pool_names.items,
+            }) catch |err| switch (err) {
+                error.OutOfMemory => return CompilationError.OutOfMemory,
+                error.InvalidObject,
+                error.UnsupportedSection,
+                error.UnsupportedSymbol,
+                error.UnsupportedRelocation,
+                error.DuplicateDefinition,
+                error.RelocationOutOfRange,
+                error.ImageTooLarge,
+                => invariant("the dev backend's object for a unit is not convertible into a unit image: {s}", .{@errorName(err)}),
+            };
+            defer allocator.free(read_back);
+            if (!std.mem.eql(u8, image, read_back)) invariant("a unit image built from its object's contents differs from the image read back from the encoded object ({d} and {d} bytes)", .{ image.len, read_back.len });
+        }
+        return CompilationResult{
+            .object_bytes = &.{},
+            .allocator = allocator,
+            .image = image,
+            .code_locations = if (options.capture_code_locations) try encodeCodeLocations(allocator, &store, &final) else &.{},
+        };
+    }
+    const object_bytes = try encodeObject(allocator, &store, target, &final, code, rodata.bytes(), zero_fill_size, resolved.symbols, relocations, rodata_relocations.items, dwarf_procs.items, timing);
     errdefer allocator.free(object_bytes);
     return CompilationResult{
         .object_bytes = object_bytes,
@@ -1668,39 +1906,28 @@ fn crossCompileDispatch(
     executor: ?Executor,
     reuse_same_program: ?*const NativeProcCompiler.Retained,
 ) CompilationError!CompilationResult {
-    const enum_info = @typeInfo(RocTarget).@"enum";
-    const default_target = target.defaultCpuTarget();
-    inline for (enum_info.field_values) |field_value| {
-        const comptime_target: RocTarget = @fromBackingInt(@intCast(field_value));
-        if (comptime comptime_target.defaultCpuTarget() != comptime_target) continue;
-        if (default_target == comptime_target) {
-            if (comptime isaOfOrNull(comptime_target) != null) {
-                return compileWithCodeGen(
-                    LirCodeGenMod.LirCodeGen(comptime_target),
-                    allocator,
-                    lir_store,
-                    layout_store,
-                    entrypoints,
-                    static_data_exports,
-                    proc_specs,
-                    target,
-                    enable_default_platform_runtime,
-                    erased_capture_prefix,
-                    timing,
-                    capture_all_procedures,
-                    link_unit,
-                    capture_excerpts,
-                    capture_code_locations,
-                    emit_object,
-                    executor,
-                    reuse_same_program,
-                );
-            } else {
-                return CompilationError.UnsupportedTarget;
-            }
-        }
+    switch (abiOfOrNull(target) orelse return CompilationError.UnsupportedTarget) {
+        inline .x86_64_sysv, .x86_64_windows, .aarch64_aapcs, .aarch64_apple, .aarch64_windows => |abi| return compileWithCodeGen(
+            LirCodeGenMod.LirCodeGen(abi),
+            allocator,
+            lir_store,
+            layout_store,
+            entrypoints,
+            static_data_exports,
+            proc_specs,
+            target,
+            enable_default_platform_runtime,
+            erased_capture_prefix,
+            timing,
+            capture_all_procedures,
+            link_unit,
+            capture_excerpts,
+            capture_code_locations,
+            emit_object,
+            executor,
+            reuse_same_program,
+        ),
     }
-    return CompilationError.UnsupportedTarget;
 }
 
 // Tests
@@ -1780,6 +2007,52 @@ test "ObjectFileCompiler native emission skips static initializers and captures 
     try std.testing.expectEqual(@as(u64, targets.len), snapshot.native_emission.procedures_emitted);
     try std.testing.expectEqual(@as(u64, 0), snapshot.native_emission.procedures_reused);
     try std.testing.expectEqual(@as(u64, 0), snapshot.rc_helper_instructions_ns);
+}
+
+test "issue 12943: a procedure's source name survives unit pieces and composition" {
+    const allocator = std.testing.allocator;
+    var named_symbol: [lir.ProcIdentity.symbol_name_len]u8 = undefined;
+    const encoded = encoded: {
+        var store = LirStore.init(allocator);
+        defer store.deinit();
+        var layouts = try layout.Store.init(allocator, @import("base").target.TargetUsize.native);
+        defer layouts.deinit();
+        const result_local = try store.addLocal(.{ .layout_idx = .i64 });
+        const ret = try store.addCFStmt(.{ .ret = .{ .value = result_local } }, .test_fixture);
+        const body = try store.addCFStmt(.{ .assign_literal = .{
+            .target = result_local,
+            .value = .{ .i64_literal = .{ .value = 42, .layout_idx = .i64 } },
+            .next = ret,
+        } }, .test_fixture);
+        const named = try store.addProcSpec(.{
+            .name = store.freshSyntheticSymbol(),
+            .identity = lir.LIR.ProcIdentity.forTest(1),
+            .args = lir.LIR.LocalSpan.empty(),
+            .body = .some(body),
+            .ret_layout = .i64,
+        }, .none);
+        try store.setProcDebugName(named, "App.answer");
+        _ = store.getProcSpec(named).identity.writeSymbolName(&named_symbol);
+
+        var compiler = ObjectFileCompiler.init(allocator);
+        var pieces = try compiler.compileToPieces(&store, &layouts, &.{}, &.{}, store.getProcSpecs(), .x64linux);
+        defer pieces.deinit();
+        // The name has to outlive the LIR it came from: the pieces are what
+        // a later build reads back from the cache.
+        break :encoded try UnitPieces.encode(allocator, &pieces);
+    };
+    defer allocator.free(encoded);
+
+    var pieces = try UnitPieces.decode(allocator, encoded);
+    defer pieces.deinit();
+    var compiler = ObjectFileCompiler.init(allocator);
+    var composed = try compiler.composeObject(&.{&pieces}, .x64linux, .{ .roots = null });
+    defer composed.deinit();
+
+    // The subprogram entry: source name, then the symbol as linkage name.
+    var entry_buffer: [16 + lir.ProcIdentity.symbol_name_len]u8 = undefined;
+    const entry = try std.fmt.bufPrint(&entry_buffer, "App.answer\x00{s}\x00", .{named_symbol});
+    try std.testing.expect(std.mem.find(u8, composed.object_bytes, entry) != null);
 }
 
 test "ObjectFileCompiler runtime static-root excerpts own only reachable canonical data" {
@@ -1886,7 +2159,7 @@ test "ObjectFileCompiler runtime static-root excerpts own only reachable canonic
         try store.setSourceFiles(files);
         var layouts = try layout.Store.init(allocator, .u64);
         defer layouts.deinit();
-        const CG = LirCodeGenMod.LirCodeGen(target);
+        const CG = LirCodeGenMod.LirCodeGen(abiOf(target));
         var receiver = try CG.init(allocator, &store, &layouts, .{}, .default);
         defer receiver.deinit();
         var procs = std.AutoHashMap(lir.ProcIdentity, lir.LIR.LirProcSpecId).init(allocator);

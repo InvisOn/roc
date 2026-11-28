@@ -157,15 +157,17 @@ fn serializeBuiltinArtifact(
     defer typed_modules.deinit();
 
     // The baked artifact serves either strategy's programs and no
-    // compilation reopens it; its evaluation completes every root, as every
-    // compilation's does.
-    const finalizer_options: comptime_finalizer.Options = .{};
+    // compilation reopens it, so its evaluation completes every root in both
+    // strategies' representations: the `.lss` evaluation first, then the
+    // `.boxy` form of every root holding a function value.
+    const finalizer_options: comptime_finalizer.Options = .{ .strategy = .lss, .complete_baked_module = true };
     var artifact = try check.CheckedArtifact.publishFromTypedModule(
         gpa,
         &typed_modules,
         0,
         .{
             .module_env_storage = .{ .checked_source = builtin_env },
+            .builtin_artifact = .this_module,
             .hoisted_roots = .none,
             .io = io,
             .compile_time_finalizer = comptime_finalizer.finalizerWithOptions(&finalizer_options),
@@ -385,7 +387,6 @@ fn compileModule(
         module_env,
         imported_envs.items,
         &module_envs,
-        &module_env.store.regions,
         builtin_ctx,
     );
     checker.fixupTypeWriter();
@@ -409,7 +410,6 @@ fn compileModule(
             source_path,
             imported_envs.items,
             &checker.import_mapping,
-            &checker.regions,
             null,
         );
         defer report_builder.deinit();
@@ -507,13 +507,15 @@ fn findTypeDeclarationByQualifiedName(env: *const ModuleEnv, qualified_name: []c
     const all_stmts = env.store.sliceStatements(env.all_statements);
     for (all_stmts) |stmt_idx| {
         const stmt = env.store.getStatement(stmt_idx);
-        if (stmt == .s_nominal_decl) {
-            const header = env.store.getTypeHeader(stmt.s_nominal_decl.header);
-            const ident_idx = header.name;
-            const ident_text = env.getIdentText(ident_idx);
-            if (std.mem.eql(u8, ident_text, qualified_name)) {
-                return stmt_idx;
-            }
+        const header_idx = if (stmt == .s_nominal_decl)
+            stmt.s_nominal_decl.header
+        else if (stmt == .s_alias_decl)
+            stmt.s_alias_decl.header
+        else
+            continue;
+        const header = env.store.getTypeHeader(header_idx);
+        if (std.mem.eql(u8, env.getIdentText(header.name), qualified_name)) {
+            return stmt_idx;
         }
     }
 

@@ -92,6 +92,42 @@ pub fn fieldAddr(desc: *const TypeDesc, base: [*]u8, field_index: u32, ops: *Roc
     return componentAddr(field.desc, base + field.offset);
 }
 
+/// Release the slot of field `field_index` of the record or tuple at `base`
+/// once the field's value has moved out of it. A slot that is a recursion box
+/// gives up its reference to the box: the last one frees the allocation
+/// without releasing the value that left, and any other one leaves the box to
+/// its remaining holders, whose value the moved copy now shares. Every other
+/// slot is the value itself and holds nothing further.
+pub fn fieldReleaseBox(desc: *const TypeDesc, base: [*]u8, field_index: u32, ops: *RocOps) void {
+    const record = recordOf(desc, ops);
+    if (field_index >= record.count) invariant(ops, "a field index past its record's fields");
+    const field = record.fieldBySemanticIndex(field_index);
+    releaseSlotBox(field.desc, base + field.offset, ops);
+}
+
+/// `fieldReleaseBox` for the only payload of the active variant of the tag
+/// union at `base`.
+pub fn tagPayloadReleaseBox(desc: *const TypeDesc, base: [*]u8, ops: *RocOps) void {
+    const union_desc = unionOf(desc, ops);
+    const variant = &union_desc.variants()[union_desc.readDiscriminant(base)];
+    if (variant.payload_count != 1) invariant(ops, "a moved tag payload that is not its tag's only payload");
+    releaseSlotBox(payloadDesc(variant, 0), base + payloadOffset(variant, 0), ops);
+}
+
+/// Release the component slot `desc` describes once its value has moved out.
+fn releaseSlotBox(desc: *const TypeDesc, slot: [*]u8, ops: *RocOps) void {
+    if (desc.kind != .recursive_box) return;
+    const payload = desc.child.?;
+    if (payload.size == 0) return;
+    const box: ?[*]u8 = @as(*const ?[*]u8, @ptrCast(@alignCast(slot))).*;
+    if (utils.isUnique(box, ops)) {
+        utils.freeDataPtrC(box, payload.alignment, payload.flags.contains_refcounted, ops);
+        return;
+    }
+    walk.incref(payload, boxPayloadAddr(payload, @ptrCast(@alignCast(slot))), 1, ops);
+    walk.decref(desc, slot, ops);
+}
+
 /// The discriminant of the tag union value at `base`.
 pub fn tagDiscriminant(desc: *const TypeDesc, base: [*]const u8, ops: *RocOps) u32 {
     const union_desc = backing(desc);
@@ -121,7 +157,6 @@ pub fn listElemAddr(elem: *const TypeDesc, roc_list: *const RocList, index: u64)
 pub fn boxPayloadAddr(desc: *const TypeDesc, box: *const usize) [*]u8 {
     // A box of a function is the callable itself (design.md "Function Values").
     if (desc.kind == .erased_callable and desc.child == null) return @ptrCast(@constCast(box));
-    if (desc.flags.sequence) return builtins.boxed_sequence.recordPtr(@ptrFromInt(box.*));
     const word = box.* & ~utils.DATA_PTR_TAG_MASK;
     if (desc.size == 0 or word == 0) return walk.zeroSizedPtr();
     return @ptrFromInt(word);
@@ -225,13 +260,6 @@ pub fn buildBox(desc: *const TypeDesc, dst: *usize, payload: [*]const u8, ops: *
         dst.* = @as(*align(1) const usize, @ptrCast(payload)).*;
         return;
     }
-    if (desc.flags.sequence) {
-        const record = recordOf(desc, ops);
-        const fields = record.fields();
-        if (fields.len != 2) invariant(ops, "builtin sequence descriptor must contain its two-field record");
-        dst.* = @intFromPtr(builtins.boxed_sequence.pack(payload, desc.size, fields[1].offset, ops));
-        return;
-    }
     if (desc.size == 0) {
         dst.* = 0;
         return;
@@ -303,9 +331,9 @@ pub fn adapt(plan: *const AdaptPlan, dst: [*]u8, src: [*]const u8, ops: *RocOps)
                 const source = node.from.?.readDiscriminant(work.src);
                 if (source >= node.count) invariant(ops, "a re-tagged value's discriminant is past its plan's variants");
                 const target = node.variants()[source];
-                if (target.discriminant == desc_mod.AdaptVariant.absent) invariant(ops, "a re-tagged variant is not in its destination's row");
+                const discriminant = target.discriminant.get() orelse invariant(ops, "a re-tagged variant is not in its destination's row");
                 @memset(work.dst[0..t.size], 0);
-                writeDiscriminant(t, work.dst, target.discriminant);
+                writeDiscriminant(t, work.dst, discriminant);
                 if (target.plan) |payload| stack.push(.{ .plan = payload, .src = work.src, .dst = work.dst }, ops);
             },
             .record => {
@@ -389,8 +417,6 @@ pub const ListOp = enum(u32) {
     reserve_for_append,
     clear,
     release_excess_capacity,
-    take_first,
-    take_last,
     reverse,
 };
 
@@ -414,12 +440,14 @@ pub const ListOpRequest = extern struct {
     list2: ?*const RocList,
     /// The element operand's bytes.
     element: ?[*]u8,
-    /// The integer operands, in the operation's operand order.
-    n: [3]u64,
+    /// The integer operands, in the operation's operand order. Aligned to 8
+    /// on every target, including those whose C ABI aligns `u64` to 4.
+    n: [3]u64 align(8),
 };
 
+/// A list of `len` zero-sized items and no spare capacity.
 fn zstList(len: usize) RocList {
-    return .{ .bytes = null, .length = len, .capacity_or_alloc_ptr = 0 };
+    return RocList.zeroSized(len, len);
 }
 
 fn zstSublistLen(size: usize, start: u64, len: u64) usize {
@@ -475,20 +503,20 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
             walk.copyBytes(req.out, at, e.width);
         },
         .append_unsafe => writeList(req.out, if (e.width == 0)
-            zstList(a.len() + 1)
+            a.zeroSizedKeeping(a.len() + 1)
         else
             list.listAppendUnsafe(a, req.element, e.width, &walk.elemCopy)),
         .concat => {
             const b = req.list2.?.*;
             writeList(req.out, if (e.width == 0)
-                zstList(a.len() + b.len())
+                a.zeroSizedKeeping(a.len() + b.len())
             else
                 list.listConcat(a, b, e.alignment, e.width, e.rc, e.context, e.inc, e.context, e.dec, m0, mode(req.unique_args, 1), ops));
         },
         .append_range_within => {
             const count = req.n[1];
             writeList(req.out, if (e.width == 0)
-                zstList(a.len() + @as(usize, @intCast(count)))
+                a.zeroSizedKeeping(a.len() + @as(usize, @intCast(count)))
             else if (count == 0)
                 a
             else
@@ -504,7 +532,7 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
         .append_range_within_unsafe => {
             const count = req.n[1];
             writeList(req.out, if (e.width == 0)
-                zstList(a.len() + @as(usize, @intCast(count)))
+                a.zeroSizedKeeping(a.len() + @as(usize, @intCast(count)))
             else if (count == 0)
                 a
             else
@@ -513,16 +541,16 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
         .append_sublist => {
             const count = req.n[1];
             writeList(req.out, if (e.width == 0)
-                zstList(a.len() + @as(usize, @intCast(count)))
+                a.zeroSizedKeeping(a.len() + @as(usize, @intCast(count)))
             else
                 list.listAppendSublist(a, req.list2.?.*, req.n[0], count, e.alignment, e.width, e.rc, e.context, e.inc, e.context, e.dec, m0, ops));
         },
         .prepend => writeList(req.out, if (e.width == 0)
-            zstList(a.len() + 1)
+            a.zeroSizedKeeping(a.len() + 1)
         else
             list.listPrepend(a, e.alignment, req.element, e.width, e.rc, e.context, e.inc, e.context, e.dec, m0, &walk.elemCopy, ops)),
         .swap => writeList(req.out, if (e.width == 0)
-            zstList(a.len())
+            a
         else
             list.listSwap(a, e.alignment, e.width, req.n[0], req.n[1], e.rc, e.context, e.inc, e.context, e.dec, m0, &walk.elemCopy, ops)),
         .map_can_reuse => req.out[0] = @intFromBool(list.listMapCanReuse(a, ops)),
@@ -535,20 +563,15 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
             }
             writeList(req.out, a);
         },
-        .sublist, .sublist_borrowed, .take_first, .take_last, .clear => {
-            const start: u64, const len: u64 = switch (req.op) {
-                .sublist, .sublist_borrowed => .{ req.n[0], req.n[1] },
-                .take_first => .{ 0, req.n[0] },
-                .take_last => blk: {
-                    const size: u64 = @intCast(a.len());
-                    const take = req.n[0];
-                    break :blk .{ if (take >= size) 0 else size - take, take };
-                },
-                .clear => .{ 0, 0 },
-                .capacity, .slack_unique, .owned_unique, .get_unsafe, .append_unsafe, .concat, .append_range_within, .copy_range_within, .append_range_within_unsafe, .append_sublist, .prepend, .swap, .map_can_reuse, .item_size_at_most, .map_cast_unsafe, .map_extract_unsafe, .map_write_unsafe, .drop_at, .replace_unsafe, .set, .set_in_place_unsafe, .with_capacity, .reserve, .reserve_for_append, .release_excess_capacity, .reverse => unreachable, // the enclosing prong admits only these five
-            };
+        .clear => writeList(req.out, if (e.width == 0)
+            a.zeroSizedKeeping(0)
+        else
+            list.listClear(a, e.alignment, e.width, e.rc, e.context, e.dec, m0, ops)),
+        .sublist, .sublist_borrowed => {
+            const start = req.n[0];
+            const len = req.n[1];
             if (e.width == 0) {
-                writeList(req.out, zstList(if (req.op == .clear) 0 else zstSublistLen(a.len(), start, len)));
+                writeList(req.out, zstList(zstSublistLen(a.len(), start, len)));
             } else if (req.op == .sublist_borrowed) {
                 writeList(req.out, list.listSublistBorrowed(a, e.width, start, len, e.rc, ops));
             } else {
@@ -558,7 +581,7 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
         .drop_at => {
             if (e.width == 0) {
                 const size = a.len();
-                writeList(req.out, zstList(if (req.n[0] >= @as(u64, @intCast(size))) size else size -| 1));
+                writeList(req.out, a.zeroSizedKeeping(if (req.n[0] >= @as(u64, @intCast(size))) size else size -| 1));
             } else {
                 writeList(req.out, list.listDropAt(a, e.alignment, e.width, e.rc, req.n[0], e.context, e.inc, e.context, e.dec, m0, ops));
             }
@@ -566,7 +589,7 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
         .replace_unsafe => {
             if (e.width == 0) {
                 const list_out = if (req.ret_desc) |ret_desc| req.out + recordOf(ret_desc, ops).fieldBySemanticIndex(0).offset else req.out;
-                writeList(list_out, zstList(a.len()));
+                writeList(list_out, a);
                 return;
             }
             // The result is the record `{ list : List(a), value : a }`.
@@ -587,7 +610,7 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
         },
         .set, .set_in_place_unsafe => {
             if (e.width == 0) {
-                writeList(req.out, zstList(a.len()));
+                writeList(req.out, a);
                 return;
             }
             // `set` does not return the displaced element; `listSet` releases it.
@@ -595,12 +618,12 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
             writeList(req.out, list.listSet(a, e.alignment, req.n[0], req.element, e.width, e.rc, e.context, e.inc, e.context, e.dec, set_mode, &walk.elemCopy, ops));
         },
         .with_capacity => writeList(req.out, if (e.width == 0)
-            zstList(0)
+            RocList.zeroSized(0, req.n[0])
         else
             list.listWithCapacity(req.n[0], e.alignment, e.width, e.rc, null, &list.rcNone, ops)),
         .reserve, .reserve_for_append => {
             if (e.width == 0) {
-                writeList(req.out, zstList(a.len()));
+                writeList(req.out, a.zeroSizedReserving(req.n[0]));
                 return;
             }
             const reserve = if (req.op == .reserve) &list.listReserve else &list.listReserveForAppend;
@@ -611,8 +634,29 @@ pub fn listOp(req: *const ListOpRequest, ops: *RocOps) void {
         else
             list.listReleaseExcessCapacity(a, e.alignment, e.width, e.rc, e.context, e.inc, e.context, e.dec, m0, ops)),
         .reverse => writeList(req.out, if (e.width == 0)
-            zstList(a.len())
+            a
         else
             list.listReverse(a, e.alignment, e.width, e.rc, e.context, e.inc, e.context, e.dec, m0, &walk.elemCopy, ops)),
     }
+}
+
+test "list op requests and erased callable payloads at 32-bit" {
+    // The dev backend lays these out at the target's pointer width; a 32-bit
+    // target cannot build the backend yet, so pin the 32-bit layouts here.
+    const request = desc_mod.externLayout(ListOpRequest, .u32);
+    try std.testing.expectEqual(@as(u32, 0), request.of(.op));
+    try std.testing.expectEqual(@as(u32, 4), request.of(.unique_args));
+    try std.testing.expectEqual(@as(u32, 8), request.of(.elem));
+    try std.testing.expectEqual(@as(u32, 12), request.of(.out));
+    try std.testing.expectEqual(@as(u32, 32), request.of(.element));
+    try std.testing.expectEqual(@as(u32, 40), request.of(.n));
+    try std.testing.expectEqual(@as(u32, 64), request.size);
+
+    const payload = desc_mod.externLayout(builtins.erased_callable.Payload, .u32);
+    try std.testing.expectEqual(@as(u32, 4), payload.of(.on_drop));
+    try std.testing.expectEqual(@as(u32, 8), payload.of(.on_copy));
+    try std.testing.expectEqual(@as(u32, 12), payload.of(.capture_size));
+    try std.testing.expectEqual(@as(u32, 16), payload.size);
+    try std.testing.expectEqual(@as(u32, 16), std.mem.alignForward(u32, payload.size, builtins.erased_callable.capture_alignment));
+    try std.testing.expectEqual(@as(u32, 16), builtins.erased_callable.captureOffset(4));
 }

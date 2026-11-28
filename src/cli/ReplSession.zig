@@ -68,6 +68,10 @@ allocator: Allocator,
 /// to read `import "path" as x : Str`/`: List(U8)` files.
 roc_ctx: CoreCtx,
 backend_kind: eval.EvalBackend,
+/// The strategy whose evaluator completes the compile-time roots of every
+/// module the session publishes, the interactive expression's root among
+/// them. The session's driver names it; an evaluation with no runtime consumer
+/// names `.boxy`, as `roc check` does (design.md "Runtime Lowering Strategy").
 specialization_strategy: base.SpecializationStrategy,
 definitions: DefinitionStore,
 virtual_modules: VirtualModuleStore,
@@ -195,7 +199,8 @@ fn initBorrowingBuiltins(
         .allocator = allocator,
         .roc_ctx = roc_ctx,
         .backend_kind = backend_kind,
-        .specialization_strategy = .lss,
+        // The strategy `roc repl` names.
+        .specialization_strategy = .boxy,
         .definitions = DefinitionStore.init(),
         .virtual_modules = .{},
         .import_policy = .filesystem,
@@ -903,6 +908,7 @@ pub fn inspectExpressionType(
         import_sources,
         self.prePublishedBuiltin(),
         self.roc_ctx,
+        self.specialization_strategy,
     ) catch |err| switch (err) {
         error.ParseError => return .{ .diagnostic = try self.renderModuleParseDiagnostics(source, report_config) },
         error.TypeCheckError => return .{ .diagnostic = try self.renderModuleProblems(source, import_sources, report_config) },
@@ -1155,32 +1161,38 @@ fn initParsedResources(self: *ReplSession) ReplStepError!eval.Inspected.ParsedRe
         import_sources,
         self.prePublishedBuiltin(),
         self.roc_ctx,
+        self.specialization_strategy,
     );
 }
 
 fn bindingPatternOfName(env: *ModuleEnv, pattern_idx: can.CIR.Pattern.Idx, name: []const u8) ?can.CIR.Pattern.Idx {
-    switch (env.store.getPattern(pattern_idx)) {
-        inline .assign, .var_assign => |assign| {
+    switch (env.store.patternKind(pattern_idx)) {
+        inline .assign, .var_assign => |kind| {
+            const assign = @field(env.store.patternView(pattern_idx), @tagName(kind)).decode();
             if (std.mem.eql(u8, env.getIdent(assign.ident), name)) return pattern_idx;
         },
-        .as => |as_pattern| {
+        .as => {
+            const as_pattern = env.store.patternView(pattern_idx).as.decode();
             if (std.mem.eql(u8, env.getIdent(as_pattern.ident), name)) return pattern_idx;
             return bindingPatternOfName(env, as_pattern.pattern, name);
         },
-        .applied_tag => |tag| {
+        .applied_tag => {
+            const tag = env.store.patternView(pattern_idx).applied_tag.decode();
             for (env.store.slicePatterns(tag.args)) |arg| {
                 if (bindingPatternOfName(env, arg, name)) |found| return found;
             }
         },
-        .nominal => |nominal| return bindingPatternOfName(env, nominal.backing_pattern, name),
-        .nominal_external => |nominal| return bindingPatternOfName(env, nominal.backing_pattern, name),
-        .record_destructure => |record| {
+        .nominal => return bindingPatternOfName(env, env.store.patternView(pattern_idx).nominal.get(.backing_pattern), name),
+        .nominal_external => return bindingPatternOfName(env, env.store.patternView(pattern_idx).nominal_external.get(.backing_pattern), name),
+        .record_destructure => {
+            const record = env.store.patternView(pattern_idx).record_destructure.decode();
             for (env.store.sliceRecordDestructs(record.destructs)) |destruct_idx| {
                 const destruct = env.store.getRecordDestruct(destruct_idx);
                 if (bindingPatternOfName(env, destruct.kind.toPatternIdx(), name)) |found| return found;
             }
         },
-        .list => |list| {
+        .list => {
+            const list = env.store.patternView(pattern_idx).list.decode();
             for (env.store.slicePatterns(list.patterns)) |elem| {
                 if (bindingPatternOfName(env, elem, name)) |found| return found;
             }
@@ -1190,12 +1202,14 @@ fn bindingPatternOfName(env: *ModuleEnv, pattern_idx: can.CIR.Pattern.Idx, name:
                 }
             }
         },
-        .tuple => |tuple| {
+        .tuple => {
+            const tuple = env.store.patternView(pattern_idx).tuple.decode();
             for (env.store.slicePatterns(tuple.patterns)) |elem| {
                 if (bindingPatternOfName(env, elem, name)) |found| return found;
             }
         },
-        .str_interpolation => |string| {
+        .str_interpolation => {
+            const string = env.store.patternView(pattern_idx).str_interpolation.decode();
             var offset: u32 = 0;
             while (offset < string.steps.span.len) : (offset += 1) {
                 const string_step = env.store.getStrPatternStep(string.steps, offset);
@@ -1230,8 +1244,8 @@ fn getBindingPatternOfName(env: *ModuleEnv, name: []const u8) ?can.CIR.Pattern.I
 fn getDefOfName(env: *ModuleEnv, name: []const u8) ?can.CIR.Def.Idx {
     for (env.store.sliceDefs(env.all_defs)) |def_idx| {
         const def = env.store.getDef(def_idx);
-        const pattern = env.store.getPattern(def.pattern);
-        if (pattern == .assign and std.mem.eql(u8, env.getIdent(pattern.assign.ident), name)) {
+        const pattern = env.store.patternAs(def.pattern, .assign);
+        if (pattern != null and std.mem.eql(u8, env.getIdent(pattern.?.ident), name)) {
             return def_idx;
         }
     }
@@ -1346,6 +1360,7 @@ pub fn programFailureKind(err: eval.Inspected.Error) ProgramFailureKind {
         error.UnwindRegistrationFailed,
         error.VirtualAllocFailed,
         error.VirtualProtectFailed,
+        error.FlushInstructionCacheFailed,
         error.WasmExecFailed,
         error.WouldBlock,
         error.WriteFailed,
@@ -1374,6 +1389,7 @@ fn validateDefinitions(self: *ReplSession, report_config: reporting.ReportingCon
         import_sources,
         self.prePublishedBuiltin(),
         self.roc_ctx,
+        self.specialization_strategy,
     )) |parsed_value| {
         var parsed = parsed_value;
         defer parsed.deinit(self.allocator);
@@ -1439,6 +1455,7 @@ fn evaluateMainSource(self: *ReplSession, source: []const u8, report_config: rep
         import_sources,
         self.prePublishedBuiltin(),
         self.roc_ctx,
+        self.specialization_strategy,
         .{
             .context = @ptrCast(&event_collector),
             .notify = ComptimeEventCollector.notify,
@@ -2127,7 +2144,9 @@ fn expectAllNative(expr: []const u8, expected: []const u8) ReplTestError!void {
         .native,
         repl.prePublishedBuiltin(),
         repl.roc_ctx,
-        repl.specialization_strategy,
+        // The runtime program's strategy, which `expectAllBackends` lowers
+        // under as well.
+        .lss,
     );
     defer compiled.deinit(testing.allocator);
 

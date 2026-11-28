@@ -484,7 +484,7 @@ const CheckedClassifier = struct {
             .e_lookup_associated => |lookup| self.setLastIdent(region, lookup.item_ident, self.exprClass(expr_idx)),
             .e_lookup_associated_resolved => |lookup| self.setLastIdent(region, lookup.source_ident, self.exprClass(expr_idx)),
             .e_lookup_required => |lookup| {
-                const required = self.module_env.requires_types.items.items[@backingInt(lookup.requires_idx)];
+                const required = self.module_env.requires_types.items()[@backingInt(lookup.requires_idx)];
                 self.setIdent(region, required.ident, self.exprClass(expr_idx));
             },
             .e_tag => |tag| self.setIdent(region, tag.name, .enum_member),
@@ -753,13 +753,11 @@ const Classifier = struct {
     innermost: collections.DenseMap(base.Ident.Idx, u32),
     work: std.ArrayListUnmanaged(Work) = .empty,
 
-    const no_binding = std.math.maxInt(u32);
-
     const Binding = struct {
         name: base.Ident.Idx,
         class: Class,
-        /// The binding of the same name this one shadows, or `no_binding`.
-        shadowed: u32,
+        /// The binding of the same name this one shadows, if any.
+        shadowed: collections.OptionalU32,
     };
 
     const Work = union(enum) {
@@ -829,11 +827,12 @@ const Classifier = struct {
     fn bind(self: *Classifier, token: Token.Idx, class: Class) Allocator.Error!void {
         self.set(token, class);
         const name = try self.nameOf(token, self.ast.resolve(token));
-        const slot = std.math.cast(u32, self.bindings.items.len) orelse return error.OutOfMemory;
-        if (slot == no_binding) return error.OutOfMemory;
+        // A later binding's `shadowed` stores this slot plus one.
+        if (std.math.cast(u32, self.bindings.items.len + 1) == null) return error.OutOfMemory;
+        const slot: u32 = @intCast(self.bindings.items.len);
         try self.bindings.ensureUnusedCapacity(self.allocator, 1);
         const entry = try self.innermost.getOrPut(name);
-        const shadowed = if (entry.found_existing) entry.value_ptr.* else no_binding;
+        const shadowed: collections.OptionalU32 = if (entry.found_existing) .some(entry.value_ptr.*) else .none;
         entry.value_ptr.* = slot;
         self.bindings.appendAssumeCapacity(.{ .name = name, .class = class, .shadowed = shadowed });
     }
@@ -841,10 +840,10 @@ const Classifier = struct {
     fn endScope(self: *Classifier, mark: u32) void {
         while (self.bindings.items.len > mark) {
             const binding = self.bindings.pop().?;
-            if (binding.shadowed == no_binding) {
-                _ = self.innermost.remove(binding.name);
+            if (binding.shadowed.get()) |shadowed| {
+                self.innermost.getPtr(binding.name).?.* = shadowed;
             } else {
-                self.innermost.getPtr(binding.name).?.* = binding.shadowed;
+                _ = self.innermost.remove(binding.name);
             }
         }
     }

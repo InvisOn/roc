@@ -71,7 +71,7 @@ shorthand = FooBar.myfunc
 		(e-lambda
 			(args
 				(p-assign (ident "list")))
-			(e-dispatch-call (method "len") (constraint-fn-var 242)
+			(e-dispatch-call (method "len") (constraint-fn-var 233)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "list"))))
@@ -94,11 +94,11 @@ shorthand = FooBar.myfunc
 (inferred-types
 	(defs
 		(patt (type "List(a) -> U64"))
-		(patt (type "List(a) -> U64")))
+		(patt (type "List(_a) -> U64")))
 	(type_decls
 		(nominal (type "FooBar")
 			(ty-header (name "FooBar"))))
 	(expressions
 		(expr (type "List(a) -> U64"))
-		(expr (type "List(a) -> U64"))))
+		(expr (type "List(_a) -> U64"))))
 ~~~

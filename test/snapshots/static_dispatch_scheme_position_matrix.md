@@ -42,7 +42,7 @@ roundtrip = parse_show("hi")
 UNBOUND WHERE RECEIVER - static_dispatch_scheme_position_matrix.md:24:32:24:50
 UNBOUND WHERE RECEIVER - static_dispatch_scheme_position_matrix.md:24:52:24:69
 POLYMORPHIC VALUE - static_dispatch_scheme_position_matrix.md:22:1:22:13
-MISSING METHOD - static_dispatch_scheme_position_matrix.md:19:5:19:14
+MISSING METHOD - static_dispatch_scheme_position_matrix.md:22:16:22:19
 MISSING METHOD - static_dispatch_scheme_position_matrix.md:28:9:28:19
 # PROBLEMS
 ~~~clojure
@@ -109,7 +109,7 @@ MISSING METHOD - static_dispatch_scheme_position_matrix.md:28:9:28:19
 	(report
 		(severity runtime_error)
 		(title "Missing Method")
-		(region (start 19 5) (end 19 14))
+		(region (start 22 16) (end 22 19))
 		(headline
 			(reflow "This")
 			(reflow " ")
@@ -130,7 +130,7 @@ MISSING METHOD - static_dispatch_scheme_position_matrix.md:28:9:28:19
 			(reflow " ")
 			(reflow "method."))
 		(document
-			(source-region (file "static_dispatch_scheme_position_matrix.md") (start 19 5) (end 19 14) (annotation error) (line-text "    A.gen({})"))
+			(source-region (file "static_dispatch_scheme_position_matrix.md") (start 22 16) (end 22 19) (annotation error) (line-text "unpinned_ret = gen({})"))
 			(line-break)
 			(reflow "Using the value somewhere that requires a specific type, or annotating it, will give it one.")))
 	(report
@@ -364,7 +364,7 @@ roundtrip = parse_show("hi")
 		(e-lambda
 			(args
 				(p-assign (ident "x")))
-			(e-dispatch-call (method "to_i128") (constraint-fn-var 353)
+			(e-dispatch-call (method "to_i128") (constraint-fn-var 348)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "x"))))
@@ -380,7 +380,7 @@ roundtrip = parse_show("hi")
 						(ty-lookup (name "I128") (builtin)))))))
 	(d-let
 		(p-assign (ident "ok_arg"))
-		(e-call (constraint-fn-var 360)
+		(e-call (constraint-fn-var 354)
 			(e-lookup-local
 				(p-assign (ident "via_arg")))
 			(e-typed-int (value "5") (type "U8"))))
@@ -404,7 +404,7 @@ roundtrip = parse_show("hi")
 												(p-assign (ident "x")))
 											(rest-at (index 1)))))
 								(value
-									(e-dispatch-call (method "to_i128") (constraint-fn-var 375)
+									(e-dispatch-call (method "to_i128") (constraint-fn-var 365)
 										(receiver
 											(e-lookup-local
 												(p-assign (ident "x"))))
@@ -428,7 +428,7 @@ roundtrip = parse_show("hi")
 						(ty-lookup (name "I128") (builtin)))))))
 	(d-let
 		(p-assign (ident "ok_data"))
-		(e-call (constraint-fn-var 395)
+		(e-call (constraint-fn-var 373)
 			(e-lookup-local
 				(p-assign (ident "via_data")))
 			(e-list
@@ -442,7 +442,9 @@ roundtrip = parse_show("hi")
 			(e-block
 				(s-type-var-alias (alias "A") (type-var "a")
 					(ty-rigid-var (name "a")))
-				(e-runtime-error (tag "erroneous_value_expr"))))
+				(e-type-dispatch-call (method "gen") (type-dispatch-stmt 67) (constraint-fn-var 384)
+					(args
+						(e-empty_record)))))
 		(annotation
 			(ty-fn (effectful false)
 				(ty-record)
@@ -454,9 +456,8 @@ roundtrip = parse_show("hi")
 						(ty-rigid-var-lookup (ty-rigid-var (name "a"))))))))
 	(d-let
 		(p-assign (ident "unpinned_ret"))
-		(e-call (constraint-fn-var 417)
-			(e-lookup-local
-				(p-assign (ident "gen")))
+		(e-call (constraint-fn-var 392)
+			(e-runtime-error (tag "erroneous_value_expr"))
 			(e-empty_record)))
 	(d-let
 		(p-assign (ident "parse_show"))

@@ -47,7 +47,7 @@ test "let-polymorphism with function composition" {
     ;
     try typeCheck(
         source,
-        "a -> a where [a.plus : a, Dec -> a, a.times : a, Dec -> a]",
+        "Dec -> Dec",
     );
 }
 
@@ -246,6 +246,97 @@ test "polymorphic identity with if-else - all intermediate types" {
         source,
         "{ num: Dec, result: Str, str: Str }",
     );
+}
+
+test "a top-level value whose type keeps an unpinned part can be inspected" {
+    // `empty = []` is a weak binding whose item type nothing pins and which
+    // carries no method requirement. Passing it to `Str.inspect` is accepted
+    // in every spelling: directly, inside interpolation, through a wrapper
+    // function, and through a field.
+    const source =
+        \\my_inspect = |v| Str.inspect(v)
+        \\
+        \\empty = []
+        \\ok_empty = Ok([])
+        \\pair = ([], Ok([]))
+        \\rec = { items: [] }
+        \\first = List.first([])
+        \\dict = Dict.empty()
+        \\set = Set.empty()
+        \\
+        \\shown = Str.inspect(empty)
+        \\
+        \\expect Str.inspect(empty) == "[]"
+        \\expect "${Str.inspect(empty)}" == "[]"
+        \\expect my_inspect(empty) == "[]"
+        \\expect Str.inspect(rec.items) == "[]"
+        \\expect Str.inspect(ok_empty) == "Ok([])"
+        \\expect Str.inspect(pair) == "([], Ok([]))"
+        \\expect Str.inspect(rec) == "{ items: [] }"
+        \\expect Str.inspect(first) == "Err(ListWasEmpty)"
+        \\expect Str.inspect(dict) == "Dict.from_list([])"
+        \\expect Str.inspect(set) == "Set.from_list([])"
+    ;
+
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try test_env.assertDefType("empty", "List(_a)");
+    try test_env.assertDefType("shown", "Str");
+}
+
+test "a nominal top-level value with an unpinned type argument can be inspected" {
+    const source =
+        \\Wrap(a) := [W(List(a))].{
+        \\    to_inspect : Wrap(a) -> Str
+        \\    to_inspect = |Wrap.(W(items))| "Wrap<${Str.inspect(items)}>"
+        \\}
+        \\
+        \\Phantom(a) := [P(U64)]
+        \\
+        \\wrapped = Wrap.W([])
+        \\phantom = Phantom.P(1)
+        \\
+        \\expect Str.inspect(wrapped) == "Wrap<[]>"
+        \\expect Str.inspect(phantom) == "P(1)"
+    ;
+
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+}
+
+test "comparing a polymorphic constant requires the method of the comparison's own instance" {
+    // `empty`'s item type carries no requirement, so `empty` quantifies it
+    // (design.md "Polymorphic Constants"): the comparison's `is_eq` is a
+    // requirement of its own instance, which nothing else fixes and so is
+    // decided, not of `empty`.
+    const source =
+        \\empty = []
+        \\
+        \\expect empty == []
+    ;
+
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+}
+
+test "inspecting and comparing a polymorphic constant are checked at their own instances" {
+    const source =
+        \\empty = []
+        \\
+        \\expect Str.inspect(empty) == "[]"
+        \\expect empty == []
+    ;
+
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
 }
 
 /// A unified helper to run the full pipeline: parse, canonicalize, and type-check source code.

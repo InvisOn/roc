@@ -80,7 +80,7 @@ EndOfFile,
 				(e-lambda
 					(args
 						(p-assign (ident "y")))
-					(e-dispatch-call (method "plus") (constraint-fn-var 234)
+					(e-dispatch-call (method "plus") (constraint-fn-var 229)
 						(receiver
 							(e-lookup-local
 								(p-assign (ident "x"))))
@@ -89,13 +89,13 @@ EndOfFile,
 								(p-assign (ident "y")))))))))
 	(d-let
 		(p-assign (ident "add_five"))
-		(e-call (constraint-fn-var 241)
+		(e-call (constraint-fn-var 234)
 			(e-lookup-local
 				(p-assign (ident "make_adder")))
 			(e-typed-int (value "5") (type "I64"))))
 	(d-let
 		(p-assign (ident "result"))
-		(e-call (constraint-fn-var 248)
+		(e-call (constraint-fn-var 238)
 			(e-lookup-local
 				(p-assign (ident "add_five")))
 			(e-typed-int (value "10") (type "I64")))))
@@ -104,11 +104,11 @@ EndOfFile,
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "a -> (b -> a) where [a.plus : a, b -> a]"))
+		(patt (type "a -> (a -> a) where [a.plus : a, a -> a]"))
 		(patt (type "I64 -> I64"))
 		(patt (type "I64")))
 	(expressions
-		(expr (type "a -> (b -> a) where [a.plus : a, b -> a]"))
+		(expr (type "a -> (a -> a) where [a.plus : a, a -> a]"))
 		(expr (type "I64 -> I64"))
 		(expr (type "I64"))))
 ~~~

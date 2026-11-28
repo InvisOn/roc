@@ -22,7 +22,7 @@ const testing = std.testing;
 const expectEqual = testing.expectEqual;
 
 fn expectNoZeroTargetExternalLookup(env: *const ModuleEnv) error{TestUnexpectedResult}!void {
-    var raw_node_idx: u32 = 0;
+    var raw_node_idx: u32 = CIR.Node.first_idx;
     while (raw_node_idx < env.store.nodes.len()) : (raw_node_idx += 1) {
         const node_idx: CIR.Node.Idx = @fromBackingInt(@intCast(raw_node_idx));
         if (env.store.nodes.get(node_idx).tag != .expr_external_lookup) continue;
@@ -136,7 +136,7 @@ test "file imports reject absolute paths before recording dependencies" {
     }
 
     try testing.expect(found_absolute_path);
-    try expectEqual(@as(usize, 0), result.parse_env.file_dependencies.items.items.len);
+    try expectEqual(@as(usize, 0), result.parse_env.file_dependencies.items().len);
 }
 
 test "import validation - mix of MODULE NOT FOUND, TYPE NOT EXPOSED, VALUE NOT EXPOSED, and working imports" {
@@ -665,7 +665,7 @@ test "aliased package-qualified import resolves before the import statement" {
 
     const make_ident = try app_env.insertIdent(base.Ident.for_text("make"));
     var found_make_lookup = false;
-    var raw_node_idx: u32 = 0;
+    var raw_node_idx: u32 = CIR.Node.first_idx;
     while (raw_node_idx < app_env.store.nodes.len()) : (raw_node_idx += 1) {
         const node_idx: CIR.Node.Idx = @fromBackingInt(@intCast(raw_node_idx));
         if (app_env.store.nodes.get(node_idx).tag != .expr_external_lookup) continue;
@@ -673,7 +673,7 @@ test "aliased package-qualified import resolves before the import statement" {
         const external = app_env.store.getExpr(@fromBackingInt(@intCast(raw_node_idx))).e_lookup_external;
         if (!external.ident_idx.eql(make_ident)) continue;
 
-        const import_name_idx = app_env.imports.imports.items.items[@backingInt(external.module_idx)];
+        const import_name_idx = app_env.imports.imports.items()[@backingInt(external.module_idx)];
         try testing.expectEqualStrings("pf.Lib", app_env.getString(import_name_idx));
         found_make_lookup = true;
     }
@@ -835,7 +835,7 @@ test "import interner - Import.Idx functionality" {
     var found_dict = false;
     var found_json_decode = false;
     var found_set = false;
-    for (result.parse_env.imports.imports.items.items) |import_string_idx| {
+    for (result.parse_env.imports.imports.items()) |import_string_idx| {
         const module_name = result.parse_env.getString(import_string_idx);
         if (CIR.Import.isCompilerBuiltinImportName(module_name)) continue;
 
@@ -888,7 +888,7 @@ test "import interner - many imports keep stable module identity keys" {
     try result.can.canonicalizeFile();
 
     var explicit_import_count: usize = 0;
-    for (result.parse_env.imports.imports.items.items) |import_string_idx| {
+    for (result.parse_env.imports.imports.items()) |import_string_idx| {
         const module_name = result.parse_env.getString(import_string_idx);
         if (CIR.Import.isCompilerBuiltinImportName(module_name)) continue;
 
@@ -899,7 +899,7 @@ test "import interner - many imports keep stable module identity keys" {
     try expectEqual(@as(usize, import_count), explicit_import_count);
 }
 
-test "imported type-module tag rejects alias target" {
+test "imported type-module tag through an alias target names the alias" {
     var gpa_state = std.heap.DebugAllocator(.{ .safety = true, .stack_trace_frames = build_options.debug_gpa_stack_trace_frames }){};
     defer std.debug.assert(build_options.debugGpaOk(gpa_state.deinit()));
     const allocator = gpa_state.allocator();
@@ -961,18 +961,79 @@ test "imported type-module tag rejects alias target" {
     const diagnostics = try env.getDiagnostics();
     defer allocator.free(diagnostics);
 
-    var found_alias_error = false;
+    // Checking resolves the alias to the type it names and reports an alias
+    // that names no nominal type, so canonicalization records the alias.
     for (diagnostics) |diagnostic| {
-        if (diagnostic == .type_alias_but_needed_nominal) {
-            const d = diagnostic.type_alias_but_needed_nominal;
-            const name = env.getIdent(d.name);
-            if (std.mem.eql(u8, name, "Alias")) {
-                found_alias_error = true;
-            }
+        if (diagnostic == .type_alias_but_needed_nominal or
+            diagnostic == .type_not_exposed) return error.UnexpectedDiagnostic;
+    }
+
+    const defs = env.store.sliceDefs(env.top_level_value_defs);
+    try testing.expectEqual(@as(usize, 1), defs.len);
+    const bad = env.store.getExpr(env.store.getDef(defs[0]).expr);
+    try testing.expect(bad == .e_nominal_external);
+    const target_stmt: CIR.Statement.Idx = @fromBackingInt(@intCast(bad.e_nominal_external.target_node_idx));
+    try testing.expect(imported_env.store.getStatement(target_stmt) == .s_alias_decl);
+}
+
+test "issue 13262: qualified type lookup rejects a private sibling alias" {
+    const allocator = testing.allocator;
+    const ctx = CoreCtx.testing(allocator, allocator);
+    var builtins = try BuiltinTestContext.init(allocator);
+    defer builtins.deinit();
+
+    const shape_source =
+        \\Shape := {}.{
+        \\    Details := {}.{ Member : U8 }
+        \\    Public : Details
+        \\}
+        \\Hidden : Shape.Details
+    ;
+    var shape = try ModuleEnv.init(allocator, shape_source);
+    defer shape.deinit();
+    try shape.initCIRFields("Shape");
+    const shape_ast = try parse.file(allocator, &shape.common);
+    defer shape_ast.deinit();
+    var shape_can = try Can.initModule(ctx, &shape, shape_ast, builtins.canInitContext());
+    defer shape_can.deinit();
+    try shape_can.canonicalizeFile();
+    try testing.expect(shape.module_kind == .type_module);
+    const shape_diags = try shape.getDiagnostics();
+    defer allocator.free(shape_diags);
+    try testing.expectEqual(@as(usize, 0), shape_diags.len);
+    for ([_][]const u8{ "Hidden", "Shape.Hidden" }) |key| {
+        if (shape.common.findIdent(key)) |ident| {
+            try testing.expect(shape.getExposedTypeNodeIndexById(ident) == null);
         }
     }
 
-    try testing.expect(found_alias_error);
+    const importer_source =
+        \\import Shape
+        \\Allowed : Shape.Public.Member
+        \\Selected : Shape.Hidden
+        \\Indirect : Shape.Hidden.Member
+    ;
+    var importer = try ModuleEnv.init(allocator, importer_source);
+    defer importer.deinit();
+    try importer.initCIRFields("Importer");
+    const importer_ast = try parse.file(allocator, &importer.common);
+    defer importer_ast.deinit();
+    var importer_can = try Can.initModule(ctx, &importer, importer_ast, builtins.canInitContext());
+    defer importer_can.deinit();
+    try importer_can.canonicalizeFile();
+    try ImportResolution.resolveDeferredImports(&importer, .{ .imports = .{ .explicit = &.{
+        .{ .import_name = "Shape", .resolution = .{ .available = .{ .module_env = &shape } } },
+    } } });
+
+    const diagnostics = try importer.getDiagnostics();
+    defer allocator.free(diagnostics);
+    try testing.expectEqual(@as(usize, 2), diagnostics.len);
+    for (diagnostics, [_][]const u8{ "Hidden", "Hidden.Member" }) |diagnostic, missing| {
+        try testing.expect(diagnostic == .type_not_exposed);
+        const diag = diagnostic.type_not_exposed;
+        try testing.expectEqualStrings("Shape", importer.getIdent(diag.module_name));
+        try testing.expectEqualStrings(missing, importer.getIdent(diag.type_name));
+    }
 }
 
 test "imported nested associated types resolve by qualified export key" {

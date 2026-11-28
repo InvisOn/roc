@@ -48,7 +48,7 @@ TYPE MISMATCH - binops.md:16:5:16:5
 			(line-break)
 			(annotation-start code-block)
 			(indent 1)
-			(text "Try(ok, err)")
+			(text "Try(_ok, _err)")
 			(annotation-end)
 			(line-break)
 			(line-break)
@@ -157,47 +157,47 @@ EndOfFile,
 ~~~clojure
 (e-tuple
 	(elems
-		(e-dispatch-call (method "plus") (constraint-fn-var 294)
+		(e-dispatch-call (method "plus") (constraint-fn-var 275)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "minus") (constraint-fn-var 310)
+		(e-dispatch-call (method "minus") (constraint-fn-var 277)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "times") (constraint-fn-var 326)
+		(e-dispatch-call (method "times") (constraint-fn-var 279)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "div_by") (constraint-fn-var 342)
+		(e-dispatch-call (method "div_by") (constraint-fn-var 281)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "rem_by") (constraint-fn-var 358)
+		(e-dispatch-call (method "rem_by") (constraint-fn-var 283)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "is_lt") (constraint-fn-var 375)
+		(e-dispatch-call (method "is_lt") (constraint-fn-var 286)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "is_gt") (constraint-fn-var 392)
+		(e-dispatch-call (method "is_gt") (constraint-fn-var 289)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "is_lte") (constraint-fn-var 409)
+		(e-dispatch-call (method "is_lte") (constraint-fn-var 292)
 			(receiver
 				(e-num (value "4")))
 			(args
 				(e-num (value "2"))))
-		(e-dispatch-call (method "is_gte") (constraint-fn-var 426)
+		(e-dispatch-call (method "is_gte") (constraint-fn-var 295)
 			(receiver
 				(e-num (value "4")))
 			(args
@@ -212,7 +212,7 @@ EndOfFile,
 				(e-num (value "4")))
 			(rhs
 				(e-num (value "2"))))
-		(e-dispatch-call (method "div_trunc_by") (constraint-fn-var 482)
+		(e-dispatch-call (method "div_trunc_by") (constraint-fn-var 303)
 			(receiver
 				(e-num (value "4")))
 			(args

@@ -54,9 +54,9 @@ pub const FramePointerPolicy = enum {
 ///
 /// Callers: compileProcSpec, x86_64/CodeGen, aarch64/CodeGen
 pub fn DeferredFrameBuilder(comptime EmitType: type) type {
-    const roc_target = EmitType.roc_target;
-    const isa = isaOf(roc_target);
-    const is_windows = roc_target.isWindows();
+    const machine_abi = EmitType.code_abi;
+    const isa = machine_abi.isa();
+    const is_windows = machine_abi.isWindows();
 
     const GeneralReg = EmitType.GeneralReg;
     const CC = EmitType.CC;
@@ -92,7 +92,7 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
         stack_probe_required: bool = false,
 
         /// Frame-pointer strategy for this function.
-        frame_pointer_policy: FramePointerPolicy = FramePointerPolicy.forTarget(roc_target),
+        frame_pointer_policy: FramePointerPolicy = FramePointerPolicy.forTarget(machine_abi),
 
         /// Bytes of caller-allocated argument block this function removes
         /// from the stack when it returns. An internal Roc procedure owns the
@@ -192,8 +192,8 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             if (self.callee_pop == 0) return emit.ret();
             switch (isa) {
                 .x86_64 => {
-                    if (self.callee_pop <= std.math.maxInt(u16)) {
-                        try emit.retImm16(@intCast(self.callee_pop));
+                    if (std.math.cast(u16, self.callee_pop)) |pop_bytes| {
+                        try emit.retImm16(pop_bytes);
                     } else {
                         try emit.pop(.R11);
                         try emit.addRegImm32(.w64, .RSP, @intCast(self.callee_pop));
@@ -259,8 +259,8 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             7 +
             // sub rsp, 0x1000 (REX.W + 81 + ModRM + imm32 = 7 bytes)
             7 +
-            // mov [rsp], eax (89 + ModRM disp32 + SIB + disp32 = 7 bytes)
-            7 +
+            // mov [rsp], eax (89 + ModRM + SIB + disp8 = 4 bytes)
+            4 +
             // sub eax, 0x1000 (RAX short form: 2D + imm32 = 5 bytes)
             5 +
             // cmp eax, 0x1000 (RAX short form: 3D + imm32 = 5 bytes)
@@ -269,8 +269,8 @@ pub fn DeferredFrameBuilder(comptime EmitType: type) type {
             6 +
             // sub rsp, rax (REX.W + 29 + ModRM = 3 bytes)
             3 +
-            // mov [rsp], eax (final probe, 7 bytes)
-            7;
+            // mov [rsp], eax (final probe, 4 bytes)
+            4;
 
         /// True when this frame must probe the stack page-by-page. Direct
         /// stack-pointer movement by at least one page can skip guard pages;
@@ -589,7 +589,6 @@ fn Aarch64CalleeSavedInfo(comptime GeneralReg: type) type {
 
 const x86_64 = @import("x86_64/mod.zig");
 const aarch64 = @import("aarch64/mod.zig");
-const isaOf = @import("isa.zig").isaOf;
 
 // DeferredFrameBuilder tests (mask-based pattern)
 

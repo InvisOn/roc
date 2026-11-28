@@ -229,6 +229,7 @@ test "a build evaluates every compile-time value and materializes the ones its p
         build_options.compiler_compatibility_id,
         null,
         ctx,
+        .lss,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
@@ -241,7 +242,7 @@ test "a build evaluates every compile-time value and materializes the ones its p
 
     // A separate runtime consumer, so completed values are materialized for
     // it rather than read out of the compile-time consumer's own slots.
-    const target: lir.CheckedPipeline.TargetConfig = .{ .inline_expects = .omit, .proc_debug_names = true };
+    const target: lir.CheckedPipeline.TargetConfig = .{ .inline_expects = .omit };
     coord.runtime_lowering = .{ .target = target };
     try coord.finishCheckedProgram(.executable_artifacts);
     try std.testing.expect(!coord.hasUserErrors());
@@ -255,7 +256,7 @@ test "a build evaluates every compile-time value and materializes the ones its p
 
     const host = &session.completed.?;
     const helper = moduleArtifactNamed(&coord, "Helper") orelse return error.TestUnexpectedResult;
-    const helper_roots = helper.root_requests.compile_time_requests;
+    const helper_roots = helper.root_requests.compile_time_requests.items();
     try std.testing.expectEqual(@as(usize, 3), helper_roots.len);
     // The value the program reads is materialized and frozen; the other root
     // is complete but stays in its module's store. Transcoding rejects a read
@@ -323,6 +324,7 @@ test "one evaluated root has one completed-value slot however many places read i
         build_options.compiler_compatibility_id,
         null,
         CoreCtx.os(allocator, allocator, io),
+        .lss,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
@@ -333,14 +335,14 @@ test "one evaluated root has one completed-value slot however many places read i
     try coord.coordinatorLoop();
     try std.testing.expect(!coord.hasUserErrors());
 
-    const target: lir.CheckedPipeline.TargetConfig = .{ .inline_expects = .omit, .proc_debug_names = true };
+    const target: lir.CheckedPipeline.TargetConfig = .{ .inline_expects = .omit };
     coord.runtime_lowering = .{ .target = target };
     try coord.finishCheckedProgram(.executable_artifacts);
     try std.testing.expect(!coord.hasUserErrors());
     const session = &coord.program_session.?;
     const stages = &session.completed.?;
     const helper = moduleArtifactNamed(&coord, "Helper") orelse return error.TestUnexpectedResult;
-    const helper_roots = helper.root_requests.compile_time_requests;
+    const helper_roots = helper.root_requests.compile_time_requests.items();
     try std.testing.expectEqual(@as(usize, 4), helper_roots.len);
     const value_roots = [_]CheckedArtifact.RootRequest{ try rootWithOrder(helper_roots, 1), try rootWithOrder(helper_roots, 2), try rootWithOrder(helper_roots, 3) };
 
@@ -443,6 +445,7 @@ test "a separate compile-time consumer lowers no runtime-only procedure" {
         build_options.compiler_compatibility_id,
         null,
         CoreCtx.os(allocator, allocator, io),
+        .lss,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
@@ -459,7 +462,6 @@ test "a separate compile-time consumer lowers no runtime-only procedure" {
         // so this compilation's consumers cannot share one program.
         .inline_expects = .omit,
         .inline_mode = .none,
-        .proc_debug_names = true,
         .work_metrics = &metrics,
     };
     coord.runtime_lowering = .{ .target = target };
@@ -533,6 +535,7 @@ test "a separate runtime consumer keeps the producer's root order and test-plan 
         build_options.compiler_compatibility_id,
         null,
         CoreCtx.os(allocator, allocator, io),
+        .lss,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
@@ -546,7 +549,7 @@ test "a separate runtime consumer keeps the producer's root order and test-plan 
     const app = coord.appRootCheckedArtifact();
     var expects = std.ArrayList(CheckedArtifact.RootRequest).empty;
     defer expects.deinit(allocator);
-    for (app.root_requests.requests) |request| {
+    for (app.root_requests.requests.items()) |request| {
         if (request.kind == .test_expect) try expects.append(allocator, request);
     }
     try std.testing.expectEqual(@as(usize, 2), expects.items.len);

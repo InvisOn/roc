@@ -72,6 +72,7 @@ pub const MatchBranchPart = types.MatchBranchPart;
 pub const MatchAltBinderMissing = types.MatchAltBinderMissing;
 pub const DiscardedVarUpdate = types.DiscardedVarUpdate;
 pub const ComptimeCondition = types.ComptimeCondition;
+pub const GeneralizationNestingTooDeep = types.GeneralizationNestingTooDeep;
 
 // Type declaration errors
 pub const TypeApplyArityMismatch = types.TypeApplyArityMismatch;
@@ -86,10 +87,10 @@ pub const RedundantOpenTagUnion = types.RedundantOpenTagUnion;
 // Nominal type errors
 pub const CannotAccessOpaqueNominal = types.CannotAccessOpaqueNominal;
 pub const NominalTypeResolutionFailed = types.NominalTypeResolutionFailed;
+pub const AliasNamesNoNominalType = types.AliasNamesNoNominalType;
 pub const InvalidNominalDeclRecursion = types.InvalidNominalDeclRecursion;
 
 // Platform errors
-pub const PlatformAliasNotFound = types.PlatformAliasNotFound;
 pub const PlatformDefNotFound = types.PlatformDefNotFound;
 pub const PlatformHostedSection = types.PlatformHostedSection;
 pub const HostedUnboxedFunction = types.HostedUnboxedFunction;
@@ -98,6 +99,7 @@ pub const HostedFunctionNotEffectful = types.HostedFunctionNotEffectful;
 pub const HostedTypeVariableNotBoxed = types.HostedTypeVariableNotBoxed;
 pub const HostBoundaryOpenRow = types.HostBoundaryOpenRow;
 pub const HostBoundaryOptionalField = types.HostBoundaryOptionalField;
+pub const PolymorphicProvidedFunction = types.PolymorphicProvidedFunction;
 pub const AnnotationOnlyValue = types.AnnotationOnlyValue;
 /// Public `AnnotationOnlyValueUse` re-export.
 pub const AnnotationOnlyValueUse = types.AnnotationOnlyValueUse;
@@ -126,3 +128,5 @@ pub const ComptimeEvalError = types.ComptimeEvalError;
 pub const VarWithSnapshot = types.VarWithSnapshot;
 pub const LocalTypeEscape = types.LocalTypeEscape;
 pub const LocalTypeEscapeCause = types.LocalTypeEscapeCause;
+pub const RecordTailRefusal = types.RecordTailRefusal;
+pub const TagTailClosing = types.TagTailClosing;

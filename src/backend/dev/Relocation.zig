@@ -22,10 +22,11 @@ pub const DataRelocationKind = enum {
     page21,
     pageoff12,
     /// A 4-byte field holding the symbol's value plus the field's own
-    /// little-endian contents (its addend), sign-extended by the instruction
-    /// (x86_64 `R_X86_64_32S`). A test unit's expect-site immediates take
-    /// this form against `expect_site_base_symbol` on x86_64.
-    abs32s,
+    /// little-endian contents (its addend), as an unsigned value the
+    /// instruction zero-extends (x86_64 `R_X86_64_32`). A test unit's
+    /// expect-site immediates take this form against
+    /// `expect_site_base_symbol` on x86_64.
+    abs32_field,
     /// An 8-byte field holding the symbol's value plus the field's own
     /// little-endian contents (its addend). A test unit's expect-site
     /// literals take this form against `expect_site_base_symbol` on arm64,
@@ -216,12 +217,12 @@ fn patchLinkedDataRelocation(
         },
         .page21 => return patchAarch64AdrpRelocation(code, reloc_offset, code_base_addr + reloc_offset, target_addr),
         .pageoff12 => return patchAarch64PageOffset12Relocation(code, reloc_offset, target_addr),
-        .abs32s => {
+        .abs32_field => {
             if (reloc_offset + 4 > code.len) return error.InvalidOffset;
             const field = code[reloc_offset..][0..4];
-            const value = @as(i128, @intCast(target_addr)) + std.mem.readInt(i32, field, .little);
-            if (value < std.math.minInt(i32) or value > std.math.maxInt(i32)) return error.BranchOutOfRange;
-            std.mem.writeInt(i32, field, @intCast(value), .little);
+            const value = @as(u128, target_addr) + std.mem.readInt(u32, field, .little);
+            const narrow = std.math.cast(u32, value) orelse return error.BranchOutOfRange;
+            std.mem.writeInt(u32, field, narrow, .little);
         },
         .abs64_field => {
             if (reloc_offset + 8 > code.len) return error.InvalidOffset;
@@ -236,9 +237,7 @@ fn patchX86Rel32Operand(code: []u8, operand_offset: usize, next_instr_addr: usiz
     if (operand_offset + 4 > code.len) return error.InvalidOffset;
 
     const rel_i128 = @as(i128, @intCast(target_addr)) - @as(i128, @intCast(next_instr_addr));
-    if (rel_i128 < std.math.minInt(i32) or rel_i128 > std.math.maxInt(i32)) return error.BranchOutOfRange;
-
-    const rel: i32 = @intCast(rel_i128);
+    const rel = std.math.cast(i32, rel_i128) orelse return error.BranchOutOfRange;
     const rel_bytes: [4]u8 = @bitCast(rel);
     @memcpy(code[operand_offset..][0..4], &rel_bytes);
 }
@@ -271,8 +270,8 @@ fn patchAbsolutePointerOperand(code: []u8, operand_offset: usize, target_addr: u
 
     if (@sizeOf(usize) == 4) {
         if (operand_offset + 4 > code.len) return error.InvalidOffset;
-        if (target_addr > std.math.maxInt(u32)) return error.BranchOutOfRange;
-        std.mem.writeInt(u32, code[operand_offset..][0..4], @intCast(target_addr), .little);
+        const target_addr32 = std.math.cast(u32, target_addr) orelse return error.BranchOutOfRange;
+        std.mem.writeInt(u32, code[operand_offset..][0..4], target_addr32, .little);
         return;
     }
 
@@ -320,8 +319,7 @@ fn patchAarch64PageOffset12Relocation(code: []u8, inst_offset: usize, target_add
 }
 
 fn asCodeOffset(offset: u64, code_len: usize) ApplyRelocationsError!usize {
-    if (offset > std.math.maxInt(usize)) return error.InvalidOffset;
-    const idx: usize = @intCast(offset);
+    const idx = std.math.cast(usize, offset) orelse return error.InvalidOffset;
     if (idx > code_len) return error.InvalidOffset;
     return idx;
 }

@@ -91,6 +91,7 @@ fn runEmbeddingSequence(
         build_options.compiler_compatibility_id,
         null,
         CoreCtx.default(gpa, arena, std.testing.io),
+        .lss,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
@@ -128,7 +129,7 @@ fn runEmbeddingSequence(
     const imports = try coord.collectImportedArtifactViews(arena, root);
     const relations = try coord.collectRelationArtifactViews(arena, root);
 
-    const lir_roots = try lir.CheckedPipeline.selectPlatformEntrypointRoots(arena, root.root_requests.runtime_requests);
+    const lir_roots = try lir.CheckedPipeline.selectPlatformEntrypointRoots(arena, root.root_requests.runtime_requests.items());
 
     const lowered = try lir.CheckedPipeline.lowerCheckedModulesToLir(
         runtime_alloc,

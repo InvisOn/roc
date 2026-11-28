@@ -28,6 +28,8 @@ pub fn managedWriterFinish(aw: *std.Io.Writer.Allocating, managed: *std.array_li
 pub const SafeList = @import("safe_list.zig").SafeList;
 pub const SafeRange = @import("safe_list.zig").SafeRange;
 pub const SafeMultiList = @import("safe_list.zig").SafeMultiList;
+/// Open-addressed dedup index stored in its store's columns.
+pub const HashedProbeTable = @import("hashed_probe_table.zig").HashedProbeTable;
 pub const validateRelocatedSpan = @import("safe_list.zig").validateRelocatedSpan;
 pub const GuardedList = @import("GuardedList.zig");
 /// Backings a growing list replaced while readers may still hold slices of them.
@@ -70,8 +72,12 @@ pub const OptionalIndexColumn = @import("OptionalIndexColumn.zig").OptionalIndex
 pub const OptionalId = @import("optional_id.zig").OptionalId;
 /// Compact optional values for a private one-based ID domain.
 pub const ZeroSentinelId = @import("optional_id.zig").ZeroSentinelId;
+/// The next zero-based `u32` id whose biased optional form also fits.
+pub const nextBiasedId = @import("optional_id.zig").nextBiasedId;
 /// An optional raw `u32` in four bytes.
 pub const OptionalU32 = @import("optional_id.zig").OptionalU32;
+/// An optional raw `u8` in one byte; zero means absent.
+pub const OptionalU8 = @import("optional_id.zig").OptionalU8;
 /// An optional small enum in one byte.
 pub const OptionalEnum = @import("optional_id.zig").OptionalEnum;
 /// An optional struct at the struct's own size, keyed by one biased field.
@@ -84,9 +90,14 @@ pub const ZeroSentinelIndexColumn = @import("OptionalIndexColumn.zig").ZeroSenti
 pub const epochs = @import("epochs.zig");
 pub const EpochSet = epochs.EpochSet;
 pub const EpochColumn = epochs.EpochColumn;
+pub const EpochMap = epochs.EpochMap;
+pub const EpochBitSet = epochs.EpochBitSet;
+pub const EpochBitSetPool = epochs.EpochBitSetPool;
 /// Append-only columns that grow on virtual reservations without copying.
 pub const ReservedList = @import("ReservedList.zig").ReservedList;
 pub const ReservedColumns = @import("ReservedList.zig").ReservedColumns;
+/// The estimated size at which a `ReservedList` starts on a reservation.
+pub const reserved_list_threshold_bytes = @import("ReservedList.zig").reserve_threshold_bytes;
 /// A mark-and-reset bump allocator for per-pass tables.
 pub const ScratchArena = @import("ScratchArena.zig");
 /// Items grouped by key: CSR for dense keys, sorted pairs for sparse keys.
@@ -144,6 +155,7 @@ test "collections tests" {
     std.testing.refAllDecls(@import("CompactWriter.zig"));
     std.testing.refAllDecls(@import("ExposedItems.zig"));
     std.testing.refAllDecls(@import("safe_list.zig"));
+    std.testing.refAllDecls(@import("hashed_probe_table.zig"));
     std.testing.refAllDecls(@import("GuardedList.zig"));
     std.testing.refAllDecls(@import("SupersededBackings.zig"));
     std.testing.refAllDecls(@import("serialization.zig"));

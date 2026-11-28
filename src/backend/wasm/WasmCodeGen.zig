@@ -342,6 +342,10 @@ rc_helper_funcs: std.AutoHashMap(u64, u32),
 rc_helper_table_indices: std.AutoHashMap(u64, u32),
 /// Atomic helpers explicitly named by static-data relocations.
 static_data_rc_helpers: []const RcHelperKey = &.{},
+/// While a `decref_queued` helper's body is emitted: the local holding the
+/// drop queue it received, which it passes to each `decref_queued` child and
+/// each queued teardown. Null in every other body, which passes a null queue.
+rc_queue_local: ?u32 = null,
 /// Map from proc spec id → wasm table index (for proc_ref literals).
 proc_table_indices: collections.DenseMap(u32, u32),
 /// Map from LIR string backing id → wasm data offset for the backing bytes.
@@ -451,7 +455,7 @@ external_calls: ExternalCalls = .unconfigured,
 /// with the `.boxy` runtime contract.
 boxy_runtime_symbols: ?BoxyRuntimeSignatures.SymbolTable = null,
 /// The procedure being compiled's tail carry parameter, if it takes one
-/// (`procCarriesTailArgs`).
+/// (`LirProcSpec.takesTailCarry`).
 carry: ?Storage.LocalInfo = null,
 /// The address of the pending cell of the procedure being compiled
 /// (`LirProcSpec.uses_pending_cell`).
@@ -625,7 +629,7 @@ pub fn deinit(self: *Self) void {
     self.stack_check_entries.deinit(self.allocator);
     self.storage.deinit();
     self.registered_procs.deinit();
-    for (self.tail_drivers.items) |*driver| driver.members.deinit(self.allocator);
+    for (self.tail_drivers.items) |*driver| driver.deinit(self.allocator);
     self.tail_drivers.deinit(self.allocator);
     self.hosted_symbol_targets.deinit();
     self.function_symbols_by_index.deinit();
@@ -1397,6 +1401,24 @@ fn addLirProcFunctionSymbol(
     );
 }
 
+/// The local symbol of an exported tail-group member, whose own name its
+/// tail entry takes (`TailDriver.entries`).
+fn addTailMemberFunctionSymbol(
+    self: *Self,
+    defined: index_types.DefinedFunction,
+    identity: LIR.ProcIdentity,
+) Allocator.Error!SymbolIndex {
+    var identity_name: [LIR.ProcIdentity.symbol_name_len]u8 = undefined;
+    const name = std.fmt.allocPrint(self.allocator, "{s}.tail_member", .{identity.writeSymbolName(&identity_name)}) catch return error.OutOfMemory;
+    errdefer self.allocator.free(name);
+    try self.function_symbol_names.append(self.allocator, name);
+    return try self.addTrackedDefinedFunctionSymbol(
+        defined,
+        name,
+        WasmLinking.SymFlag.BINDING_LOCAL | WasmLinking.SymFlag.VISIBILITY_HIDDEN,
+    );
+}
+
 /// Resolve the undefined PIC base global, importing it on first use.
 /// A merged module may already import it (LLVM PIC objects do), so prefer that
 /// symbol over adding a second import of the same global.
@@ -1486,10 +1508,8 @@ fn staticDataSymbol(self: *Self, id: LIR.StaticDataId) Allocator.Error!SymbolInd
     const symbol_name = try lir.Program.staticDataSymbolName(self.allocator, id);
     errdefer self.allocator.free(symbol_name);
 
-    const symbol = if (self.module.findSymbolByNameAndKind(symbol_name, .data)) |existing|
-        SymbolIndex.fromRaw(existing)
-    else
-        try self.module.addUndefinedDataSymbol(symbol_name);
+    // Returns the module's existing data symbol of that name when it has one.
+    const symbol = try self.module.addUndefinedDataSymbol(symbol_name);
 
     try self.static_data_names.append(self.allocator, symbol_name);
     try self.static_data_symbols.put(raw_id, symbol);
@@ -2150,7 +2170,7 @@ pub fn generateModule(
     try self.module.finalizeMemoryAndTableWithConfig(.{
         .stack_bytes = self.wasm_stack_bytes,
         .minimum_memory = if (self.wasm_memory_pages > 0)
-            @as(usize, self.wasm_memory_pages) * 65536
+            @as(u64, self.wasm_memory_pages) * 65536
         else
             null,
         .export_memory = true,
@@ -2401,33 +2421,42 @@ fn emitRawDirectRcPlan(
         },
         .erased_callable_incref => {
             const payload_ptr_local = try self.emitLoadAtToNewLocal(value_ptr_local, .i32, 0);
+            try self.emitFrameCallableSkipBlock(payload_ptr_local);
             if (count_local) |count| {
                 try self.emitDataPtrIncrefByLocal(payload_ptr_local, count);
             } else {
                 try self.emitDataPtrIncref(payload_ptr_local, 1);
             }
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
             return true;
         },
         .erased_callable_decref => {
             const payload_ptr_local = try self.emitLoadAtToNewLocal(value_ptr_local, .i32, 0);
+            try self.emitFrameCallableSkipBlock(payload_ptr_local);
             try self.emitErasedCallableOnDropIfUnique(payload_ptr_local);
             try self.emitDataPtrDecref(
                 payload_ptr_local,
                 builtins.erased_callable.payload_alignment,
                 builtins.erased_callable.allocation_has_refcounted_children,
             );
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
             return true;
         },
         .erased_callable_free => {
             const payload_ptr_local = try self.emitLoadAtToNewLocal(value_ptr_local, .i32, 0);
+            try self.emitFrameCallableSkipBlock(payload_ptr_local);
             try self.emitErasedCallableOnDrop(payload_ptr_local);
             try self.emitDataPtrFree(
                 payload_ptr_local,
                 builtins.erased_callable.payload_alignment,
                 builtins.erased_callable.allocation_has_refcounted_children,
             );
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
             return true;
         },
+        // A queued teardown calls a builtin with a helper callback, which
+        // only a compiled helper's body emits.
+        .list_decref_queued, .list_free_queued, .box_decref_queued, .box_free_queued => return false,
         .struct_, .tag_union, .closure => return false,
     }
 }
@@ -2457,6 +2486,10 @@ fn emitExplicitRcHelperCallForValuePtr(
         .decref, .free => {},
         .host_drop => wasmInvariantFmt(
             "WASM/codegen invariant violated: RC statement used a host-shaped drop adapter",
+            .{},
+        ),
+        .decref_queued => wasmInvariantFmt(
+            "WASM/codegen invariant violated: RC statement used a queued drop helper",
             .{},
         ),
     }
@@ -2902,8 +2935,8 @@ fn emitBuiltinInternalStrRc(self: *Self, comptime kind: RcOpKind, str_ptr_local:
 /// on_drop slots belong to no RC statement and are always requested as
 /// `.atomic`.
 fn rcHelperCacheKey(helper_key: RcHelperKey, atomicity: RcAtomicity) u64 {
-    // RcHelperKey.encode() occupies bits 0..33 (layout index + op).
-    return helper_key.encode() | (@as(u64, @backingInt(atomicity)) << 34);
+    // RcHelperKey.encode() occupies the low `encoded_bits` bits (layout index + op).
+    return helper_key.encode() | (@as(u64, @backingInt(atomicity)) << RcHelperKey.encoded_bits);
 }
 
 fn staticDataRequiresRcHelper(self: *const Self, helper_key: RcHelperKey, atomicity: RcAtomicity) bool {
@@ -2935,12 +2968,55 @@ fn emitRawRcHelperCallByKey(
             try self.emitLocalGet(count_local.?);
         },
         .decref, .free => {},
+        .decref_queued => try self.emitRcQueueArg(),
         .host_drop => wasmInvariantFmt(
             "WASM/codegen invariant violated: RC statement used a host-shaped drop adapter",
             .{},
         ),
     }
     try self.emitCall(helper_func_idx);
+}
+
+/// Push the queue a helper passes to a `decref_queued` child or a queued
+/// teardown: the one it received, or null in a helper that received none.
+fn emitRcQueueArg(self: *Self) Allocator.Error!void {
+    if (self.rc_queue_local) |queue_local| {
+        try self.emitLocalGet(queue_local);
+    } else {
+        try self.emitI32Const(0);
+    }
+}
+
+fn queuedDropMode(atomicity: RcAtomicity) builtins.utils.DropMode {
+    return switch (atomicity) {
+        .atomic => .decref_atomic,
+        .single_thread => .decref_single_thread,
+    };
+}
+
+/// Drop a list on a cycle of its type through the queued teardown builtin
+/// (`builtins.utils.DropQueue`). The builtin takes the list by address, which
+/// is the helper's value pointer, and reaches the element helper through its
+/// table slot.
+fn emitQueuedListDrop(self: *Self, list_plan: layout.RcQueuedListPlan, value_ptr_local: u32, mode: builtins.utils.DropMode) Allocator.Error!void {
+    try self.emitLocalGet(value_ptr_local);
+    try self.emitI32Const(@intCast(list_plan.elem_alignment));
+    try self.emitI32Const(@intCast(list_plan.elem_width));
+    try self.emitFunctionTableIndexConst(try self.rcHelperTableIndex(list_plan.child));
+    try self.emitRcQueueArg();
+    try self.emitI32Const(@intCast(@backingInt(mode)));
+    try self.emitBuiltinCall(.list_drop_queued);
+}
+
+/// Drop a box on a cycle of its type through the queued teardown builtin
+/// (`builtins.utils.DropQueue`).
+fn emitQueuedBoxDrop(self: *Self, box_plan: layout.RcQueuedBoxPlan, value_ptr_local: u32, mode: builtins.utils.DropMode) Allocator.Error!void {
+    try self.emitLoadAt(value_ptr_local, .i32, 0);
+    try self.emitI32Const(@intCast(box_plan.elem_alignment));
+    try self.emitFunctionTableIndexConst(try self.rcHelperTableIndex(box_plan.child));
+    try self.emitRcQueueArg();
+    try self.emitI32Const(@intCast(@backingInt(mode)));
+    try self.emitBuiltinCall(.box_drop_queued);
 }
 
 /// Look up a previously-reserved RC helper's global function index.
@@ -2983,6 +3059,23 @@ fn emitBuiltinInternalBoxChildDropIfUnique(
     try self.emitRawRcHelperCallByKey(child_key, atomicity, box_ptr_local, null);
 
     self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+}
+
+/// Open a block that a null pointer or a frame callable
+/// (`utils.REFCOUNT_FRAME`, design.md "Frame Callables") branches out of:
+/// an erased callable's retain, release and free do nothing to frame
+/// storage. The caller closes the block.
+fn emitFrameCallableSkipBlock(self: *Self, payload_ptr_local: u32) Allocator.Error!void {
+    const rc_val = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
+    try self.emitVoidBlock();
+    try self.emitLocalGet(payload_ptr_local);
+    self.currentCode().append(self.allocator, Op.i32_eqz) catch return error.OutOfMemory;
+    try self.emitBrIf(0);
+    try self.emitLoadI32AtPtrOffset(payload_ptr_local, refcount_offset, rc_val);
+    try self.emitLocalGet(rc_val);
+    try self.emitI32Const(@intCast(builtins.utils.targetRefcountFrame(wasm_word_size)));
+    self.currentCode().append(self.allocator, Op.i32_eq) catch return error.OutOfMemory;
+    try self.emitBrIf(0);
 }
 
 fn emitErasedCallableOnDropIfUnique(
@@ -3067,27 +3160,37 @@ fn generateBuiltinInternalRcHelperBody(
             }
             try self.emitDataPtrFree(box_ptr_local, box_plan.elem_alignment, box_plan.child != null);
         },
+        .list_decref_queued => |list_plan| try self.emitQueuedListDrop(list_plan, value_ptr_local, queuedDropMode(atomicity)),
+        .list_free_queued => |list_plan| try self.emitQueuedListDrop(list_plan, value_ptr_local, .free),
+        .box_decref_queued => |box_plan| try self.emitQueuedBoxDrop(box_plan, value_ptr_local, queuedDropMode(atomicity)),
+        .box_free_queued => |box_plan| try self.emitQueuedBoxDrop(box_plan, value_ptr_local, .free),
         .erased_callable_incref => {
             const payload_ptr_local = try self.emitLoadAtToNewLocal(value_ptr_local, .i32, 0);
+            try self.emitFrameCallableSkipBlock(payload_ptr_local);
             try self.emitDataPtrIncrefByLocal(payload_ptr_local, count_local.?);
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
         },
         .erased_callable_decref => {
             const payload_ptr_local = try self.emitLoadAtToNewLocal(value_ptr_local, .i32, 0);
+            try self.emitFrameCallableSkipBlock(payload_ptr_local);
             try self.emitErasedCallableOnDropIfUnique(payload_ptr_local);
             try self.emitDataPtrDecref(
                 payload_ptr_local,
                 builtins.erased_callable.payload_alignment,
                 builtins.erased_callable.allocation_has_refcounted_children,
             );
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
         },
         .erased_callable_free => {
             const payload_ptr_local = try self.emitLoadAtToNewLocal(value_ptr_local, .i32, 0);
+            try self.emitFrameCallableSkipBlock(payload_ptr_local);
             try self.emitErasedCallableOnDrop(payload_ptr_local);
             try self.emitDataPtrFree(
                 payload_ptr_local,
                 builtins.erased_callable.payload_alignment,
                 builtins.erased_callable.allocation_has_refcounted_children,
             );
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
         },
         .struct_ => |struct_plan| {
             const field_count = self.getLayoutStore().rcHelperStructFieldCount(struct_plan);
@@ -3155,6 +3258,7 @@ fn rcPlanNeedsCompiledHelper(helper_plan: RcHelperPlan) bool {
     return switch (helper_plan) {
         .list_incref, .list_decref, .list_free => |list_plan| list_plan.child != null,
         .box_decref, .box_free => |box_plan| box_plan.child != null,
+        .list_decref_queued, .list_free_queued, .box_decref_queued, .box_free_queued => true,
         .struct_, .tag_union, .closure => true,
         .noop, .str_incref, .str_decref, .str_free, .box_incref, .erased_callable_incref, .erased_callable_decref, .erased_callable_free => false,
     };
@@ -3196,6 +3300,9 @@ fn appendRcHelperChildKeys(self: *const Self, helper_plan: RcHelperPlan, out: *s
             }
         },
         .closure => |child_key| try out.append(oa, child_key),
+        // A queued teardown names its child by table slot, which reserves
+        // the child itself (`rcHelperTableIndex`).
+        .list_decref_queued, .list_free_queued, .box_decref_queued, .box_free_queued => {},
         .noop, .str_incref, .str_decref, .str_free, .box_incref, .erased_callable_incref, .erased_callable_decref, .erased_callable_free => {},
     }
 }
@@ -3207,7 +3314,7 @@ fn rcHelperParamTypes(op: layout.RcOp, buf: *[builtins.rc_callback_abi.max_param
     for (roles, 0..) |role, i| {
         buf[i] = switch (role) {
             // wasm32 pointers and the pointer-sized count are both i32.
-            .value_ptr, .count, .ops_ptr => .i32,
+            .value_ptr, .count, .ops_ptr, .drop_queue => .i32,
         };
     }
     return buf[0..roles.len];
@@ -3349,12 +3456,18 @@ fn emitRcHelperBody(self: *Self, helper_key: RcHelperKey, atomicity: RcAtomicity
     const value_ptr_local = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
     const count_local = switch (helper_key.op) {
         .incref => self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory,
-        .decref, .free, .host_drop => null,
+        .decref, .free, .host_drop, .decref_queued => null,
     };
     if (helper_key.op == .host_drop) {
         // The published on-drop ABI's ops slot, which generated adapters ignore.
         _ = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
     }
+    const outer_rc_queue_local = self.rc_queue_local;
+    defer self.rc_queue_local = outer_rc_queue_local;
+    self.rc_queue_local = if (helper_key.op == .decref_queued)
+        self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory
+    else
+        null;
     self.fp_local = self.storage.allocPersistentLocal(.i32) catch return error.OutOfMemory;
 
     try self.emitVoidBlock();
@@ -6576,8 +6689,8 @@ const DecodedRcHelper = struct { key: RcHelperKey, atomicity: RcAtomicity };
 
 fn decodeRcHelperCacheKey(cache_key: u64) DecodedRcHelper {
     return .{
-        .key = RcHelperKey.decode(cache_key & 0x3_ffff_ffff),
-        .atomicity = @fromBackingInt(@as(u1, @intCast((cache_key >> 34) & 1))),
+        .key = RcHelperKey.decode(cache_key),
+        .atomicity = @fromBackingInt(@as(u1, @intCast((cache_key >> RcHelperKey.encoded_bits) & 1))),
     };
 }
 
@@ -6673,6 +6786,23 @@ const TailDriver = struct {
     result: ValType,
     defined: index_types.DefinedFunction,
     members: std.ArrayList(LIR.LirProcSpecId) = .empty,
+    /// The tail entry of each member other units call
+    /// (`LIR.LirProcSpec.exported`): a function under the member's name and
+    /// signature that calls the member and then this driver, so a call from
+    /// another unit, which only an exported procedure receives, returns the
+    /// group's result. A frame-replacing call never crosses a unit, so the
+    /// tail area and drivers stay private to the unit that defines the group.
+    entries: std.ArrayList(TailEntry) = .empty,
+
+    fn deinit(self: *TailDriver, allocator: Allocator) void {
+        self.members.deinit(allocator);
+        self.entries.deinit(allocator);
+    }
+};
+
+const TailEntry = struct {
+    member: LIR.LirProcSpecId,
+    defined: index_types.DefinedFunction,
 };
 
 const tail_area_args_offset: u32 = 16;
@@ -6711,7 +6841,7 @@ fn tailArgOffsets(self: *Self, proc: LirProcSpec, offsets: ?[]u32) Allocator.Err
         if (offsets) |out| out[i] = offset;
         offset += std.mem.alignForward(u32, size, 16);
     }
-    const hidden_count = self.hiddenParams(proc).count();
+    const hidden_count = hiddenParams(proc).count();
     for (0..hidden_count) |i| {
         if (offsets) |out| out[args.len + i] = offset;
         offset += 16;
@@ -6734,7 +6864,13 @@ fn registerTailDrivers(self: *Self, proc_specs: []const LirProcSpec) Allocator.E
             try self.tail_drivers.append(self.allocator, .{ .group = proc.tail_group.get().?, .result = result, .defined = defined });
             break :blk &self.tail_drivers.items[self.tail_drivers.items.len - 1];
         };
-        try driver.members.append(self.allocator, @fromBackingInt(@as(u32, @intCast(i))));
+        const member: LIR.LirProcSpecId = @fromBackingInt(@as(u32, @intCast(i)));
+        try driver.members.append(self.allocator, member);
+        if (proc.exported) {
+            const entry = self.module.addDefinedFunction(try self.procFuncType(proc)) catch return error.OutOfMemory;
+            _ = try self.addLirProcFunctionSymbol(entry, proc.identity, true);
+            try driver.entries.append(self.allocator, .{ .member = member, .defined = entry });
+        }
     }
     if (self.tail_drivers.items.len == 0) return;
 
@@ -6817,7 +6953,7 @@ fn compileTailDrivers(self: *Self) Allocator.Error!void {
             self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
             const proc = self.store.getProcSpec(member);
             const args = self.store.getLocalSpan(proc.args);
-            const hidden_count = self.hiddenParams(proc).count();
+            const hidden_count = hiddenParams(proc).count();
             const offsets = try self.allocator.alloc(u32, args.len + hidden_count);
             defer self.allocator.free(offsets);
             _ = try self.tailArgOffsets(proc, offsets);
@@ -6852,7 +6988,33 @@ fn compileTailDrivers(self: *Self) Allocator.Error!void {
         try self.encodeLocalsDecl(&self.currentBody().preamble, 1);
         self.endFunction();
         self.restoreState(saved);
+        for (driver.entries.items) |entry| try self.compileTailEntry(driver, entry);
     }
+}
+
+/// A member's tail entry (`TailDriver.entries`): pass every parameter on to
+/// the member, then finish what it left pending.
+fn compileTailEntry(self: *Self, driver: *const TailDriver, entry: TailEntry) Allocator.Error!void {
+    const saved = self.saveState() catch return error.OutOfMemory;
+    errdefer self.abandonState(saved);
+    try self.beginFunction(entry.defined.local);
+    self.stack_frame_size = 0;
+    self.uses_stack_memory = false;
+    self.fp_local = 0;
+    self.cf_depth = 0;
+    self.in_proc = false;
+    self.current_proc_id = null;
+
+    const proc = self.store.getProcSpec(entry.member);
+    const param_count = self.rocParamCount(proc);
+    var param: u32 = 0;
+    while (param < param_count) : (param += 1) try self.emitLocalGet(param);
+    try self.emitCall(self.registered_procs.get(@backingInt(entry.member)) orelse unreachable); // pass 1 registered every tail-group member
+    try self.emitCall(driver.defined.function.raw());
+    self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+    try self.encodeLocalsDecl(&self.currentBody().preamble, param_count);
+    self.endFunction();
+    self.restoreState(saved);
 }
 
 fn valTypeByteSize(vt: ValType) u32 {
@@ -6883,7 +7045,7 @@ fn generateFrameReplacingCall(self: *Self, proc_id: LIR.LirProcSpecId, call_args
     const args = self.store.getLocalSpan(call_args);
     const params = self.store.getLocalSpan(proc.args);
     if (args.len != params.len) wasmInvariantFmt("WASM/codegen invariant violated: frame-replacing call arity mismatch", .{});
-    const hidden = self.hiddenParams(proc);
+    const hidden = hiddenParams(proc);
     var offsets_buffer: [16 * @sizeOf(u32)]u8 align(@alignOf(u32)) = undefined;
     var offsets_sfa = std.heap.BufferFirstAllocator.init(&offsets_buffer, self.allocator);
     const offsets_alloc = offsets_sfa.allocator();
@@ -7013,7 +7175,13 @@ fn registerProcSpec(self: *Self, proc_id: LIR.LirProcSpecId, proc: LirProcSpec) 
     const type_idx = try self.procFuncType(proc);
     const defined = self.module.addDefinedFunction(type_idx) catch return error.OutOfMemory;
     const func_idx = defined.function.raw();
-    _ = try self.addLirProcFunctionSymbol(defined, proc.identity, proc.exported);
+    if (proc.exported and isTailGroupMember(proc)) {
+        // Other units call the member's tail entry under its name
+        // (`registerTailDrivers`).
+        _ = try self.addTailMemberFunctionSymbol(defined, proc.identity);
+    } else {
+        _ = try self.addLirProcFunctionSymbol(defined, proc.identity, proc.exported);
+    }
     const table_idx = self.module.addTableElement(func_idx) catch return error.OutOfMemory;
 
     self.registered_procs.put(key, func_idx) catch return error.OutOfMemory;
@@ -7042,7 +7210,7 @@ fn procFuncType(self: *Self, proc: LirProcSpec) Allocator.Error!u32 {
     if (direct_count < args.len) param_types.append(self.allocator, .i32) catch return error.OutOfMemory;
     // The hidden result pointer, tail carry, and pending cell follow the
     // explicit arguments.
-    const hidden = self.hiddenParams(proc);
+    const hidden = hiddenParams(proc);
     if (hidden.result) param_types.append(self.allocator, .i32) catch return error.OutOfMemory;
     if (hidden.carry) param_types.append(self.allocator, .i32) catch return error.OutOfMemory;
     if (hidden.pending) param_types.append(self.allocator, .i32) catch return error.OutOfMemory;
@@ -7189,7 +7357,7 @@ fn emitProcSpecBody(
             _ = try self.bindProcParamLocal(arg);
         }
         const stored_args: ?u32 = if (direct_count < args.len) self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory else null;
-        const hidden = self.hiddenParams(proc);
+        const hidden = hiddenParams(proc);
         if (hidden.result) _ = try self.bindProcParamLocal(proc.dyn_result.get().?);
         if (hidden.carry) self.carry = .{ .idx = self.storage.allocPersistentLocal(.i32) catch return error.OutOfMemory, .val_type = .i32 };
         if (hidden.pending) self.pending_cell = .{ .idx = self.storage.allocPersistentLocal(.i32) catch return error.OutOfMemory, .val_type = .i32 };
@@ -7294,13 +7462,7 @@ fn emitProcSpecBody(
     }
 
     // Locals declaration (beyond function parameters).
-    const param_count: u32 = if (erased_abi)
-        6
-    else blk: {
-        const hidden = self.hiddenParams(proc);
-        const direct_count = self.directArgCount(proc);
-        break :blk @intCast(direct_count + @intFromBool(direct_count < args.len) + hidden.count());
-    };
+    const param_count: u32 = if (erased_abi) 6 else self.rocParamCount(proc);
     try self.encodeLocalsDecl(&self.currentBody().preamble, param_count);
 
     // Prologue (if stack memory used)
@@ -8231,6 +8393,21 @@ fn generateCFStmtNode(self: *Self, work: *std.ArrayList(StmtWork), wa: Allocator
         .assign_ref => |assign| {
             if (assign.op.kind == .field and self.localDyn(assign.op.source) != null) {
                 try self.generateDyn(assign.target, .{ .field_addr = .{ .base = assign.op.source, .desc = self.localDyn(assign.op.source).?.desc, .field_index = .{ .immediate = assign.op.index } } });
+                // Release the slot a stamped field take left
+                // (`LIR.RefExtra.releases_recursion_box`).
+                if (self.store.stmtRowOrDefault(assign.extra).releases_recursion_box) {
+                    try self.emitProcLocal(self.localDyn(assign.op.source).?.desc);
+                    try self.emitBytesAddress(assign.op.source);
+                    try self.emitI32Const(@bitCast(assign.op.index));
+                    try self.emitBoxyRuntimeCall(.field_release_box);
+                }
+            } else if (assign.op.kind == .tag_payload_struct and self.localDyn(assign.op.source) != null) {
+                try self.generateDyn(assign.target, .{ .tag_payload_addr = .{ .base = assign.op.source, .desc = self.localDyn(assign.op.source).?.desc, .payload_index = 0 } });
+                if (self.store.stmtRowOrDefault(assign.extra).releases_recursion_box) {
+                    try self.emitProcLocal(self.localDyn(assign.op.source).?.desc);
+                    try self.emitBytesAddress(assign.op.source);
+                    try self.emitBoxyRuntimeCall(.tag_payload_release_box);
+                }
             } else if (assign.op.kind == .local and self.localDyn(assign.target) != null) {
                 try self.generateDyn(assign.target, .{ .copy = .{ .src = assign.op.source, .desc = self.localDyn(assign.target).?.desc } });
             } else if (assign.op.kind == .local and self.backing_aliases.contains(assign.target)) {
@@ -8293,6 +8470,7 @@ fn generateCFStmtNode(self: *Self, work: *std.ArrayList(StmtWork), wa: Allocator
                 .on_copy = assign.on_copy,
                 .reuse = assign.reuse,
                 .reuse_unique = assign.reuse_unique,
+                .frame = assign.frame,
             });
             try self.bindAssignedLocal(assign_stmt.target);
             try work.append(wa, .{ .node = .{ .stmt_id = assign_stmt.next, .stop = stop } });
@@ -9091,9 +9269,17 @@ const stored_arg_slot_size: u32 = 16;
 /// "Wasm Calling Convention" in design.md).
 fn directArgCount(self: *const Self, proc: LirProcSpec) usize {
     const arg_count = self.store.getLocalSpan(proc.args).len;
-    const hidden_count = self.hiddenParams(proc).count();
+    const hidden_count = hiddenParams(proc).count();
     if (arg_count + hidden_count <= layout.abi.wasm_max_function_params) return arg_count;
     return layout.abi.wasm_max_function_params - 1 - hidden_count;
+}
+
+/// How many wasm parameters a Roc-convention procedure takes: its direct
+/// arguments, the address of the ones passed in memory when there are any,
+/// and its hidden parameters.
+fn rocParamCount(self: *const Self, proc: LirProcSpec) u32 {
+    const direct_count = self.directArgCount(proc);
+    return @intCast(direct_count + @intFromBool(direct_count < self.store.getLocalSpan(proc.args).len) + hiddenParams(proc).count());
 }
 
 const StoredArgs = struct {
@@ -9131,26 +9317,12 @@ const HiddenParams = struct {
     }
 };
 
-fn hiddenParams(self: *const Self, proc: LirProcSpec) HiddenParams {
+fn hiddenParams(proc: LirProcSpec) HiddenParams {
     return .{
         .result = proc.abi == .roc and proc.dyn_result != .none,
-        .carry = procCarriesTailArgs(self.store, proc),
+        .carry = proc.takesTailCarry(),
         .pending = proc.takesPendingCell(),
     };
-}
-
-/// Whether `proc` takes a tail carry: a last hidden parameter holding the
-/// storage a frame-replacing call moved its dynamic arguments into, because
-/// their bytes lived in the frame it replaced. Such a procedure has a dynamic
-/// parameter and can receive frame-replacing calls; it releases its carry
-/// when it returns or replaces its own frame. Every other caller passes none.
-fn procCarriesTailArgs(store: *const LirStore, proc: LirProcSpec) bool {
-    if (!isTailGroupMember(proc)) return false;
-    const params = store.getLocalSpan(proc.args);
-    for (0..params.len) |i| {
-        if (store.getLocal(GuardedList.at(params, i)).dyn != null) return true;
-    }
-    return false;
 }
 
 fn localDyn(self: *const Self, local: ProcLocalId) ?LIR.DynLocal {
@@ -9161,7 +9333,7 @@ fn localDyn(self: *const Self, local: ProcLocalId) ?LIR.DynLocal {
 /// result is dynamic.
 fn currentDynResult(self: *const Self) ?ProcLocalId {
     const proc_id = self.current_proc_id orelse return null;
-    return self.store.getProcSpec(proc_id).dyn_result.get();
+    return self.store.getProcSpecImmediate(proc_id).dyn_result.get();
 }
 
 fn emitBoxyRuntimeCall(self: *Self, entry: BoxyRuntimeSignatures.Entry) Allocator.Error!void {
@@ -9368,7 +9540,7 @@ fn generateDynRc(self: *Self, value: ProcLocalId, op: layout.RcOp, count: u32) A
             try self.emitBytesAddress(value);
             try self.emitBoxyRuntimeCall(.decref);
         },
-        .free, .host_drop => wasmInvariantFmt("WASM/codegen invariant violated: {s} of dynamic local {d}", .{ @tagName(op), @backingInt(value) }),
+        .free, .host_drop, .decref_queued => wasmInvariantFmt("WASM/codegen invariant violated: {s} of dynamic local {d}", .{ @tagName(op), @backingInt(value) }),
     }
 }
 
@@ -9484,7 +9656,7 @@ fn generateDynCall(self: *Self, proc_id: LIR.LirProcSpecId, args: ProcLocalSpan,
         try self.emitTargetAddress(t);
     }
     // An ordinary call's arguments stay in this frame: no carry.
-    if (procCarriesTailArgs(self.store, callee)) try self.emitI32Const(0);
+    if (callee.takesTailCarry()) try self.emitI32Const(0);
     if (callee.takesPendingCell()) try self.emitPendingCell();
     try self.emitCall(func_idx);
     try self.emitTailDrive(callee);
@@ -9571,7 +9743,7 @@ fn emitTailCarry(self: *Self, args: anytype, params: anytype, moved: []u32) Allo
 /// stack pointer from the frame pointer releases it.
 fn generateDynFrameAlloc(self: *Self) Allocator.Error!void {
     const proc_id = self.current_proc_id orelse wasmInvariantFmt("WASM/codegen invariant violated: frame_alloc outside a procedure", .{});
-    const locals = self.store.getLocalSpan(self.store.getProcSpec(proc_id).frame_locals);
+    const locals = self.store.getLocalSpan(self.store.getProcSpecImmediate(proc_id).frame_locals);
     // The epilogue restores the stack pointer only for a procedure with a
     // frame, so the region's procedure has one.
     _ = try self.allocStackMemory(0, 1);
@@ -9580,6 +9752,29 @@ fn generateDynFrameAlloc(self: *Self) Allocator.Error!void {
     for (0..locals.len) |i| {
         const local = GuardedList.at(locals, i);
         const dyn = self.localDyn(local) orelse continue;
+        if (dyn.storage == .frame_callable) {
+            // A frame callable's storage: 16-byte aligned, its data pointer
+            // after the 16-byte prefix ending in its refcount word, then the
+            // header and the capture record its descriptor sizes.
+            const prefix: i32 = builtins.erased_callable.payload_alignment;
+            const desc = try self.emitProcLocalToNewLocal(dyn.desc, .i32);
+            try self.emitLocalGet(total);
+            try self.emitI32Const(prefix - 1);
+            try self.emitOps(.{Op.i32_add});
+            try self.emitI32Const(-prefix);
+            try self.emitOps(.{Op.i32_and});
+            try self.emitI32Const(prefix);
+            try self.emitOps(.{Op.i32_add});
+            try self.emitLocalTee(total);
+            try self.emitBindingSet(try self.procLocalBinding(local));
+            try self.emitLocalGet(total);
+            try self.emitI32Const(@intCast(builtins.erased_callable.captureOffset(wasm_word_size)));
+            try self.emitOps(.{Op.i32_add});
+            try self.emitLoadAt(desc, .i32, desc_size_offset);
+            try self.emitOps(.{Op.i32_add});
+            try self.emitLocalSet(total);
+            continue;
+        }
         if (dyn.storage != .frame) continue;
         const desc = try self.emitProcLocalToNewLocal(dyn.desc, .i32);
         try self.emitLoadAt(desc, .i32, desc_alignment_offset);
@@ -9617,7 +9812,7 @@ fn generateDynFrameAlloc(self: *Self) Allocator.Error!void {
     for (0..locals.len) |i| {
         const local = GuardedList.at(locals, i);
         const dyn = self.localDyn(local) orelse continue;
-        if (dyn.storage != .frame) continue;
+        if (dyn.storage != .frame and dyn.storage != .frame_callable) continue;
         const binding = try self.procLocalBinding(local);
         try self.emitBindingGet(binding);
         try self.emitLocalGet(total);
@@ -9803,7 +9998,16 @@ fn generateDyn(self: *Self, target_or_null: ?ProcLocalId, op: LIR.DynOp) Allocat
             try self.emitProcLocal(v.address);
             try self.bindComponentAddress(dst);
         },
-        .closure => |c| {
+        .closure => |c| if (c.frame) |frame| {
+            try self.emitProcTableIndex(c.proc);
+            try self.emitBytesAddress(c.capture);
+            try self.emitBindingGet(try self.procLocalBinding(frame));
+            // No hot-reload header or drop on wasm.
+            try self.emitI32Const(0);
+            try self.emitI32Const(0);
+            try self.emitBoxyRuntimeCall(.closure_frame);
+            try self.bindReturnedScalar(dst, .i32);
+        } else {
             try self.emitProcTableIndex(c.proc);
             try self.emitBytesAddress(c.capture);
             if (c.reuse) |reuse| {
@@ -9868,7 +10072,7 @@ fn generateDyn(self: *Self, target_or_null: ?ProcLocalId, op: LIR.DynOp) Allocat
 /// operation.
 fn boxyListOp(op: base.LowLevel) ?BoxyListOp {
     return switch (op) {
-        .boxed_sequence_pack, .boxed_sequence_unpack => null,
+        .dec_mul_saturated => null,
         .list_capacity => .capacity,
         .list_slack_unique => .slack_unique,
         .list_owned_unique => .owned_unique,
@@ -9897,10 +10101,8 @@ fn boxyListOp(op: base.LowLevel) ?BoxyListOp {
         .list_reserve_for_append => .reserve_for_append,
         .list_clear => .clear,
         .list_release_excess_capacity => .release_excess_capacity,
-        .list_take_first => .take_first,
-        .list_take_last => .take_last,
         .list_reverse => .reverse,
-        .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_len, .list_prefetched, .list_prefetch, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_map_prepare_reuse, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => null,
+        .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_len, .list_prefetched, .list_prefetch, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_map_prepare_reuse, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .erased_capture_load_borrowed, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => null,
     };
 }
 
@@ -9924,7 +10126,7 @@ fn generateDynElemLowLevel(self: *Self, assign: anytype) Allocator.Error!void {
     const extra = self.store.stmtRowOrDefault(assign.extra);
 
     switch (assign.op) {
-        .boxed_sequence_pack, .boxed_sequence_unpack => unreachable, // sequence operations never carry list element descriptors
+        .dec_mul_saturated => {},
         .list_prefetch => {
             if (self.localDyn(dst) == null) {
                 try self.emitZeroValue(try self.procLocalValType(dst));
@@ -9949,7 +10151,7 @@ fn generateDynElemLowLevel(self: *Self, assign: anytype) Allocator.Error!void {
             try self.emitMemCopy(to, 0, source, roc_list_size);
             return self.finishTarget(dst, t);
         },
-        .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_capacity, .list_get_unsafe, .list_prefetched, .list_append_unsafe, .list_concat, .list_append_range_within, .list_copy_range_within, .list_append_range_within_unsafe, .list_append_sublist, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_slack_unique, .list_owned_unique, .list_set_in_place_unsafe, .list_with_capacity, .list_drop_at, .list_sublist, .list_sublist_borrowed, .list_set, .list_replace_unsafe, .list_swap, .list_prepend, .list_take_first, .list_take_last, .list_reverse, .list_reserve, .list_reserve_for_append, .list_release_excess_capacity, .list_clear, .list_map_can_reuse, .list_map_cast_unsafe, .list_map_extract_unsafe, .list_move_out_unsafe, .list_map_write_unsafe, .list_item_size_at_most, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => {},
+        .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_capacity, .list_get_unsafe, .list_prefetched, .list_append_unsafe, .list_concat, .list_append_range_within, .list_copy_range_within, .list_append_range_within_unsafe, .list_append_sublist, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_slack_unique, .list_owned_unique, .list_set_in_place_unsafe, .list_with_capacity, .list_drop_at, .list_sublist, .list_sublist_borrowed, .list_set, .list_replace_unsafe, .list_swap, .list_prepend, .list_reverse, .list_reserve, .list_reserve_for_append, .list_release_excess_capacity, .list_clear, .list_map_can_reuse, .list_map_cast_unsafe, .list_map_extract_unsafe, .list_move_out_unsafe, .list_map_write_unsafe, .list_item_size_at_most, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .erased_capture_load_borrowed, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => {},
     }
     const list_op = boxyListOp(assign.op) orelse wasmInvariantFmt(
         "WASM/codegen invariant violated: low-level {s} has no element-descriptor form",
@@ -9974,7 +10176,7 @@ fn generateDynElemLowLevel(self: *Self, assign: anytype) Allocator.Error!void {
     const Operands = struct { list: ?u32 = 0, list2: ?u32 = null, element: ?u32 = null, n: [3]?u32 = .{ null, null, null } };
     const operands: Operands = switch (list_op) {
         .capacity, .slack_unique, .owned_unique, .map_can_reuse, .map_cast_unsafe, .clear, .release_excess_capacity, .reverse => .{},
-        .get_unsafe, .map_extract_unsafe, .item_size_at_most, .drop_at, .reserve, .reserve_for_append, .take_first, .take_last => .{ .n = .{ 1, null, null } },
+        .get_unsafe, .map_extract_unsafe, .item_size_at_most, .drop_at, .reserve, .reserve_for_append => .{ .n = .{ 1, null, null } },
         .append_unsafe, .prepend => .{ .element = 1 },
         .concat => .{ .list2 = 1 },
         .append_range_within, .append_range_within_unsafe, .swap => .{ .n = .{ 1, 2, null } },
@@ -10295,13 +10497,13 @@ fn generatePackedErasedFn(self: *Self, c: anytype) Allocator.Error!void {
             );
         }
     }
-    if (builtin.mode == .debug and (c.capture != null) != (c.capture_layout != null)) {
+    if (builtin.mode == .debug and (c.capture != .none) != (c.capture_layout != .none)) {
         base.invariant("WasmCodeGen invariant violated: packed erased fn capture value/layout presence differed", .{});
     }
 
-    const capture_size = if (c.capture_layout) |capture_layout| try self.layoutStorageByteSize(capture_layout) else 0;
+    const capture_size = if (c.capture_layout.get()) |capture_layout| try self.layoutStorageByteSize(capture_layout) else 0;
     if (builtin.mode == .debug) {
-        if (c.capture_layout) |capture_layout| {
+        if (c.capture_layout.get()) |capture_layout| {
             const capture_align = try self.layoutStorageByteAlign(capture_layout);
             if (capture_align > builtins.erased_callable.capture_alignment) {
                 base.invariant(
@@ -10320,7 +10522,17 @@ fn generatePackedErasedFn(self: *Self, c: anytype) Allocator.Error!void {
     };
     const on_drop_table_idx = try self.erasedCallableOnDropTableIndex(c.on_drop);
     const payload_ptr = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
-    if (c.reuse) |reuse| {
+    if (c.frame) {
+        // The callable lives in frame memory of this statement's own,
+        // 16-byte aligned, whose refcount word is the frame marker.
+        const prefix: u32 = builtins.erased_callable.payload_alignment;
+        const offset = try self.allocPersistentStackMemory(prefix + @as(u32, @intCast(builtins.erased_callable.payloadSizeFor(wasm_word_size, capture_size))), builtins.erased_callable.payload_alignment);
+        try self.emitFpOffset(offset + prefix);
+        try self.emitLocalSet(payload_ptr);
+        try self.emitFpOffset(offset + prefix - wasm_word_size);
+        try self.emitI32Const(@intCast(builtins.utils.targetRefcountFrame(wasm_word_size)));
+        try self.emitStoreOpSized(.i32, 4, 0);
+    } else if (c.reuse.get()) |reuse| {
         const reuse_ptr = try self.emitProcLocalToNewLocal(reuse, .i32);
 
         try self.emitLocalGet(reuse_ptr);
@@ -10351,11 +10563,13 @@ fn generatePackedErasedFn(self: *Self, c: anytype) Allocator.Error!void {
             self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
 
             try self.emitFreshErasedCallablePayload(payload_ptr, capture_size);
+            try self.emitFrameCallableSkipBlock(reuse_ptr);
             try self.emitDataPtrDecref(
                 reuse_ptr,
                 builtins.erased_callable.payload_alignment,
                 builtins.erased_callable.allocation_has_refcounted_children,
             );
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
 
             self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
         }
@@ -10380,8 +10594,8 @@ fn generatePackedErasedFn(self: *Self, c: anytype) Allocator.Error!void {
     try self.emitI32Const(@intCast(capture_size));
     try self.emitStoreOpSized(.i32, 4, 12);
 
-    if (c.capture) |capture| {
-        const capture_layout = c.capture_layout orelse unreachable; // capture and capture_layout are present together (asserted at function entry)
+    if (c.capture.get()) |capture| {
+        const capture_layout = c.capture_layout.get() orelse unreachable; // capture and capture_layout are present together (asserted at function entry)
         if (capture_size > 0) {
             const capture_value = try self.emitProcLocalToNewLocal(capture, try self.procLocalValType(capture));
 
@@ -11162,17 +11376,63 @@ fn generateStoreAggregateValue(self: *Self, dest: ProcLocalId, value_layout: lay
 /// Generate a discriminant switch expression.
 /// Evaluates the tag union value, loads its discriminant, and generates
 /// cascading if/else branches indexed by discriminant value.
-/// Emit the canonical value for a list of zero-width elements: such a list owns
-/// no allocation, so its data pointer is null and its stored capacity is zero,
-/// and it carries nothing but the length held in `len_local`. Leaves a pointer
-/// to the list value on the operand stack.
+/// The most a wasm32 capacity word encodes, which bounds the capacity a list
+/// of zero-width elements records.
+const max_zst_capacity: u32 = std.math.maxInt(u32) >> capacity_shift;
+
+/// Emit a list of zero-width elements with the length held in `len_local` and
+/// no spare capacity. Such a list owns no allocation, so its data pointer is
+/// null and its capacity is a count alone. Leaves a pointer to the list value
+/// on the operand stack.
 fn emitZstListWithLen(self: *Self, len_local: u32) Allocator.Error!void {
+    try self.emitZstListWithCapacity(len_local, len_local);
+}
+
+/// Emit a list of zero-width elements with the length held in `len_local`
+/// whose capacity is the count in `count_local`, or the length when that is
+/// larger. The count never exceeds `max_zst_capacity`. Leaves a pointer to the
+/// list value on the operand stack.
+fn emitZstListWithCapacity(self: *Self, len_local: u32, count_local: u32) Allocator.Error!void {
     const offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
     const list_base = try self.emitFpOffsetToNewLocal(offset);
     try self.emitZeroInit(list_base, roc_list_size);
     try self.emitLocalGet(len_local);
     try self.emitStoreToMem(list_base, list_len_offset, .i32);
+    try self.emitLocalGets(.{ count_local, len_local, count_local, len_local });
+    try self.emitOps(.{ Op.i32_gt_u, Op.select });
+    try self.emitI32Const(capacity_shift);
+    try self.emitOps(.{Op.i32_shl});
+    try self.emitStoreToMem(list_base, list_capacity_offset, .i32);
     try self.emitLocalGet(list_base);
+}
+
+/// Read the capacity recorded by the list of zero-width elements pointed to
+/// by `list_local`.
+fn emitZstListCapacityLocal(self: *Self, list_local: u32) Allocator.Error!u32 {
+    try self.emitLoadAt(list_local, .i32, list_capacity_offset);
+    try self.emitI32Const(capacity_shift);
+    try self.emitOps(.{Op.i32_shr_u});
+    return self.emitSetNewLocal(.i32);
+}
+
+/// Emit the list of zero-width elements an operation makes in place of the
+/// list pointed to by `list_local`: the length held in `len_local` and the
+/// capacity that list has. Leaves a pointer to the list value on the operand
+/// stack.
+fn emitZstListKeeping(self: *Self, list_local: u32, len_local: u32) Allocator.Error!void {
+    const count_local = try self.emitZstListCapacityLocal(list_local);
+    try self.emitZstListWithCapacity(len_local, count_local);
+}
+
+/// Bound the `U64` count on the operand stack by `max_zst_capacity` and leave
+/// it there as an i32.
+fn emitBoundZstCapacity(self: *Self) Allocator.Error!void {
+    const count_local = try self.emitSetNewLocal(.i64);
+    try self.emitLocalGet(count_local);
+    try self.emitI64Const(max_zst_capacity);
+    try self.emitLocalGet(count_local);
+    try self.emitI64Const(max_zst_capacity);
+    try self.emitOps(.{ Op.i64_lt_u, Op.select, Op.i32_wrap_i64 });
 }
 
 /// Emit the canonical zero-width list carrying the length currently on the
@@ -11186,12 +11446,6 @@ fn emitZstListFromStackLen(self: *Self) Allocator.Error!void {
 fn emitListLenLocal(self: *Self, list_local: u32) Allocator.Error!u32 {
     const len_local = try self.emitLoadAtToNewLocal(list_local, .i32, list_len_offset);
     return len_local;
-}
-
-/// Push `@min(a, b)` for the unsigned i32 locals `a` and `b`.
-fn emitU32Min(self: *Self, a: u32, b: u32) Allocator.Error!void {
-    try self.emitLocalGets(.{ a, b, a, b });
-    try self.emitOps(.{ Op.i32_lt_u, Op.select });
 }
 
 fn generateList(self: *Self, l: anytype) Allocator.Error!void {
@@ -11260,9 +11514,8 @@ fn generateList(self: *Self, l: anytype) Allocator.Error!void {
     try self.emitI32Const(@intCast(elems.len));
     try self.emitStoreToMem(list_base, list_len_offset, .i32);
 
-    // Store encoded capacity. A list of zero-sized elements holds no
-    // allocation, so its stored capacity is zero however many elements it carries.
-    const encoded_capacity: u32 = if (elem_size == 0) 0 else @as(u32, @intCast(elems.len)) << capacity_shift;
+    // Store encoded capacity.
+    const encoded_capacity: u32 = @as(u32, @intCast(elems.len)) << capacity_shift;
     try self.emitI32Const(@intCast(encoded_capacity));
     try self.emitStoreToMem(list_base, list_capacity_offset, .i32);
 
@@ -11275,22 +11528,6 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
     const args = self.store.getLocalSpan(ll.args);
 
     switch (ll.op) {
-        .boxed_sequence_pack => {
-            const record = GuardedList.at(args, 0);
-            try self.emitBytesAddress(record);
-            try self.emitI32Const(@intCast(try self.layoutStorageByteSize(self.procLocalLayoutIdx(record))));
-            try self.emitProcLocal(GuardedList.at(args, 1));
-            try self.emitBuiltinCall(.boxed_sequence_pack);
-        },
-        .boxed_sequence_unpack => {
-            const size = try self.layoutStorageByteSize(ll.ret_layout);
-            const slot = try self.allocStackMemory(size, 8);
-            try self.emitFpOffset(slot);
-            try self.emitProcLocal(GuardedList.at(args, 0));
-            try self.emitI32Const(@intCast(size));
-            try self.emitBuiltinCall(.boxed_sequence_unpack);
-            try self.emitFpOffset(slot);
-        },
         .num_from_le_bytes_unchecked => try self.emitNumFromLeBytes(ll, args),
         .simd_load_16_unchecked => return self.emitSimdLowLevel(.simd_load_16_unchecked, ll, args),
         .simd_store_16_unchecked => return self.emitSimdLowLevel(.simd_store_16_unchecked, ll, args),
@@ -11688,6 +11925,8 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
             self.currentCode().append(self.allocator, Op.f64_reinterpret_i64) catch return error.OutOfMemory;
         },
 
+        .dec_mul_saturated => try self.emitDecBinaryMath(args, BuiltinSignatures.kindOf(comptime LowLevelBuiltins.decBinaryArith(.dec_mul_saturated))),
+
         // Float math functions (direct wasm opcodes)
         .num_pow => {
             if (ll.ret_layout == .dec) {
@@ -11885,10 +12124,14 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
             self.currentCode().append(self.allocator, @backingInt(ValType.i32)) catch return error.OutOfMemory;
             try self.emitI32Const(0);
             self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
-            // Zero capacity has no heap refcount and counts as unique.
+            // A list with zero capacity or no data pointer has no heap
+            // refcount and counts as unique. A list of zero-width elements
+            // records a capacity and holds no allocation.
             try self.emitLocalGet(cap_local);
             try self.emitI32Const(capacity_shift);
-            try self.emitOps(.{ Op.i32_shr_u, Op.i32_eqz, Op.@"if" });
+            try self.emitOps(.{ Op.i32_shr_u, Op.i32_eqz });
+            try self.emitLoadAt(list_local, .i32, list_bytes_offset);
+            try self.emitOps(.{ Op.i32_eqz, Op.i32_or, Op.@"if" });
             self.currentCode().append(self.allocator, @backingInt(ValType.i32)) catch return error.OutOfMemory;
             try self.emitI32Const(1);
             self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
@@ -12030,105 +12273,6 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
             try self.generateLLListSwap(args, ll.ret_layout, ll.unique_args);
         },
 
-        .list_take_first => {
-            // list_take_first(list, count) -> list
-            // Same as list but with length = min(count, len)
-            const list_local = try self.emitProcLocalToNewLocal(GuardedList.at(args, 0), .i32);
-
-            try self.emitProcLocalAsI32(GuardedList.at(args, 1));
-            const count_local = try self.emitSetNewLocal(.i32);
-
-            // Zero-width elements have no bytes to keep, so taking a prefix
-            // only shortens the length of an unallocated list.
-            {
-                const take_abi = self.builtinInternalListAbi("wasm.list_take_first.builtin_list_abi", ll.ret_layout);
-                if (take_abi.elem_size == 0) {
-                    const len_local = try self.emitListLenLocal(list_local);
-                    try self.emitU32Min(count_local, len_local);
-                    try self.emitZstListFromStackLen();
-                    return;
-                }
-            }
-
-            const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
-            const result_local = try self.emitFpOffsetToNewLocal(result_offset);
-
-            // Same elements_ptr
-            try self.emitLocalGet(result_local);
-            try self.emitLoadAt(list_local, .i32, list_bytes_offset);
-            try self.emitStoreOp(.i32, list_bytes_offset);
-
-            // new_len = min(count, old_len) using select
-            // Stack: count, old_len, count <= old_len
-            try self.emitLocalGets(.{ result_local, count_local });
-            try self.emitLoadAt(list_local, .i32, list_len_offset);
-            try self.emitLocalGet(count_local);
-            try self.emitLoadAt(list_local, .i32, list_len_offset);
-            try self.emitOps(.{ Op.i32_le_u, Op.select });
-            try self.emitStoreOp(.i32, list_len_offset);
-
-            // Same capacity
-            try self.emitLocalGet(result_local);
-            try self.emitLoadAt(list_local, .i32, list_capacity_offset);
-            try self.emitStoreOp(.i32, list_capacity_offset);
-
-            try self.emitLocalGet(result_local);
-        },
-        .list_take_last => {
-            // list_take_last(list, count) -> list
-            // elements_ptr += (len - min(count, len)) * elem_size
-            // length = min(count, len)
-            const list_local = try self.emitProcLocalToNewLocal(GuardedList.at(args, 0), .i32);
-
-            try self.emitProcLocalAsI32(GuardedList.at(args, 1));
-            const count_local = try self.emitSetNewLocal(.i32);
-
-            // Load length
-            try self.emitLoadAt(list_local, .i32, list_len_offset);
-            const len_local = try self.emitSetNewLocal(.i32);
-
-            // actual_count = min(count, len)
-            try self.emitLocalGets(.{ count_local, len_local, count_local, len_local });
-            try self.emitOps(.{ Op.i32_le_u, Op.select });
-            const actual_count = try self.emitSetNewLocal(.i32);
-
-            const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
-            const result_local = try self.emitFpOffsetToNewLocal(result_offset);
-
-            const list_abi = self.builtinInternalListAbi("wasm.list_take_last.builtin_list_abi", ll.ret_layout);
-            const elem_size = list_abi.elem_size;
-
-            // Zero-width elements have no bytes to keep, so taking a suffix
-            // only shortens the length of an unallocated list.
-            if (elem_size == 0) {
-                try self.emitU32Min(count_local, len_local);
-                try self.emitZstListFromStackLen();
-                return;
-            }
-
-            // new_ptr = old_ptr + (len - actual_count) * elem_size
-            try self.emitLocalGet(result_local);
-            try self.emitLoadAt(list_local, .i32, list_bytes_offset);
-            try self.emitLocalGets(.{ len_local, actual_count });
-            self.currentCode().append(self.allocator, Op.i32_sub) catch return error.OutOfMemory;
-            try self.emitI32Const(@intCast(elem_size));
-            try self.emitOps(.{ Op.i32_mul, Op.i32_add });
-            try self.emitStoreOp(.i32, list_bytes_offset);
-
-            // new_len = actual_count
-            try self.emitLocalGets(.{ result_local, actual_count });
-            try self.emitStoreOp(.i32, list_len_offset);
-
-            // Encode seamless-slice cap from the source allocation pointer.
-            const encoded_cap = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
-            try self.emitPrepareListSliceMetadata(list_local, list_abi.elements_refcounted, encoded_cap);
-
-            try self.emitLocalGets(.{ result_local, encoded_cap });
-            try self.emitStoreOp(.i32, list_capacity_offset);
-
-            try self.emitLocalGet(result_local);
-        },
-
         .list_append_unsafe => {
             // list_append(list, elem) -> new list with elem appended
             try self.generateLLListAppend(args, ll.ret_layout);
@@ -12202,7 +12346,7 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
         },
         // list_release_excess_capacity(list) -> list with capacity = length
         .list_release_excess_capacity => {
-            try self.generateLLListReleaseExcessCapacity(args, ll.ret_layout);
+            try self.generateLLListReleaseExcessCapacity(args, ll.ret_layout, ll.unique_args);
         },
         // list_sublist(list, {len: U64, start: U64}) -> list
         .list_sublist, .list_sublist_borrowed => {
@@ -12241,48 +12385,44 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
                 }
             }
 
-            // Generate list arg (pointer to {data_ptr, len, capacity})
             const list_local = try self.emitProcLocalToNewLocal(GuardedList.at(args, 0), .i32);
-
-            // Generate record arg (pointer to the config record)
             const rec_local = try self.emitProcLocalToNewLocal(GuardedList.at(args, 1), .i32);
-
-            try self.generateListSublistLocals(list_local, rec_local, len_field_off, start_field_off, ll.ret_layout);
+            const window: ListSublistWindow = .{ .rec_local = rec_local, .len_field_off = len_field_off, .start_field_off = start_field_off };
+            if (ll.op == .list_sublist) {
+                try self.generateListSublist(.{ .owned = .{ .unique_args = ll.unique_args } }, list_local, window, ll.ret_layout);
+            } else {
+                // The enclosing prong admits only the two sublist ops.
+                std.debug.assert(ll.op == .list_sublist_borrowed);
+                try self.generateListSublist(.borrowed, list_local, window, ll.ret_layout);
+            }
         },
         // list_clear(list) -> the zero-length sublist from index zero, the
         // list emptied in place when uniquely owned.
         .list_clear => {
             const list_local = try self.emitProcLocalToNewLocal(GuardedList.at(args, 0), .i32);
-            // Clearing goes through the sublist builtin, which keeps a uniquely
-            // owned allocation.
+            // Clearing goes through the clear builtin, which keeps a uniquely
+            // owned allocation and the capacity static data records.
             const clear_abi = self.builtinInternalListAbi("wasm.list_clear.builtin_list_abi", ll.ret_layout);
-            if (self.external_calls == .builtin_relocs and clear_abi.elem_size != 0) {
-                const fields = try self.loadRocListFields(list_local);
-                const callbacks = try self.listElementCallbacks(clear_abi);
-                const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
-                try self.emitFpOffset(result_offset);
-                try self.emitRocListFields(fields);
-                try self.emitI32Const(@intCast(clear_abi.elem_align));
-                try self.emitI32Const(@intCast(clear_abi.elem_size));
-                try self.emitI64Const(0);
-                try self.emitI64Const(0);
-                try self.emitI32Const(@intCast(callbacks.elements_refcounted));
-                try self.emitListCallbackTableIndexConst(callbacks.elements_refcounted, callbacks.decref_table_idx);
-                try self.emitI32Const(updateModeImmForArg(ll.unique_args, 0));
-                try self.emitBuiltinCall(.list_sublist);
-                try self.emitFpOffset(result_offset);
+            // Clearing a list of zero-width elements empties it in place, so
+            // it keeps its capacity.
+            if (clear_abi.elem_size == 0) {
+                const zero_len = try self.emitI32ConstToNewLocal(0);
+                try self.emitZstListKeeping(list_local, zero_len);
                 return;
             }
-            // A { start, len } record of two zero words on the stack.
-            const rec_off = try self.allocStackMemory(16, 8);
-            try self.emitFpOffset(rec_off);
-            try self.emitI64Const(0);
-            try self.emitStoreOp(.i64, 0);
-            try self.emitFpOffset(rec_off);
-            try self.emitI64Const(0);
-            try self.emitStoreOp(.i64, 8);
-            const rec_local = try self.emitFpOffsetToNewLocal(rec_off);
-            try self.generateListSublistLocals(list_local, rec_local, 0, 8, ll.ret_layout);
+            self.requireBuiltinCalls("list_clear");
+            const fields = try self.loadRocListFields(list_local);
+            const callbacks = try self.listElementCallbacks(clear_abi);
+            const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
+            try self.emitFpOffset(result_offset);
+            try self.emitRocListFields(fields);
+            try self.emitI32Const(@intCast(clear_abi.elem_align));
+            try self.emitI32Const(@intCast(clear_abi.elem_size));
+            try self.emitI32Const(@intCast(callbacks.elements_refcounted));
+            try self.emitListCallbackTableIndexConst(callbacks.elements_refcounted, callbacks.decref_table_idx);
+            try self.emitI32Const(updateModeImmForArg(ll.unique_args, 0));
+            try self.emitBuiltinCall(.list_clear);
+            try self.emitFpOffset(result_offset);
         },
 
         .str_count_utf8_bytes => {
@@ -12914,7 +13054,8 @@ fn generateLowLevel(self: *Self, ll: anytype) Allocator.Error!void {
                 }
             }
         },
-        .erased_capture_load => {
+        .erased_capture_load => unreachable, // ARC normalizes a consuming capture load into the borrowed load plus explicit RC statements
+        .erased_capture_load_borrowed => {
             const capture_ptr_expr = GuardedList.at(args, 0);
             const result_size = try self.layoutStorageByteSize(ll.ret_layout);
             const result_vt = try self.resolveValType(ll.ret_layout);
@@ -14749,92 +14890,84 @@ fn emitStrSubstringUnsafe(self: *Self, args: anytype) Allocator.Error!void {
     try self.emitLocalGet(result_ptr);
 }
 
-/// Generate str_to_utf8: convert RocStr to RocList(U8).
-/// SSO strings have their bytes copied to heap memory.
-/// Non-SSO strings are converted field-by-field because RocStr stores encoded
-/// capacity before length, while RocList stores length before encoded capacity.
+/// Generate str_to_utf8: convert RocStr to RocList(U8), with the outcomes of
+/// the `strToBytes` builtin. An empty string, small or heap, converts to the
+/// empty list `{null, 0, 0}`, which owns no allocation. A non-empty small
+/// string's bytes are copied into a fresh allocation of exactly its length. A
+/// non-empty heap string's bytes are shared: the list retains the string's
+/// allocation and takes its capacity word, which encodes a seamless slice the
+/// same way for both types. The fields are copied one by one because RocStr
+/// stores its encoded capacity before its length and RocList stores them the
+/// other way around.
 fn emitStrToUtf8(self: *Self, str_arg: ProcLocalId) Allocator.Error!void {
-    // Generate the string expression (produces i32 pointer to a RocStr)
     const str_ptr = try self.emitProcLocalToNewLocal(str_arg, .i32);
 
-    // Allocate result memory for the RocList(U8)
     const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
     const result_ptr = try self.emitFpOffsetToNewLocal(result_offset);
+    try self.emitZeroInit(result_ptr, roc_list_size);
 
-    // Read the flag byte to check SSO flag
     try self.emitLocalGet(str_ptr);
     try self.emitMemOp(Op.i32_load8_u, 0, str_flag_byte_offset);
     const last_byte = try self.emitSetNewLocal(.i32);
 
-    // Check SSO flag: last_byte & small-string flag
     try self.emitLocalGet(last_byte);
     try self.emitI32Const(small_str_flag);
     self.currentCode().append(self.allocator, Op.i32_and) catch return error.OutOfMemory;
+    const is_small = try self.emitSetNewLocal(.i32);
 
-    // if (is_sso)
+    // len = is_small ? last_byte & length mask : the length field.
+    try self.emitLocalGet(last_byte);
+    try self.emitI32Const(small_str_len_mask);
+    self.currentCode().append(self.allocator, Op.i32_and) catch return error.OutOfMemory;
+    try self.emitLoadAt(str_ptr, .i32, str_len_offset);
+    try self.emitLocalGet(is_small);
+    self.currentCode().append(self.allocator, Op.select) catch return error.OutOfMemory;
+    const len = try self.emitSetNewLocal(.i32);
+
+    // An empty string leaves the zeroed empty list in place.
+    try self.emitLocalGet(len);
     try self.emitVoidIf();
     {
-        // SSO case: extract len = last_byte & length mask
-        try self.emitLocalGet(last_byte);
-        try self.emitI32Const(small_str_len_mask);
-        self.currentCode().append(self.allocator, Op.i32_and) catch return error.OutOfMemory;
-        const sso_len = try self.emitSetNewLocal(.i32);
+        try self.emitLocalGet(is_small);
+        try self.emitVoidIf();
+        {
+            try self.emitHeapAllocWithRefcount(len, 1, false);
+            const heap_ptr = try self.emitSetNewLocal(.i32);
 
-        // Allocate sso_len bytes on heap via roc_alloc
-        try self.emitHeapAllocWithRefcount(sso_len, 1, false);
-        const heap_ptr = try self.emitSetNewLocal(.i32);
+            const zero = try self.emitI32ConstToNewLocal(0);
+            try self.emitMemCopyLoop(heap_ptr, zero, str_ptr, len);
 
-        // Copy SSO bytes from str_ptr to heap: memcpy(heap_ptr+0, str_ptr, sso_len)
-        const zero = try self.emitI32ConstToNewLocal(0);
-        try self.emitMemCopyLoop(heap_ptr, zero, str_ptr, sso_len);
+            try self.emitLocalGets(.{ result_ptr, heap_ptr });
+            try self.emitStoreOp(.i32, list_bytes_offset);
+            try self.emitLocalGets(.{ result_ptr, len });
+            try self.emitStoreOp(.i32, list_len_offset);
+            try self.emitLocalGets(.{ result_ptr, len });
+            try self.emitI32Const(capacity_shift);
+            self.currentCode().append(self.allocator, Op.i32_shl) catch return error.OutOfMemory;
+            try self.emitStoreOp(.i32, list_capacity_offset);
+        }
+        self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
+        {
+            // A seamless string slice's data pointer points inside its
+            // allocation, so the allocation pointer is decoded before the
+            // shared backing is retained.
+            const alloc_ptr, const decoded_small = try self.allocAnonymousLocals(.i32, 2);
+            try self.emitDecodeStrAllocPtr(str_ptr, alloc_ptr, decoded_small);
+            try self.emitDataPtrIncref(alloc_ptr, 1);
 
-        // Write RocList {heap_ptr, sso_len, sso_len << capacity_shift} to result_ptr
-        // ptr
-        try self.emitLocalGets(.{ result_ptr, heap_ptr });
-        try self.emitStoreOp(.i32, list_bytes_offset);
-        // len
-        try self.emitLocalGets(.{ result_ptr, sso_len });
-        try self.emitStoreOp(.i32, list_len_offset);
-        // cap
-        try self.emitLocalGets(.{ result_ptr, sso_len });
-        try self.emitI32Const(capacity_shift);
-        self.currentCode().append(self.allocator, Op.i32_shl) catch return error.OutOfMemory;
-        try self.emitStoreOp(.i32, list_capacity_offset);
+            try self.emitLocalGet(result_ptr);
+            try self.emitLoadAt(str_ptr, .i32, str_bytes_offset);
+            try self.emitStoreOp(.i32, list_bytes_offset);
+            try self.emitLocalGets(.{ result_ptr, len });
+            try self.emitStoreOp(.i32, list_len_offset);
+            try self.emitLocalGet(result_ptr);
+            try self.emitLoadAt(str_ptr, .i32, str_capacity_offset);
+            try self.emitStoreOp(.i32, list_capacity_offset);
+        }
+        self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
     }
-    // else (non-SSO)
-    self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
-    {
-        const str_data, const str_len, const str_cap = try self.allocAnonymousLocals(.i32, 3);
-
-        try self.emitLoadAt(str_ptr, .i32, str_bytes_offset);
-        try self.emitLocalSet(str_data);
-
-        try self.emitLoadAt(str_ptr, .i32, str_len_offset);
-        try self.emitLocalSet(str_len);
-
-        try self.emitLoadAt(str_ptr, .i32, str_capacity_offset);
-        try self.emitLocalSet(str_cap);
-
-        // Non-SSO Str.to_utf8 returns a List(U8) that aliases the string bytes.
-        // A seamless string slice's data pointer points inside its allocation,
-        // so decode the allocation pointer before retaining the shared backing.
-        const alloc_ptr, const is_small = try self.allocAnonymousLocals(.i32, 2);
-        try self.emitDecodeStrAllocPtr(str_ptr, alloc_ptr, is_small);
-        try self.emitDataPtrIncref(alloc_ptr, 1);
-
-        try self.emitLocalGets(.{ result_ptr, str_data });
-        try self.emitStoreOp(.i32, list_bytes_offset);
-
-        try self.emitLocalGets(.{ result_ptr, str_len });
-        try self.emitStoreOp(.i32, list_len_offset);
-
-        try self.emitLocalGets(.{ result_ptr, str_cap });
-        try self.emitStoreOp(.i32, list_capacity_offset);
-    }
-    // end if
     self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
 
-    // Leave result pointer on stack
     try self.emitLocalGet(result_ptr);
 }
 
@@ -17166,6 +17299,10 @@ fn emitStrMatchFindDelimiter(
         try self.emitLocalGet(cursor);
         try self.emitLocalSet(pos);
 
+        // On a partial delimiter match restart after that candidate. `pos`
+        // stays a search position, not the committed pattern cursor.
+        if (delimiter.len > 1) try self.emitVoidLoop();
+
         // Sixteen bytes at a time where vector instructions exist; WebAssembly
         // 1.0 searches byte by byte below.
         if (self.cpu_level != .v1) {
@@ -17243,13 +17380,9 @@ fn emitStrMatchFindDelimiter(
         try self.emitBr(0);
 
         try self.emitOps(.{ Op.end, Op.end, Op.end });
-    }
-    self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
-
-    if (delimiter.len > 1) {
-        try self.emitLocalGet(found);
-        try self.emitVoidIf();
-        {
+        if (delimiter.len > 1) {
+            try self.emitLocalGet(found);
+            try self.emitVoidIf();
             const delimiter_matches = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
             try self.emitStaticBytesEqualAtOffset(source_bytes, found_pos, delimiter, delimiter_matches);
 
@@ -17258,11 +17391,16 @@ fn emitStrMatchFindDelimiter(
             try self.emitVoidIf();
             {
                 try self.emitSetI32Local(found, 0);
+                try self.emitLocalGet(found_pos);
+                try self.emitI32Const(1);
+                try self.emitOps(.{Op.i32_add});
+                try self.emitLocalSet(pos);
+                try self.emitBr(2);
             }
-            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+            try self.emitOps(.{ Op.end, Op.end, Op.end });
         }
-        self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
     }
+    self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
 }
 
 fn emitStoreSmallStrMatchCapture(
@@ -17387,7 +17525,19 @@ fn generateStrMatchWithSource(self: *Self, source: StrMatchSourceShape, str_matc
                 try self.emitLocalSet(cursor);
             } else {
                 const found_pos, const found = try self.allocAnonymousLocals(.i32, 2);
-                try self.emitStrMatchFindDelimiter(source.bytes, source.len, cursor, delimiter, found_pos, found);
+                if (delimiter.len > builtins.delimiter.max_inline_len) {
+                    const plan = builtins.delimiter.Plan.init(delimiter);
+                    try self.emitLocalGets(.{ source.bytes, source.len, cursor });
+                    try self.emitDataAddressConst(try self.staticStrDataOffset(step.delimiter.backing), @intCast(step.delimiter.offset));
+                    try self.emitI32Const(@intCast(delimiter.len));
+                    try self.emitI32Const(@intCast(plan.cut));
+                    try self.emitI32Const(@intCast(plan.period));
+                    try self.emitBuiltinCall(BuiltinSignatures.kindOf(.str_find_delimiter));
+                    try self.emitLocalSet(found_pos);
+                    try self.emitLocalGets(.{ found_pos, source.len });
+                    try self.emitOps(.{Op.i32_ne});
+                    try self.emitLocalSet(found);
+                } else try self.emitStrMatchFindDelimiter(source.bytes, source.len, cursor, delimiter, found_pos, found);
 
                 try self.emitLocalGet(found);
                 self.currentCode().append(self.allocator, Op.i32_eqz) catch return error.OutOfMemory;
@@ -17477,10 +17627,20 @@ fn generateLLListAppend(self: *Self, args: anytype, ret_layout: layout.Idx) Allo
     try self.emitLocalSet(list_ptr);
     self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
 
-    const elem_ptr = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
+    // A zero-width element has no bytes to write, so appending one only bumps
+    // the length.
     if (elem_size == 0) {
-        try self.emitSetI32Local(elem_ptr, 0);
-    } else {
+        const len_local = try self.emitListLenLocal(list_ptr);
+        try self.emitLocalGet(len_local);
+        try self.emitI32Const(1);
+        try self.emitOps(.{Op.i32_add});
+        const grown = try self.emitSetNewLocal(.i32);
+        try self.emitZstListKeeping(list_ptr, grown);
+        return;
+    }
+
+    const elem_ptr = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
+    {
         const target_is_composite = try self.isCompositeLayout(elem_layout_idx);
         if (target_is_composite) {
             const src_local = try self.emitProcLocalToNewLocal(GuardedList.at(args, 1), .i32);
@@ -17529,7 +17689,8 @@ fn generateLLListPrepend(self: *Self, args: anytype, ret_layout: layout.Idx, uni
         try self.emitLocalGet(len_local);
         try self.emitI32Const(1);
         self.currentCode().append(self.allocator, Op.i32_add) catch return error.OutOfMemory;
-        try self.emitZstListFromStackLen();
+        const grown = try self.emitSetNewLocal(.i32);
+        try self.emitZstListKeeping(list_ptr, grown);
         return;
     }
 
@@ -17740,11 +17901,9 @@ fn generateLLListConcat(self: *Self, args: anytype, ret_layout: layout.Idx, uniq
         self.currentCode().append(self.allocator, Op.i32_add) catch return error.OutOfMemory;
         try self.emitLocalSet(new_len);
 
-        const zero = try self.emitI32ConstToNewLocal(0);
-
-        // Zero-width elements own no allocation, so the joined list carries a
-        // length and a stored capacity of zero.
-        try self.buildRocListWithCap(zero, new_len, zero);
+        // Zero-width elements have no bytes to join, so the result is the
+        // first list grown in place by the length of the second.
+        try self.emitZstListKeeping(a_ptr, new_len);
         return;
     }
 
@@ -17787,7 +17946,8 @@ fn generateLLListDropAt(self: *Self, args: anytype, ret_layout: layout.Idx, uniq
         // is exactly the number of elements to remove (zero or one).
         try self.emitLocalGets(.{ len_local, index_local, len_local });
         try self.emitOps(.{ Op.i64_extend_i32_u, Op.i64_lt_u, Op.i32_sub });
-        try self.emitZstListFromStackLen();
+        const kept = try self.emitSetNewLocal(.i32);
+        try self.emitZstListKeeping(list_ptr, kept);
         return;
     }
 
@@ -17841,8 +18001,7 @@ fn emitZstListGrownBy(self: *Self, list_ptr: u32, count_local: u32) Allocator.Er
     try self.emitLocalGet(count_local);
     try self.emitOps(.{ Op.i32_wrap_i64, Op.i32_add });
     try self.emitLocalSet(len);
-    const zero = try self.emitI32ConstToNewLocal(0);
-    try self.buildRocListWithCap(zero, len, len);
+    try self.emitZstListKeeping(list_ptr, len);
 }
 
 /// Build a RocList struct with separate capacity value.
@@ -17874,10 +18033,14 @@ fn generateLLListWithCapacity(self: *Self, args: anytype, ret_layout: layout.Idx
     const elem_size = list_abi.elem_size;
 
     // Zero-width elements need no storage, so a reservation allocates nothing
-    // and the result is the canonical empty list.
+    // and the capacity alone records it.
     if (elem_size == 0) {
         const zero_len = try self.emitI32ConstToNewLocal(0);
-        try self.emitZstListWithLen(zero_len);
+        try self.emitProcLocal(GuardedList.at(args, 0));
+        try self.emitConversion(try self.procLocalValType(GuardedList.at(args, 0)), .i64);
+        try self.emitBoundZstCapacity();
+        const count_local = try self.emitSetNewLocal(.i32);
+        try self.emitZstListWithCapacity(zero_len, count_local);
         return;
     }
 
@@ -18081,10 +18244,29 @@ fn generateLLListReserve(self: *Self, kind: BuiltinKind, args: anytype, ret_layo
     const list_abi = self.builtinInternalListAbi("wasm.generateLLListReserve.builtin_list_abi", ret_layout);
     const elem_size = list_abi.elem_size;
 
-    // Zero-width elements need no storage, so there is nothing to reserve and
-    // the list passes through unchanged.
+    // Zero-width elements need no storage, so a reservation allocates nothing
+    // and the capacity alone records it: room for `spare` more elements, or
+    // the capacity the list already has when that is larger.
     if (elem_size == 0) {
-        try self.emitProcLocal(GuardedList.at(args, 0));
+        const zst_list_ptr = try self.emitProcLocalToNewLocal(GuardedList.at(args, 0), .i32);
+        const len_local = try self.emitListLenLocal(zst_list_ptr);
+        try self.emitProcLocal(GuardedList.at(args, 1));
+        try self.emitConversion(try self.procLocalValType(GuardedList.at(args, 1)), .i64);
+        const zst_spare = try self.emitSetNewLocal(.i64);
+        // len + spare cannot wrap a U64 once spare is bounded, since len fits
+        // in 32 bits.
+        try self.emitLocalGet(zst_spare);
+        try self.emitBoundZstCapacity();
+        try self.emitOps(.{Op.i64_extend_i32_u});
+        try self.emitLocalGet(len_local);
+        try self.emitOps(.{ Op.i64_extend_i32_u, Op.i64_add });
+        try self.emitBoundZstCapacity();
+        const wanted = try self.emitSetNewLocal(.i32);
+        const held = try self.emitZstListCapacityLocal(zst_list_ptr);
+        try self.emitLocalGets(.{ wanted, held, wanted, held });
+        try self.emitOps(.{ Op.i32_gt_u, Op.select });
+        const count_local = try self.emitSetNewLocal(.i32);
+        try self.emitZstListWithCapacity(len_local, count_local);
         return;
     }
 
@@ -18123,104 +18305,227 @@ fn emitU64ClampedToU32Bound(self: *Self, value: u32, bound: u32) Allocator.Error
     return self.emitSetNewLocal(.i32);
 }
 
-/// Compute the same bounded window for allocated and zero-width lists.
-fn emitListSublistWindow(self: *Self, list_local: u32, rec_local: u32, len_field_off: u32, start_field_off: u32) Allocator.Error!struct { start: u32, len: u32 } {
+/// Compute the same bounded window for allocated and zero-width lists from
+/// the requested U64 start and length in i64 locals, as the builtins bound
+/// it: the start at most the list's length, the length at most what follows.
+fn emitListSublistWindow(self: *Self, list_local: u32, requested: ListSublistRequest) Allocator.Error!struct { start: u32, len: u32 } {
     const size = try self.emitListLenLocal(list_local);
-    const requested_start = try self.emitLoadAtToNewLocal(rec_local, .i64, start_field_off);
-    const start = try self.emitU64ClampedToU32Bound(requested_start, size);
+    const start = try self.emitU64ClampedToU32Bound(requested.start, size);
     try self.emitLocalGets(.{ size, start });
     try self.emitOps(.{Op.i32_sub});
     const remaining = try self.emitSetNewLocal(.i32);
-    const requested_len = try self.emitLoadAtToNewLocal(rec_local, .i64, len_field_off);
-    const len = try self.emitU64ClampedToU32Bound(requested_len, remaining);
+    const len = try self.emitU64ClampedToU32Bound(requested.len, remaining);
     return .{ .start = start, .len = len };
 }
 
-/// Emit a sublist of the list in wasm local `list_local` over the `{ start,
-/// len }` record at the address in `rec_local`, whose fields sit at the given
-/// offsets.
-fn generateListSublistLocals(self: *Self, list_local: u32, rec_local: u32, len_field_off: u32, start_field_off: u32, ret_layout: layout.Idx) Allocator.Error!void {
-    const list_abi = self.builtinInternalListAbi("wasm.list_sublist.builtin_list_abi", ret_layout);
+/// Where a sublist's window comes from: its `{ len, start }` record
+/// (`list_sublist`, `list_sublist_borrowed`), the record's address in a wasm
+/// local and the offsets of its two U64 fields.
+const ListSublistWindow = struct { rec_local: u32, len_field_off: u32, start_field_off: u32 };
 
-    // Zero-width elements have no bytes to slice, so the result is the
-    // window length alone: min(len, size -| start).
+/// A sublist's requested U64 start and length, in i64 locals, before they
+/// are bounded by the list's length; the `listSublist` builtin takes them so.
+const ListSublistRequest = struct { start: u32, len: u32 };
+
+fn emitListSublistRequest(self: *Self, window: ListSublistWindow) Allocator.Error!ListSublistRequest {
+    return .{
+        .start = try self.emitLoadAtToNewLocal(window.rec_local, .i64, window.start_field_off),
+        .len = try self.emitLoadAtToNewLocal(window.rec_local, .i64, window.len_field_off),
+    };
+}
+
+/// Which sublist low-level is being lowered. An owned sublist consumes its
+/// list (`list_sublist`), and `unique_args` is the statement's proven-unique
+/// argument mask; a borrowed sublist is a view of a list that stays live
+/// (`list_sublist_borrowed`).
+const ListSublistMode = union(enum) {
+    owned: struct { unique_args: u64 },
+    borrowed,
+};
+
+/// Emit a sublist of the list in wasm local `list_local` over the window
+/// `window_source` names, with exactly the outcomes of the `listSublist` builtin (owned) or
+/// the `listSublistBorrowed` builtin (borrowed), and push the result's
+/// address.
+///
+/// Zero-width elements have no bytes to slice, so the result is the window
+/// length alone. An owned sublist of refcounted elements calls `listSublist`,
+/// which releases the elements it drops. Every other sublist is inline:
+///
+/// - borrowed: an empty window gives the empty list; any other window is a
+///   seamless slice of the source, which records the source's element count
+///   for teardown while the source is exclusive (`emitPrepareListSliceMetadata`);
+/// - owned: the list is reusable when it is not a slice and is exclusive (its
+///   argument is proven unique, it has no allocation, or its refcount is
+///   one). An empty window keeps a reusable list's allocation and capacity at
+///   length zero, and otherwise releases the list and gives the empty list.
+///   A window from index zero of a reusable list shrinks it in place. Any
+///   other window is a seamless slice that takes over the list's reference.
+fn generateListSublist(self: *Self, mode: ListSublistMode, list_local: u32, window_source: ListSublistWindow, ret_layout: layout.Idx) Allocator.Error!void {
+    const list_abi = self.builtinInternalListAbi("wasm.list_sublist.builtin_list_abi", ret_layout);
+    const requested = try self.emitListSublistRequest(window_source);
+
     if (list_abi.elem_size == 0) {
-        const window = try self.emitListSublistWindow(list_local, rec_local, len_field_off, start_field_off);
+        const window = try self.emitListSublistWindow(list_local, requested);
         try self.emitLocalGet(window.len);
         try self.emitZstListFromStackLen();
         return;
     }
 
-    const window = try self.emitListSublistWindow(list_local, rec_local, len_field_off, start_field_off);
-    const actual_start = window.start;
-    const actual_len = window.len;
-
-    // Allocate result RocList
-    const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
-    const result_local = try self.emitFpOffsetToNewLocal(result_offset);
-
-    const elem_size = list_abi.elem_size;
-
-    // new_ptr = old_ptr + actual_start * elem_size
-    try self.emitLocalGet(result_local);
-    try self.emitLoadAt(list_local, .i32, list_bytes_offset);
-    try self.emitLocalGet(actual_start);
-    try self.emitI32Const(@intCast(elem_size));
-    try self.emitOps(.{ Op.i32_mul, Op.i32_add });
-    try self.emitStoreOp(.i32, list_bytes_offset);
-
-    // new_len = actual_len
-    try self.emitLocalGets(.{ result_local, actual_len });
-    try self.emitStoreOp(.i32, list_len_offset);
-
-    // Encode seamless-slice cap from the source allocation pointer.
-    const encoded_cap = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
-    try self.emitPrepareListSliceMetadata(list_local, list_abi.elements_refcounted, encoded_cap);
-
-    try self.emitLocalGets(.{ result_local, encoded_cap });
-    try self.emitStoreOp(.i32, list_capacity_offset);
-
-    // Push result pointer
-    try self.emitLocalGet(result_local);
-}
-
-/// Generate list_release_excess_capacity: shrink list to exact length
-fn generateLLListReleaseExcessCapacity(self: *Self, args: anytype, ret_layout: layout.Idx) Allocator.Error!void {
-    const list_abi = self.builtinInternalListAbi("wasm.generateLLListReleaseExcessCapacity.builtin_list_abi", ret_layout);
-    const elem_size = list_abi.elem_size;
-
-    // A zero-width list holds no allocation, so it has no excess to release and
-    // passes through unchanged.
-    if (elem_size == 0) {
-        try self.emitProcLocal(GuardedList.at(args, 0));
+    if (mode == .owned and list_abi.elements_refcounted) {
+        self.requireBuiltinCalls("list_sublist");
+        const fields = try self.loadRocListFields(list_local);
+        const callbacks = try self.listElementCallbacks(list_abi);
+        const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
+        try self.emitFpOffset(result_offset);
+        try self.emitRocListFields(fields);
+        try self.emitI32Const(@intCast(list_abi.elem_align));
+        try self.emitI32Const(@intCast(list_abi.elem_size));
+        try self.emitLocalGets(.{ requested.start, requested.len });
+        try self.emitI32Const(@intCast(callbacks.elements_refcounted));
+        try self.emitListCallbackTableIndexConst(callbacks.elements_refcounted, callbacks.decref_table_idx);
+        try self.emitI32Const(updateModeImmForArg(mode.owned.unique_args, 0));
+        try self.emitBuiltinCall(.list_sublist);
+        try self.emitFpOffset(result_offset);
         return;
     }
 
-    const elem_align = list_abi.elem_align;
+    const window = try self.emitListSublistWindow(list_local, requested);
 
-    // Generate list arg
+    const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
+    const result_local = try self.emitFpOffsetToNewLocal(result_offset);
+    try self.emitZeroInit(result_local, roc_list_size);
+
+    switch (mode) {
+        .borrowed => {
+            // An empty window leaves the zeroed empty list in place.
+            try self.emitLocalGet(window.len);
+            try self.emitVoidIf();
+            try self.emitListSliceInto(result_local, list_local, window.start, window.len, list_abi);
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+        },
+        .owned => |owned| {
+            const alloc_ptr, const is_slice = try self.allocAnonymousLocals(.i32, 2);
+            try self.emitDecodeListAllocPtr(list_local, alloc_ptr, is_slice);
+
+            // reuse = !is_slice and (proven unique or no allocation or refcount one)
+            const reuse = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
+            try self.emitSetI32Local(reuse, 0);
+            try self.emitLocalGet(is_slice);
+            self.currentCode().append(self.allocator, Op.i32_eqz) catch return error.OutOfMemory;
+            try self.emitVoidIf();
+            if ((owned.unique_args & 1) != 0) {
+                try self.emitSetI32Local(reuse, 1);
+            } else {
+                try self.emitLocalGet(alloc_ptr);
+                self.currentCode().append(self.allocator, Op.i32_eqz) catch return error.OutOfMemory;
+                self.currentCode().append(self.allocator, Op.@"if") catch return error.OutOfMemory;
+                self.currentCode().append(self.allocator, @backingInt(ValType.i32)) catch return error.OutOfMemory;
+                try self.emitI32Const(1);
+                self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
+                try self.emitPtrWithOffset(alloc_ptr, refcount_offset);
+                try self.emitLoadOp(.i32, 0);
+                try self.emitI32Const(1);
+                self.currentCode().append(self.allocator, Op.i32_eq) catch return error.OutOfMemory;
+                self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+                try self.emitLocalSet(reuse);
+            }
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+
+            try self.emitLocalGet(window.len);
+            self.currentCode().append(self.allocator, Op.i32_eqz) catch return error.OutOfMemory;
+            try self.emitVoidIf();
+            {
+                try self.emitLocalGet(reuse);
+                try self.emitVoidIf();
+                try self.emitListKeptPrefixInto(result_local, list_local, window.len);
+                self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
+                // The released list's result is the zeroed empty list.
+                try self.emitDataPtrDecref(alloc_ptr, list_abi.elem_align, false);
+                self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+            }
+            self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
+            {
+                // start == 0 and reuse
+                try self.emitLocalGet(window.start);
+                self.currentCode().append(self.allocator, Op.i32_eqz) catch return error.OutOfMemory;
+                try self.emitLocalGet(reuse);
+                self.currentCode().append(self.allocator, Op.i32_and) catch return error.OutOfMemory;
+                try self.emitVoidIf();
+                try self.emitListKeptPrefixInto(result_local, list_local, window.len);
+                self.currentCode().append(self.allocator, Op.@"else") catch return error.OutOfMemory;
+                try self.emitListSliceInto(result_local, list_local, window.start, window.len, list_abi);
+                self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+            }
+            self.currentCode().append(self.allocator, Op.end) catch return error.OutOfMemory;
+        },
+    }
+
+    try self.emitLocalGet(result_local);
+}
+
+/// Store into `result_local` the list in `list_local` cut to its first
+/// `len_local` items, keeping its allocation and capacity word.
+fn emitListKeptPrefixInto(self: *Self, result_local: u32, list_local: u32, len_local: u32) Allocator.Error!void {
+    try self.emitLocalGet(result_local);
+    try self.emitLoadAt(list_local, .i32, list_bytes_offset);
+    try self.emitStoreOp(.i32, list_bytes_offset);
+    try self.emitLocalGets(.{ result_local, len_local });
+    try self.emitStoreOp(.i32, list_len_offset);
+    try self.emitLocalGet(result_local);
+    try self.emitLoadAt(list_local, .i32, list_capacity_offset);
+    try self.emitStoreOp(.i32, list_capacity_offset);
+}
+
+/// Store into `result_local` the seamless slice of the list in `list_local`
+/// holding `len_local` items from index `start_local`, which takes over the
+/// list's reference.
+fn emitListSliceInto(self: *Self, result_local: u32, list_local: u32, start_local: u32, len_local: u32, list_abi: BuiltinListAbi) Allocator.Error!void {
+    try self.emitLocalGet(result_local);
+    try self.emitLoadAt(list_local, .i32, list_bytes_offset);
+    try self.emitLocalGet(start_local);
+    try self.emitI32Const(@intCast(list_abi.elem_size));
+    try self.emitOps(.{ Op.i32_mul, Op.i32_add });
+    try self.emitStoreOp(.i32, list_bytes_offset);
+
+    try self.emitLocalGets(.{ result_local, len_local });
+    try self.emitStoreOp(.i32, list_len_offset);
+
+    const encoded_cap = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
+    try self.emitPrepareListSliceMetadata(list_local, list_abi.elements_refcounted, encoded_cap);
+    try self.emitLocalGets(.{ result_local, encoded_cap });
+    try self.emitStoreOp(.i32, list_capacity_offset);
+}
+
+/// Generate list_release_excess_capacity, which consumes the list: the
+/// `listReleaseExcessCapacity` builtin keeps a unique list whose capacity is
+/// its length, gives the empty list for an empty one, and otherwise copies
+/// the items into an allocation of exactly their count and releases the
+/// list.
+fn generateLLListReleaseExcessCapacity(self: *Self, args: anytype, ret_layout: layout.Idx, unique_args: u64) Allocator.Error!void {
+    const list_abi = self.builtinInternalListAbi("wasm.generateLLListReleaseExcessCapacity.builtin_list_abi", ret_layout);
+
+    // A zero-width list holds no allocation, so releasing its excess only
+    // brings its capacity down to its length.
+    if (list_abi.elem_size == 0) {
+        const zst_list_ptr = try self.emitProcLocalToNewLocal(GuardedList.at(args, 0), .i32);
+        try self.emitZstListWithLen(try self.emitListLenLocal(zst_list_ptr));
+        return;
+    }
+
     const list_ptr = try self.emitProcLocalToNewLocal(GuardedList.at(args, 0), .i32);
-
-    // Load list fields
-    const old_data = try self.emitLoadAtToNewLocal(list_ptr, .i32, list_bytes_offset);
-
-    const old_len = try self.emitLoadAtToNewLocal(list_ptr, .i32, list_len_offset);
-
-    // Allocate new_len * elem_size bytes
-    const total_size = self.storage.allocAnonymousLocal(.i32) catch return error.OutOfMemory;
-    try self.emitLocalGet(old_len);
-    try self.emitI32Const(@intCast(elem_size));
-    self.currentCode().append(self.allocator, Op.i32_mul) catch return error.OutOfMemory;
-    try self.emitLocalSet(total_size);
-
-    try self.emitHeapAllocWithRefcount(total_size, elem_align, list_abi.elements_refcounted);
-    const new_data = try self.emitSetNewLocal(.i32);
-
-    // Copy old data
-    const zero5 = try self.emitI32ConstToNewLocal(0);
-    try self.emitMemCopyLoop(new_data, zero5, old_data, total_size);
-
-    try self.buildRocListWithCap(new_data, old_len, old_len);
+    self.requireBuiltinCalls("list_release_excess_capacity");
+    const fields = try self.loadRocListFields(list_ptr);
+    const callbacks = try self.listElementCallbacks(list_abi);
+    const result_offset = try self.allocStackMemory(roc_list_size, wasm_word_size);
+    try self.emitFpOffset(result_offset);
+    try self.emitRocListFields(fields);
+    try self.emitI32Const(@intCast(list_abi.elem_align));
+    try self.emitI32Const(@intCast(list_abi.elem_size));
+    try self.emitListElementCallbackArgs(callbacks);
+    try self.emitI32Const(updateModeImmForArg(unique_args, 0));
+    try self.emitBuiltinCall(.list_release_excess_capacity);
+    try self.emitFpOffset(result_offset);
 }
 
 const ListElementPairLayout = struct {
@@ -19367,6 +19672,237 @@ test "issue 12198: wasm list windows preserve unsigned U64 extremes" {
     try expectListWindowLength(.zst, std.math.maxInt(u64), 0, 3, .drop_at);
 }
 
+/// The source list of an inline sublist fixture: a four-item list that is
+/// exclusive, shared by a second reference, an exclusive seamless slice of
+/// its last three items, or the empty list.
+const SublistSource = enum { unique, shared, unique_slice, empty };
+
+/// What a sublist did, in terms both a native builtin call and a wasm
+/// fixture can report: the result's shape, where its items start in the
+/// source allocation, its length, whether it keeps the source's capacity
+/// word, and the source allocation's refcount and recorded element count
+/// afterwards (null once the allocation is freed).
+const SublistOutcome = struct {
+    kind: enum { empty_list, same_list, slice },
+    offset: usize,
+    len: usize,
+    keeps_capacity: bool,
+    refcount: ?i64,
+    element_count: ?usize,
+};
+
+const SublistCase = struct {
+    source: SublistSource,
+    start: u64,
+    len: u64,
+    borrowed: bool,
+    proven_unique: bool = false,
+};
+
+const sublist_source_len = 4;
+
+/// The outcome of the `listSublist` / `listSublistBorrowed` builtin on a
+/// native list built the way `case` describes.
+fn nativeSublistOutcome(case: SublistCase, element_width: usize, elements_refcounted: bool) SublistOutcome {
+    const list_mod = builtins.list;
+    var env = builtins.utils.TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const ops = env.getOps();
+    const alignment: u32 = 4;
+    const whole = list_mod.RocList.list_allocate(alignment, sublist_source_len, element_width, elements_refcounted, ops);
+    const alloc = whole.bytes.?;
+    const words: [*]isize = @ptrCast(@alignCast(alloc));
+    if (elements_refcounted) (words - 2)[0] = 0;
+    const source: list_mod.RocList = switch (case.source) {
+        .unique => whole,
+        .shared => blk: {
+            (words - 1)[0] = 2;
+            break :blk whole;
+        },
+        .unique_slice => .{
+            .bytes = alloc + element_width,
+            .length = sublist_source_len - 1,
+            .capacity_or_alloc_ptr = list_mod.RocList.encodeSliceAllocationPtr(alloc),
+        },
+        .empty => list_mod.RocList.empty(),
+    };
+    const mode: builtins.utils.UpdateMode = if (case.proven_unique) .InPlace else .Immutable;
+    const result = if (case.borrowed)
+        list_mod.listSublistBorrowed(source, element_width, case.start, case.len, elements_refcounted, ops)
+    else
+        list_mod.listSublist(source, alignment, element_width, elements_refcounted, case.start, case.len, null, &list_mod.rcNone, mode, ops);
+
+    const freed = env.getAllocationCount() == 0;
+    const kind: @FieldType(SublistOutcome, "kind") = if (result.bytes == null and result.length == 0 and result.capacity_or_alloc_ptr == 0)
+        .empty_list
+    else if (result.isSeamlessSlice())
+        .slice
+    else
+        .same_list;
+    return .{
+        .kind = kind,
+        .offset = if (kind == .empty_list) 0 else (@intFromPtr(result.bytes.?) - @intFromPtr(alloc)) / element_width,
+        .len = result.length,
+        .keeps_capacity = kind == .same_list and result.capacity_or_alloc_ptr == whole.capacity_or_alloc_ptr,
+        .refcount = if (freed or case.source == .empty) null else (words - 1)[0],
+        .element_count = if (freed or case.source == .empty or !elements_refcounted) null else @intCast((words - 2)[0]),
+    };
+}
+
+const SublistHost = struct {
+    deallocs: u32 = 0,
+
+    fn dealloc(ctx: ?*anyopaque, _: *@import("bytebox").ModuleInstance, _: [*]const @import("bytebox").Val, _: [*]@import("bytebox").Val) error{}!void {
+        const self: *SublistHost = @ptrCast(@alignCast(ctx));
+        self.deallocs += 1;
+    }
+
+    fn unexpected(_: ?*anyopaque, _: *@import("bytebox").ModuleInstance, _: [*]const @import("bytebox").Val, _: [*]@import("bytebox").Val) error{}!void {
+        @panic("an inline sublist called a runtime function other than roc_dealloc");
+    }
+};
+
+/// The outcome of the inline wasm sublist on the same source, for a list of
+/// `element` items.
+fn wasmSublistOutcome(case: SublistCase, element: layout.Idx) (ListWindowLengthError || HostedSymbolError)!SublistOutcome {
+    const bytebox = @import("bytebox");
+    const allocator = std.testing.allocator;
+    var store = LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, .u32);
+    defer layouts.deinit();
+    const list_layout = try layouts.insertList(element);
+    const list_arg = try store.addLocal(.{ .layout_idx = list_layout });
+
+    var codegen = Self.init(allocator, &store, &layouts, .default);
+    defer codegen.deinit();
+    try codegen.registerHostedSymbolTargets(&.{});
+    const abi = codegen.builtinInternalListAbi("test.sublist", list_layout);
+    const signature = try codegen.module.addFuncType(&.{ .i32, .i32 }, &.{.i32});
+    const function = try codegen.module.addDefinedFunction(signature);
+    try codegen.beginFunction(function.local);
+    const scope = codegen.storage.beginScope();
+    defer codegen.storage.endScope(scope);
+    const list_local = try codegen.storage.allocLocal(list_arg, .i32);
+    const record_local = try codegen.storage.allocAnonymousLocal(.i32);
+    codegen.fp_local = try codegen.storage.allocAnonymousLocal(.i32);
+    try codegen.emitI32Const(4096);
+    try codegen.emitLocalSet(codegen.fp_local);
+    const window: ListSublistWindow = .{ .rec_local = record_local, .len_field_off = 0, .start_field_off = 8 };
+    const mode: ListSublistMode = if (case.borrowed) .borrowed else .{ .owned = .{ .unique_args = @intFromBool(case.proven_unique) } };
+    try codegen.generateListSublist(mode, list_local, window, list_layout);
+    try codegen.emitOps(.{Op.end});
+    try codegen.encodeLocalsDecl(&codegen.currentBody().preamble, 2);
+    codegen.endFunction();
+    try codegen.flushPendingBodies();
+    try codegen.module.addExport("sublist", .func, function.function.raw());
+    try codegen.module.finalizeMemoryAndTableWithConfig(.{ .stack_bytes = 65536, .export_memory = true });
+    try codegen.module.materializeFuncBodies();
+    const bytes = try codegen.module.encode(allocator);
+    defer allocator.free(bytes);
+
+    var host: SublistHost = .{};
+    var arena_impl = std.heap.ArenaAllocator.init(allocator);
+    defer arena_impl.deinit();
+    var definition = try bytebox.createModuleDefinition(arena_impl.allocator(), .{});
+    defer definition.destroy();
+    try definition.decode(bytes);
+    var instance = try bytebox.createModuleInstance(.Stack, definition, allocator);
+    defer instance.destroy();
+    var env_imports = try bytebox.ModuleImportPackage.init("env", null, &host, allocator);
+    defer env_imports.deinit();
+    const two_i32 = [_]bytebox.ValType{ .I32, .I32 };
+    try env_imports.addHostFunction(builtins.shim_symbols.roc_alloc, &two_i32, &[_]bytebox.ValType{.I32}, SublistHost.unexpected, &host);
+    try env_imports.addHostFunction(builtins.shim_symbols.roc_dealloc, &two_i32, &[_]bytebox.ValType{}, SublistHost.dealloc, &host);
+    try env_imports.addHostFunction(builtins.shim_symbols.roc_dbg, &two_i32, &[_]bytebox.ValType{}, SublistHost.unexpected, &host);
+    try env_imports.addHostFunction(builtins.shim_symbols.roc_expect_failed, &two_i32, &[_]bytebox.ValType{}, SublistHost.unexpected, &host);
+    try env_imports.addHostFunction(builtins.shim_symbols.roc_crashed, &two_i32, &[_]bytebox.ValType{}, SublistHost.unexpected, &host);
+    const imports = [_]bytebox.ModuleImportPackage{env_imports};
+    try instance.instantiate(.{ .stack_size = 65536, .imports = &imports });
+
+    const memory = instance.store.getMemory(0).buffer();
+    const width: u32 = abi.elem_size;
+    const alloc: u32 = 1024;
+    const rc_at: u32 = @intCast(@as(i64, alloc) + refcount_offset);
+    const count_at: u32 = @intCast(@as(i64, alloc) + alloc_elem_count_offset);
+    const whole_cap: u32 = @as(u32, sublist_source_len) << capacity_shift;
+    std.mem.writeInt(i32, memory[rc_at..][0..4], if (case.source == .shared) 2 else 1, .little);
+    std.mem.writeInt(u32, memory[count_at..][0..4], 0, .little);
+    const list_at: u32 = 256;
+    const fields: [3]u32 = switch (case.source) {
+        .unique, .shared => .{ alloc, sublist_source_len, whole_cap },
+        .unique_slice => .{ alloc + width, sublist_source_len - 1, alloc | @as(u32, @intCast(seamless_slice_tag)) },
+        .empty => .{ 0, 0, 0 },
+    };
+    std.mem.writeInt(u32, memory[list_at + list_bytes_offset ..][0..4], fields[0], .little);
+    std.mem.writeInt(u32, memory[list_at + list_len_offset ..][0..4], fields[1], .little);
+    std.mem.writeInt(u32, memory[list_at + list_capacity_offset ..][0..4], fields[2], .little);
+    std.mem.writeInt(u64, memory[512..520], case.len, .little);
+    std.mem.writeInt(u64, memory[520..528], case.start, .little);
+
+    const handle = try instance.getFunctionHandle("sublist");
+    var params = [_]bytebox.Val{ .{ .I32 = list_at }, .{ .I32 = 512 } };
+    var returns = [_]bytebox.Val{.{ .I32 = 0 }};
+    try instance.invoke(handle, &params, &returns, .{});
+
+    const result_at: u32 = @bitCast(returns[0].I32);
+    const result_bytes = std.mem.readInt(u32, memory[result_at + list_bytes_offset ..][0..4], .little);
+    const result_len = std.mem.readInt(u32, memory[result_at + list_len_offset ..][0..4], .little);
+    const result_cap = std.mem.readInt(u32, memory[result_at + list_capacity_offset ..][0..4], .little);
+    const freed = host.deallocs != 0;
+    const kind: @FieldType(SublistOutcome, "kind") = if (result_bytes == 0 and result_len == 0 and result_cap == 0)
+        .empty_list
+    else if (result_cap & @as(u32, @intCast(seamless_slice_tag)) != 0)
+        .slice
+    else
+        .same_list;
+    return .{
+        .kind = kind,
+        .offset = if (kind == .empty_list) 0 else (result_bytes - alloc) / width,
+        .len = result_len,
+        .keeps_capacity = kind == .same_list and result_cap == whole_cap,
+        .refcount = if (freed or case.source == .empty) null else std.mem.readInt(i32, memory[rc_at..][0..4], .little),
+        .element_count = if (freed or case.source == .empty or !abi.elements_refcounted) null else std.mem.readInt(u32, memory[count_at..][0..4], .little),
+    };
+}
+
+fn expectSublistMatchesBuiltin(case: SublistCase, element: layout.Idx, native_width: usize, elements_refcounted: bool) (ListWindowLengthError || HostedSymbolError || error{TestExpectedEqual})!void {
+    const expected = nativeSublistOutcome(case, native_width, elements_refcounted);
+    const actual = try wasmSublistOutcome(case, element);
+    std.testing.expectEqualDeep(expected, actual) catch |err| {
+        std.debug.print("sublist case {any}\n", .{case});
+        return err;
+    };
+}
+
+// Regression for https://github.com/roc-lang/roc/issues/13020: every inline
+// sublist has the builtin's outcome, including releasing a list it empties
+// and shrinking an exclusive list in place.
+test "issue 13020: inline wasm sublists of non-refcounted items match the builtins" {
+    for ([_]SublistSource{ .unique, .shared, .unique_slice, .empty }) |source| {
+        for ([_]bool{ false, true }) |borrowed| {
+            // empty window, window from zero, window from inside, window past the end
+            for ([_][2]u64{ .{ 0, 0 }, .{ 2, 0 }, .{ 0, 2 }, .{ 0, 9 }, .{ 1, 2 }, .{ 9, 1 } }) |window| {
+                try expectSublistMatchesBuiltin(.{ .source = source, .start = window[0], .len = window[1], .borrowed = borrowed }, .u8, 1, false);
+            }
+        }
+    }
+    // A proven-unique argument skips the refcount check.
+    for ([_]SublistSource{ .unique, .unique_slice, .empty }) |source| {
+        for ([_][2]u64{ .{ 0, 0 }, .{ 0, 2 }, .{ 1, 2 } }) |window| {
+            try expectSublistMatchesBuiltin(.{ .source = source, .start = window[0], .len = window[1], .borrowed = false, .proven_unique = true }, .u8, 1, false);
+        }
+    }
+}
+
+test "issue 13020: inline wasm borrowed sublists of refcounted items match the builtin" {
+    for ([_]SublistSource{ .unique, .shared, .unique_slice, .empty }) |source| {
+        for ([_][2]u64{ .{ 0, 0 }, .{ 0, 2 }, .{ 1, 2 }, .{ 9, 1 } }) |window| {
+            try expectSublistMatchesBuiltin(.{ .source = source, .start = window[0], .len = window[1], .borrowed = true }, .str, 12, true);
+        }
+    }
+}
+
 /// Every way building, running and checking a list window fixture can fail.
 const ListWindowLengthError = Allocator.Error ||
     WasmModule.EncodeError ||
@@ -19408,7 +19944,9 @@ fn expectListWindowLength(element: layout.Idx, start: u64, len: u64, expected: i
     try codegen.emitI32Const(4096);
     try codegen.emitLocalSet(codegen.fp_local);
     switch (operation) {
-        .sublist => try codegen.generateListSublistLocals(list_local, record_local, 0, 8, list_layout),
+        // The window is the same for both sublist modes; the borrowed one needs
+        // no runtime functions.
+        .sublist => try codegen.generateListSublist(.borrowed, list_local, .{ .rec_local = record_local, .len_field_off = 0, .start_field_off = 8 }, list_layout),
         .drop_at => {
             const index_arg = try store.addLocal(.{ .layout_idx = .u64 });
             const index_local = try codegen.storage.allocLocal(index_arg, .i64);

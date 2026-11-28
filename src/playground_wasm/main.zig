@@ -954,9 +954,8 @@ const ReplCompiledModule = struct {
 fn findDefByName(module_env: *const ModuleEnv, name: []const u8) ?can.CIR.Def.Idx {
     for (module_env.store.sliceDefs(module_env.all_defs)) |def_idx| {
         const def = module_env.store.getDef(def_idx);
-        const pattern = module_env.store.getPattern(def.pattern);
-        const ident = switch (pattern) {
-            inline .assign, .var_assign, .as => |assign| assign.ident,
+        const ident = switch (module_env.store.patternKind(def.pattern)) {
+            inline .assign, .var_assign, .as => |kind| @field(module_env.store.patternView(def.pattern), @tagName(kind)).get(.ident),
             .applied_tag,
             .nominal,
             .nominal_external,
@@ -994,15 +993,23 @@ fn compileReplInspectedModule(source: []const u8) PlaygroundCompileError!ReplCom
     var typed_cir_modules = try check.TypedCIR.Modules.init(allocator, &source_modules);
     defer typed_cir_modules.deinit();
 
+    // The strategy the expression's runtime program lowers under, which is
+    // therefore the one whose evaluator completes the modules' compile-time
+    // roots. The program runs on the LIR interpreter, as an
+    // `--opt=interpreter` program does, and lowers under the same strategy.
+    const strategy: base.SpecializationStrategy = .boxy;
+    const ctfe_options: eval.CompileTimeFinalization.Options = .{ .strategy = strategy };
+
     var builtin_artifact = try check.CheckedArtifact.publishFromTypedModule(
         allocator,
         &typed_cir_modules,
         1,
         .{
             .module_env_storage = .{ .static_builtin = builtin_module.env },
+            .builtin_artifact = .this_module,
             .hoisted_roots = .none,
             .io = @as(std.Io, undefined),
-            .compile_time_finalizer = eval.CompileTimeFinalization.finalizer(),
+            .compile_time_finalizer = eval.CompileTimeFinalization.finalizerWithOptions(&ctfe_options),
         },
     );
     errdefer builtin_artifact.deinitRetainingModuleEnv(allocator);
@@ -1027,17 +1034,18 @@ fn compileReplInspectedModule(source: []const u8) PlaygroundCompileError!ReplCom
         0,
         .{
             .module_env_storage = .{ .checked_source = checked_module.module_env },
+            .builtin_artifact = .{ .imported = builtin_artifact.key.digest() },
             .hoisted_roots = .none,
             .io = @as(std.Io, undefined),
             .imports = &publish_imports,
             .explicit_roots = &explicit_roots,
-            .compile_time_finalizer = eval.CompileTimeFinalization.finalizer(),
+            .compile_time_finalizer = eval.CompileTimeFinalization.finalizerWithOptions(&ctfe_options),
         },
     );
     errdefer root_artifact.deinitRetainingModuleEnv(allocator);
 
     var import_artifacts = [_]check.CheckedArtifact.CheckedModuleArtifact{builtin_artifact};
-    const lowered = try eval.Inspected.lowerCheckedModuleSetToLir(allocator, @as(std.Io, undefined), &root_artifact, &import_artifacts, .u32, .{});
+    const lowered = try eval.Inspected.lowerCheckedModuleSetToLir(allocator, @as(std.Io, undefined), &root_artifact, &import_artifacts, .u32, .{ .specialization_strategy = strategy });
 
     root_artifact.deinitRetainingModuleEnv(allocator);
     import_artifacts[0].deinitRetainingModuleEnv(allocator);
@@ -1427,7 +1435,7 @@ fn compileSourceWithValidation(source: []const u8, module_name: []const u8, vali
         try can.resolveDeferredImports(type_can_ir, .{ .imports = .{ .resolved_store = imported_envs } });
 
         // Use pointer to the stored CIR to ensure solver references valid memory
-        result.solver = try Check.init(allocator, &type_can_ir.types, type_can_ir, imported_envs, auto_imported_types, &type_can_ir.store.regions, module_builtin_ctx);
+        result.solver = try Check.init(allocator, &type_can_ir.types, type_can_ir, imported_envs, auto_imported_types, module_builtin_ctx);
         var solver = &result.solver.?;
         solver.fixupTypeWriter();
 
@@ -1769,7 +1777,7 @@ fn collectPlaygroundTestRootRequests(
     var roots = std.ArrayList(check.CheckedArtifact.RootRequest).empty;
     errdefer roots.deinit(alloc);
 
-    for (artifact.root_requests.requests) |root| {
+    for (artifact.root_requests.requests.items()) |root| {
         if (root.kind != .test_expect) continue;
         try roots.append(alloc, root);
     }
@@ -1967,7 +1975,7 @@ fn writeHoverInfoResponse(response_buffer: []u8, data: CompilerStageData, messag
     }
 
     const source = data.module_env.common.source;
-    const line_starts = data.module_env.common.line_starts.items.items;
+    const line_starts = data.module_env.common.line_starts.items();
 
     if (line_num >= line_starts.len) {
         try writeErrorResponse(response_buffer, .ERROR, "Line number out of range");
@@ -2034,10 +2042,9 @@ fn findHoverInfoAtPosition(data: CompilerStageData, byte_offset: u32, identifier
         const pattern_region = cir.store.getPatternRegion(def.pattern);
 
         if (byte_offset >= pattern_region.start.offset and byte_offset < pattern_region.end.offset) {
-            const pattern = cir.store.getPattern(def.pattern);
-            const ident = switch (pattern) {
-                .assign => |assign| assign.ident,
-                .var_assign => |var_assign| var_assign.ident,
+            const ident = switch (cir.store.patternKind(def.pattern)) {
+                .assign => cir.store.patternView(def.pattern).assign.get(.ident),
+                .var_assign => cir.store.patternView(def.pattern).var_assign.get(.ident),
                 .as,
                 .applied_tag,
                 .nominal,

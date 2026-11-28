@@ -41,6 +41,9 @@
 //! merged carrier receives matching metadata on every definition: tracked
 //! inputs forward it, and outside inputs transfer ownership before measuring
 //! their own allocation. Chain membership alone does not initialize a merge.
+//! A join parameter that some edge assigns directly merges the same way: its
+//! parameter writes and its assignments all set one shared pair of metadata
+//! locals, where a parameter written on every edge gets metadata parameters.
 //! A chain value with any unrecognized use is tainted (something may retain or
 //! observe it); a tainted value may end the chain (escape to the loop's
 //! result) but must not feed further chain edges, since a later unchecked
@@ -63,6 +66,43 @@
 //! head, which measures again. Both bodies share the loop's parameter locals,
 //! so the dispatch needs no argument copies, and the copy is lexically nested
 //! inside the head's body so every jump still targets an enclosing join.
+//!
+//! Only the loop exists twice. The statements a pass through the body runs
+//! after it has decided to leave (those from which no jump back to the head
+//! is reachable) are moved out of the body before it is copied, into joins
+//! declared at the top of the head's body, around the dispatch
+//! (`body_clone.shareLoopExits`). Both versions jump to them, so the code
+//! after a loop in the middle of a procedure is emitted once. Such an exit
+//! is the body as promoted: a set in it dispatches on its flag and an
+//! append in it tests its limit, whichever version of the loop ran, and
+//! both versions pass it the flags and limits it reads as the join's
+//! parameters.
+//! The slack dispatch still counts the appends an exit performs, which
+//! only makes it ask for more spare capacity than the copy needs.
+//!
+//! An update that moves an element out of its slot and back in reaches the
+//! same flag through other operations, and the chain follows them. The
+//! ownership transfer `list_map_prepare_reuse` returns the list it consumed,
+//! so the limit and the flag pass through it. `list_move_out_unsafe` is a
+//! read. `list_map_write_unsafe` stores into the allocation it was given;
+//! its contract is a uniquely owned non-slice list, so having run it leaves
+//! the flag at one and the limit unchanged. A transfer whose result has a
+//! use the pass does not model stays an unmodeled use of its input, so the
+//! chain ends there rather than flowing into operations it cannot follow.
+//!
+//! Such an update asks `list_owned_unique` before choosing between the
+//! in-place arm and the copying one. That query is a read of a carried
+//! value, and it asks exactly what the value's flag records, so it is a
+//! site like a set: its chain threads the flag, and in the unique-only copy
+//! a query whose flag is known one becomes the constant, with the switch on
+//! its result reduced to the arm the constant selects. The cold body keeps
+//! the query as written. The argument is the one for sets. The flag is
+//! consulted only for the value it was computed for: a query on a value
+//! that a consuming use can split from another live use is left alone, as
+//! is one whose flag was measured inside the copy. A flag of one states
+//! that the value held the only reference to a non-slice allocation when
+//! the flag was established, and an unsplit value has had no second
+//! reference made since, so the query would answer one.
 
 const std = @import("std");
 const builtins = @import("builtins");
@@ -273,8 +313,38 @@ const EdgeKind = enum {
     /// `target = list_append_unsafe(source, elem)`: the length it bumps is
     /// the fill cursor, so the limit and the owned flag pass through.
     unsafe_append,
+    /// `target = list_map_prepare_reuse(source)`: the same list under the
+    /// ownership unit it consumed, so the limit and the owned flag pass
+    /// through.
+    transfer,
+    /// `target = list_map_write_unsafe(source, index, elem)`: a store into a
+    /// slot of the list's own allocation. Its contract is a uniquely owned
+    /// non-slice list, so the owned flag comes out one; the capacity is
+    /// unchanged, so the limit passes through.
+    write_in_place,
     /// `set param := source` with initialize-join-param mode.
     param_write,
+};
+
+/// One `target = list_owned_unique(source)` in the procedure: a read that
+/// asks what an owned flag records.
+const OwnedQuery = struct {
+    stmt: CFStmtId,
+    source: LocalId,
+    target: LocalId,
+    /// False when the queried value can be split from another live use, so
+    /// a flag computed for it may no longer describe it at the query.
+    preserves_metadata: bool = true,
+};
+
+/// A query on a carried list whose answer the owned flag `flag` implies:
+/// wherever the flag is one, the query answers one.
+const AnsweredQuery = struct {
+    flag: LocalId,
+    target: LocalId,
+    /// The query is the only definition of `target`, so every read of it
+    /// reads this query's answer.
+    sole_definition: bool,
 };
 
 /// One forward value edge of the chain graph.
@@ -294,14 +364,13 @@ const Edge = struct {
 /// on discovery, so cycles and reverse-ordered definitions cost one visit per
 /// reachable edge, rather than one whole-graph pass per propagation step.
 const EdgeIndex = struct {
-    heads: collections.DenseMap(LocalId, usize),
+    heads: collections.DenseMap(LocalId, u32),
     /// Storage for the chains; the live prefix covers the indexed edges.
-    next: []usize,
-    const end = std.math.maxInt(usize);
+    next: []collections.OptionalU32,
 
     fn init(allocator: Allocator, edges: []const Edge) ResourceError!EdgeIndex {
         var self = EdgeIndex{
-            .heads = collections.DenseMap(LocalId, usize).init(allocator),
+            .heads = collections.DenseMap(LocalId, u32).init(allocator),
             .next = &.{},
         };
         errdefer self.deinit(allocator);
@@ -312,15 +381,17 @@ const EdgeIndex = struct {
     /// Index another edge list, keeping the storage already held.
     fn rebuild(self: *EdgeIndex, allocator: Allocator, edges: []const Edge) ResourceError!void {
         self.heads.clearRetainingCapacity();
+        // Every edge index, plus one in its biased form, fits a `u32`.
+        _ = try collections.nextBiasedId(edges.len);
         if (self.next.len < edges.len) {
             allocator.free(self.next);
             self.next = &.{};
-            self.next = try allocator.alloc(usize, edges.len);
+            self.next = try allocator.alloc(collections.OptionalU32, edges.len);
         }
         for (edges, 0..) |edge, i| {
             const entry = try self.heads.getOrPut(edge.source);
-            self.next[i] = if (entry.found_existing) entry.value_ptr.* else end;
-            entry.value_ptr.* = i;
+            self.next[i] = if (entry.found_existing) .some(entry.value_ptr.*) else .none;
+            entry.value_ptr.* = @intCast(i);
         }
     }
 
@@ -338,8 +409,8 @@ const EdgeIndex = struct {
         var cursor: usize = 0;
         var edge_visits: usize = 0;
         while (cursor < queue.items.len) : (cursor += 1) {
-            var index = self.heads.get(queue.items[cursor]) orelse end;
-            while (index != end) : (index = self.next[index]) {
+            var next = self.heads.get(queue.items[cursor]);
+            while (next) |index| : (next = self.next[index].get()) {
                 edge_visits += 1;
                 const target = edges[index].target;
                 const entry = try carriers.getOrPut(target);
@@ -365,6 +436,13 @@ const Pass = struct {
     owned_defs: collections.DenseMap(LocalId, std.ArrayList(OwnedSource)),
     /// Set-site dispatch switches of the current proc.
     set_dispatches: collections.DenseMap(CFStmtId, void),
+    /// Ownership queries of the current proc that an owned flag answers,
+    /// keyed by the query statement.
+    answered_queries: collections.DenseMap(CFStmtId, AnsweredQuery),
+    /// Ownership transfers of the current proc through which a list entered
+    /// a promoted chain. Each is followed by a measurement of the list it
+    /// acquires, so it bounds its chain: no later chain flows through it.
+    entry_transfers: collections.DenseMap(CFStmtId, void),
     /// Promoted loops of the current proc, keyed by their join statement.
     loop_versions: collections.DenseMap(CFStmtId, LoopVersion),
     /// Rewritten append sites of the current proc, keyed by the join that
@@ -419,6 +497,8 @@ const Pass = struct {
             },
             .owned_defs = collections.DenseMap(LocalId, std.ArrayList(OwnedSource)).init(allocator),
             .set_dispatches = collections.DenseMap(CFStmtId, void).init(allocator),
+            .answered_queries = collections.DenseMap(CFStmtId, AnsweredQuery).init(allocator),
+            .entry_transfers = collections.DenseMap(CFStmtId, void).init(allocator),
             .loop_versions = collections.DenseMap(CFStmtId, LoopVersion).init(allocator),
             .append_sites = collections.DenseMap(CFStmtId, AppendSite).init(allocator),
             .slack_loops = collections.DenseMap(CFStmtId, SlackLoop).init(allocator),
@@ -436,7 +516,7 @@ const Pass = struct {
                 .dirty_targets = collections.DenseMap(LocalId, void).init(allocator),
                 .assigned_targets = collections.DenseMap(LocalId, u32).init(allocator),
             },
-            .edge_index = .{ .heads = collections.DenseMap(LocalId, usize).init(allocator), .next = &.{} },
+            .edge_index = .{ .heads = collections.DenseMap(LocalId, u32).init(allocator), .next = &.{} },
             .proc_args = collections.DenseMap(LocalId, void).init(allocator),
             .attempted = collections.DenseMap(LocalId, void).init(allocator),
             .candidate_carriers = collections.DenseMap(LocalId, void).init(allocator),
@@ -486,6 +566,8 @@ const Pass = struct {
         self.scan_active_bodies.deinit();
         self.owned_defs.deinit();
         self.set_dispatches.deinit();
+        self.answered_queries.deinit();
+        self.entry_transfers.deinit();
         self.loop_versions.deinit();
         self.append_sites.deinit();
         self.slack_loops.deinit();
@@ -502,6 +584,8 @@ const Pass = struct {
         while (defs.next()) |list| list.deinit(allocator);
         self.owned_defs.clearRetainingCapacity();
         self.set_dispatches.clearRetainingCapacity();
+        self.answered_queries.clearRetainingCapacity();
+        self.entry_transfers.clearRetainingCapacity();
         var versions = self.loop_versions.valueIterator();
         while (versions.next()) |version| version.deinit(allocator);
         self.loop_versions.clearRetainingCapacity();
@@ -658,7 +742,7 @@ const Pass = struct {
                             .i64_literal => |lit| if (lit.value >= 0) .{ .literal = @intCast(lit.value) } else Abstract.other,
                             .i128_literal => |lit_id| blk_lit: {
                                 const lit = self.store.stmtRow(lit_id);
-                                break :blk_lit if (lit.value >= 0 and lit.value <= std.math.maxInt(u64)) .{ .literal = @intCast(lit.value) } else Abstract.other;
+                                break :blk_lit if (std.math.cast(u64, lit.value)) |value| .{ .literal = value } else Abstract.other;
                             },
                             .f64_literal, .f32_literal, .dec_literal, .str_literal, .static_data, .bytes_literal, .proc_ref => .other,
                         };
@@ -804,6 +888,8 @@ const Pass = struct {
     const Scan = struct {
         /// Forward value edges of every potentially chain-relevant statement.
         edges: std.ArrayList(Edge) = .empty,
+        /// Every `list_owned_unique` read of a list local.
+        queries: std.ArrayList(OwnedQuery) = .empty,
         /// Per-local counts of total operand uses and of uses this pass
         /// understands. A carrier with untracked uses is tainted.
         total_uses: collections.DenseMap(LocalId, u32),
@@ -825,16 +911,17 @@ const Pass = struct {
         dirty_targets: collections.DenseMap(LocalId, void),
         /// Direct-assignment definition counts per local. A join parameter
         /// initialized this way on some edge has no place to receive a slack
-        /// write, and a chain value defined by more than one statement has no
-        /// single slack: branches can assign the same result local and
-        /// converge without a join parameter, leaving the other path's slack
-        /// never computed.
+        /// write there, so it merges its metadata the way a value defined
+        /// by more than one statement does: branches can assign the same
+        /// result local and converge without a join parameter, and every
+        /// such definition writes the value's one shared slack local.
         assigned_targets: collections.DenseMap(LocalId, u32),
 
         /// Empty the scan for another pass over the procedure, keeping its
         /// storage.
         fn clear(self: *Scan) void {
             self.edges.clearRetainingCapacity();
+            self.queries.clearRetainingCapacity();
             self.total_uses.clearRetainingCapacity();
             self.tracked_uses.clearRetainingCapacity();
             self.param_join.clearRetainingCapacity();
@@ -866,6 +953,7 @@ const Pass = struct {
 
         fn deinit(self: *Scan, allocator: Allocator) void {
             self.edges.deinit(allocator);
+            self.queries.deinit(allocator);
             self.total_uses.deinit();
             self.tracked_uses.deinit();
             self.param_join.deinit();
@@ -970,8 +1058,24 @@ const Pass = struct {
                     const arg_count = GuardedList.borrowLen(args);
                     const list_arg0 = arg_count > 0 and self.isListLocal(GuardedList.at(args, 0));
                     const rebinds = assign.op == .list_reserve or assign.op == .list_reserve_for_append or assign.op == .list_append_unsafe or assign.op == .list_append_range_within or assign.op == .list_copy_range_within or assign.op == .list_append_sublist or assign.op == .list_append_le_bytes or assign.op == .list_set or assign.op == .list_clear;
-                    const read_ok = assign.op == .list_len or assign.op == .list_get_unsafe or assign.op == .list_slack_unique or assign.op == .list_prefetch;
-                    if (rebinds and list_arg0 and self.isListLocal(assign.target)) {
+                    // A transfer through which a list entered a promoted
+                    // chain stays the unmodeled use that bounds that chain.
+                    const transfers = assign.op == .list_map_prepare_reuse and !self.entry_transfers.contains(current);
+                    const writes_in_place = assign.op == .list_map_write_unsafe;
+                    const read_ok = assign.op == .list_len or assign.op == .list_get_unsafe or assign.op == .list_move_out_unsafe or assign.op == .list_slack_unique or assign.op == .list_owned_unique or assign.op == .list_prefetch;
+                    if (assign.op == .list_owned_unique and list_arg0) {
+                        try scan.queries.append(allocator, .{ .stmt = current, .source = GuardedList.at(args, 0), .target = assign.target });
+                    }
+                    if ((transfers or writes_in_place) and list_arg0 and self.isListLocal(assign.target)) {
+                        // Neither depends on the element size: both hand on
+                        // the allocation they were given.
+                        try scan.edges.append(allocator, .{
+                            .kind = if (transfers) .transfer else .write_in_place,
+                            .stmt = current,
+                            .source = GuardedList.at(args, 0),
+                            .target = assign.target,
+                        });
+                    } else if (rebinds and list_arg0 and self.isListLocal(assign.target)) {
                         // Range-within appends promote to a slack-guarded
                         // diamond of their own; zero-sized elements have no
                         // bytes to copy, so they keep the checked call.
@@ -1003,7 +1107,7 @@ const Pass = struct {
                         // modeled use; any list appearing in another operand
                         // position (a source list to copy from, say) is a
                         // borrow the chain analysis treats as foreign.
-                        const tracked = (i == 0 and list_arg0 and (rebinds or read_ok)) or
+                        const tracked = (i == 0 and list_arg0 and (rebinds or transfers or writes_in_place or read_ok)) or
                             (i > 0 and !self.isListLocal(arg));
                         try noteUse(scan, arg, tracked);
                     }
@@ -1060,7 +1164,7 @@ const Pass = struct {
                         .i64_literal => |lit| if (lit.value >= 0) @intCast(lit.value) else null,
                         .i128_literal => |lit_id| blk_lit: {
                             const lit = self.store.stmtRow(lit_id);
-                            break :blk_lit if (lit.value >= 0 and lit.value <= std.math.maxInt(u64)) @intCast(lit.value) else null;
+                            break :blk_lit std.math.cast(u64, lit.value);
                         },
                         .f64_literal, .f32_literal, .dec_literal, .str_literal, .static_data, .bytes_literal, .proc_ref => null,
                     };
@@ -1095,6 +1199,33 @@ const Pass = struct {
                 },
             }
         }
+        dropUnmodeledTransfers(scan);
+    }
+
+    /// An ownership transfer joins the chain graph only when every use of
+    /// its result is modeled. Otherwise it is an unmodeled use of its input:
+    /// the chain may end at the input, and nothing flows through the transfer
+    /// into operations the analysis could not follow to their end. Dropping a
+    /// transfer makes its input's use unmodeled, which can in turn unmodel a
+    /// transfer that produced the input, so this runs to a fixpoint.
+    fn dropUnmodeledTransfers(scan: *Scan) void {
+        var dropping = true;
+        while (dropping) {
+            dropping = false;
+            var kept: usize = 0;
+            for (scan.edges.items) |edge| {
+                if (edge.kind == .transfer and
+                    (scan.total_uses.get(edge.target) orelse 0) != (scan.tracked_uses.get(edge.target) orelse 0))
+                {
+                    scan.tracked_uses.getPtr(edge.source).?.* -= 1;
+                    dropping = true;
+                    continue;
+                }
+                scan.edges.items[kept] = edge;
+                kept += 1;
+            }
+            scan.edges.shrinkRetainingCapacity(kept);
+        }
     }
 
     /// An operand read the chain analysis does not model.
@@ -1117,6 +1248,9 @@ const Pass = struct {
         for (scan.edges.items) |edge| {
             if (!parents.contains(edge.source)) try parents.put(edge.source, edge.source);
             if (!parents.contains(edge.target)) try parents.put(edge.target, edge.target);
+        }
+        for (scan.queries.items) |query| {
+            if (!parents.contains(query.source)) try parents.put(query.source, query.source);
         }
         const Family = struct {
             fn root(map: *collections.DenseMap(LocalId, LocalId), local: LocalId) LocalId {
@@ -1178,7 +1312,7 @@ const Pass = struct {
                     occurrence.value_ptr.* += 1;
                     if (stmt.* == .assign_low_level) {
                         const op = stmt.assign_low_level.op;
-                        if (op == .list_len or op == .list_get_unsafe or op == .list_prefetch or
+                        if (op == .list_len or op == .list_get_unsafe or op == .list_move_out_unsafe or op == .list_prefetch or
                             op == .list_slack_unique or op == .list_owned_unique) continue;
                     }
                     try consumes.put(stmt_id, {});
@@ -1210,6 +1344,9 @@ const Pass = struct {
             const root = Family.root(parents, edge.source);
             const same_value_alias = edge.kind == .alias and Family.root(parents, edge.target) == root;
             edge.preserves_metadata = same_value_alias or !split.contains(root);
+        }
+        for (scan.queries.items) |*query| {
+            query.preserves_metadata = !split.contains(Family.root(parents, query.source));
         }
     }
 
@@ -1276,8 +1413,11 @@ const Pass = struct {
                     if (!self.candidate_carriers.contains(edge.source)) continue;
                     switch (edge.kind) {
                         .append_call, .range_append, .le_bytes_append, .reserve_op, .set_op => break :candidate true,
-                        .param_write, .alias, .refresh_op, .unsafe_append => {},
+                        .param_write, .alias, .refresh_op, .unsafe_append, .transfer, .write_in_place => {},
                     }
+                }
+                for (scan.queries.items) |query| {
+                    if (self.candidate_carriers.contains(query.source)) break :candidate true;
                 }
                 break :candidate false;
             };
@@ -1337,10 +1477,12 @@ const Pass = struct {
         _ = try edge_index.closure(allocator, scan.edges.items, list_param, &carriers);
 
         var rewrite_site_count: u32 = 0;
-        var has_sets = false;
+        var threads_owned = false;
         var chain_params = collections.DenseMap(LocalId, CFStmtId).init(allocator);
         defer chain_params.deinit();
         try chain_params.put(list_param, loop_stmt);
+        var merged_params = collections.DenseMap(LocalId, CFStmtId).init(allocator);
+        defer merged_params.deinit();
 
         // A reserve is a growth step only when its spare is a known positive
         // literal; any other spare keeps the checked call and re-measures.
@@ -1354,39 +1496,71 @@ const Pass = struct {
             edge.flow = if (!carriers.contains(edge.target)) .outside else if (carriers.contains(edge.source) and edge.preserves_metadata) .carried else .entry;
             if (edge.flow != .outside and edge.kind == .param_write) {
                 const owner = scan.param_join.get(edge.target) orelse return false;
-                try chain_params.put(edge.target, owner);
+                // A parameter that some edge assigns directly cannot take
+                // its metadata through parameter writes alone. It is a
+                // merged carrier instead: each of its definitions, write or
+                // assignment, sets the shared metadata locals beside it.
+                // The promoted loop's own parameter must be a parameter in
+                // full, since versioning dispatches on its flag.
+                if (edge.target != list_param and scan.assigned_targets.contains(edge.target)) {
+                    try merged_params.put(edge.target, owner);
+                } else {
+                    try chain_params.put(edge.target, owner);
+                }
             }
             if (edge.flow != .carried) continue;
             switch (edge.kind) {
                 .append_call, .range_append, .le_bytes_append, .reserve_op => rewrite_site_count += 1,
                 .set_op => {
                     rewrite_site_count += 1;
-                    has_sets = true;
+                    threads_owned = true;
                 },
-                .param_write, .alias, .refresh_op, .unsafe_append => {},
+                .param_write, .alias, .refresh_op, .unsafe_append, .transfer, .write_in_place => {},
             }
+        }
+        // A query on a carried value is a site too: the owned flag threaded
+        // for it answers the query wherever the flag is known to be one.
+        for (scan.queries.items) |query| {
+            if (!carriers.contains(query.source) or !query.preserves_metadata) continue;
+            rewrite_site_count += 1;
+            threads_owned = true;
         }
         if (rewrite_site_count == 0) return false;
 
-        // A write-less entry (a parameter that doubles as a proc argument)
-        // would leave the slack parameter uninitialized on that path.
+        // A chain parameter that is also a procedure argument (the loop of a
+        // tail-recursive procedure) is entered by jumps that write nothing:
+        // the argument already holds the incoming list. Each such entry gets
+        // a measurement of the argument in front of its jump.
+        var argument_entries = std.ArrayList(ArgumentEntry).empty;
+        defer argument_entries.deinit(allocator);
         {
-            var it = chain_params.keyIterator();
-            while (it.next()) |param| {
-                if (proc_args.contains(param.*)) return false;
+            const proc_body = self.store.getProcSpecImmediate(proc_id).body.get().?;
+            var it = chain_params.iterator();
+            while (it.next()) |entry| {
+                if (!proc_args.contains(entry.key_ptr.*)) continue;
+                if (!try self.planArgumentEntries(scan, &carriers, proc_body, entry.value_ptr.*, entry.key_ptr.*, &argument_entries)) return false;
             }
         }
 
         // Chain parameters must not be conditionally initialized: that
         // machinery names whole locals and is not modeled here.
-        {
-            var it = chain_params.valueIterator();
+        for ([_]*collections.DenseMap(LocalId, CFStmtId){ &chain_params, &merged_params }) |params| {
+            var it = params.valueIterator();
             while (it.next()) |owner| {
                 const join = self.store.getCFStmtImmediate(owner.*).join;
                 const maybe = self.store.getLocalSpan(self.store.stmtRowOrDefault(join.extra).maybe_uninitialized_params);
                 for (0..GuardedList.borrowLen(maybe)) |i| {
                     if (carriers.contains(GuardedList.at(maybe, i))) return false;
                 }
+            }
+        }
+        // A merged parameter is written only by modeled definitions, and is
+        // never the list a procedure was called with.
+        {
+            var it = merged_params.keyIterator();
+            while (it.next()) |param| {
+                if (scan.dirty_targets.contains(param.*)) return false;
+                if (proc_args.contains(param.*)) return false;
             }
         }
 
@@ -1426,6 +1600,18 @@ const Pass = struct {
                 const assigned = scan.assigned_targets.get(entry.key_ptr.*) orelse 0;
                 if (assigned != entry.value_ptr.*) return false;
             }
+            // A merged parameter's writes are definitions too, so it always
+            // has several and shares its metadata locals among them. Its
+            // direct assignments must all be chain edges, like any other
+            // carrier's.
+            var merged_it = merged_params.keyIterator();
+            while (merged_it.next()) |param| {
+                if ((chain_defs.get(param.*) orelse 0) != scan.assigned_targets.get(param.*).?) return false;
+            }
+            for (scan.edges.items) |edge| {
+                if (edge.kind != .param_write or edge.flow == .outside) continue;
+                if (merged_params.contains(edge.target)) try bumpUse(&chain_defs, edge.target);
+            }
         }
 
         // A tainted carrier (one with uses this analysis does not understand)
@@ -1449,7 +1635,7 @@ const Pass = struct {
             metadata_classified.* = true;
         }
         rewrite_site_count = 0;
-        has_sets = false;
+        threads_owned = false;
         for (scan.edges.items) |*edge| {
             edge.flow = if (!carriers.contains(edge.target)) .outside else if (carriers.contains(edge.source) and edge.preserves_metadata) .carried else .entry;
             if (edge.flow != .carried) continue;
@@ -1457,16 +1643,150 @@ const Pass = struct {
                 .append_call, .range_append, .le_bytes_append, .reserve_op => rewrite_site_count += 1,
                 .set_op => {
                     rewrite_site_count += 1;
-                    has_sets = true;
+                    threads_owned = true;
                 },
-                .param_write, .alias, .refresh_op, .unsafe_append => {},
+                .param_write, .alias, .refresh_op, .unsafe_append, .transfer, .write_in_place => {},
             }
+        }
+        // A query on a carried value is a site too: the owned flag threaded
+        // for it answers the query wherever the flag is known to be one.
+        for (scan.queries.items) |query| {
+            if (!carriers.contains(query.source) or !query.preserves_metadata) continue;
+            rewrite_site_count += 1;
+            threads_owned = true;
         }
         if (rewrite_site_count == 0) return false;
 
         // Qualified: thread the slack.
-        try self.apply(scan, &chain_defs, &chain_params, has_sets, loop_stmt, list_param, max_join_id, new_locals);
+        try self.apply(scan, &chain_defs, &chain_params, argument_entries.items, threads_owned, loop_stmt, list_param, max_join_id, new_locals);
         return true;
+    }
+
+    /// A jump that enters a loop whose parameter is a procedure argument
+    /// without writing that parameter.
+    const ArgumentEntry = struct {
+        param: LocalId,
+        jump: CFStmtId,
+    };
+
+    /// Whether the loop `owner` can carry metadata for `param`, a chain
+    /// parameter that is also an argument of the procedure, collecting the
+    /// jumps that enter the loop from outside its body into `entries`.
+    ///
+    /// Inside the body (the statements reachable from the join's body
+    /// without returning to its head), every jump back to the head must
+    /// write `param`. A back edge that leaves it unwritten passes the
+    /// head's list along implicitly, a use that control-flow use ordering
+    /// does not see, so a consumption earlier in that iteration could be
+    /// judged the list's last use. Outside the body (the statements
+    /// reachable from the procedure's start without entering it), the
+    /// argument is the list on every path to the loop: nothing there writes
+    /// `param` or defines or reads a chain carrier through a chain edge,
+    /// so the only metadata the loop needs from that region is the
+    /// measurement each entry jump receives. The two regions share no
+    /// statement, so no statement runs both before metadata exists and
+    /// under it.
+    fn planArgumentEntries(
+        self: *Pass,
+        scan: *const Scan,
+        carriers: *const collections.DenseMap(LocalId, void),
+        proc_body: CFStmtId,
+        owner: CFStmtId,
+        param: LocalId,
+        entries: *std.ArrayList(ArgumentEntry),
+    ) ResourceError!bool {
+        const allocator = self.allocator;
+        const loop = self.store.getCFStmtImmediate(owner).join;
+        var join_bodies = collections.DenseMap(LIR.JoinPointId, CFStmtId).init(allocator);
+        defer join_bodies.deinit();
+        for (scan.joins.items) |info| {
+            const join = self.store.getCFStmtImmediate(info.stmt).join;
+            try join_bodies.put(join.id, join.body);
+        }
+
+        var body_region = collections.DenseMap(CFStmtId, bool).init(allocator);
+        defer body_region.deinit();
+        var back_edges = std.ArrayList(CFStmtId).empty;
+        defer back_edges.deinit(allocator);
+        try self.walkParamWrites(loop.body, loop.id, param, &join_bodies, &body_region, &back_edges);
+        for (back_edges.items) |jump| {
+            if (!body_region.get(jump).?) return false;
+        }
+
+        var outer_region = collections.DenseMap(CFStmtId, bool).init(allocator);
+        defer outer_region.deinit();
+        var entry_jumps = std.ArrayList(CFStmtId).empty;
+        defer entry_jumps.deinit(allocator);
+        try self.walkParamWrites(proc_body, loop.id, param, &join_bodies, &outer_region, &entry_jumps);
+        {
+            var it = outer_region.iterator();
+            while (it.next()) |entry| {
+                if (body_region.contains(entry.key_ptr.*)) return false;
+                switch (self.store.getCFStmtImmediate(entry.key_ptr.*).*) {
+                    .set_local => |s| if (s.target == param) return false,
+                    .init_uninitialized, .assign_ref, .assign_literal, .assign_call, .assign_call_erased, .assign_packed_erased_fn, .assign_low_level, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .dyn, .debug, .expect, .expect_err, .runtime_error, .comptime_exhaustiveness_failed, .incref, .decref, .decref_if_initialized, .free, .switch_stmt, .switch_initialized_payload, .str_match, .str_match_set, .join, .jump, .ret, .crash => {},
+                }
+            }
+        }
+        for (scan.edges.items) |edge| {
+            if (!outer_region.contains(edge.stmt)) continue;
+            if (carriers.contains(edge.source) or carriers.contains(edge.target)) return false;
+        }
+        for (entry_jumps.items) |jump| try entries.append(allocator, .{ .param = param, .jump = jump });
+        return true;
+    }
+
+    /// Walk forward from `root`, entering the bodies of joins other than
+    /// `loop_id` through the jumps that target them and stopping at jumps
+    /// to `loop_id`, which are collected into `loop_jumps`. `region` maps
+    /// every statement reached to whether every path from `root` to it
+    /// passes an initializing write of `param`.
+    fn walkParamWrites(
+        self: *Pass,
+        root: CFStmtId,
+        loop_id: LIR.JoinPointId,
+        param: LocalId,
+        join_bodies: *const collections.DenseMap(LIR.JoinPointId, CFStmtId),
+        region: *collections.DenseMap(CFStmtId, bool),
+        loop_jumps: *std.ArrayList(CFStmtId),
+    ) ResourceError!void {
+        const allocator = self.allocator;
+        const Item = struct { stmt: CFStmtId, written: bool };
+        var work = std.ArrayList(Item).empty;
+        defer work.deinit(allocator);
+        var successors = std.ArrayList(CFStmtId).empty;
+        defer successors.deinit(allocator);
+        try work.append(allocator, .{ .stmt = root, .written = false });
+        while (work.pop()) |item| {
+            const entry = try region.getOrPut(item.stmt);
+            if (entry.found_existing) {
+                // A statement's state only falls from written to unwritten,
+                // so each is revisited at most once.
+                if (!entry.value_ptr.* or item.written) continue;
+                entry.value_ptr.* = false;
+            } else {
+                entry.value_ptr.* = item.written;
+            }
+            const written = entry.value_ptr.*;
+            switch (self.store.getCFStmtImmediate(item.stmt).*) {
+                .jump => |jump| {
+                    if (jump.target == loop_id) {
+                        if (!entry.found_existing) try loop_jumps.append(allocator, item.stmt);
+                    } else {
+                        try work.append(allocator, .{ .stmt = join_bodies.get(jump.target).?, .written = written });
+                    }
+                },
+                .set_local => |s| try work.append(allocator, .{
+                    .stmt = s.next,
+                    .written = written or (s.mode == .initialize_join_param and s.target == param),
+                }),
+                .init_uninitialized, .assign_ref, .assign_literal, .assign_call, .assign_call_erased, .assign_packed_erased_fn, .assign_low_level, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .dyn, .debug, .expect, .expect_err, .runtime_error, .comptime_exhaustiveness_failed, .incref, .decref, .decref_if_initialized, .free, .switch_stmt, .switch_initialized_payload, .str_match, .str_match_set, .join, .ret, .crash => {
+                    successors.clearRetainingCapacity();
+                    try body_clone.appendSuccessorsInOrder(self.store, &successors, item.stmt, allocator, .{ .join_body = false });
+                    for (successors.items) |successor| try work.append(allocator, .{ .stmt = successor, .written = written });
+                },
+            }
+        }
     }
 
     // Rewrite
@@ -1511,7 +1831,8 @@ const Pass = struct {
         scan: *Scan,
         chain_defs: *collections.DenseMap(LocalId, u32),
         chain_params: *collections.DenseMap(LocalId, CFStmtId),
-        has_sets: bool,
+        argument_entries: []const ArgumentEntry,
+        threads_owned: bool,
         loop_stmt: CFStmtId,
         list_param: LocalId,
         max_join_id: *u32,
@@ -1520,8 +1841,9 @@ const Pass = struct {
         const allocator = self.allocator;
 
         // One slack parameter per chain join; chains containing element
-        // overwrites also carry an owned flag (one when the list uniquely
-        // owns a non-slice allocation, so a set may run in place).
+        // overwrites or ownership queries also carry an owned flag (one
+        // when the list uniquely owns a non-slice allocation, so a set may
+        // run in place and a query answers one).
         var slack_params = collections.DenseMap(LocalId, LocalId).init(allocator);
         defer slack_params.deinit();
         var owned_params = collections.DenseMap(LocalId, LocalId).init(allocator);
@@ -1538,7 +1860,7 @@ const Pass = struct {
                 defer params.deinit(allocator);
                 for (0..GuardedList.borrowLen(old_params)) |i| try params.append(allocator, GuardedList.at(old_params, i));
                 try params.append(allocator, slack_param);
-                if (has_sets) {
+                if (threads_owned) {
                     const owned_param = try self.freshLocal(.u64, new_locals);
                     try owned_params.put(entry.key_ptr.*, owned_param);
                     try params.append(allocator, owned_param);
@@ -1566,7 +1888,7 @@ const Pass = struct {
             var it = chain_params.keyIterator();
             while (it.next()) |param| {
                 try slack_of.put(param.*, slack_params.get(param.*).?);
-                if (has_sets) try owned_of.put(param.*, owned_params.get(param.*).?);
+                if (threads_owned) try owned_of.put(param.*, owned_params.get(param.*).?);
             }
         }
 
@@ -1585,7 +1907,7 @@ const Pass = struct {
                     const sx = try self.freshLocal(.u64, new_locals);
                     try shared_slack.put(entry.key_ptr.*, sx);
                     try slack_of.put(entry.key_ptr.*, sx);
-                    if (has_sets) {
+                    if (threads_owned) {
                         const ox = try self.freshLocal(.u64, new_locals);
                         try shared_owned.put(entry.key_ptr.*, ox);
                         try owned_of.put(entry.key_ptr.*, ox);
@@ -1601,18 +1923,66 @@ const Pass = struct {
         while (resolving) {
             resolving = false;
             for (scan.edges.items) |edge| {
-                if (edge.flow == .outside or edge.kind == .param_write) continue;
+                if (edge.flow == .outside) continue;
+                if (edge.kind == .param_write) {
+                    // Only a merged parameter's write defines metadata
+                    // here; chain parameters are wired below.
+                    if (chain_params.contains(edge.target) or rewritten.contains(edge.stmt)) continue;
+                    const limit = shared_slack.get(edge.target).?;
+                    const owned: ?LocalId = if (threads_owned) shared_owned.get(edge.target).? else null;
+                    const original = self.store.getCFStmtImmediate(edge.stmt).set_local;
+                    const original_origin = self.store.stmtOrigin(edge.stmt);
+                    const origin = promoteOrigin(original_origin);
+                    if (edge.flow == .entry) {
+                        // Acquire the incoming ownership unit, measure it,
+                        // then write the acquired list.
+                        const incoming = try self.freshLocal(self.store.getLocal(edge.source).layout_idx, new_locals);
+                        var acquired = original;
+                        acquired.value = incoming;
+                        const write = try self.store.addCFStmt(.{ .set_local = acquired }, original_origin);
+                        const seed = try self.seedMetadata(incoming, limit, owned, write, new_locals, origin);
+                        try self.store.replaceCFStmt(edge.stmt, .{ .assign_low_level = .{
+                            .target = incoming,
+                            .op = .list_map_prepare_reuse,
+                            .rc_effect = try self.store.addRcEffect(LowLevelOp.list_map_prepare_reuse.rcEffect()),
+                            .args = try self.store.addLocalSpan(&.{edge.source}),
+                            .next = seed,
+                        } }, origin);
+                        try self.entry_transfers.put(edge.stmt, {});
+                    } else {
+                        const source_slack = slack_of.get(edge.source) orelse continue;
+                        const source_owned = if (threads_owned) owned_of.get(edge.source) orelse continue else undefined;
+                        var next = original.next;
+                        if (owned) |flag| {
+                            try self.noteOwnedDef(flag, .{ .local = source_owned });
+                            next = try self.store.addCFStmt(.{ .assign_ref = .{
+                                .target = flag,
+                                .op = .local(source_owned),
+                                .next = next,
+                            } }, origin);
+                        }
+                        next = try self.store.addCFStmt(.{ .assign_ref = .{
+                            .target = limit,
+                            .op = .local(source_slack),
+                            .next = next,
+                        } }, origin);
+                        self.store.getCFStmtPtr(edge.stmt).set_local.next = next;
+                    }
+                    try rewritten.put(edge.stmt, {});
+                    resolving = true;
+                    continue;
+                }
                 if (slack_of.contains(edge.target) and !shared_slack.contains(edge.target)) continue;
                 if (rewritten.contains(edge.stmt)) continue;
                 const origin = promoteOrigin(self.store.stmtOrigin(edge.stmt));
                 if (edge.flow == .entry) {
                     const limit = shared_slack.get(edge.target) orelse try self.freshLocal(.u64, new_locals);
-                    const owned = try self.ownedOutFor(edge.target, has_sets, &shared_owned, new_locals);
+                    const owned = try self.ownedOutFor(edge.target, threads_owned, &shared_owned, new_locals);
                     const stmt = self.store.getCFStmt(edge.stmt);
                     const next = switch (edge.kind) {
                         .alias => stmt.assign_ref.next,
                         .append_call => stmt.assign_call.next,
-                        .refresh_op, .range_append, .set_op, .le_bytes_append, .reserve_op, .unsafe_append => stmt.assign_low_level.next,
+                        .refresh_op, .range_append, .set_op, .le_bytes_append, .reserve_op, .unsafe_append, .transfer, .write_in_place => stmt.assign_low_level.next,
                         .param_write => unreachable, // the loop skips param_write edges above
                     };
                     const seed = try self.seedMetadata(edge.target, limit, owned, next, new_locals, origin);
@@ -1620,15 +1990,23 @@ const Pass = struct {
                         // A plain alias can still borrow from an outside holder.
                         // Transfer ownership before observing its refcount, so
                         // ARC preserves any other live uses before the query.
-                        .alias => try self.store.replaceCFStmt(edge.stmt, .{ .assign_low_level = .{
-                            .target = edge.target,
-                            .op = .list_map_prepare_reuse,
-                            .rc_effect = try self.store.addRcEffect(LowLevelOp.list_map_prepare_reuse.rcEffect()),
-                            .args = try self.store.addLocalSpan(&.{edge.source}),
-                            .next = seed,
-                        } }, origin),
+                        .alias => {
+                            try self.store.replaceCFStmt(edge.stmt, .{ .assign_low_level = .{
+                                .target = edge.target,
+                                .op = .list_map_prepare_reuse,
+                                .rc_effect = try self.store.addRcEffect(LowLevelOp.list_map_prepare_reuse.rcEffect()),
+                                .args = try self.store.addLocalSpan(&.{edge.source}),
+                                .next = seed,
+                            } }, origin);
+                            try self.entry_transfers.put(edge.stmt, {});
+                        },
                         .append_call => self.store.getCFStmtPtr(edge.stmt).assign_call.next = seed,
-                        .refresh_op, .range_append, .set_op, .le_bytes_append, .reserve_op, .unsafe_append => self.store.getCFStmtPtr(edge.stmt).assign_low_level.next = seed,
+                        // The transfer already acquired the unit measured.
+                        .transfer => {
+                            self.store.getCFStmtPtr(edge.stmt).assign_low_level.next = seed;
+                            try self.entry_transfers.put(edge.stmt, {});
+                        },
+                        .refresh_op, .range_append, .set_op, .le_bytes_append, .reserve_op, .unsafe_append, .write_in_place => self.store.getCFStmtPtr(edge.stmt).assign_low_level.next = seed,
                         .param_write => unreachable, // the loop skips param_write edges above
                     }
                     try slack_of.put(edge.target, limit);
@@ -1640,14 +2018,14 @@ const Pass = struct {
                 switch (edge.kind) {
                     .alias => {
                         const source_slack = slack_of.get(edge.source) orelse continue;
-                        const source_owned = if (has_sets) owned_of.get(edge.source) orelse continue else undefined;
+                        const source_owned = if (threads_owned) owned_of.get(edge.source) orelse continue else undefined;
                         if (shared_slack.get(edge.target)) |sx| {
                             // Materialize this definition's contribution to
                             // the shared slack right after the alias.
                             try rewritten.put(edge.stmt, {});
                             const alias = self.store.getCFStmtImmediate(edge.stmt).assign_ref;
                             var next = alias.next;
-                            if (has_sets) {
+                            if (threads_owned) {
                                 const flag = shared_owned.get(edge.target).?;
                                 try self.noteOwnedDef(flag, .{ .local = source_owned });
                                 next = try self.store.addCFStmt(.{ .assign_ref = .{
@@ -1664,7 +2042,7 @@ const Pass = struct {
                             self.store.getCFStmtPtr(edge.stmt).assign_ref.next = copy;
                         } else {
                             try slack_of.put(edge.target, source_slack);
-                            if (has_sets) try owned_of.put(edge.target, source_owned);
+                            if (threads_owned) try owned_of.put(edge.target, source_owned);
                         }
                         resolving = true;
                     },
@@ -1672,7 +2050,7 @@ const Pass = struct {
                         const slack_in = slack_of.get(edge.source) orelse continue;
                         try rewritten.put(edge.stmt, {});
                         const slack_out = shared_slack.get(edge.target) orelse try self.freshLocal(.u64, new_locals);
-                        const owned_out = try self.ownedOutFor(edge.target, has_sets, &shared_owned, new_locals);
+                        const owned_out = try self.ownedOutFor(edge.target, threads_owned, &shared_owned, new_locals);
                         try self.rewriteAppendSite(edge, slack_in, slack_out, owned_out, max_join_id, new_locals);
                         try slack_of.put(edge.target, slack_out);
                         if (owned_out) |flag| try owned_of.put(edge.target, flag);
@@ -1682,7 +2060,7 @@ const Pass = struct {
                         const slack_in = slack_of.get(edge.source) orelse continue;
                         try rewritten.put(edge.stmt, {});
                         const slack_out = shared_slack.get(edge.target) orelse try self.freshLocal(.u64, new_locals);
-                        const owned_out = try self.ownedOutFor(edge.target, has_sets, &shared_owned, new_locals);
+                        const owned_out = try self.ownedOutFor(edge.target, threads_owned, &shared_owned, new_locals);
                         try self.rewriteLeBytesAppendSite(edge, slack_in, slack_out, owned_out, max_join_id, new_locals);
                         try slack_of.put(edge.target, slack_out);
                         if (owned_out) |flag| try owned_of.put(edge.target, flag);
@@ -1692,7 +2070,7 @@ const Pass = struct {
                         const slack_in = slack_of.get(edge.source) orelse continue;
                         try rewritten.put(edge.stmt, {});
                         const slack_out = shared_slack.get(edge.target) orelse try self.freshLocal(.u64, new_locals);
-                        const owned_out = try self.ownedOutFor(edge.target, has_sets, &shared_owned, new_locals);
+                        const owned_out = try self.ownedOutFor(edge.target, threads_owned, &shared_owned, new_locals);
                         try self.rewriteRangeAppendSite(edge, slack_in, slack_out, owned_out, max_join_id, new_locals);
                         try slack_of.put(edge.target, slack_out);
                         if (owned_out) |flag| try owned_of.put(edge.target, flag);
@@ -1702,22 +2080,22 @@ const Pass = struct {
                         const slack_in = slack_of.get(edge.source) orelse continue;
                         try rewritten.put(edge.stmt, {});
                         const slack_out = shared_slack.get(edge.target) orelse try self.freshLocal(.u64, new_locals);
-                        const owned_out = try self.ownedOutFor(edge.target, has_sets, &shared_owned, new_locals);
+                        const owned_out = try self.ownedOutFor(edge.target, threads_owned, &shared_owned, new_locals);
                         try self.rewriteReserveSite(edge, slack_in, slack_out, owned_out, max_join_id, new_locals);
                         try slack_of.put(edge.target, slack_out);
                         if (owned_out) |flag| try owned_of.put(edge.target, flag);
                         resolving = true;
                     },
-                    .unsafe_append => {
+                    .unsafe_append, .transfer => {
                         const source_slack = slack_of.get(edge.source) orelse continue;
-                        const source_owned = if (has_sets) owned_of.get(edge.source) orelse continue else undefined;
+                        const source_owned = if (threads_owned) owned_of.get(edge.source) orelse continue else undefined;
                         try rewritten.put(edge.stmt, {});
                         if (shared_slack.get(edge.target)) |sx| {
                             // Materialize this definition's contribution to
-                            // the shared slack right after the append.
+                            // the shared slack right after the operation.
                             const assign = self.store.getCFStmtImmediate(edge.stmt).assign_low_level;
                             var next = assign.next;
-                            if (has_sets) {
+                            if (threads_owned) {
                                 const flag = shared_owned.get(edge.target).?;
                                 try self.noteOwnedDef(flag, .{ .local = source_owned });
                                 next = try self.store.addCFStmt(.{ .assign_ref = .{
@@ -1734,7 +2112,7 @@ const Pass = struct {
                             self.store.getCFStmtPtr(edge.stmt).assign_low_level.next = copy;
                         } else {
                             try slack_of.put(edge.target, source_slack);
-                            if (has_sets) try owned_of.put(edge.target, source_owned);
+                            if (threads_owned) try owned_of.put(edge.target, source_owned);
                         }
                         resolving = true;
                     },
@@ -1749,12 +2127,40 @@ const Pass = struct {
                         try owned_of.put(edge.target, owned_out);
                         resolving = true;
                     },
+                    .write_in_place => {
+                        const source_slack = slack_of.get(edge.source) orelse continue;
+                        try rewritten.put(edge.stmt, {});
+                        const assign = self.store.getCFStmtImmediate(edge.stmt).assign_low_level;
+                        var next = assign.next;
+                        if (try self.ownedOutFor(edge.target, threads_owned, &shared_owned, new_locals)) |flag| {
+                            // The store ran, so its contract held: the list
+                            // uniquely owns a non-slice allocation.
+                            try self.noteOwnedDef(flag, .one);
+                            next = try self.store.addCFStmt(.{ .assign_literal = .{
+                                .target = flag,
+                                .value = .{ .i64_literal = .{ .value = 1, .layout_idx = .u64 } },
+                                .next = next,
+                            } }, origin);
+                            try owned_of.put(edge.target, flag);
+                        }
+                        if (shared_slack.get(edge.target)) |sx| {
+                            next = try self.store.addCFStmt(.{ .assign_ref = .{
+                                .target = sx,
+                                .op = .local(source_slack),
+                                .next = next,
+                            } }, origin);
+                        } else {
+                            try slack_of.put(edge.target, source_slack);
+                        }
+                        self.store.getCFStmtPtr(edge.stmt).assign_low_level.next = next;
+                        resolving = true;
+                    },
                     .refresh_op => {
                         try rewritten.put(edge.stmt, {});
                         const assign = self.store.getCFStmtImmediate(edge.stmt).assign_low_level;
                         const slack_out = shared_slack.get(edge.target) orelse try self.freshLocal(.u64, new_locals);
                         var next = assign.next;
-                        if (try self.ownedOutFor(edge.target, has_sets, &shared_owned, new_locals)) |flag| {
+                        if (try self.ownedOutFor(edge.target, threads_owned, &shared_owned, new_locals)) |flag| {
                             // Every kept list operation returns a uniquely
                             // owned non-slice result.
                             try self.noteOwnedDef(flag, .one);
@@ -1779,12 +2185,34 @@ const Pass = struct {
         // definition initialized it. Check the emitted definitions themselves.
         if (std.debug.runtime_safety) {
             for (scan.edges.items) |edge| {
-                if (edge.flow == .outside or edge.kind == .param_write) continue;
+                if (edge.flow == .outside) continue;
+                if (edge.kind == .param_write) {
+                    std.debug.assert(chain_params.contains(edge.target) or rewritten.contains(edge.stmt));
+                    continue;
+                }
                 std.debug.assert(slack_of.contains(edge.target));
                 if (shared_slack.contains(edge.target) or edge.kind != .alias) {
                     std.debug.assert(rewritten.contains(edge.stmt));
                 }
-                if (has_sets) std.debug.assert(owned_of.contains(edge.target));
+                if (threads_owned) std.debug.assert(owned_of.contains(edge.target));
+            }
+        }
+
+        // A query on a carried value asks what that value's flag records.
+        // The flag was computed for exactly this value, and no other live
+        // use can have split the value since, so a flag of one means the
+        // query answers one. Loop versioning uses that where it knows the
+        // flag.
+        if (threads_owned) {
+            for (scan.queries.items) |query| {
+                if (!query.preserves_metadata) continue;
+                const flag = owned_of.get(query.source) orelse continue;
+                try self.answered_queries.put(query.stmt, .{
+                    .flag = flag,
+                    .target = query.target,
+                    .sole_definition = (scan.assigned_targets.get(query.target) orelse 0) == 1 and
+                        !scan.dirty_targets.contains(query.target) and !scan.param_join.contains(query.target),
+                });
             }
         }
 
@@ -1795,7 +2223,7 @@ const Pass = struct {
             if (edge.kind != .param_write) continue;
             if (!chain_params.contains(edge.target)) continue;
             const slack_param = slack_params.get(edge.target).?;
-            var original = self.store.getCFStmtImmediate(edge.stmt).set_local;
+            const original = self.store.getCFStmtImmediate(edge.stmt).set_local;
             const original_origin = self.store.stmtOrigin(edge.stmt);
             const origin = promoteOrigin(original_origin);
             if (edge.flow == .carried) {
@@ -1803,7 +2231,7 @@ const Pass = struct {
                 // a chain parameter.
                 const slack = slack_of.get(edge.source).?;
                 var forward = try self.store.addCFStmt(.{ .set_local = original }, original_origin);
-                if (has_sets) {
+                if (threads_owned) {
                     const owned_param = owned_params.get(edge.target).?;
                     const owned = owned_of.get(edge.source).?;
                     try self.noteOwnedDef(owned_param, .{ .local = owned });
@@ -1823,44 +2251,76 @@ const Pass = struct {
                 } }, origin);
             } else {
                 std.debug.assert(edge.flow == .entry);
-                // Entry edge: acquire the incoming ownership unit before
-                // measuring it, just as for an outside alias definition.
-                const incoming = try self.freshLocal(self.store.getLocal(edge.source).layout_idx, new_locals);
-                original.value = incoming;
-                const measured = try self.freshLocal(.u64, new_locals);
-                var forward = try self.store.addCFStmt(.{ .set_local = original }, original_origin);
-                var owned: ?LocalId = null;
-                if (has_sets) {
-                    const measured_owned = try self.freshLocal(.u64, new_locals);
-                    owned = measured_owned;
-                    const owned_param = owned_params.get(edge.target).?;
-                    try self.noteOwnedDef(owned_param, .{ .local = measured_owned });
-                    if (edge.target == list_param) try self.noteLoopEdge(loop_stmt, original.next, measured_owned);
-                    forward = try self.store.addCFStmt(.{ .set_local = .{
-                        .target = owned_param,
-                        .value = measured_owned,
-                        .mode = .initialize_join_param,
-                        .next = forward,
-                    } }, origin);
-                }
-                const write_slack = try self.store.addCFStmt(.{ .set_local = .{
-                    .target = slack_param,
-                    .value = measured,
-                    .mode = .initialize_join_param,
-                    .next = forward,
-                } }, origin);
-                const seed = try self.seedMetadata(incoming, measured, owned, write_slack, new_locals, origin);
-                try self.store.replaceCFStmt(edge.stmt, .{ .assign_low_level = .{
-                    .target = incoming,
-                    .op = .list_map_prepare_reuse,
-                    .rc_effect = try self.store.addRcEffect(LowLevelOp.list_map_prepare_reuse.rcEffect()),
-                    .args = try self.store.addLocalSpan(&.{edge.source}),
-                    .next = seed,
-                } }, origin);
+                try self.wireEntryWrite(edge.stmt, edge.target, edge.source, original.next, original_origin, slack_param, if (threads_owned) owned_params.get(edge.target).? else null, loop_stmt, list_param, new_locals);
             }
         }
 
-        try self.noteSlackChains(scan, chain_params, &slack_params, has_sets);
+        // An argument entry hands the loop the procedure argument its
+        // parameter already holds, so the jump is preceded by an entry write
+        // of that argument into its own parameter.
+        for (argument_entries) |entry| {
+            const jump_origin = self.store.stmtOrigin(entry.jump);
+            const jump = try self.store.addCFStmt(self.store.getCFStmt(entry.jump), jump_origin);
+            try self.wireEntryWrite(entry.jump, entry.param, entry.param, jump, jump_origin, slack_params.get(entry.param).?, if (threads_owned) owned_params.get(entry.param).? else null, loop_stmt, list_param, new_locals);
+        }
+
+        try self.noteSlackChains(scan, chain_params, &slack_params, threads_owned);
+    }
+
+    /// Replace `stmt`, a write of `source` into the chain parameter `param`
+    /// continuing at `next`, with an entry write: acquire the incoming
+    /// ownership unit before measuring it, just as for an outside alias
+    /// definition, then write the measured metadata beside the list.
+    fn wireEntryWrite(
+        self: *Pass,
+        stmt: CFStmtId,
+        param: LocalId,
+        source: LocalId,
+        next: CFStmtId,
+        write_origin: LIR.StmtOrigin,
+        slack_param: LocalId,
+        owned_param: ?LocalId,
+        loop_stmt: CFStmtId,
+        list_param: LocalId,
+        new_locals: *std.ArrayList(LocalId),
+    ) ResourceError!void {
+        const origin = promoteOrigin(write_origin);
+        const incoming = try self.freshLocal(self.store.getLocal(source).layout_idx, new_locals);
+        const measured = try self.freshLocal(.u64, new_locals);
+        var forward = try self.store.addCFStmt(.{ .set_local = .{
+            .target = param,
+            .value = incoming,
+            .mode = .initialize_join_param,
+            .next = next,
+        } }, write_origin);
+        var owned: ?LocalId = null;
+        if (owned_param) |flag_param| {
+            const measured_owned = try self.freshLocal(.u64, new_locals);
+            owned = measured_owned;
+            try self.noteOwnedDef(flag_param, .{ .local = measured_owned });
+            if (param == list_param) try self.noteLoopEdge(loop_stmt, next, measured_owned);
+            forward = try self.store.addCFStmt(.{ .set_local = .{
+                .target = flag_param,
+                .value = measured_owned,
+                .mode = .initialize_join_param,
+                .next = forward,
+            } }, origin);
+        }
+        const write_slack = try self.store.addCFStmt(.{ .set_local = .{
+            .target = slack_param,
+            .value = measured,
+            .mode = .initialize_join_param,
+            .next = forward,
+        } }, origin);
+        const seed = try self.seedMetadata(incoming, measured, owned, write_slack, new_locals, origin);
+        try self.store.replaceCFStmt(stmt, .{ .assign_low_level = .{
+            .target = incoming,
+            .op = .list_map_prepare_reuse,
+            .rc_effect = try self.store.addRcEffect(LowLevelOp.list_map_prepare_reuse.rcEffect()),
+            .args = try self.store.addLocalSpan(&.{source}),
+            .next = seed,
+        } }, origin);
+        try self.entry_transfers.put(stmt, {});
     }
 
     /// The owned-flag local a chain-op definition of `target` must write, or
@@ -1868,11 +2328,11 @@ const Pass = struct {
     fn ownedOutFor(
         self: *Pass,
         target: LocalId,
-        has_sets: bool,
+        threads_owned: bool,
         shared_owned: *const collections.DenseMap(LocalId, LocalId),
         new_locals: *std.ArrayList(LocalId),
     ) ResourceError!?LocalId {
-        if (!has_sets) return null;
+        if (!threads_owned) return null;
         if (shared_owned.get(target)) |flag| return flag;
         return try self.freshLocal(.u64, new_locals);
     }
@@ -2535,8 +2995,10 @@ const Pass = struct {
     /// in a nested loop, which the versioning checks for itself. A loop is unbounded when its
     /// body holds any other chain operation, or a list entering the chain,
     /// since neither keeps the limit the head measured; a chain with element
-    /// overwrites carries owned flags and versions on those instead.
-    fn noteSlackChains(self: *Pass, scan: *const Scan, chain_params: *collections.DenseMap(LocalId, CFStmtId), slack_params: *const collections.DenseMap(LocalId, LocalId), has_sets: bool) ResourceError!void {
+    /// overwrites or ownership queries carries owned flags and versions on
+    /// those instead. An ownership transfer hands its list on unchanged, so
+    /// a carried one counts as an alias does.
+    fn noteSlackChains(self: *Pass, scan: *const Scan, chain_params: *collections.DenseMap(LocalId, CFStmtId), slack_params: *const collections.DenseMap(LocalId, LocalId), threads_owned: bool) ResourceError!void {
         var body_stmts = collections.DenseMap(CFStmtId, void).init(self.allocator);
         defer body_stmts.deinit();
         var it = chain_params.iterator();
@@ -2548,7 +3010,7 @@ const Pass = struct {
             }
             if (!is_loop) continue;
             const loop = try self.slackLoop(loop_stmt);
-            if (has_sets) {
+            if (threads_owned) {
                 loop.unbounded = true;
                 continue;
             }
@@ -2572,8 +3034,8 @@ const Pass = struct {
                     } else {
                         loop.unbounded = true;
                     },
-                    .range_append, .set_op, .refresh_op, .le_bytes_append, .reserve_op, .unsafe_append => loop.unbounded = true,
-                    .alias, .param_write => if (edge.flow == .entry) {
+                    .range_append, .set_op, .refresh_op, .le_bytes_append, .reserve_op, .unsafe_append, .write_in_place => loop.unbounded = true,
+                    .alias, .transfer, .param_write => if (edge.flow == .entry) {
                         loop.unbounded = true;
                     },
                 }
@@ -2600,7 +3062,7 @@ const Pass = struct {
     /// declared inside the body continue into their bodies.
     fn loopPassEnds(self: *Pass, loop_stmt: CFStmtId, site: CFStmtId) ResourceError!PassEnds {
         const allocator = self.allocator;
-        const join = self.store.getCFStmt(loop_stmt).join;
+        const join = self.store.getCFStmtImmediate(loop_stmt).join;
         var inner_joins = collections.DenseMap(LIR.JoinPointId, CFStmtId).init(allocator);
         defer inner_joins.deinit();
         {
@@ -2637,33 +3099,6 @@ const Pass = struct {
             }
         }
         return ends;
-    }
-
-    /// Body-local definitions the copy of a loop body may rename: locals
-    /// defined only inside the body and read only there, so the copy's
-    /// stores and loads never share a slot with the original's.
-    fn renamableBodyLocals(self: *Pass, body: CFStmtId, proc_body: CFStmtId) ResourceError!collections.DenseMap(LocalId, void) {
-        var body_reads = try body_clone.countReachableReadsWithScratch(self.store, body, self.analysis);
-        defer body_reads.deinit();
-        var body_defs = try body_clone.countReachableDefsWithScratch(self.store, body, self.analysis);
-        defer body_defs.deinit();
-        var proc_reads = try body_clone.countReachableReadsWithScratch(self.store, proc_body, self.analysis);
-        defer proc_reads.deinit();
-        var proc_defs = try body_clone.countReachableDefsWithScratch(self.store, proc_body, self.analysis);
-        defer proc_defs.deinit();
-        var renamable = collections.DenseMap(LocalId, void).init(self.allocator);
-        errdefer renamable.deinit();
-        var defs = body_defs.counts.iterator();
-        while (defs.next()) |entry| {
-            const local = entry.key_ptr.*;
-            if (entry.value_ptr.* > 0 and
-                entry.value_ptr.* == proc_defs.get(local) and
-                body_reads.get(local) == proc_reads.get(local))
-            {
-                try renamable.put(local, {});
-            }
-        }
-        return renamable;
     }
 
     /// Version every promoted loop whose remaining iterations a counter
@@ -3029,8 +3464,15 @@ const Pass = struct {
         const join = self.store.getCFStmtImmediate(loop_stmt).join;
         const chains = self.slack_loops.get(loop_stmt).?.chains.items;
 
-        var renamable = try self.renamableBodyLocals(join.body, proc_body);
+        // What the loop runs only after it has exited stays out of the copy:
+        // both versions continue into the same statements.
+        var exits = std.ArrayList(body_clone.LoopExit).empty;
+        defer exits.deinit(allocator);
+        try body_clone.shareLoopExits(self.store, join, proc_body, max_join_id, self.analysis, allocator, &exits, new_locals, origin.kind);
+
+        var renamable = try body_clone.renamableBodyLocals(self.store, join.body, proc_body, self.analysis, allocator);
         defer renamable.deinit();
+        body_clone.keepExitParams(self.store, exits.items, &renamable);
 
         const fast_id: LIR.JoinPointId = @fromBackingInt(@intCast(max_join_id.*));
         max_join_id.* += 1;
@@ -3092,7 +3534,8 @@ const Pass = struct {
                 .next = head,
             } }, origin);
         }
-        self.store.getCFStmtPtr(loop_stmt).join.body = head;
+        const loop_body = try body_clone.declareLoopExits(self.store, exits.items, head, origin);
+        self.store.getCFStmtPtr(loop_stmt).join.body = loop_body;
     }
 
     /// Emit the dispatch for one chain, continuing at `fits` when its spare
@@ -3176,6 +3619,12 @@ const Pass = struct {
         const version = self.loop_versions.getPtr(loop_stmt).?;
         const flags = version.owned_params.items;
 
+        // What the loop runs only after it has exited stays out of the copy:
+        // both versions continue into the same statements.
+        var exits = std.ArrayList(body_clone.LoopExit).empty;
+        defer exits.deinit(allocator);
+        try body_clone.shareLoopExits(self.store, join, proc_body, max_join_id, self.analysis, allocator, &exits, new_locals, origin.kind);
+
         // Flags that may be zero inside the copy: measurements of lists the
         // chain did not carry, and every flag fed by one, to a fixpoint. The
         // loop's own flags are one throughout the copy, which is entered only
@@ -3228,29 +3677,32 @@ const Pass = struct {
             }
         }
 
+        // Queries in the body whose flag is one throughout the copy: the
+        // copy states their answer, and a switch on a local only such a
+        // query defines keeps the arm that answer selects. LIR initializes
+        // a local on every path to a read, so within one pass through the
+        // body the query runs before any switch on its result.
+        var answered = collections.DenseMap(CFStmtId, void).init(allocator);
+        defer answered.deinit();
+        var known_one = collections.DenseMap(LocalId, void).init(allocator);
+        defer known_one.deinit();
+        if (self.answered_queries.count() != 0) {
+            var stmts = try body_clone.ReachableStmts.initWithScratch(self.store, join.body, self.analysis);
+            defer stmts.deinit();
+            while (try stmts.next()) |stmt_id| {
+                const query = self.answered_queries.get(stmt_id) orelse continue;
+                if (non_static.contains(query.flag)) continue;
+                try answered.put(stmt_id, {});
+                if (query.sole_definition) try known_one.put(query.target, {});
+            }
+        }
+
         // The copy gets fresh locals for values that live entirely inside the
         // body, so its stores and loads never share a slot with the cold
         // arm's calls; everything else, the parameters included, is shared.
-        var body_reads = try body_clone.countReachableReadsWithScratch(self.store, join.body, self.analysis);
-        defer body_reads.deinit();
-        var body_defs = try body_clone.countReachableDefsWithScratch(self.store, join.body, self.analysis);
-        defer body_defs.deinit();
-        var proc_reads = try body_clone.countReachableReadsWithScratch(self.store, proc_body, self.analysis);
-        defer proc_reads.deinit();
-        var proc_defs = try body_clone.countReachableDefsWithScratch(self.store, proc_body, self.analysis);
-        defer proc_defs.deinit();
-        var renamable = collections.DenseMap(LocalId, void).init(allocator);
+        var renamable = try body_clone.renamableBodyLocals(self.store, join.body, proc_body, self.analysis, allocator);
         defer renamable.deinit();
-        var defs = body_defs.counts.iterator();
-        while (defs.next()) |entry| {
-            const local = entry.key_ptr.*;
-            if (entry.value_ptr.* > 0 and
-                entry.value_ptr.* == proc_defs.get(local) and
-                body_reads.get(local) == proc_reads.get(local))
-            {
-                try renamable.put(local, {});
-            }
-        }
+        body_clone.keepExitParams(self.store, exits.items, &renamable);
 
         const unique_id: LIR.JoinPointId = @fromBackingInt(@intCast(max_join_id.*));
         max_join_id.* += 1;
@@ -3259,6 +3711,8 @@ const Pass = struct {
             .unique_id = unique_id,
             .retarget = &retarget,
             .fold = &fold,
+            .answered = &answered,
+            .known_one = &known_one,
             .renamable = &renamable,
             .join_map = collections.DenseMap(LIR.JoinPointId, LIR.JoinPointId).init(allocator),
             .max_join_id = max_join_id,
@@ -3303,13 +3757,11 @@ const Pass = struct {
                 .next = head,
             } }, origin);
         }
-        self.store.getCFStmtPtr(loop_stmt).join.body = head;
+        const loop_body = try body_clone.declareLoopExits(self.store, exits.items, head, origin);
+        self.store.getCFStmtPtr(loop_stmt).join.body = loop_body;
     }
 };
 
-/// Clones a promoted loop body into its unique-only copy: nested joins get
-/// fresh ids, back edges that keep the flags at one return to the copy, and
-/// set-site dispatches whose flag is one collapse to the unchecked store.
 /// Origin of a statement this pass produces for, or in place of, `anchor`.
 fn promoteOrigin(anchor: LIR.StmtOrigin) LIR.StmtOrigin {
     var origin = anchor;
@@ -3317,11 +3769,20 @@ fn promoteOrigin(anchor: LIR.StmtOrigin) LIR.StmtOrigin {
     return origin;
 }
 
+/// Clones a promoted loop body into its unique-only copy: nested joins get
+/// fresh ids, back edges that keep the flags at one return to the copy,
+/// set-site dispatches whose flag is one collapse to the unchecked store,
+/// and ownership queries whose flag is one become that answer, with each
+/// switch on such an answer collapsing to the arm it selects.
 const VersionRewriter = struct {
     loop_id: LIR.JoinPointId,
     unique_id: LIR.JoinPointId,
     retarget: *const collections.DenseMap(CFStmtId, void),
     fold: *const collections.DenseMap(CFStmtId, void),
+    /// Query statements the copy answers with one.
+    answered: *const collections.DenseMap(CFStmtId, void),
+    /// Locals that hold one wherever the copy reads them.
+    known_one: *const collections.DenseMap(LocalId, void),
     renamable: *const collections.DenseMap(LocalId, void),
     join_map: collections.DenseMap(LIR.JoinPointId, LIR.JoinPointId),
     max_join_id: *u32,
@@ -3352,9 +3813,18 @@ const VersionRewriter = struct {
                 return .{ .done = try cloner.store.addCFStmt(.{ .jump = .{ .target = target } }, origin) };
             },
             .switch_stmt => |s| {
-                if (!self.fold.contains(old_id)) return .none;
                 const branches = cloner.store.getCFSwitchBranches(s.branches);
-                return body_clone.Intercept.one(GuardedList.at(branches, 0).body);
+                if (self.fold.contains(old_id)) return body_clone.Intercept.one(GuardedList.at(branches, 0).body);
+                if (!self.known_one.contains(s.cond)) return .none;
+                for (0..GuardedList.borrowLen(branches)) |i| {
+                    const branch = GuardedList.at(branches, i);
+                    if (branch.value == 1) return body_clone.Intercept.one(branch.body);
+                }
+                return body_clone.Intercept.one(s.default_branch);
+            },
+            .assign_low_level => |s| {
+                if (!self.answered.contains(old_id)) return .none;
+                return body_clone.Intercept.one(s.next);
             },
             .init_uninitialized,
             .assign_ref,
@@ -3362,7 +3832,6 @@ const VersionRewriter = struct {
             .assign_call,
             .assign_call_erased,
             .assign_packed_erased_fn,
-            .assign_low_level,
             .assign_list,
             .assign_struct,
             .assign_tag,
@@ -3405,7 +3874,15 @@ const VersionRewriter = struct {
                 .extra = try cloner.mapJoinExtra(s.extra),
             } }, origin),
             .switch_stmt => return cloned[0],
-            .init_uninitialized, .assign_ref, .assign_literal, .assign_call, .assign_call_erased, .assign_packed_erased_fn, .assign_low_level, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .set_local, .dyn, .debug, .expect, .expect_err, .runtime_error, .comptime_exhaustiveness_failed, .incref, .decref, .decref_if_initialized, .free, .switch_initialized_payload, .str_match, .str_match_set, .jump, .ret, .crash => unreachable, // interceptStmt returns children only for join and switch_stmt
+            .assign_low_level => |s| {
+                const target = try cloner.mapLocal(s.target);
+                return try cloner.store.addCFStmt(.{ .assign_literal = .{
+                    .target = target,
+                    .value = .{ .i64_literal = .{ .value = 1, .layout_idx = cloner.store.getLocal(target).layout_idx } },
+                    .next = cloned[0],
+                } }, origin);
+            },
+            .init_uninitialized, .assign_ref, .assign_literal, .assign_call, .assign_call_erased, .assign_packed_erased_fn, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .set_local, .dyn, .debug, .expect, .expect_err, .runtime_error, .comptime_exhaustiveness_failed, .incref, .decref, .decref_if_initialized, .free, .switch_initialized_payload, .str_match, .str_match_set, .jump, .ret, .crash => unreachable, // interceptStmt returns children only for join, switch_stmt and an answered query
         }
     }
 };
@@ -4798,7 +5275,7 @@ test "promote keeps capacity checks when a back edge supplies an outside list" {
     // Each iteration replaces the carried list with a fresh empty allocation.
     // The capacity observed at entry cannot justify unchecked future appends.
     try run(store, &f.layouts);
-    const head = store.getCFStmt(built.loop).join;
+    const head = store.getCFStmtImmediate(built.loop).join;
     const shape = try appendShapeOf(store, head.body, head.id, head.id);
     try testing.expectEqual(@as(u32, 1), shape.unsafe_appends);
     try testing.expectEqual(@as(u32, 1), shape.reserves);
@@ -5360,13 +5837,13 @@ test "promote initializes merged metadata on every incoming definition" {
     try testing.expectEqual(merged, GuardedList.at(store.getLocalSpan(owned.args), 0));
     try testing.expectEqual(foreign_jump, owned.next);
 
-    const forwarded_limit = store.getCFStmtImmediate(store.getCFStmt(tracked).assign_ref.next).assign_ref;
+    const forwarded_limit = store.getCFStmtImmediate(store.getCFStmtImmediate(tracked).assign_ref.next).assign_ref;
     try testing.expectEqual(limit.target, forwarded_limit.target);
     const forwarded_owned = store.getCFStmtImmediate(forwarded_limit.next).assign_ref;
     try testing.expectEqual(owned.target, forwarded_owned.target);
     try testing.expectEqual(tracked_jump, forwarded_owned.next);
     try testing.expectEqual(limit.target, store.getCFStmtImmediate(back_write).set_local.value);
-    try testing.expectEqual(owned.target, store.getCFStmtImmediate(store.getCFStmt(back_write).set_local.next).set_local.value);
+    try testing.expectEqual(owned.target, store.getCFStmtImmediate(store.getCFStmtImmediate(back_write).set_local.next).set_local.value);
 
     const head = store.getCFStmtImmediate(loop).join;
     const dispatch = store.getCFStmtImmediate(head.body).switch_stmt;
@@ -5407,4 +5884,607 @@ test "promote skips metadata topology for a read-only loop beside an unrelated a
     try testing.expectEqual(before, @import("use_order.zig").topology_builds);
     try testing.expect(store.getCFStmtImmediate(append).* == .assign_call);
     try testing.expectEqual(@as(usize, 1), store.getLocalSpan(store.getCFStmtImmediate(loop).join.params).len);
+}
+
+test "promote measures a tail-recursive loop's argument at its entry and versions the loop" {
+    var f = try PromoteTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+
+    // The shape plain TCE gives a tail-recursive procedure: the loop's
+    // parameter is the procedure's own argument, and the remainder enters
+    // the loop without writing it.
+    // proc(out):
+    //   loop J(out):
+    //     body: a = ref out; s = list_set(a, 0, 9); b = ref s
+    //           set out := b; jump J
+    //     remainder: jump J
+    const out = try store.addLocal(.{ .layout_idx = f.list });
+    const a = try store.addLocal(.{ .layout_idx = f.list });
+    const s = try store.addLocal(.{ .layout_idx = f.list });
+    const b = try store.addLocal(.{ .layout_idx = f.list });
+    const join_id = f.freshJoinPointId();
+
+    const back_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
+    const back_set = try store.addCFStmt(.{ .set_local = .{
+        .target = out,
+        .value = b,
+        .mode = .initialize_join_param,
+        .next = back_jump,
+    } }, .test_fixture);
+    const alias_b = try store.addCFStmt(.{ .assign_ref = .{ .target = b, .op = .local(s), .next = back_set } }, .test_fixture);
+    const site = try addSetSite(&f, s, a, alias_b);
+    const alias_a = try store.addCFStmt(.{ .assign_ref = .{ .target = a, .op = .local(out), .next = site } }, .test_fixture);
+    const entry_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
+    const loop = try store.addCFStmt(.{ .join = .{
+        .id = join_id,
+        .params = try store.addLocalSpan(&.{out}),
+        .body = alias_a,
+        .remainder = entry_jump,
+    } }, .test_fixture);
+    _ = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .identity = LIR.ProcIdentity.forTest(4),
+        .args = try store.addLocalSpan(&.{out}),
+        .body = .some(loop),
+        .ret_layout = f.list,
+    }, .none);
+
+    try run(store, &f.layouts);
+
+    const head = store.getCFStmtImmediate(loop).join;
+    const params = store.getLocalSpan(head.params);
+    try testing.expectEqual(@as(usize, 3), params.len);
+    try testing.expectEqual(out, GuardedList.at(params, 0));
+    const limit_param = GuardedList.at(params, 1);
+    const owned_param = GuardedList.at(params, 2);
+
+    // The entry acquires the argument's unit, measures it, and writes the
+    // list and both metadata parameters before jumping to the head.
+    const prepare = store.getCFStmtImmediate(head.remainder).assign_low_level;
+    try testing.expectEqual(LowLevelOp.list_map_prepare_reuse, prepare.op);
+    try testing.expectEqual(out, GuardedList.at(store.getLocalSpan(prepare.args), 0));
+    const incoming = prepare.target;
+    var measured_slack = false;
+    var measured_owned = false;
+    var wrote_limit = false;
+    var wrote_owned = false;
+    var wrote_list = false;
+    var current = prepare.next;
+    while (true) {
+        switch (store.getCFStmtImmediate(current).*) {
+            .assign_low_level => |st| {
+                const operand = GuardedList.at(store.getLocalSpan(st.args), 0);
+                if (st.op == .list_slack_unique) measured_slack = operand == incoming;
+                if (st.op == .list_owned_unique) measured_owned = operand == incoming;
+                current = st.next;
+            },
+            .set_local => |st| {
+                try testing.expect(st.mode == .initialize_join_param);
+                if (st.target == limit_param) wrote_limit = true;
+                if (st.target == owned_param) wrote_owned = true;
+                if (st.target == out) wrote_list = st.value == incoming;
+                current = st.next;
+            },
+            .jump => |st| {
+                try testing.expectEqual(join_id, st.target);
+                break;
+            },
+            .init_uninitialized,
+            .assign_ref,
+            .assign_literal,
+            .assign_call,
+            .assign_call_erased,
+            .assign_packed_erased_fn,
+            .assign_list,
+            .assign_struct,
+            .assign_tag,
+            .dyn,
+            .store_struct,
+            .store_tag,
+            .debug,
+            .expect,
+            .expect_err,
+            .runtime_error,
+            .comptime_exhaustiveness_failed,
+            .incref,
+            .decref,
+            .decref_if_initialized,
+            .free,
+            .switch_stmt,
+            .switch_initialized_payload,
+            .str_match,
+            .str_match_set,
+            .join,
+            .ret,
+            .crash,
+            => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expect(measured_slack and measured_owned and wrote_limit and wrote_owned and wrote_list);
+
+    // The head dispatches on the flag measured at the entry; the copy stores
+    // in place and returns to itself.
+    const dispatch = store.getCFStmtImmediate(head.body).switch_stmt;
+    try testing.expectEqual(owned_param, dispatch.cond);
+    try testing.expectEqual(alias_a, dispatch.default_branch);
+    const copy = store.getCFStmtImmediate(GuardedList.at(store.getCFSwitchBranches(dispatch.branches), 0).body).join;
+    const hot = try shapeOf(store, copy.body, head.id, copy.id);
+    try testing.expectEqual(BodyShape{ .unchecked_sets = 1, .jumps_to_copy = 1 }, hot);
+    const cold = try shapeOf(store, alias_a, head.id, copy.id);
+    try testing.expectEqual(BodyShape{ .switches = 1, .checked_sets = 1, .unchecked_sets = 1, .jumps_to_head = 1 }, cold);
+}
+
+test "promote leaves a tail-recursive loop alone when a back edge passes the argument along unwritten" {
+    var f = try PromoteTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+
+    // proc(out, c):
+    //   loop J(out, c):
+    //     body: a = ref out; s = list_set(a, 0, 9)
+    //           switch c { 1: set out := s; jump J
+    //                      default: jump J }
+    //     remainder: jump J
+    // The default edge passes `out` along implicitly after its alias was
+    // consumed, so the set must keep its uniqueness check.
+    const out = try store.addLocal(.{ .layout_idx = f.list });
+    const c = try store.addLocal(.{ .layout_idx = .u8 });
+    const a = try store.addLocal(.{ .layout_idx = f.list });
+    const s = try store.addLocal(.{ .layout_idx = f.list });
+    const join_id = f.freshJoinPointId();
+
+    const written_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
+    const written = try store.addCFStmt(.{ .set_local = .{
+        .target = out,
+        .value = s,
+        .mode = .initialize_join_param,
+        .next = written_jump,
+    } }, .test_fixture);
+    const identity_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
+    const branch = try store.addCFStmt(.{ .switch_stmt = .{
+        .cond = c,
+        .branches = try store.addCFSwitchBranches(&.{.{ .value = 1, .body = written }}),
+        .default_branch = identity_jump,
+        .continuation = null,
+    } }, .test_fixture);
+    const site = try addSetSite(&f, s, a, branch);
+    const alias_a = try store.addCFStmt(.{ .assign_ref = .{ .target = a, .op = .local(out), .next = site } }, .test_fixture);
+    const entry_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
+    const loop = try store.addCFStmt(.{ .join = .{
+        .id = join_id,
+        .params = try store.addLocalSpan(&.{ out, c }),
+        .body = alias_a,
+        .remainder = entry_jump,
+    } }, .test_fixture);
+    _ = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .identity = LIR.ProcIdentity.forTest(5),
+        .args = try store.addLocalSpan(&.{ out, c }),
+        .body = .some(loop),
+        .ret_layout = f.list,
+    }, .none);
+
+    try run(store, &f.layouts);
+
+    const head = store.getCFStmtImmediate(loop).join;
+    try testing.expectEqual(@as(usize, 2), store.getLocalSpan(head.params).len);
+    try testing.expectEqual(entry_jump, head.remainder);
+    try testing.expect(store.getCFStmtImmediate(entry_jump).* == .jump);
+    const shape = try shapeOf(store, head.body, head.id, head.id);
+    try testing.expectEqual(@as(u32, 1), shape.checked_sets);
+    try testing.expectEqual(@as(u32, 0), shape.unchecked_sets);
+}
+
+test "promote leaves a tail-recursive loop alone when the argument feeds a chain edge before the loop" {
+    var f = try PromoteTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+
+    // proc(out, c):
+    //   loop J(out):
+    //     body: a = ref out; s = list_set(a, 0, 9); b = ref s
+    //           set out := b; jump J
+    //     remainder: switch c { 1: e = list_set(out, 0, 9); ret e
+    //                           default: jump J }
+    // The early exit's set runs before any entry measurement, so no metadata
+    // exists for it and the loop stays unpromoted.
+    const out = try store.addLocal(.{ .layout_idx = f.list });
+    const c = try store.addLocal(.{ .layout_idx = .u8 });
+    const a = try store.addLocal(.{ .layout_idx = f.list });
+    const s = try store.addLocal(.{ .layout_idx = f.list });
+    const b = try store.addLocal(.{ .layout_idx = f.list });
+    const e = try store.addLocal(.{ .layout_idx = f.list });
+    const join_id = f.freshJoinPointId();
+
+    const back_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
+    const back_set = try store.addCFStmt(.{ .set_local = .{
+        .target = out,
+        .value = b,
+        .mode = .initialize_join_param,
+        .next = back_jump,
+    } }, .test_fixture);
+    const alias_b = try store.addCFStmt(.{ .assign_ref = .{ .target = b, .op = .local(s), .next = back_set } }, .test_fixture);
+    const site = try addSetSite(&f, s, a, alias_b);
+    const alias_a = try store.addCFStmt(.{ .assign_ref = .{ .target = a, .op = .local(out), .next = site } }, .test_fixture);
+
+    const exit_ret = try store.addCFStmt(.{ .ret = .{ .value = e } }, .test_fixture);
+    const exit_site = try addSetSite(&f, e, out, exit_ret);
+    const entry_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } }, .test_fixture);
+    const branch = try store.addCFStmt(.{ .switch_stmt = .{
+        .cond = c,
+        .branches = try store.addCFSwitchBranches(&.{.{ .value = 1, .body = exit_site }}),
+        .default_branch = entry_jump,
+        .continuation = null,
+    } }, .test_fixture);
+    const loop = try store.addCFStmt(.{ .join = .{
+        .id = join_id,
+        .params = try store.addLocalSpan(&.{out}),
+        .body = alias_a,
+        .remainder = branch,
+    } }, .test_fixture);
+    _ = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .identity = LIR.ProcIdentity.forTest(6),
+        .args = try store.addLocalSpan(&.{ out, c }),
+        .body = .some(loop),
+        .ret_layout = f.list,
+    }, .none);
+
+    try run(store, &f.layouts);
+
+    const head = store.getCFStmtImmediate(loop).join;
+    try testing.expectEqual(@as(usize, 1), store.getLocalSpan(head.params).len);
+    try testing.expect(store.getCFStmtImmediate(entry_jump).* == .jump);
+    const shape = try shapeOf(store, loop, head.id, head.id);
+    try testing.expectEqual(@as(u32, 2), shape.checked_sets);
+    try testing.expectEqual(@as(u32, 0), shape.unchecked_sets);
+}
+
+fn countLowLevel(store: *LirStore, root: CFStmtId, op: LowLevelOp) Allocator.Error!u32 {
+    var stmts = try body_clone.ReachableStmts.init(store, root);
+    defer stmts.deinit();
+    var count: u32 = 0;
+    while (try stmts.next()) |id| {
+        const stmt = store.getCFStmtImmediate(id);
+        if (stmt.* == .assign_low_level and stmt.assign_low_level.op == op) count += 1;
+    }
+    return count;
+}
+
+/// An in-place update of `list` the way a checked index update lowers once
+/// inlined, merging its two arms into `merged` through the join `merge`:
+///
+/// ```text
+/// p = list_map_prepare_reuse(list); [boxed = struct { p }]; v = ref p
+/// q = list_owned_unique(v)
+/// switch q { 1: item = list_move_out_unsafe(p, i); w = list_map_write_unsafe(p, i, item)
+///               set merged := w; jump merge
+///            default: s = list_set(p, 0, 9); set merged := s; jump merge }
+/// ```
+const UpdateSite = struct {
+    head: CFStmtId,
+    query: CFStmtId,
+
+    fn build(f: *PromoteTest, list: LocalId, merged: LocalId, merge: LIR.JoinPointId, escape: bool) Allocator.Error!UpdateSite {
+        const store = &f.store;
+        const p = try store.addLocal(.{ .layout_idx = f.list });
+        const v = try store.addLocal(.{ .layout_idx = f.list });
+        const q = try store.addLocal(.{ .layout_idx = .u64 });
+        const index = try store.addLocal(.{ .layout_idx = .u64 });
+        const item = try store.addLocal(.{ .layout_idx = .u8 });
+        const w = try store.addLocal(.{ .layout_idx = f.list });
+        const s = try store.addLocal(.{ .layout_idx = f.list });
+
+        const write_jump = try store.addCFStmt(.{ .jump = .{ .target = merge } }, .test_fixture);
+        const write_merge = try store.addCFStmt(.{ .set_local = .{ .target = merged, .value = w, .mode = .initialize_join_param, .next = write_jump } }, .test_fixture);
+        const write = try store.addLowLevelStmt(w, .list_map_write_unsafe, &.{ p, index, item }, write_merge, .test_fixture);
+        const move_out = try store.addLowLevelStmt(item, .list_move_out_unsafe, &.{ p, index }, write, .test_fixture);
+
+        const set_jump = try store.addCFStmt(.{ .jump = .{ .target = merge } }, .test_fixture);
+        const set_merge = try store.addCFStmt(.{ .set_local = .{ .target = merged, .value = s, .mode = .initialize_join_param, .next = set_jump } }, .test_fixture);
+        const set_site = try addSetSite(f, s, p, set_merge);
+
+        const dispatch = try store.addCFStmt(.{ .switch_stmt = .{
+            .cond = q,
+            .branches = try store.addCFSwitchBranches(&.{.{ .value = 1, .body = move_out }}),
+            .default_branch = set_site,
+            .continuation = null,
+        } }, .test_fixture);
+        const query = try store.addLowLevelStmt(q, .list_owned_unique, &.{v}, dispatch, .test_fixture);
+        const view = try store.addCFStmt(.{ .assign_ref = .{ .target = v, .op = .local(p), .next = query } }, .test_fixture);
+        var after_prepare = view;
+        if (escape) {
+            const pair = try f.layouts.putStructFields(&[_]layout_mod.StructField{
+                .{ .index = 0, .layout = f.list },
+            });
+            const boxed = try store.addLocal(.{ .layout_idx = pair });
+            after_prepare = try store.addCFStmt(.{ .assign_struct = .{
+                .target = boxed,
+                .fields = try store.addLocalSpan(&.{p}),
+                .next = view,
+            } }, .test_fixture);
+        }
+        const prepare = try store.addLowLevelStmt(p, .list_map_prepare_reuse, &.{list}, after_prepare, .test_fixture);
+        const index_lit = try store.addCFStmt(.{ .assign_literal = .{
+            .target = index,
+            .value = .{ .i64_literal = .{ .value = 0, .layout_idx = .u64 } },
+            .next = prepare,
+        } }, .test_fixture);
+        return .{ .head = index_lit, .query = query };
+    }
+};
+
+/// `loop J(out): a = ref out; <update of a into m>; M(m): set out := m; jump J`
+/// entered by `set out := init; jump J`.
+const UpdateLoop = struct {
+    loop: CFStmtId,
+    body: CFStmtId,
+    site: UpdateSite,
+
+    fn build(f: *PromoteTest, escape: bool) Allocator.Error!UpdateLoop {
+        const store = &f.store;
+        const out = try store.addLocal(.{ .layout_idx = f.list });
+        const init_list = try store.addLocal(.{ .layout_idx = f.list });
+        const a = try store.addLocal(.{ .layout_idx = f.list });
+        const m = try store.addLocal(.{ .layout_idx = f.list });
+        const loop_id = f.freshJoinPointId();
+        const merge_id = f.freshJoinPointId();
+
+        const back_jump = try store.addCFStmt(.{ .jump = .{ .target = loop_id } }, .test_fixture);
+        const back_set = try store.addCFStmt(.{ .set_local = .{ .target = out, .value = m, .mode = .initialize_join_param, .next = back_jump } }, .test_fixture);
+        const site = try UpdateSite.build(f, a, m, merge_id, escape);
+        const alias_a = try store.addCFStmt(.{ .assign_ref = .{ .target = a, .op = .local(out), .next = site.head } }, .test_fixture);
+        const merge = try store.addCFStmt(.{ .join = .{
+            .id = merge_id,
+            .params = try store.addLocalSpan(&.{m}),
+            .body = back_set,
+            .remainder = alias_a,
+        } }, .test_fixture);
+
+        const entry_jump = try store.addCFStmt(.{ .jump = .{ .target = loop_id } }, .test_fixture);
+        const entry_set = try store.addCFStmt(.{ .set_local = .{ .target = out, .value = init_list, .mode = .initialize_join_param, .next = entry_jump } }, .test_fixture);
+        const loop = try store.addCFStmt(.{ .join = .{
+            .id = loop_id,
+            .params = try store.addLocalSpan(&.{out}),
+            .body = merge,
+            .remainder = entry_set,
+        } }, .test_fixture);
+        _ = try store.addProcSpec(.{
+            .name = store.freshSyntheticSymbol(),
+            .identity = LIR.ProcIdentity.forTest(7),
+            .args = LIR.LocalSpan.empty(),
+            .body = .some(loop),
+            .ret_layout = f.list,
+        }, .none);
+        return .{ .loop = loop, .body = merge, .site = site };
+    }
+};
+
+test "promote answers an ownership query on a carried list in the unique-only copy" {
+    var f = try PromoteTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+    const built = try UpdateLoop.build(&f, false);
+
+    try run(store, &f.layouts);
+
+    // The loop carries the list, its limit, and its owned flag, and its
+    // head dispatches on the flag.
+    const head = store.getCFStmtImmediate(built.loop).join;
+    const params = store.getLocalSpan(head.params);
+    try testing.expectEqual(@as(usize, 3), params.len);
+    const dispatch = store.getCFStmtImmediate(head.body).switch_stmt;
+    try testing.expectEqual(GuardedList.at(params, 2), dispatch.cond);
+    try testing.expectEqual(built.body, dispatch.default_branch);
+    const copy = store.getCFStmtImmediate(GuardedList.at(store.getCFSwitchBranches(dispatch.branches), 0).body).join;
+
+    // The copy asks nothing: the query is gone, its switch is the in-place
+    // arm alone, and the merged list returns to the copy.
+    const hot = try shapeOf(store, copy.body, head.id, copy.id);
+    try testing.expectEqual(BodyShape{ .jumps_to_copy = 1 }, hot);
+    try testing.expectEqual(@as(u32, 0), try countLowLevel(store, copy.body, .list_owned_unique));
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, copy.body, .list_map_prepare_reuse));
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, copy.body, .list_move_out_unsafe));
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, copy.body, .list_map_write_unsafe));
+
+    // The cold arm keeps the query as written, with both of its arms; the
+    // set in its copying arm is guarded by the flag.
+    const query = store.getCFStmtImmediate(built.site.query).assign_low_level;
+    try testing.expectEqual(LowLevelOp.list_owned_unique, query.op);
+    try testing.expect(store.getCFStmtImmediate(query.next).* == .switch_stmt);
+    const cold = try shapeOf(store, built.body, head.id, copy.id);
+    try testing.expectEqual(BodyShape{ .switches = 2, .checked_sets = 1, .unchecked_sets = 1, .jumps_to_head = 1 }, cold);
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, built.body, .list_owned_unique));
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, built.body, .list_map_write_unsafe));
+
+    // The transfer inside the body forwards the metadata it was handed:
+    // only the entry edge measures.
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, head.remainder, .list_slack_unique));
+    try testing.expectEqual(@as(u32, 0), try countLowLevel(store, built.body, .list_slack_unique));
+}
+
+test "promote ends the chain at a transfer whose result escapes" {
+    var f = try PromoteTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+
+    // The prepared list is also stored in a struct before the query, so the
+    // struct may hold it when the query runs. The transfer is then an
+    // unmodeled use of the loop's list and nothing past it is promoted.
+    const built = try UpdateLoop.build(&f, true);
+
+    try run(store, &f.layouts);
+
+    const unchanged = store.getCFStmtImmediate(built.loop).join;
+    try testing.expectEqual(@as(usize, 1), store.getLocalSpan(unchanged.params).len);
+    try testing.expectEqual(built.body, unchanged.body);
+    try testing.expectEqual(LowLevelOp.list_owned_unique, store.getCFStmtImmediate(built.site.query).assign_low_level.op);
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, built.body, .list_owned_unique));
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, built.body, .list_set));
+    try testing.expectEqual(@as(u32, 0), try countLowLevel(store, built.body, .list_set_in_place_unsafe));
+}
+
+test "promote keeps an ownership query on a list measured inside the copy" {
+    var f = try PromoteTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+
+    // loop J(out):
+    //   switch c { 1: s0 = list_set(out, 0, 9); set n := s0; jump N
+    //              default: set n := other; jump N }
+    //   N(n): <update of n into m>
+    //   M(m): set out := m; jump J
+    // `other` is a proc argument the chain never carried: the flag of `n`
+    // is measured on that edge, so inside the copy the query on `n` still
+    // has to ask.
+    const out = try store.addLocal(.{ .layout_idx = f.list });
+    const init_list = try store.addLocal(.{ .layout_idx = f.list });
+    const other = try store.addLocal(.{ .layout_idx = f.list });
+    const c = try store.addLocal(.{ .layout_idx = .u8 });
+    const s0 = try store.addLocal(.{ .layout_idx = f.list });
+    const n = try store.addLocal(.{ .layout_idx = f.list });
+    const m = try store.addLocal(.{ .layout_idx = f.list });
+    const loop_id = f.freshJoinPointId();
+    const merge_id = f.freshJoinPointId();
+    const incoming_id = f.freshJoinPointId();
+
+    const back_jump = try store.addCFStmt(.{ .jump = .{ .target = loop_id } }, .test_fixture);
+    const back_set = try store.addCFStmt(.{ .set_local = .{ .target = out, .value = m, .mode = .initialize_join_param, .next = back_jump } }, .test_fixture);
+    const site = try UpdateSite.build(&f, n, m, merge_id, false);
+    const merge = try store.addCFStmt(.{ .join = .{
+        .id = merge_id,
+        .params = try store.addLocalSpan(&.{m}),
+        .body = back_set,
+        .remainder = site.head,
+    } }, .test_fixture);
+
+    const carried_jump = try store.addCFStmt(.{ .jump = .{ .target = incoming_id } }, .test_fixture);
+    const carried_set = try store.addCFStmt(.{ .set_local = .{ .target = n, .value = s0, .mode = .initialize_join_param, .next = carried_jump } }, .test_fixture);
+    const carried_site = try addSetSite(&f, s0, out, carried_set);
+    const foreign_jump = try store.addCFStmt(.{ .jump = .{ .target = incoming_id } }, .test_fixture);
+    const foreign_set = try store.addCFStmt(.{ .set_local = .{ .target = n, .value = other, .mode = .initialize_join_param, .next = foreign_jump } }, .test_fixture);
+    const branch = try store.addCFStmt(.{ .switch_stmt = .{
+        .cond = c,
+        .branches = try store.addCFSwitchBranches(&.{.{ .value = 1, .body = carried_site }}),
+        .default_branch = foreign_set,
+        .continuation = null,
+    } }, .test_fixture);
+    const incoming = try store.addCFStmt(.{ .join = .{
+        .id = incoming_id,
+        .params = try store.addLocalSpan(&.{n}),
+        .body = merge,
+        .remainder = branch,
+    } }, .test_fixture);
+
+    const entry_jump = try store.addCFStmt(.{ .jump = .{ .target = loop_id } }, .test_fixture);
+    const entry_set = try store.addCFStmt(.{ .set_local = .{ .target = out, .value = init_list, .mode = .initialize_join_param, .next = entry_jump } }, .test_fixture);
+    const loop = try store.addCFStmt(.{ .join = .{
+        .id = loop_id,
+        .params = try store.addLocalSpan(&.{out}),
+        .body = incoming,
+        .remainder = entry_set,
+    } }, .test_fixture);
+    _ = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .identity = LIR.ProcIdentity.forTest(8),
+        .args = try store.addLocalSpan(&.{ other, c }),
+        .body = .some(loop),
+        .ret_layout = f.list,
+    }, .none);
+
+    try run(store, &f.layouts);
+
+    const head = store.getCFStmtImmediate(loop).join;
+    const dispatch = store.getCFStmtImmediate(head.body).switch_stmt;
+    const copy = store.getCFStmtImmediate(GuardedList.at(store.getCFSwitchBranches(dispatch.branches), 0).body).join;
+
+    // The copy still holds the query (beside the foreign edge's
+    // measurement), its switch with both arms, and the flag-guarded set of
+    // its copying arm. Only the set on the loop's own parameter, whose flag
+    // the head tested, stores unchecked. Both arms leave a uniquely owned
+    // list, so the back edge stays in the copy.
+    const hot = try shapeOf(store, copy.body, head.id, copy.id);
+    try testing.expectEqual(BodyShape{ .switches = 3, .checked_sets = 1, .unchecked_sets = 2, .jumps_to_copy = 1 }, hot);
+    try testing.expectEqual(@as(u32, 2), try countLowLevel(store, copy.body, .list_owned_unique));
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, copy.body, .list_map_write_unsafe));
+}
+
+test "promote merges metadata into a join parameter that one edge assigns directly" {
+    var f = try PromoteTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+
+    // loop J(out):
+    //   switch c { 1: a = ref out; <update of a into m>
+    //              default: m = ref out; jump M }
+    //   M(m): set out := m; jump J
+    // `m` is written as a parameter by the update's arms and assigned
+    // directly by the arm that skips the update, so it cannot take its
+    // metadata through parameter writes alone.
+    const out = try store.addLocal(.{ .layout_idx = f.list });
+    const init_list = try store.addLocal(.{ .layout_idx = f.list });
+    const c = try store.addLocal(.{ .layout_idx = .u8 });
+    const a = try store.addLocal(.{ .layout_idx = f.list });
+    const m = try store.addLocal(.{ .layout_idx = f.list });
+    const loop_id = f.freshJoinPointId();
+    const merge_id = f.freshJoinPointId();
+
+    const back_jump = try store.addCFStmt(.{ .jump = .{ .target = loop_id } }, .test_fixture);
+    const back_set = try store.addCFStmt(.{ .set_local = .{ .target = out, .value = m, .mode = .initialize_join_param, .next = back_jump } }, .test_fixture);
+    const site = try UpdateSite.build(&f, a, m, merge_id, false);
+    const alias_a = try store.addCFStmt(.{ .assign_ref = .{ .target = a, .op = .local(out), .next = site.head } }, .test_fixture);
+    const skip_jump = try store.addCFStmt(.{ .jump = .{ .target = merge_id } }, .test_fixture);
+    const skip = try store.addCFStmt(.{ .assign_ref = .{ .target = m, .op = .local(out), .next = skip_jump } }, .test_fixture);
+    const branch = try store.addCFStmt(.{ .switch_stmt = .{
+        .cond = c,
+        .branches = try store.addCFSwitchBranches(&.{.{ .value = 1, .body = alias_a }}),
+        .default_branch = skip,
+        .continuation = null,
+    } }, .test_fixture);
+    const merge = try store.addCFStmt(.{ .join = .{
+        .id = merge_id,
+        .params = try store.addLocalSpan(&.{m}),
+        .body = back_set,
+        .remainder = branch,
+    } }, .test_fixture);
+
+    const entry_jump = try store.addCFStmt(.{ .jump = .{ .target = loop_id } }, .test_fixture);
+    const entry_set = try store.addCFStmt(.{ .set_local = .{ .target = out, .value = init_list, .mode = .initialize_join_param, .next = entry_jump } }, .test_fixture);
+    const loop = try store.addCFStmt(.{ .join = .{
+        .id = loop_id,
+        .params = try store.addLocalSpan(&.{out}),
+        .body = merge,
+        .remainder = entry_set,
+    } }, .test_fixture);
+    _ = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .identity = LIR.ProcIdentity.forTest(9),
+        .args = try store.addLocalSpan(&.{c}),
+        .body = .some(loop),
+        .ret_layout = f.list,
+    }, .none);
+
+    try run(store, &f.layouts);
+
+    // The loop is promoted and versioned; the merge keeps its one parameter
+    // and every definition of it sets the shared limit and flag locals.
+    const head = store.getCFStmtImmediate(loop).join;
+    try testing.expectEqual(@as(usize, 3), store.getLocalSpan(head.params).len);
+    try testing.expectEqual(@as(usize, 1), store.getLocalSpan(store.getCFStmtImmediate(merge).join.params).len);
+    const skip_limit = store.getCFStmtImmediate(store.getCFStmtImmediate(skip).assign_ref.next).assign_ref;
+    const skip_flag = store.getCFStmtImmediate(skip_limit.next).assign_ref;
+    try testing.expectEqual(skip_jump, skip_flag.next);
+    const back_limit = store.getCFStmtImmediate(back_set).set_local;
+    try testing.expectEqual(skip_limit.target, back_limit.value);
+    try testing.expectEqual(skip_flag.target, store.getCFStmtImmediate(back_limit.next).set_local.value);
+
+    // In the copy the query is answered and the merged list returns to the
+    // copy: every definition of the merged flag is one there.
+    const dispatch = store.getCFStmtImmediate(head.body).switch_stmt;
+    const copy = store.getCFStmtImmediate(GuardedList.at(store.getCFSwitchBranches(dispatch.branches), 0).body).join;
+    const hot = try shapeOf(store, copy.body, head.id, copy.id);
+    try testing.expectEqual(BodyShape{ .switches = 1, .jumps_to_copy = 1 }, hot);
+    try testing.expectEqual(@as(u32, 0), try countLowLevel(store, copy.body, .list_owned_unique));
+    try testing.expectEqual(@as(u32, 1), try countLowLevel(store, copy.body, .list_map_write_unsafe));
 }

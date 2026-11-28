@@ -14,11 +14,12 @@ const core = @import("lir_core");
 const Arc = @import("arc.zig");
 const ImmortalLocals = @import("immortal_locals.zig");
 const TailDrive = @import("tail_drive.zig");
+const FrameCallables = @import("frame_callables.zig");
 const ProcPasses = @import("proc_passes.zig");
+const RangeProve = @import("range_prove.zig");
 const ReturnSlot = @import("return_slot.zig");
 const ErasedOwner = @import("erased_owner.zig");
 const StrAppend = @import("str_append.zig");
-const SingleUseInline = @import("single_use_inline.zig");
 
 /// Completed compile-time scalar roots a forked continuation lowers as literals.
 pub const CompletedScalarValues = postcheck.ComptimeScalarValues.CompletedScalarValues;
@@ -90,8 +91,49 @@ pub const boxyTemplateWorkerIdentity = postcheck.Boxy.Lower.templateWorkerIdenti
 /// What reading a `.boxy` program's function values takes after lowering.
 pub const BoxyStoredFunctions = postcheck.Boxy.StoredFn.Retained;
 pub const BoxyFunctionMetadata = postcheck.Boxy.StoredFn;
+/// The constant schema of the roots the checked-value writer completes.
+pub const BoxyValueSchema = postcheck.Boxy.ValueSchema;
 /// The names the modules of one link give their workers and nominal types.
 pub const BoxyModuleNames = postcheck.Boxy.Types.ModuleNames;
+
+/// The host boundary of a `.boxy` platform entrypoint: the layouts its
+/// arguments and result are committed at and the named schemas they reach,
+/// for a caller that runs the entrypoint from unit images without lowering
+/// its program (design.md "Unit-Image Glue Execution").
+pub const BoxyEntrypointBoundary = struct {
+    schema: postcheck.Boxy.EntrypointSchema,
+    runtime_value_schemas: RuntimeValueSchemaStore,
+
+    /// The boundary of the entrypoint `request` asks for, a root of the root
+    /// module of `modules`.
+    pub fn init(allocator: Allocator, modules: CheckedModuleSet, request: checked.RootRequest, target_usize: base.target.TargetUsize) Allocator.Error!BoxyEntrypointBoundary {
+        var schema = try postcheck.Boxy.EntrypointSchema.init(allocator, modules, request, target_usize);
+        const named = schema.named;
+        schema.named = postcheck.SolvedLirLower.RuntimeSchemaStore.init(allocator);
+        return .{ .schema = schema, .runtime_value_schemas = convertRuntimeSchemas(allocator, named) };
+    }
+
+    pub fn deinit(self: *BoxyEntrypointBoundary) void {
+        self.runtime_value_schemas.deinit();
+        self.schema.deinit();
+        self.* = undefined;
+    }
+
+    /// The store every layout of the boundary is committed in.
+    pub fn layouts(self: *const BoxyEntrypointBoundary) *const @import("layout").Store {
+        return self.schema.layouts();
+    }
+
+    /// The layout of each argument, in order.
+    pub fn argLayouts(self: *const BoxyEntrypointBoundary) []const @import("layout").Idx {
+        return self.schema.arg_layouts;
+    }
+
+    /// The layout of the result.
+    pub fn retLayout(self: *const BoxyEntrypointBoundary) @import("layout").Idx {
+        return self.schema.ret_layout;
+    }
+};
 
 /// Resource failure while lowering checked modules to LIR, plus the one
 /// checked input this entrance rejects outright: see
@@ -148,6 +190,8 @@ pub const WorkMetrics = struct {
     monotype_runs: u32 = 0,
     solved_runs: u32 = 0,
     lir_continuations: u32 = 0,
+    /// What the range prover's work on the lowered procedures cost.
+    range_prove: RangeProve.WorkStats = .{},
 };
 
 /// Dev keeps standalone procedures eligible for reuse in other programs.
@@ -156,7 +200,7 @@ pub const dev_inline_mode: InlineMode = .procedures;
 
 /// SpecConstr's clone-inlining scope for dev builds and compile-time
 /// evaluation.
-pub const dev_spec_constr_clone_inlining: SpecConstrCloneInlining = .iterator_fusion;
+pub const dev_spec_constr_clone_inlining: SpecConstrCloneInlining = .no_calls;
 
 /// Target settings and checked module state for the checked-to-LIR pipeline.
 pub const TargetConfig = struct {
@@ -200,8 +244,12 @@ pub const TargetConfig = struct {
     /// checks, so optimized consumers enable them and the rest keep the
     /// checks and skip the analysis.
     prove_uniqueness: bool = false,
+    /// Drop the retains and releases of string literals, which are image
+    /// data. They only ever decide to do nothing at runtime, so optimized
+    /// consumers drop them and the rest keep them and skip the analysis.
+    immortal_string_literals: bool = false,
     /// Direct-call inlining scope for SpecConstr's value-aware clones.
-    /// Optimized builds use `.all_calls`; dev builds use `.iterator_fusion`
+    /// Optimized builds use `.all_calls`; dev builds use `.no_calls`
     /// so post-check time and emitted program size stay bounded. Consulted
     /// only when `inline_mode` is not `.none`, since that is what gates
     /// SpecConstr itself.
@@ -221,8 +269,6 @@ pub const TargetConfig = struct {
     /// compile-time evaluation leave it off so the in-place branches are
     /// dropped during lowering.
     list_in_place_map: bool = false,
-    /// Preserve source-level procedure names in LIR for runtime diagnostics.
-    proc_debug_names: bool = false,
     /// Record each platform entrypoint's host boundary digest in its root
     /// metadata. Only consumers that compare host interfaces across hot
     /// reload generations ask for it.
@@ -265,6 +311,11 @@ pub const TargetConfig = struct {
     /// is enabled for optimized builds and kept off for dev and compile-time
     /// evaluation.
     tag_reachability: bool = false,
+    /// The consumer reads the cold-default marks of switches on `bool_likely`
+    /// conditions, so the `branch_expectation` pass runs. Only the LLVM
+    /// backend reads them; dev builds, the interpreter and compile-time
+    /// evaluation turn this off.
+    reads_branch_expectations: bool = true,
     /// Elide checks proven always-safe by unsigned value-range analysis. This
     /// is enabled for optimized builds and kept off for dev and compile-time
     /// evaluation.
@@ -327,7 +378,7 @@ pub const Timing = struct {
     std_io: std.Io,
     demand_mutex: std.Io.Mutex = .init,
     demand: DemandMetrics = .{},
-    detailed_monotype_body: bool = false,
+    detailed: bool = false,
     monotype_diagnostics_mutex: std.Io.Mutex = .init,
     monotype_diagnostics: postcheck.Monotype.Lower.Diagnostics = .{},
     solved_lir_parallel_mutex: std.Io.Mutex = .init,
@@ -382,15 +433,117 @@ pub const Timing = struct {
     boxy_unit_restore_ns: TimingCounter = .{},
     lir_passes_ns: TimingCounter = .{},
     arc_ns: TimingCounter = .{},
+    /// Detailed Boxy lowering steps and work counts (`BoxyTiming`).
+    boxy_steps_ns: [BoxyTiming.step_count]TimingCounter = @splat(.{}),
+    boxy_workers_by_kind: [BoxyTiming.worker_kind_count]TimingCounter = @splat(.{}),
+    boxy_tables_filled: TimingCounter = .{},
+    /// Detailed module unit steps, summed over units (`UnitStep`).
+    unit_steps_ns: [unit_step_count]TimingCounter = @splat(.{}),
+    units_mutex: std.Io.Mutex = .init,
+    /// The slowest module units, and the Builtin module's unit.
+    units: UnitRecords = .{},
+    /// Detailed LIR pass steps outside the procedure-local phases.
+    pass_steps_ns: [pass_step_count]TimingCounter = @splat(.{}),
+    /// Detailed procedure-local phase measures, by `ProcPassMeasure` and
+    /// phase.
+    proc_passes: [proc_pass_measure_count][ProcPasses.phase_count]TimingCounter = @splat(@splat(.{})),
+    /// Detailed ARC insertion steps (`ArcTiming.Step`).
+    arc_steps_ns: [ArcTiming.step_count]TimingCounter = @splat(.{}),
+    /// Detailed steps of the specializing stages (`LssStep`).
+    lss_steps_ns: [lss_step_count]TimingCounter = @splat(.{}),
+    /// Detailed native code generation steps and counts of module units.
+    codegen_steps_ns: [codegen_step_count]TimingCounter = @splat(.{}),
+    codegen_counts: [codegen_count_count]TimingCounter = @splat(.{}),
+    /// Code bytes and statements emitted, by LIR statement kind.
+    stmt_bytes: [stmt_kind_count]TimingCounter = @splat(.{}),
+    stmt_counts: [stmt_kind_count]TimingCounter = @splat(.{}),
 
     pub fn init(std_io: std.Io) Timing {
         return .{ .std_io = std_io };
     }
 
-    /// Enable fine-grained, per-node Monotype body timing. This is opt-in
-    /// because timestamping interleaved body work has measurable overhead.
-    pub fn enableDetailedMonotypeBody(self: *Timing) void {
-        self.detailed_monotype_body = true;
+    /// Enable fine-grained timing: per-node Monotype body timing and every
+    /// detailed step and work count a stage records. This is opt-in because
+    /// timestamping interleaved work has measurable overhead.
+    pub fn enableDetail(self: *Timing) void {
+        self.detailed = true;
+    }
+
+    /// `timing` when it records detailed steps.
+    pub fn detailOf(timing: ?*Timing) ?*Timing {
+        const active = timing orelse return null;
+        return if (active.detailed) active else null;
+    }
+
+    /// A clock reading for a detailed step, or zero when `timing` records
+    /// no detail.
+    pub fn startDetail(timing: ?*Timing) i64 {
+        const active = detailOf(timing) orelse return 0;
+        return active.start();
+    }
+
+    /// The nanoseconds since `started_ns`, which `startDetail` read.
+    pub fn elapsedSince(self: *const Timing, started_ns: i64) u64 {
+        return @intCast(@max(0, timingNowNs(self.std_io) - started_ns));
+    }
+
+    /// Add the time since `started_ns` to unit step `step` when `timing`
+    /// records detail.
+    pub fn finishUnitStep(timing: ?*Timing, started_ns: i64, step: UnitStep) void {
+        const active = detailOf(timing) orelse return;
+        active.unit_steps_ns[@backingInt(step)].add(active.elapsedSince(started_ns));
+    }
+
+    /// Add the time since `started_ns` to codegen step `step` when `timing`
+    /// records detail.
+    pub fn finishCodegenStep(timing: ?*Timing, started_ns: i64, step: CodegenStep) void {
+        const active = detailOf(timing) orelse return;
+        active.codegen_steps_ns[@backingInt(step)].add(active.elapsedSince(started_ns));
+    }
+
+    /// Fold one lowering's procedure-local phase measures.
+    pub fn addProcPasses(self: *Timing, passes: *const ProcPasses.Timing) void {
+        const columns = [proc_pass_measure_count]*const [ProcPasses.phase_count]u64{
+            &passes.wall_ns,     &passes.prepare_ns,        &passes.rewrite_ns, &passes.worker_ns,
+            &passes.capacity_ns, &passes.segment_worker_ns, &passes.commit_ns,  &passes.visited,
+            &passes.changed,
+        };
+        for (&self.proc_passes, columns) |*row, values| {
+            for (row, values) |*counter, value| counter.add(value);
+        }
+    }
+
+    /// Add `amount` to codegen count `count` when `timing` records detail.
+    pub fn addCodegenCount(timing: ?*Timing, count: CodegenCount, amount: u64) void {
+        const active = detailOf(timing) orelse return;
+        active.codegen_counts[@backingInt(count)].add(amount);
+    }
+
+    /// Fold one ARC insertion's detailed steps.
+    pub fn addArc(self: *Timing, arc: *const ArcTiming) void {
+        addCounters(ArcTiming.step_count, &self.arc_steps_ns, arc.steps_ns);
+    }
+
+    /// Fold one Boxy lowering's detailed steps and counts.
+    pub fn addBoxy(self: *Timing, boxy: *const BoxyTiming) void {
+        for (&self.boxy_steps_ns, boxy.steps_ns) |*counter, value| counter.add(value);
+        for (&self.boxy_workers_by_kind, boxy.workers_by_kind) |*counter, value| counter.add(value);
+        self.boxy_tables_filled.add(boxy.tables_filled);
+    }
+
+    /// Keep `record` if it is among the slowest units or is the Builtin
+    /// module's unit.
+    pub fn addUnitRecord(self: *Timing, record: UnitRecord) void {
+        self.units_mutex.lockUncancelable(self.std_io);
+        defer self.units_mutex.unlock(self.std_io);
+        self.units.add(record);
+    }
+
+    fn unitsSnapshot(self: *const Timing) UnitRecords {
+        const mutable = @constCast(self);
+        mutable.units_mutex.lockUncancelable(self.std_io);
+        defer mutable.units_mutex.unlock(self.std_io);
+        return self.units;
     }
 
     pub fn snapshot(self: *const Timing) TimingSnapshot {
@@ -448,6 +601,23 @@ pub const Timing = struct {
             .lir_pass_parallel = self.lirPassParallelSnapshot(),
             .arc_parallel = self.arcParallelSnapshot(),
             .demand = self.demandSnapshot(),
+            .boxy_steps_ns = loadCounters(BoxyTiming.step_count, &self.boxy_steps_ns),
+            .boxy_workers_by_kind = loadCounters(BoxyTiming.worker_kind_count, &self.boxy_workers_by_kind),
+            .boxy_tables_filled = self.boxy_tables_filled.load(),
+            .unit_steps_ns = loadCounters(unit_step_count, &self.unit_steps_ns),
+            .units = self.unitsSnapshot(),
+            .pass_steps_ns = loadCounters(pass_step_count, &self.pass_steps_ns),
+            .arc_steps_ns = loadCounters(ArcTiming.step_count, &self.arc_steps_ns),
+            .lss_steps_ns = loadCounters(lss_step_count, &self.lss_steps_ns),
+            .codegen_steps_ns = loadCounters(codegen_step_count, &self.codegen_steps_ns),
+            .codegen_counts = loadCounters(codegen_count_count, &self.codegen_counts),
+            .stmt_bytes = loadCounters(stmt_kind_count, &self.stmt_bytes),
+            .stmt_counts = loadCounters(stmt_kind_count, &self.stmt_counts),
+            .proc_passes = proc_passes: {
+                var values: [proc_pass_measure_count][ProcPasses.phase_count]u64 = undefined;
+                for (&self.proc_passes, &values) |*row, *out| out.* = loadCounters(ProcPasses.phase_count, row);
+                break :proc_passes values;
+            },
         };
     }
 
@@ -503,6 +673,20 @@ pub const Timing = struct {
         self.lir_passes_ns.add(snapshot_value.lir_passes_ns);
         self.arc_ns.add(snapshot_value.arc_ns);
         self.addMonotypeDiagnostics(snapshot_value.monotype_diagnostics);
+        addCounters(BoxyTiming.step_count, &self.boxy_steps_ns, snapshot_value.boxy_steps_ns);
+        addCounters(BoxyTiming.worker_kind_count, &self.boxy_workers_by_kind, snapshot_value.boxy_workers_by_kind);
+        self.boxy_tables_filled.add(snapshot_value.boxy_tables_filled);
+        addCounters(unit_step_count, &self.unit_steps_ns, snapshot_value.unit_steps_ns);
+        addCounters(pass_step_count, &self.pass_steps_ns, snapshot_value.pass_steps_ns);
+        addCounters(ArcTiming.step_count, &self.arc_steps_ns, snapshot_value.arc_steps_ns);
+        addCounters(lss_step_count, &self.lss_steps_ns, snapshot_value.lss_steps_ns);
+        addCounters(codegen_step_count, &self.codegen_steps_ns, snapshot_value.codegen_steps_ns);
+        addCounters(codegen_count_count, &self.codegen_counts, snapshot_value.codegen_counts);
+        addCounters(stmt_kind_count, &self.stmt_bytes, snapshot_value.stmt_bytes);
+        addCounters(stmt_kind_count, &self.stmt_counts, snapshot_value.stmt_counts);
+        for (&self.proc_passes, snapshot_value.proc_passes) |*row, values| addCounters(ProcPasses.phase_count, row, values);
+        for (snapshot_value.units.slowest[0..snapshot_value.units.len]) |record| self.addUnitRecord(record);
+        if (snapshot_value.units.builtin) |record| self.addUnitRecord(record);
     }
 
     fn start(self: *const Timing) i64 {
@@ -638,6 +822,253 @@ pub const Timing = struct {
 
 const TimingCounter = base.ConcurrentU64;
 
+fn loadCounters(comptime n: usize, counters: *const [n]TimingCounter) [n]u64 {
+    var values: [n]u64 = undefined;
+    for (counters, &values) |*counter, *value| value.* = counter.load();
+    return values;
+}
+
+fn addCounters(comptime n: usize, counters: *[n]TimingCounter, values: [n]u64) void {
+    for (counters, values) |*counter, value| counter.add(value);
+}
+
+/// Detailed timing of one Boxy lowering.
+pub const BoxyTiming = postcheck.Boxy.Lower.Timing;
+
+/// Detailed timing of the procedure-local LIR phases of one lowering.
+pub const ProcPassTiming = ProcPasses.Timing;
+
+/// Detailed timing of one ARC insertion.
+pub const ArcTiming = Arc.Timing;
+
+/// A step of a module unit's native code generation that detailed timing
+/// itemizes, summed over units.
+pub const CodegenStep = enum {
+    backend_setup,
+    /// Indexing the unit's data and procedures before the first run.
+    procedure_setup,
+    /// Elapsed time of the ordered runs that compile and append procedures.
+    procedure_runs,
+    /// Worker code generator setup, summed over lanes.
+    procedure_worker_setup,
+    /// Stack planning and instruction emission, summed over lanes.
+    procedure_emit,
+    /// Fragment extraction, summed over lanes.
+    procedure_extract,
+    /// Worker capacity over the runs that no procedure used.
+    procedure_idle,
+    /// Appending fragments to the unit's code, in order.
+    procedure_commit,
+    /// Resolving the unit's symbolic references.
+    procedure_resolve,
+    entrypoints,
+    /// Finishing the unit's code before lifting it into pieces.
+    finish_image,
+    /// The data catalog pieces are extracted against.
+    catalog,
+    piece_extraction,
+    content_naming,
+    /// Host-visible data, helper aliases, and source files of the pieces.
+    piece_data,
+    /// Composing the pieces into an object for the unit image.
+    composition,
+    dwarf,
+    /// Encoding a relocatable object; a unit image is built from its
+    /// composition's object contents with no object encoded.
+    object_encoding,
+    /// Building the unit image from its composition's object contents.
+    unit_image,
+    /// Encoding the pieces of a unit whose entry holds them.
+    pieces_encoding,
+};
+
+/// The number of `CodegenStep` members.
+pub const codegen_step_count = @typeInfo(CodegenStep).@"enum".field_names.len;
+
+/// A step of the specializing (`.lss`) stages that detailed timing
+/// itemizes.
+pub const LssStep = enum {
+    /// Lambda-set solving's analysis solve, which finds row-joined types.
+    lambda_analysis_solve,
+    lambda_solver_setup,
+    /// The real lambda-set solve and its finishing passes.
+    lambda_solve,
+};
+
+/// The number of `LssStep` members.
+pub const lss_step_count = @typeInfo(LssStep).@"enum".field_names.len;
+
+/// A byte or item count of module units' native code generation.
+pub const CodegenCount = enum {
+    procedures_emitted,
+    helpers_emitted,
+    code_bytes_emitted,
+    object_bytes,
+    image_bytes,
+    pieces_bytes,
+    cache_entry_bytes,
+};
+
+/// The number of `CodegenCount` members.
+pub const codegen_count_count = @typeInfo(CodegenCount).@"enum".field_names.len;
+
+/// The number of LIR statement kinds.
+pub const stmt_kind_count = @typeInfo(std.meta.Tag(LIR.CFStmt)).@"enum".field_names.len;
+
+/// A whole-program step of the LIR passes, or of the work after ARC, that
+/// detailed timing itemizes.
+pub const PassStep = enum {
+    /// Resolving `.boxy` erased calls' ownership sources.
+    erased_owner,
+    return_slot,
+    str_append,
+    tag_reachability,
+    /// Dropping procedures and data nothing references, before ARC.
+    reachable_procs_before_arc,
+    /// Solving which function parameters never outlive their call, and
+    /// building the callables passed only to them in their frames.
+    frame_callables,
+    tail_drive,
+    /// Dropping procedures and data nothing references, after ARC.
+    reachable_procs_after_arc,
+    immortal_locals,
+    comptime_value_guards,
+    /// LIR dumps and censuses, which developer diagnostics enable.
+    lir_diagnostics,
+};
+
+/// The number of `PassStep` members.
+pub const pass_step_count = @typeInfo(PassStep).@"enum".field_names.len;
+
+/// A per-phase measure of the procedure-local LIR phases
+/// (`ProcPasses.Timing`).
+pub const ProcPassMeasure = enum { wall, prepare, rewrite, worker, capacity, segment_worker, commit, visited, changed };
+
+/// The number of `ProcPassMeasure` members.
+pub const proc_pass_measure_count = @typeInfo(ProcPassMeasure).@"enum".field_names.len;
+
+/// A detailed LIR pass step in progress; records nothing when `timing`
+/// records no detail.
+pub const PassStepScope = struct {
+    timing: ?*Timing,
+    started_ns: i64,
+    step: PassStep,
+
+    /// Start `step`, reading the clock only when `timing` records detail.
+    pub fn begin(timing: ?*Timing, step: PassStep) PassStepScope {
+        const active = Timing.detailOf(timing) orelse return .{ .timing = null, .started_ns = 0, .step = step };
+        return .{ .timing = active, .started_ns = active.start(), .step = step };
+    }
+
+    /// Record the step's duration. Idempotent.
+    pub fn end(self: *PassStepScope) void {
+        const active = self.timing orelse return;
+        active.pass_steps_ns[@backingInt(self.step)].add(active.elapsedSince(self.started_ns));
+        self.timing = null;
+    }
+};
+
+/// A step of one module unit that detailed timing itemizes (design.md
+/// "Caching Under `.boxy`").
+pub const UnitStep = enum {
+    /// Digesting the unit's inputs and computing its object cache key.
+    key,
+    /// Reading and decoding the unit's object from the object cache.
+    restore,
+    /// Boxy lowering of the unit.
+    lower,
+    /// LIR passes over the unit.
+    lir_passes,
+    /// ARC insertion into the unit.
+    arc,
+    /// Building the unit's static data exports.
+    static_data,
+    /// Native or wasm code generation of the unit's procedures.
+    codegen,
+    /// Building the unit image from its code pieces.
+    image,
+    /// The unit's export records and their digest.
+    export_records,
+    /// Encoding the unit's pieces and cache entry.
+    encode,
+    /// Writing the encoded entry to the object cache.
+    cache_write,
+    /// Between the unit's offer and the last of its imports' objects
+    /// becoming known.
+    import_wait,
+    /// Between the unit's imports being known and a worker starting it.
+    queue_wait,
+};
+
+/// The number of `UnitStep` members.
+pub const unit_step_count = @typeInfo(UnitStep).@"enum".field_names.len;
+
+/// One module unit's detailed step durations.
+pub const UnitRecord = struct {
+    name_bytes: [48]u8 = undefined,
+    name_len: u8 = 0,
+    restored: bool = false,
+    steps_ns: [unit_step_count]u64 = @splat(0),
+
+    /// A record of the unit of `module_name`, with no steps yet.
+    pub fn init(module_name: []const u8, restored: bool) UnitRecord {
+        var record: UnitRecord = .{ .restored = restored };
+        record.name_len = @intCast(@min(module_name.len, record.name_bytes.len));
+        @memcpy(record.name_bytes[0..record.name_len], module_name[0..record.name_len]);
+        return record;
+    }
+
+    /// The unit's module name.
+    pub fn name(self: *const UnitRecord) []const u8 {
+        return self.name_bytes[0..self.name_len];
+    }
+
+    /// The unit's own work, excluding the time it waited for its imports.
+    pub fn workNs(self: *const UnitRecord) u64 {
+        var total: u64 = 0;
+        for (self.steps_ns, 0..) |value, index| {
+            if (index == @backingInt(UnitStep.import_wait) or index == @backingInt(UnitStep.queue_wait)) continue;
+            total +|= value;
+        }
+        return total;
+    }
+};
+
+/// The slowest module units by their own work, slowest first, and the
+/// Builtin module's unit, which every compilation has.
+pub const UnitRecords = struct {
+    /// How many of the slowest units are kept.
+    pub const capacity = 10;
+
+    slowest: [capacity]UnitRecord = undefined,
+    len: u8 = 0,
+    builtin: ?UnitRecord = null,
+
+    /// Keep `record` among the slowest, or fold it into the Builtin record.
+    pub fn add(self: *UnitRecords, record: UnitRecord) void {
+        if (std.mem.eql(u8, record.name(), "Builtin")) {
+            if (self.builtin) |*kept| {
+                for (&kept.steps_ns, record.steps_ns) |*total, value| total.* +|= value;
+            } else self.builtin = record;
+            return;
+        }
+        const work = record.workNs();
+        var position: usize = self.len;
+        while (position > 0 and self.slowest[position - 1].workNs() < work) position -= 1;
+        if (position >= capacity) return;
+        const kept = @min(@as(usize, self.len), capacity - 1);
+        var index = kept;
+        while (index > position) : (index -= 1) self.slowest[index] = self.slowest[index - 1];
+        self.slowest[position] = record;
+        self.len = @intCast(kept + 1);
+    }
+
+    /// Whether every recorded unit's steps are zero.
+    pub fn isEmpty(self: *const UnitRecords) bool {
+        return self.len == 0 and self.builtin == null;
+    }
+};
+
 /// Immutable checked-to-LIR timings for progress reporting.
 pub const TimingSnapshot = struct {
     monotype_ns: u64 = 0,
@@ -678,6 +1109,24 @@ pub const TimingSnapshot = struct {
     arc_ns: u64 = 0,
     monotype_diagnostics: postcheck.Monotype.Lower.Diagnostics = .{},
     demand: DemandMetrics = .{},
+    boxy_steps_ns: [BoxyTiming.step_count]u64 = @splat(0),
+    boxy_workers_by_kind: [BoxyTiming.worker_kind_count]u64 = @splat(0),
+    boxy_tables_filled: u64 = 0,
+    unit_steps_ns: [unit_step_count]u64 = @splat(0),
+    units: UnitRecords = .{},
+    pass_steps_ns: [pass_step_count]u64 = @splat(0),
+    proc_passes: [proc_pass_measure_count][ProcPasses.phase_count]u64 = @splat(@splat(0)),
+    arc_steps_ns: [ArcTiming.step_count]u64 = @splat(0),
+    lss_steps_ns: [lss_step_count]u64 = @splat(0),
+    codegen_steps_ns: [codegen_step_count]u64 = @splat(0),
+    codegen_counts: [codegen_count_count]u64 = @splat(0),
+    stmt_bytes: [stmt_kind_count]u64 = @splat(0),
+    stmt_counts: [stmt_kind_count]u64 = @splat(0),
+
+    /// The recorded `measure` of procedure-local phase `phase`.
+    pub fn procPass(self: *const TimingSnapshot, measure: ProcPassMeasure, phase: LirPassPhase) u64 {
+        return self.proc_passes[@backingInt(measure)][@backingInt(phase)];
+    }
 };
 
 /// A post-check stage `--timings` itemizes on its own line.
@@ -791,8 +1240,8 @@ test "pipeline timing aggregates SpecConstr totals and preserves peaks" {
         .bodies_committed = 4,
         .expressions_committed = 30,
         .peak_retained_shards = 2,
-        .committed_by_phase = .{ 1, 2, 3 },
-        .changed_by_phase = .{ 1, 1, 2 },
+        .committed_by_phase = .{ 1, 2 },
+        .changed_by_phase = .{ 1, 1 },
     };
     timing.addSpecConstrParallel(first);
     var aggregate = Timing.init(std.testing.io);
@@ -1040,7 +1489,7 @@ pub const Observers = struct {
         return observers;
     }
 
-    fn applyTo(self: Observers, target: *TargetConfig) void {
+    fn applyTo(self: *const Observers, target: *TargetConfig) void {
         inline for (@typeInfo(Observers).@"struct".field_names) |field_name| {
             @field(target, field_name) = @field(self, field_name);
         }
@@ -1074,10 +1523,10 @@ pub const SolvedPolicy = struct {
 pub const LirPolicy = struct {
     specialize_arc_modes: bool,
     prove_uniqueness: bool,
+    immortal_string_literals: bool,
     consume_dead_boxes: bool,
     zero_dict_seed: bool,
     list_in_place_map: bool,
-    proc_debug_names: bool,
     host_boundary_digests: bool,
     site_code_keys: bool,
     owned_proc_signatures: bool,
@@ -1087,6 +1536,7 @@ pub const LirPolicy = struct {
     thread_confined_rc: bool,
     layout_request_const_plans: bool,
     tag_reachability: bool,
+    reads_branch_expectations: bool,
     prove_ranges: bool,
 
     pub fn fromTarget(target: TargetConfig) LirPolicy {
@@ -1432,11 +1882,11 @@ pub fn prepareCheckedModulesMonotype(
     else
         null;
     var monotype_diagnostics: ?postcheck.Monotype.Lower.Diagnostics = if (target.timing) |timing|
-        if (timing.detailed_monotype_body) .{} else null
+        if (timing.detailed) .{} else null
     else
         null;
     if (monotype_timing) |*detail| {
-        detail.body_work_timing_enabled = target.timing.?.detailed_monotype_body;
+        detail.body_work_timing_enabled = target.timing.?.detailed;
     }
     var demand_counters: postcheck.Monotype.Lower.DemandCounters = .{};
     const mono = monotype: {
@@ -1455,7 +1905,6 @@ pub fn prepareCheckedModulesMonotype(
             modules,
             rootRequests(roots, layout_requests, static_data_requests),
             .{
-                .proc_debug_names = target.proc_debug_names or LirDump.filter() != null or SpecCensus.enabled() or ProcCensus.enabled(),
                 .post_check_executor = target.post_check_executor,
                 .comptime_value_reads = target.comptime_value_reads,
                 .demand_driven_comptime_roots = target.demand_driven_comptime_roots,
@@ -1540,13 +1989,7 @@ pub fn prepareMonotypeToSolved(prepared: PreparedMonotype) Allocator.Error!Prepa
         const usage = try postcheck.MonotypeLifted.SpecConstr.runAndCollectProcedureUsageWithOptions(allocator, &lifted, target.spec_constr_clone_inlining, spec_constr_options);
         spec_constr_timing_scope.end();
         break :blk usage;
-    } else blk: {
-        var spec_constr_timing_scope = PipelineStageScope.begin(target.timing, .spec_constr);
-        defer spec_constr_timing_scope.end();
-        try postcheck.MonotypeLifted.SpecConstr.runIteratorFusionWithOptions(allocator, &lifted, spec_constr_options);
-        spec_constr_timing_scope.end();
-        break :blk postcheck.MonotypeLifted.SpecConstr.OwnedProcedureUsage.empty(allocator);
-    };
+    } else postcheck.MonotypeLifted.SpecConstr.OwnedProcedureUsage.empty(allocator);
     defer procedure_usage.deinit();
     if (target.timing) |timing| timing.addSpecConstrParallel(spec_constr_metrics.?.*);
 
@@ -1559,16 +2002,23 @@ pub fn prepareMonotypeToSolved(prepared: PreparedMonotype) Allocator.Error!Prepa
     const lifted_input = lifted;
     lifted_owned = false;
     lifted = undefined;
-    var solved = try postcheck.LambdaSolved.Solve.run(allocator, lifted_input);
+    var solve_detail: ?postcheck.LambdaSolved.Solve.Timing = if (Timing.detailOf(target.timing)) |timing| .{ .std_io = timing.std_io } else null;
+    var solved = try postcheck.LambdaSolved.Solve.runTimed(allocator, lifted_input, if (solve_detail) |*detail| detail else null);
+    if (solve_detail) |detail| {
+        const timing = target.timing.?;
+        timing.lss_steps_ns[@backingInt(LssStep.lambda_analysis_solve)].add(detail.analysis_ns);
+        timing.lss_steps_ns[@backingInt(LssStep.lambda_solver_setup)].add(detail.setup_ns);
+        timing.lss_steps_ns[@backingInt(LssStep.lambda_solve)].add(detail.solve_ns);
+    }
     errdefer solved.deinit();
     lambda_solve_timing_scope.end();
 
-    var inline_plan_timing_scope = PipelineStageScope.begin(
-        if (target.inline_mode != .none) target.timing else null,
-        .inline_plan,
-    );
+    var inline_plan_timing_scope = PipelineStageScope.begin(target.timing, .inline_plan);
     defer inline_plan_timing_scope.end();
-    const inline_plan = try postcheck.SolvedInline.analyze(allocator, target.inline_mode, procedure_usage.view(), &solved);
+    // Inline decisions are made per function at each instance of its group.
+    const spec_usage = try postcheck.LambdaSolved.Instances.procedureUsage(allocator, &solved, procedure_usage.items);
+    defer allocator.free(spec_usage);
+    const inline_plan = try postcheck.SolvedInline.analyze(allocator, target.inline_mode, spec_usage, &solved);
     inline_plan_timing_scope.end();
 
     return .{
@@ -1745,7 +2195,6 @@ fn generateConsumerLir(prepared: *PreparedSolved, consumer: Consumer) LowerResou
         .inline_expects = target.inline_expects,
         .list_in_place_map = target.list_in_place_map,
         .dict_seed_mode = if (target.zero_dict_seed) .comptime_zero else .runtime,
-        .proc_debug_names = target.proc_debug_names or LirDump.filter() != null or SpecCensus.enabled() or ProcCensus.enabled(),
         .host_boundary_digests = target.host_boundary_digests,
         .layout_request_const_plans = target.layout_request_const_plans,
         .test_plan_metadata = prepared.test_plan_metadata,
@@ -1786,16 +2235,58 @@ fn runProcedurePass(
     result: *LirProgram.Result,
     target: TargetConfig,
     phase: ProcPasses.Phase,
+    timing: ?*ProcPasses.Timing,
 ) Allocator.Error!void {
-    try ProcPasses.run(
+    try runProcedureSegment(allocator, result, target, &.{phase}, timing, null);
+}
+
+fn runProcedureSegment(
+    allocator: Allocator,
+    result: *LirProgram.Result,
+    target: TargetConfig,
+    phases: []const ProcPasses.Phase,
+    timing: ?*ProcPasses.Timing,
+    guarded_reads: ?*const std.DynamicBitSetUnmanaged,
+) Allocator.Error!void {
+    if (phases.len == 0) return;
+    try ProcPasses.runSegmentTimed(
         allocator,
         &result.store,
         &result.layouts,
-        phase,
+        phases,
         target.post_check_executor,
         target.lir_pass_parallel_metrics_out,
+        timing,
+        if (target.work_metrics) |metrics| &metrics.range_prove else null,
+        guarded_reads,
     );
 }
+
+/// Fusible procedure-local phases gathered into one segment until a phase
+/// that cannot share its procedures' tasks, or a whole-program step, comes
+/// next (`ProcPasses.fusible`).
+const PendingSegment = struct {
+    phases: [ProcPasses.phase_count]ProcPasses.Phase = undefined,
+    len: usize = 0,
+
+    fn add(self: *PendingSegment, phase: ProcPasses.Phase) void {
+        std.debug.assert(ProcPasses.fusible(phase));
+        self.phases[self.len] = phase;
+        self.len += 1;
+    }
+
+    fn flush(self: *PendingSegment, allocator: Allocator, result: *LirProgram.Result, target: TargetConfig, timing: ?*ProcPasses.Timing) Allocator.Error!void {
+        return self.flushGuarded(allocator, result, target, timing, null);
+    }
+
+    /// Flush a segment whose `prune_join_params` phase keeps the reads of
+    /// `guarded_reads` (`ProcPasses.runSegmentTimed`).
+    fn flushGuarded(self: *PendingSegment, allocator: Allocator, result: *LirProgram.Result, target: TargetConfig, timing: ?*ProcPasses.Timing, guarded_reads: ?*const std.DynamicBitSetUnmanaged) Allocator.Error!void {
+        const len = self.len;
+        self.len = 0;
+        try runProcedureSegment(allocator, result, target, self.phases[0..len], timing, guarded_reads);
+    }
+};
 
 fn finishLoweredOutput(
     allocator: Allocator,
@@ -1816,68 +2307,98 @@ fn finishLoweredOutput(
         if (pass_target.lir_pass_parallel_metrics_out) |metrics| timing.addLirPassParallel(metrics.*);
     };
 
-    // A `.boxy` body's owned erased calls name their closure as their
-    // ownership source; the allocation's root is reached through the
-    // representation-transparent aliases lowering emitted (design.md
-    // "Destination-Passing Results and Allocation Reuse").
-    if (target.specialization_strategy != .lss) {
-        const store = &lowered.lir_result.store;
-        for (0..store.procSpecCount()) |index| {
-            const proc_id: LIR.LirProcSpecId = @fromBackingInt(@intCast(index));
-            try ErasedOwner.resolveProcReuseSources(allocator, store, &lowered.lir_result.layouts, proc_id);
-        }
-    }
+    var proc_pass_detail: ?ProcPasses.Timing = if (Timing.detailOf(target.timing)) |timing| .{ .std_io = timing.std_io } else null;
+    defer if (proc_pass_detail) |*detail| target.timing.?.addProcPasses(detail);
+    const pass_timing: ?*ProcPasses.Timing = if (proc_pass_detail) |*detail| detail else null;
+    // Consecutive fusible phases share one task per procedure
+    // (`PendingSegment`); each other phase ends the segment before it.
+    var segment: PendingSegment = .{};
     // Branch expectations are read off the lowered switches before any
     // rewrite reshapes them.
-    try runProcedurePass(allocator, &lowered.lir_result, pass_target, .branch_expectation);
+    if (target.reads_branch_expectations) segment.add(.branch_expectation);
     // TRMC/TCE must rewrite recursive procs before ARC insertion: it deletes
     // calls and changes allocation sites, and ARC panics on pre-existing RC
     // statements (see src/lir/trmc.zig).
-    try runProcedurePass(allocator, &lowered.lir_result, pass_target, .trmc);
-    if (target.specialization_strategy == .lss) {
-        if (target.inline_mode == .none) {
-            try SingleUseInline.run(&lowered.lir_result);
-            try runProcedurePass(allocator, &lowered.lir_result, pass_target, .forwarding_join);
-        }
-        // Every inline mode produces tag-valued joins whose body matches the
-        // tag at once: the iterator-fusion clone in `.none`, and the checked
-        // wrappers substituted at their call sites in `.wrappers`, whose
-        // `Try` results the caller matches immediately.
-        if (target.fuse_tag_cases) {
-            try runProcedurePass(allocator, &lowered.lir_result, pass_target, .tag_fusion);
-        }
+    segment.add(.trmc);
+    // Every strategy and inline mode produces tag-valued joins whose body
+    // matches the tag at once: the checked wrappers substituted at their call
+    // sites in `.wrappers`, whose `Try` results the caller matches
+    // immediately, every inlined call that returns a tag, and a flag loop's
+    // merge join under either strategy, whose header switches on the flag.
+    if (target.fuse_tag_cases) {
+        try segment.flush(allocator, &lowered.lir_result, pass_target, pass_timing);
+        try runProcedurePass(allocator, &lowered.lir_result, pass_target, .tag_fusion, pass_timing);
     }
     // Every mode: a join parameter nothing reads still keeps its written
     // value alive past any consuming call on the entry path. Scalarization
     // first gives each variable carried out of a construct with its result
     // its own parameter, so pruning can remove it.
-    try runProcedurePass(allocator, &lowered.lir_result, pass_target, .scalarize);
-    try runProcedurePass(allocator, &lowered.lir_result, pass_target, .prune_join_params);
+    segment.add(.scalarize);
+    segment.add(.prune_join_params);
+    {
+        // A read of a compile-time value whose evaluation can fail is guarded
+        // after ARC, so pruning keeps it even when nothing reads its value.
+        // The slots are a function of the program's static data alone, which
+        // no phase of the segment changes.
+        var guarded_reads = try @import("comptime_value_guards.zig").guardedSlots(allocator, &lowered.lir_result, if (frozen.*) |*data| data else null);
+        defer if (guarded_reads) |*set| set.deinit(allocator);
+        // Loop append promotion reads the bodies of the procedures a loop
+        // calls, so it runs after every procedure's earlier phases committed.
+        try segment.flushGuarded(allocator, &lowered.lir_result, pass_target, pass_timing, if (guarded_reads) |*set| set else null);
+    }
     if (target.promote_loop_appends.enabled()) {
-        try runProcedurePass(allocator, &lowered.lir_result, pass_target, .loop_append);
+        try runProcedurePass(allocator, &lowered.lir_result, pass_target, .loop_append, pass_timing);
     }
     if (target.prove_ranges) {
-        try runProcedurePass(allocator, &lowered.lir_result, pass_target, .range);
+        try runProcedurePass(allocator, &lowered.lir_result, pass_target, .range, pass_timing);
     }
     if (target.reuse_boxes) {
-        try runProcedurePass(allocator, &lowered.lir_result, pass_target, .box_reuse);
+        try runProcedurePass(allocator, &lowered.lir_result, pass_target, .box_reuse, pass_timing);
     }
+    // No procedure-local rewrite runs after this, and the steps below append
+    // and replace rows without recording body chunks.
+    lowered.lir_result.store.releaseBodyChunks();
+    var return_slot_scope = PassStepScope.begin(target.timing, .return_slot);
     try ReturnSlot.run(&lowered.lir_result.store, &lowered.lir_result.layouts);
+    return_slot_scope.end();
+    var str_append_scope = PassStepScope.begin(target.timing, .str_append);
     try StrAppend.run(&lowered.lir_result.store, &lowered.lir_result.layouts);
+    str_append_scope.end();
     if (target.tag_reachability) {
+        var tag_reachability_scope = PassStepScope.begin(target.timing, .tag_reachability);
         try TagReachability.run(&lowered.lir_result);
+        tag_reachability_scope.end();
     }
+    var reachable_scope = PassStepScope.begin(target.timing, .reachable_procs_before_arc);
     if (frozen.*) |*data| {
         try ReachableProcs.runWithFrozen(&lowered.lir_result, data);
     } else {
         try ReachableProcs.run(&lowered.lir_result);
     }
+    reachable_scope.end();
+    // Every erased call names the allocation root its closure's unit belongs
+    // to, reached through the representation-transparent aliases of the
+    // final body: rewrites above (inlining, join forwarding and pruning) can
+    // change those aliases, so the roots are resolved once they have all run
+    // (design.md "Destination-Passing Results and Allocation Reuse").
+    var erased_owner_scope = PassStepScope.begin(target.timing, .erased_owner);
+    {
+        const store = &lowered.lir_result.store;
+        var scratch = ErasedOwner.Scratch.init(allocator);
+        defer scratch.deinit();
+        for (0..store.procSpecCount()) |index| {
+            const proc_id: LIR.LirProcSpecId = @fromBackingInt(@intCast(index));
+            try ErasedOwner.resolveProcReuseSources(&scratch, store, &lowered.lir_result.layouts, proc_id);
+        }
+    }
+    erased_owner_scope.end();
     lir_passes_timing_scope.end();
 
     var arc_timing_scope = PipelineStageScope.begin(target.timing, .arc);
     defer arc_timing_scope.end();
     var local_arc_metrics: ArcParallelMetrics = .{};
     const arc_metrics = arcMetricsOutput(target, &local_arc_metrics);
+    var arc_detail: ?ArcTiming = if (Timing.detailOf(target.timing)) |timing| .{ .std_io = timing.std_io } else null;
     var arc_roots = std.ArrayList(LIR.LirProcSpecId).empty;
     defer arc_roots.deinit(allocator);
     try arc_roots.appendSlice(allocator, lowered.lir_result.root_procs.items);
@@ -1907,7 +2428,10 @@ fn finishLoweredOutput(
             try arc_roots.append(allocator, proc);
         };
     }
-    try Arc.insert(&lowered.lir_result.store, &lowered.lir_result.layouts, .{
+    const store_allocator = lowered.lir_result.store.allocator;
+    var published_variants = std.ArrayList(Arc.PublishedOutcomeVariant).empty;
+    defer published_variants.deinit(store_allocator);
+    const arc_result = try Arc.insert(&lowered.lir_result.store, &lowered.lir_result.layouts, .{
         .roots = arc_roots.items,
         .specialize = target.specialize_arc_modes,
         .prove_uniqueness = target.prove_uniqueness,
@@ -1915,28 +2439,72 @@ fn finishLoweredOutput(
         .thread_confined_rc = target.thread_confined_rc,
         .post_check_executor = if (target.post_check_executor) |*executor| executor else null,
         .metrics_out = arc_metrics,
+        .timing = if (arc_detail) |*detail| detail else null,
+        .published_variants_out = &published_variants,
     });
+    // The only procedures ARC exports are the outcome-restitution variants
+    // it publishes (design.md "Outcome-Conditioned Argument Restitution").
+    // A variant's export record is importer-visible exactly when its
+    // worker's is: an importer demands the variant only through a call of
+    // the worker, which it makes only of a visible worker.
+    if (published_variants.items.len != 0) {
+        const result = &lowered.lir_result;
+        try result.boxy_exports.ensureUnusedCapacity(result.store.allocator, @intCast(published_variants.items.len));
+        for (published_variants.items) |published| {
+            try result.exported_procs.append(result.store.allocator, published.variant);
+            const worker_export = result.boxy_exports.get(result.store.getProcSpecImmediate(published.worker).identity) orelse
+                checkedPipelineInvariant("an exported worker publishing an outcome variant has no export record of its unit");
+            result.boxy_exports.putAssumeCapacity(result.store.getProcSpecImmediate(published.variant).identity, .{ .visible = worker_export.visible });
+        }
+    }
     if (target.timing) |timing| timing.addArcParallel(arc_metrics.?.*);
+    if (arc_detail) |*detail| target.timing.?.addArc(detail);
     arc_timing_scope.end();
 
-    try TailDrive.run(allocator, &lowered.lir_result.store, &.{entered_from_outside.items});
+    // Which function parameters never outlive their call, and the callables
+    // built in their caller's frame for them (design.md "Frame Callables").
+    // Both read the deferred and frame-replacing calls ARC emitted, after
+    // the certifier checked ARC's placement, and run before tail drive
+    // stamps where pending calls run; a frame callable's capture release
+    // is a reference-count statement, which a handed-up call may precede.
+    if (target.specialization_strategy == .boxy) {
+        var frame_scope = PassStepScope.begin(target.timing, .frame_callables);
+        defer frame_scope.end();
+        const pairs = try allocator.alloc(FrameCallables.PublishedPair, published_variants.items.len);
+        defer allocator.free(pairs);
+        for (published_variants.items, pairs) |published, *pair| pair.* = .{ .worker = published.worker, .variant = published.variant };
+        try FrameCallables.solveParams(allocator, &lowered.lir_result.store, &lowered.lir_result.layouts, pairs);
+        _ = try FrameCallables.markFrames(allocator, &lowered.lir_result.store, &lowered.lir_result.layouts);
+    }
+
+    var tail_drive_scope = PassStepScope.begin(target.timing, .tail_drive);
+    try TailDrive.run(allocator, &lowered.lir_result.store, &.{entered_from_outside.items}, arc_result.deferred_erased_calls);
+    tail_drive_scope.end();
 
     // Retain only procedures and data referenced after ARC.
+    var reachable_after_scope = PassStepScope.begin(target.timing, .reachable_procs_after_arc);
     if (frozen.*) |*data| {
         try ReachableProcs.runWithFrozen(&lowered.lir_result, data);
     } else {
         try ReachableProcs.run(&lowered.lir_result);
     }
+    reachable_after_scope.end();
 
     // After the certifier has checked ARC's ledger, so that what it verified
     // is the placement ARC produced.
-    _ = try ImmortalLocals.elide(allocator, &lowered.lir_result.store);
+    var immortal_scope = PassStepScope.begin(target.timing, .immortal_locals);
+    _ = try ImmortalLocals.elide(allocator, &lowered.lir_result.store, if (target.immortal_string_literals) .static_data_and_strings else .static_data);
+    immortal_scope.end();
 
+    var guards_scope = PassStepScope.begin(target.timing, .comptime_value_guards);
     try @import("comptime_value_guards.zig").insert(allocator, &lowered.lir_result, if (frozen.*) |*data| data else null);
+    guards_scope.end();
 
+    var diagnostics_scope = PassStepScope.begin(target.timing, .lir_diagnostics);
     try LirDump.run(&lowered.lir_result);
     if (SpecCensus.enabled()) try SpecCensus.runLir(allocator, &lowered.lir_result);
     ProcCensus.run(&lowered.lir_result, target.specialization_strategy);
+    diagnostics_scope.end();
 
     if (root_count != 0 and lowered.lir_result.root_procs.items.len == 0) {
         checkedPipelineInvariant("explicit root set produced no LIR roots");
@@ -1983,6 +2551,7 @@ pub const PreparedBoxy = struct {
         std.debug.assert(target.specialization_strategy == .boxy);
         const allocator = self.allocator;
         var boxy_timing_scope = PipelineStageScope.begin(target.timing, .boxy_lowering);
+        var boxy_detail: ?BoxyTiming = if (Timing.detailOf(target.timing)) |timing| .{ .std_io = timing.std_io } else null;
         var output = try postcheck.Boxy.run(allocator, .{
             .modules = self.modules,
             .roots = rootRequests(self.roots, self.layout_requests, self.static_data_requests),
@@ -1991,15 +2560,16 @@ pub const PreparedBoxy = struct {
                 .run => .run,
                 .omit => .omit,
             },
-            .proc_debug_names = target.proc_debug_names or LirDump.filter() != null or SpecCensus.enabled() or ProcCensus.enabled(),
             .list_in_place_map = target.list_in_place_map,
             .host_boundary_digests = target.host_boundary_digests,
             .compile_time = target.boxy_compile_time,
             .stored_functions = target.boxy_stored_functions,
             .function_unit = target.boxy_function_unit,
             .unit = if (target.boxy_unit) |unit| .{ .module = unit } else .program,
+            .timing = if (boxy_detail) |*detail| detail else null,
         });
         boxy_timing_scope.end();
+        if (boxy_detail) |*detail| target.timing.?.addBoxy(detail);
         try LirDump.run(&output.lir_result);
         var lowered: struct {
             lir_result: LirProgram.Result,
@@ -2091,13 +2661,13 @@ pub fn requireHostedProceduresBound(
     }
 
     const root_view = checked.importedView(modules.root.module);
-    const bindings = platformHostedBindings(root_view, modules) orelse return;
+    const bindings = platformHostedBindings(&root_view, modules) orelse return;
 
-    if (!hostedProceduresBound(root_view, bindings)) return error.HostedFunctionNotBound;
-    for (modules.imports) |imported| {
+    if (!hostedProceduresBound(&root_view, bindings)) return error.HostedFunctionNotBound;
+    for (modules.imports) |*imported| {
         if (!hostedProceduresBound(imported, bindings)) return error.HostedFunctionNotBound;
     }
-    for (modules.root.relation_modules) |relation| {
+    for (modules.root.relation_modules) |*relation| {
         if (!hostedProceduresBound(relation, bindings)) return error.HostedFunctionNotBound;
     }
 }
@@ -2105,24 +2675,24 @@ pub fn requireHostedProceduresBound(
 /// The hosted bindings of the one platform module visible to this lowering, or
 /// null when no platform module is in scope and so no section binds anything.
 fn platformHostedBindings(
-    root_view: checked.ImportedModuleView,
+    root_view: *const checked.ImportedModuleView,
     modules: CheckedModuleSet,
 ) ?[]const checked.HostedBinding {
-    if (root_view.module_identity.kind == .platform) return root_view.hosted_bindings.bindings;
+    if (root_view.module_identity.kind == .platform) return root_view.hosted_bindings.bindings.items();
     for (modules.imports) |imported| {
-        if (imported.module_identity.kind == .platform) return imported.hosted_bindings.bindings;
+        if (imported.module_identity.kind == .platform) return imported.hosted_bindings.bindings.items();
     }
     for (modules.root.relation_modules) |relation| {
-        if (relation.module_identity.kind == .platform) return relation.hosted_bindings.bindings;
+        if (relation.module_identity.kind == .platform) return relation.hosted_bindings.bindings.items();
     }
     return null;
 }
 
 fn hostedProceduresBound(
-    view: checked.ImportedModuleView,
+    view: *const checked.ImportedModuleView,
     bindings: []const checked.HostedBinding,
 ) bool {
-    for (view.hosted_procs.procs) |proc| {
+    for (view.hosted_procs.procs.items()) |proc| {
         var bound = false;
         for (bindings) |binding| {
             if (!std.mem.eql(u8, &binding.target_checked_module.bytes, &view.key.bytes)) continue;
@@ -2196,7 +2766,7 @@ fn collectStaticDataRequests(
 
     if (!include_provided) return try requests.toOwnedSlice(allocator);
 
-    for (root.provided_exports.exports) |provided| {
+    for (root.provided_exports.exports.items()) |provided| {
         switch (provided) {
             .data => |data| {
                 try requests.append(allocator, .{
@@ -2470,8 +3040,8 @@ const SpecCensus = if (!base.dev_diagnostics.available) struct {
         if (key.export_name.get()) |export_name| return info.names.exportNameText(export_name);
         const def_idx = key.source_def_idx.get() orelse return "?";
         const def = info.env.store.getDef(@fromBackingInt(@intCast(def_idx)));
-        return switch (info.env.store.getPattern(def.pattern)) {
-            inline .assign, .var_assign => |assign| info.env.getIdent(assign.ident),
+        return switch (info.env.store.patternKind(def.pattern)) {
+            inline .assign, .var_assign => |kind| info.env.getIdent(@field(info.env.store.patternView(def.pattern), @tagName(kind)).get(.ident)),
             .as,
             .applied_tag,
             .nominal,
@@ -2539,7 +3109,7 @@ const SpecCensus = if (!base.dev_diagnostics.available) struct {
         return null;
     }
 
-    fn checkedTypeHasVariable(allocator: Allocator, types: checked.CheckedTypeStoreView, root: checked.CheckedTypeId) Allocator.Error!bool {
+    fn checkedTypeHasVariable(allocator: Allocator, types: *const checked.CheckedTypeStoreView, root: checked.CheckedTypeId) Allocator.Error!bool {
         var visited = collections.DenseMap(checked.CheckedTypeId, void).init(allocator);
         defer visited.deinit();
         var stack = std.ArrayList(checked.CheckedTypeId).empty;
@@ -2827,10 +3397,10 @@ const SpecCensus = if (!base.dev_diagnostics.available) struct {
                     module_kind = info.kind;
                     module_name = info.name;
                     callable_name = defName(info, proc_base);
-                    if (callable_kind_is_template and sub < info.templates.templates.items.len) {
-                        const source_fn_ty = info.templates.templates.items[sub].checked_fn_root;
+                    if (callable_kind_is_template and sub < info.templates.templates.items().len) {
+                        const source_fn_ty = info.templates.templates.items()[sub].checked_fn_root;
                         if (info.types.containsId(source_fn_ty)) {
-                            poly = if (try checkedTypeHasVariable(allocator, info.types, source_fn_ty)) 1 else 0;
+                            poly = if (try checkedTypeHasVariable(allocator, &info.types, source_fn_ty)) 1 else 0;
                         }
                     }
                 }

@@ -31,19 +31,16 @@ TYPE MISMATCH - issue_9075.md:6:11:6:12
 			(line-break)
 			(annotation-start code-block)
 			(indent 1)
-			(text "b")
+			(text "item")
 			(line-break)
 			(indent 1)
 			(text "  where [")
 			(line-break)
 			(indent 1)
-			(text "    b.from_numeral : Numeral -> Try(b, [InvalidNumeral(Str)]),")
+			(text "    item.from_numeral : Numeral -> Try(item, [InvalidNumeral(Str)]),")
 			(line-break)
 			(indent 1)
-			(text "    b.plus : b, c -> b,")
-			(line-break)
-			(indent 1)
-			(text "    c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)]),")
+			(text "    item.plus : item, item -> item,")
 			(line-break)
 			(indent 1)
 			(text "  ]")
@@ -148,7 +145,7 @@ main = "${y}"
 				(p-assign (ident "thing"))
 				(p-assign (ident "f")))
 			(e-block
-				(e-call (constraint-fn-var 260)
+				(e-call (constraint-fn-var 251)
 					(e-lookup-local
 						(p-assign (ident "f")))
 					(e-lookup-local
@@ -163,7 +160,7 @@ main = "${y}"
 				(ty-rigid-var-lookup (ty-rigid-var (name "b"))))))
 	(d-let
 		(p-assign (ident "y"))
-		(e-call (constraint-fn-var 283)
+		(e-call (constraint-fn-var 256)
 			(e-lookup-local
 				(p-assign (ident "call")))
 			(e-num (value "5"))
@@ -171,7 +168,7 @@ main = "${y}"
 				(args
 					(p-assign (ident "i")))
 				(e-block
-					(e-dispatch-call (method "plus") (constraint-fn-var 281)
+					(e-dispatch-call (method "plus") (constraint-fn-var 255)
 						(receiver
 							(e-lookup-local
 								(p-assign (ident "i"))))

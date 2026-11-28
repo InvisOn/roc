@@ -890,14 +890,9 @@ pub fn findSymbolByNameAndKind(self: *const Self, name: []const u8, kind: WasmLi
     return null;
 }
 
-fn isUndefinedFunctionNamed(self: *const Self, sym: WasmLinking.SymInfo, name: []const u8) bool {
-    if (sym.kind != .function or !sym.isUndefined()) return false;
-    const sym_name = sym.resolveName(self.imports.items, self.global_imports.items, self.table_imports.items) orelse return false;
-    return std.mem.eql(u8, sym_name, name);
-}
-
 fn resolveUndefinedFunctionSymbols(
     self: *Self,
+    undefined_functions: *UndefinedSymbols,
     name: []const u8,
     defined_function_index: u32,
     defined_flags: u32,
@@ -910,20 +905,20 @@ fn resolveUndefinedFunctionSymbols(
     if (defined_local_index >= self.func_type_indices.items.len) return error.InvalidSection;
     const defined_type = self.func_type_indices.items[defined_local_index];
 
-    var first_match: ?u32 = null;
-    for (self.linking.symbol_table.items, 0..) |sym, i| {
-        if (!self.isUndefinedFunctionNamed(sym, name)) continue;
+    const pending = undefined_functions.map.getPtr(name) orelse return null;
+    for (pending.items) |sym_idx| {
+        const sym = self.linking.symbol_table.items[sym_idx];
         if (sym.index >= self.imports.items.len) return error.InvalidSection;
         if (self.imports.items[sym.index].type_idx != defined_type) {
             return error.FunctionTypeMismatch;
         }
-        if (first_match == null) first_match = @intCast(i);
     }
 
-    if (first_match == null) return null;
-
-    for (self.linking.symbol_table.items) |*sym| {
-        if (!self.isUndefinedFunctionNamed(sym.*, name)) continue;
+    var matches = undefined_functions.take(name).?;
+    defer matches.deinit(undefined_functions.gpa);
+    const first_match = matches.items[0];
+    for (matches.items) |sym_idx| {
+        const sym = &self.linking.symbol_table.items[sym_idx];
         const imported_function_index = sym.index;
         for (self.table_func_indices.items) |*table_function_index| {
             if (table_function_index.* == imported_function_index) {
@@ -943,20 +938,21 @@ fn resolveUndefinedFunctionSymbols(
     return first_match;
 }
 
-/// Tracks the currently-undefined data symbols in one module, grouped by
-/// resolved name, so `resolveUndefinedDataSymbols` can find and rewrite them in
-/// amortized O(1) instead of rescanning the whole symbol table for each defined
-/// data symbol. Index lists are kept in ascending order (symbols are recorded
-/// as they are appended), so the head of each list is the first-match index.
-const UndefinedDataSymbols = struct {
+/// Tracks the currently-undefined symbols of one kind (data or function) in
+/// one module, grouped by resolved name, so `resolveUndefinedDataSymbols` and
+/// `resolveUndefinedFunctionSymbols` can find and rewrite them in amortized
+/// O(1) instead of rescanning the whole symbol table for each defined symbol.
+/// Index lists are kept in ascending order (symbols are recorded as they are
+/// appended), so the head of each list is the first-match index.
+const UndefinedSymbols = struct {
     gpa: Allocator,
     map: std.StringHashMap(std.ArrayList(u32)),
 
-    fn init(gpa: Allocator) UndefinedDataSymbols {
+    fn init(gpa: Allocator) UndefinedSymbols {
         return .{ .gpa = gpa, .map = std.StringHashMap(std.ArrayList(u32)).init(gpa) };
     }
 
-    fn deinit(self: *UndefinedDataSymbols) void {
+    fn deinit(self: *UndefinedSymbols) void {
         var it = self.map.valueIterator();
         while (it.next()) |list| list.deinit(self.gpa);
         self.map.deinit();
@@ -964,7 +960,7 @@ const UndefinedDataSymbols = struct {
 
     /// Record an undefined data symbol at `index` under `name`. Indices are
     /// recorded in ascending order.
-    fn add(self: *UndefinedDataSymbols, name: []const u8, index: u32) Allocator.Error!void {
+    fn add(self: *UndefinedSymbols, name: []const u8, index: u32) Allocator.Error!void {
         const gop = try self.map.getOrPut(name);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(self.gpa, index);
@@ -973,7 +969,7 @@ const UndefinedDataSymbols = struct {
     /// Remove and return the ascending index list of undefined data symbols for
     /// `name`, transferring ownership to the caller. The symbols become defined
     /// once rewritten, so their entry is dropped from this index.
-    fn take(self: *UndefinedDataSymbols, name: []const u8) ?std.ArrayList(u32) {
+    fn take(self: *UndefinedSymbols, name: []const u8) ?std.ArrayList(u32) {
         const entry = self.map.fetchRemove(name) orelse return null;
         return entry.value;
     }
@@ -981,7 +977,7 @@ const UndefinedDataSymbols = struct {
 
 fn resolveUndefinedDataSymbols(
     self: *Self,
-    undefined_data: *UndefinedDataSymbols,
+    undefined_data: *UndefinedSymbols,
     name: []const u8,
     segment_index: u32,
     data_offset: u32,
@@ -1035,10 +1031,11 @@ fn appendFuncBody(self: *Self, body: []const u8) Allocator.Error!void {
 }
 
 fn storeFuncBodyBytes(self: *Self, body: []const u8) Allocator.Error!FuncBody {
-    const start = self.func_body_bytes.items.len;
-    if (body.len > std.math.maxInt(u32) - start) return error.OutOfMemory;
+    const start = std.math.cast(u32, self.func_body_bytes.items.len) orelse return error.OutOfMemory;
+    const len = std.math.cast(u32, body.len) orelse return error.OutOfMemory;
+    _ = std.math.add(u32, start, len) catch return error.OutOfMemory;
     try self.func_body_bytes.appendSlice(self.allocator, body);
-    return .{ .start = @intCast(start), .len = @intCast(body.len) };
+    return .{ .start = start, .len = len };
 }
 
 /// The bytes of the function body at `index` in `func_bodies`.
@@ -1253,17 +1250,24 @@ pub fn addStaticDataExports(self: *Self, exports: []const StaticDataExport) Stat
 
     for (exports, 0..) |data_export, i| {
         segment_indices[i] = @intCast(self.data_segments.items.len);
+        // Each export is its own segment, named `<prefix>.<symbol>`, so a
+        // relocatable link keeps it a separate input segment that
+        // `--gc-sections` drops when nothing references it, and the final
+        // link merges the survivors into one standard output segment per
+        // prefix instead of one active segment per export.
+        //
         // Linear memory starts zeroed, so an export whose bytes are all zero
         // and that no relocation writes into needs no bytes in the binary:
         // its segment is marked zero-fill through the name every wasm
-        // object uses for that, which survives linking, and is left out of
-        // the data section when the memory is known to start zeroed.
-        const segment_name = if (isZeroFillExport(data_export)) blk: {
-            const name = try std.fmt.allocPrint(self.allocator, ".bss.{s}", .{data_export.symbol_name});
-            errdefer self.allocator.free(name);
-            try self.owned_segment_names.append(self.allocator, name);
-            break :blk name;
-        } else data_export.symbol_name;
+        // object uses for that, `.bss.`, which survives linking, and is left
+        // out of the data section when the memory is known to start zeroed.
+        // Every other export is immutable and is `.rodata.`.
+        const segment_prefix = if (isZeroFillExport(data_export)) ".bss." else ".rodata.";
+        const segment_name = try std.mem.concat(self.allocator, u8, &.{ segment_prefix, data_export.symbol_name });
+        {
+            errdefer self.allocator.free(segment_name);
+            try self.owned_segment_names.append(self.allocator, segment_name);
+        }
         _ = try self.addDataSegmentWithInfo(
             data_export.bytes,
             @max(data_export.alignment, 1),
@@ -1302,13 +1306,13 @@ pub fn addStaticDataExports(self: *Self, exports: []const StaticDataExport) Stat
                     .offset = @intCast(relocation.offset),
                     .symbol_index = symbol_index.raw(),
                     .addend = @intCast(relocation.addend),
-                    .data_segment_index = segment_index,
+                    .data_segment_index = .some(segment_index),
                 } }),
                 .function_pointer => try self.reloc_data.entries.append(self.allocator, .{ .index = .{
                     .type_id = .table_index_i32,
                     .offset = @intCast(relocation.offset),
                     .symbol_index = symbol_index.raw(),
-                    .data_segment_index = segment_index,
+                    .data_segment_index = .some(segment_index),
                 } }),
             }
         }
@@ -1696,12 +1700,19 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
 
     // Group self's currently-undefined data symbols by name so merging a
     // defined data symbol can resolve them without rescanning the table.
-    var undefined_data = UndefinedDataSymbols.init(gpa);
+    var undefined_data = UndefinedSymbols.init(gpa);
     defer undefined_data.deinit();
+    var undefined_functions = UndefinedSymbols.init(gpa);
+    defer undefined_functions.deinit();
     for (self.linking.symbol_table.items, 0..) |sym, i| {
-        if (sym.kind != .data or !sym.isUndefined()) continue;
+        if (!sym.isUndefined()) continue;
+        const index = switch (sym.kind) {
+            .data => &undefined_data,
+            .function => &undefined_functions,
+            .global, .section, .event, .table => continue,
+        };
         const sym_name = sym.resolveName(self.imports.items, self.global_imports.items, self.table_imports.items) orelse continue;
-        try undefined_data.add(sym_name, @intCast(i));
+        try index.add(sym_name, @intCast(i));
     }
 
     for (source.linking.symbol_table.items, 0..) |src_sym, src_sym_idx| {
@@ -1726,11 +1737,16 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
                         .index = func_remap[src_sym.index],
                     });
                     symbol_remap[src_sym_idx] = new_sym_idx;
+                    const new_sym = self.linking.symbol_table.items[new_sym_idx];
+                    if (new_sym.isUndefined()) {
+                        if (new_sym.resolveName(self.imports.items, self.global_imports.items, self.table_imports.items)) |name| try undefined_functions.add(name, new_sym_idx);
+                    }
                 } else {
                     // Defined function in source—add as defined in self.
                     if (!src_sym.isLocal()) {
                         if (src_name) |name| {
                             if (try self.resolveUndefinedFunctionSymbols(
+                                &undefined_functions,
                                 name,
                                 func_remap[src_sym.index],
                                 src_sym.flags,
@@ -1868,10 +1884,14 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
                 symbol_remap[src_sym_idx] = new_sym_idx;
             },
             .table => {
-                // PIC: __indirect_function_table → just enable the module's table.
+                // Function-address relocations implicitly need the table, so
+                // object composition must preserve its explicit retention.
                 if (src_sym.isUndefined()) {
                     if (src_name) |name| {
                         if (self.findSymbolByNameAndKind(name, .table)) |existing| {
+                            if (mode == .relocatable_object) {
+                                self.linking.symbol_table.items[existing].flags |= src_sym.flags & WasmLinking.SymFlag.NO_STRIP;
+                            }
                             symbol_remap[src_sym_idx] = existing;
                             continue;
                         }
@@ -1879,6 +1899,7 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
                             if (src_sym.index >= source.table_imports.items.len) return error.InvalidSection;
                             const src_imp = source.table_imports.items[src_sym.index];
                             const symbol = try self.addTableImportWithSymbolNamed(src_imp.module_name, src_imp.field_name);
+                            self.linking.symbol_table.items[symbol.raw()].flags |= src_sym.flags & WasmLinking.SymFlag.NO_STRIP;
                             symbol_remap[src_sym_idx] = symbol.raw();
                             continue;
                         }
@@ -1962,10 +1983,7 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
     for (source.reloc_data.entries.items) |src_entry| {
         switch (src_entry) {
             .index => |idx| {
-                const remapped_segment_idx = if (idx.data_segment_index < data_segment_remap.len)
-                    data_segment_remap[idx.data_segment_index]
-                else
-                    idx.data_segment_index;
+                const remapped_segment_idx = remapDataSegment(idx.data_segment_index, data_segment_remap);
                 try self.reloc_data.entries.append(gpa, .{
                     .index = .{
                         .type_id = idx.type_id,
@@ -1976,10 +1994,7 @@ pub fn mergeModuleMode(self: *Self, source: *const Self, mode: MergeMode) MergeE
                 });
             },
             .offset => |off| {
-                const remapped_segment_idx = if (off.data_segment_index < data_segment_remap.len)
-                    data_segment_remap[off.data_segment_index]
-                else
-                    off.data_segment_index;
+                const remapped_segment_idx = remapDataSegment(off.data_segment_index, data_segment_remap);
                 try self.reloc_data.entries.append(gpa, .{ .offset = .{
                     .type_id = off.type_id,
                     .offset = off.offset,
@@ -2333,14 +2348,17 @@ pub fn resolveCodeRelocations(self: *Self) RelocationError!void {
     }
 }
 
+/// A data relocation's segment after a merge moved segments by `remap`; a
+/// segment index outside `remap` is kept as it is.
+fn remapDataSegment(segment: collections.OptionalU32, remap: []const u32) collections.OptionalU32 {
+    const index = segment.get() orelse return .none;
+    return if (index < remap.len) .some(remap[index]) else segment;
+}
+
 /// Resolve all data relocations in place.
 pub fn resolveDataRelocations(self: *Self) RelocationError!void {
     for (self.reloc_data.entries.items) |entry| {
-        const segment_idx = switch (entry) {
-            .index => |idx| idx.data_segment_index,
-            .offset => |off| off.data_segment_index,
-        };
-        std.debug.assert(segment_idx != std.math.maxInt(u32));
+        const segment_idx = entry.dataSegmentIndex().?;
         std.debug.assert(segment_idx < self.data_segments.items.len);
 
         const segment = &self.data_segments.items[segment_idx];
@@ -2819,7 +2837,7 @@ fn eliminateDeadData(self: *Self, live_flags: []const bool, fn_index_min: u32, f
     while (changed) {
         changed = false;
         for (self.reloc_data.entries.items) |entry| {
-            const source_segment = relocationDataSegment(entry);
+            const source_segment = entry.dataSegmentIndex().?;
             std.debug.assert(source_segment < live_segments.len);
             if (!live_segments[source_segment]) continue;
 
@@ -2842,13 +2860,6 @@ fn eliminateDeadData(self: *Self, live_flags: []const bool, fn_index_min: u32, f
 fn relocationOffsetInRange(entry: WasmLinking.RelocationEntry, code_start: u32, code_end: u32) bool {
     const offset = entry.getOffset();
     return offset > code_start and offset < code_end;
-}
-
-fn relocationDataSegment(entry: WasmLinking.RelocationEntry) u32 {
-    return switch (entry) {
-        .index => |idx| idx.data_segment_index,
-        .offset => |off| off.data_segment_index,
-    };
 }
 
 fn markRelocationDataTarget(self: *const Self, live_segments: []bool, entry: WasmLinking.RelocationEntry) bool {
@@ -2885,11 +2896,12 @@ fn traceLiveFunctions(
 ) Allocator.Error![]bool {
     const gpa = self.allocator;
 
-    // Build symbol_index → function_index lookup.
-    const sym_fn_indices = try gpa.alloc(u32, self.linking.symbol_table.items.len);
+    // Build symbol_index → function_index lookup; absent for a symbol that
+    // names no function, which a direct call site never reaches.
+    const sym_fn_indices = try gpa.alloc(collections.OptionalU32, self.linking.symbol_table.items.len);
     defer gpa.free(sym_fn_indices);
     for (self.linking.symbol_table.items, 0..) |sym, i| {
-        sym_fn_indices[i] = if (sym.isFunction()) sym.index else std.math.maxInt(u32);
+        sym_fn_indices[i] = if (sym.isFunction()) .some(sym.index) else .none;
     }
 
     // Each direct call and indirect call site, by its offset in the code
@@ -2979,7 +2991,7 @@ fn traceLiveFunctions(
         while (site_index < call_sites.items.len and call_sites.items[site_index].offset < code_end) : (site_index += 1) {
             const site = call_sites.items[site_index];
             switch (site.kind) {
-                .direct => try tracer.mark(gpa, sym_fn_indices[site.target]),
+                .direct => if (sym_fn_indices[site.target].get()) |callee| try tracer.mark(gpa, callee),
                 .indirect => {
                     const type_idx = site.target;
                     if ((try traced_indirect_types.getOrPut(type_idx)).found_existing) continue;
@@ -3005,8 +3017,8 @@ pub const FinalMemoryConfig = struct {
     stack_bytes: u32,
     import_memory: bool = false,
     imported_memory_zeroed: bool = false,
-    minimum_memory: ?usize = null,
-    maximum_memory: ?usize = null,
+    minimum_memory: ?u64 = null,
+    maximum_memory: ?u64 = null,
     export_memory: bool = true,
 };
 
@@ -3033,12 +3045,12 @@ pub fn finalizeMemoryAndTableWithConfig(self: *Self, config: FinalMemoryConfig) 
     // Calculate memory pages: data + stack, rounded up to page boundary.
     const required_bytes = @as(u64, data_end) + @as(u64, config.stack_bytes);
     const configured_min = config.minimum_memory orelse 0;
-    const total_bytes: u64 = @max(required_bytes, @as(u64, configured_min));
+    const total_bytes: u64 = @max(required_bytes, configured_min);
     const page_size: u64 = 65536;
     const pages: u32 = @intCast(@max(1, (total_bytes + page_size - 1) / page_size));
     self.memory_min_pages = pages;
     self.memory_max_pages = if (config.maximum_memory) |maximum_memory|
-        @intCast(@max(1, (@as(u64, maximum_memory) + page_size - 1) / page_size))
+        @intCast(@max(1, (maximum_memory + page_size - 1) / page_size))
     else
         null;
 
@@ -3189,11 +3201,11 @@ fn normalizeDataRelocations(self: *Self) ParseError!void {
             switch (entry.*) {
                 .index => |*idx| {
                     idx.offset = in_segment_offset;
-                    idx.data_segment_index = @intCast(seg_idx);
+                    idx.data_segment_index = .some(@intCast(seg_idx));
                 },
                 .offset => |*off| {
                     off.offset = in_segment_offset;
-                    off.data_segment_index = @intCast(seg_idx);
+                    off.data_segment_index = .some(@intCast(seg_idx));
                 },
             }
             matched = true;
@@ -3945,11 +3957,8 @@ fn encodeSymbol(gpa: Allocator, output: *std.ArrayList(u8), sym: WasmLinking.Sym
 /// for an entry that names no segment (every `reloc.CODE` entry, whose offset is
 /// already a position in the code section).
 fn relocationSegmentDelta(self: *const Self, entry: WasmLinking.RelocationEntry) u32 {
-    const segment_index = switch (entry) {
-        .index => |idx| idx.data_segment_index,
-        .offset => |off| off.data_segment_index,
-    };
-    if (segment_index == std.math.maxInt(u32) or segment_index >= self.data_segments.items.len) return 0;
+    const segment_index = entry.dataSegmentIndex() orelse return 0;
+    if (segment_index >= self.data_segments.items.len) return 0;
     return self.data_segments.items[segment_index].section_offset;
 }
 
@@ -5673,7 +5682,7 @@ fn buildMergeDataRelocModule(allocator: Allocator) Allocator.Error!Self {
         .offset = 0,
         .symbol_index = 0,
         .addend = 0,
-        .data_segment_index = 0,
+        .data_segment_index = .some(0),
     } });
 
     return module;
@@ -6465,7 +6474,7 @@ test "resolveDataRelocations—function_offset_i32 writes raw function body offs
         .offset = 0,
         .symbol_index = 0,
         .addend = 3,
-        .data_segment_index = 0,
+        .data_segment_index = .some(0),
     } });
 
     try module.resolveDataRelocations();
@@ -6826,6 +6835,76 @@ test "mergeModuleForObject - preserves wasm object ABI symbols as imports" {
     try app.verifyNoLinkObjectContract();
 }
 
+test "issue 13102: object merge retains a new indirect function table" {
+    try expectMergedTableRetention(false);
+}
+
+test "issue 13102: object merge retains an existing indirect function table" {
+    try expectMergedTableRetention(true);
+}
+
+fn expectMergedTableRetention(existing_table: bool) (MergeError || error{ TestUnexpectedResult, TestExpectedEqual })!void {
+    const allocator = std.testing.allocator;
+    var app = Self.init(allocator);
+    defer app.deinit();
+    if (existing_table) _ = try app.addTableImportWithSymbol();
+
+    var source = Self.init(allocator);
+    defer source.deinit();
+    const source_table = try source.addTableImportWithSymbol();
+    // https://github.com/roc-lang/roc/issues/13102
+    // Function-address relocations implicitly use the table. LLVM marks it
+    // NO_STRIP so it remains live even without a reachable call_indirect.
+    source.linking.symbol_table.items[source_table.raw()].flags |= WasmLinking.SymFlag.NO_STRIP;
+
+    var result = try app.mergeModuleForObject(&source);
+    defer result.deinit();
+    const table = app.linking.symbol_table.items[result.symbol_remap[source_table.raw()]];
+    try std.testing.expect(table.isUndefined());
+    try std.testing.expectEqualStrings("__indirect_function_table", table.name.?);
+    try std.testing.expectEqual(@as(usize, 1), app.table_imports.items.len);
+    try std.testing.expectEqual(WasmLinking.SymFlag.NO_STRIP, table.flags & WasmLinking.SymFlag.NO_STRIP);
+}
+
+test "issue 13102: object table retention is the union of explicit input requirements" {
+    const allocator = std.testing.allocator;
+    const no_strip = WasmLinking.SymFlag.NO_STRIP;
+    for ([_]?bool{ null, false, true }) |destination_retained| {
+        for ([_]bool{ false, true }) |source_retained| {
+            var app = Self.init(allocator);
+            defer app.deinit();
+            if (destination_retained) |retained| {
+                const table = try app.addTableImportWithSymbol();
+                if (retained) app.linking.symbol_table.items[table.raw()].flags |= no_strip;
+            }
+
+            var source = Self.init(allocator);
+            defer source.deinit();
+            const source_table = try source.addTableImportWithSymbol();
+            if (source_retained) source.linking.symbol_table.items[source_table.raw()].flags |= no_strip;
+            // Retention is semantic; unrelated source visibility must not
+            // replace the destination import's canonical flags.
+            source.linking.symbol_table.items[source_table.raw()].flags |= WasmLinking.SymFlag.VISIBILITY_HIDDEN;
+
+            var result = try app.mergeModuleForObject(&source);
+            defer result.deinit();
+            const expected_flags = WasmLinking.SymFlag.UNDEFINED | WasmLinking.SymFlag.EXPLICIT_NAME |
+                @as(u32, if (source_retained or (destination_retained orelse false)) no_strip else 0);
+            const table = app.linking.symbol_table.items[result.symbol_remap[source_table.raw()]];
+            try std.testing.expectEqual(expected_flags, table.flags);
+            try std.testing.expectEqual(@as(usize, 1), app.table_imports.items.len);
+
+            // The final linker consumes serialized metadata, not this module.
+            const bytes = try app.encodeRelocatable(allocator);
+            defer allocator.free(bytes);
+            var decoded = try Self.preload(allocator, bytes, .relocatable_for_merge);
+            defer decoded.deinit();
+            const decoded_table = decoded.findSymbolByNameAndKind("__indirect_function_table", .table).?;
+            try std.testing.expectEqual(expected_flags, decoded.linking.symbol_table.items[decoded_table].flags);
+        }
+    }
+}
+
 test "mergeModule final link - resolves PIC globals and table symbols" {
     const allocator = std.testing.allocator;
     var app = Self.init(allocator);
@@ -6913,7 +6992,7 @@ test "all-zero static exports without relocations become zero-fill segments" {
     try std.testing.expect(module.data_segments.items[0].zero_fill);
     try std.testing.expectEqualStrings(".bss.table", module.data_segments.items[0].name.?);
     try std.testing.expect(!module.data_segments.items[1].zero_fill);
-    try std.testing.expectEqualStrings("descriptor", module.data_segments.items[1].name.?);
+    try std.testing.expectEqualStrings(".rodata.descriptor", module.data_segments.items[1].name.?);
     try std.testing.expect(!module.data_segments.items[2].zero_fill);
     // The zero-fill segment still owns its address range: the following
     // segments are placed after it.
@@ -6978,6 +7057,75 @@ test "addStaticDataExports defines forward data symbols used by code relocations
     try module.resolveCodeRelocations();
     const expected_addr: i32 = @intCast(module.data_segments.items[sym.index].offset + 2);
     try std.testing.expectEqual(expected_addr, decodePaddedI32(module.code_bytes.items[1..6]));
+}
+
+// https://github.com/roc-lang/roc/issues/13029
+// wasm-ld merges input data segments into one output segment by name prefix
+// (`.rodata.`, `.data.`, `.bss.`), and an active output segment costs a
+// header in the final data section. Every static data segment a relocatable
+// object carries is therefore named so that wasm-ld places it in a standard
+// output segment, rather than giving each constant a segment of its own.
+test "static data segments are named for wasm-ld's standard output segments" {
+    const allocator = std.testing.allocator;
+    const exports = [_]StaticDataExport{
+        .{ .symbol_name = "roc__d0", .bytes = &.{ 1, 2, 3, 4 }, .alignment = 4, .is_exported = false },
+        .{
+            .symbol_name = "roc__d1",
+            .bytes = &.{ 0, 0, 0, 0, 5, 0, 0, 0 },
+            .alignment = 4,
+            .is_exported = false,
+            .relocations = &.{.{ .offset = 0, .target_symbol_name = "roc__d0" }},
+        },
+        .{ .symbol_name = "roc__c_0123456789abcdef", .bytes = &.{ 6, 7, 8 }, .alignment = 1, .is_exported = false, .content_named = true },
+        .{ .symbol_name = "roc__d2", .bytes = &(@as([16]u8, @splat(0))), .alignment = 8, .is_exported = false },
+    };
+    var static_module = try Self.staticDataModule(allocator, &exports);
+    defer static_module.deinit();
+
+    const encoded = try static_module.encodeRelocatable(allocator);
+    defer allocator.free(encoded);
+    var parsed = try Self.preload(allocator, encoded, .relocatable_for_merge);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(exports.len, parsed.data_segments.items.len);
+    for (parsed.data_segments.items) |segment| {
+        const name = segment.name.?;
+        const merged = for ([_][]const u8{ ".rodata", ".data", ".bss" }) |output| {
+            if (std.mem.eql(u8, name, output)) break true;
+            if (std.mem.startsWith(u8, name, output) and name.len > output.len and name[output.len] == '.') break true;
+        } else false;
+        if (!merged) {
+            std.debug.print("static data segment `{s}` has a name wasm-ld does not merge into a standard output segment\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// A relocatable link joins input segments that share a name, and
+// `--gc-sections` can only drop whole input segments. Each static data
+// symbol's segment therefore carries a name no other segment has, built from
+// the symbol, so a constant nothing references is still dropped on its own.
+test "static data segments keep one distinct name per symbol" {
+    const allocator = std.testing.allocator;
+    const exports = [_]StaticDataExport{
+        .{ .symbol_name = "roc__d0", .bytes = &.{ 1, 2, 3, 4 }, .alignment = 4, .is_exported = false },
+        .{ .symbol_name = "roc__d1", .bytes = &.{ 5, 6, 7, 8 }, .alignment = 4, .is_exported = false },
+        .{ .symbol_name = "roc__d2", .bytes = &(@as([8]u8, @splat(0))), .alignment = 8, .is_exported = false },
+        .{ .symbol_name = "roc__d3", .bytes = &(@as([8]u8, @splat(0))), .alignment = 8, .is_exported = false },
+    };
+    const expected = [_][]const u8{ ".rodata.roc__d0", ".rodata.roc__d1", ".bss.roc__d2", ".bss.roc__d3" };
+    var static_module = try Self.staticDataModule(allocator, &exports);
+    defer static_module.deinit();
+
+    const encoded = try static_module.encodeRelocatable(allocator);
+    defer allocator.free(encoded);
+    var parsed = try Self.preload(allocator, encoded, .relocatable_for_merge);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(expected.len, parsed.data_segments.items.len);
+    for (expected, parsed.data_segments.items) |name, segment| {
+        try std.testing.expectEqualStrings(name, segment.name.?);
+    }
 }
 
 test "mergeModuleForObject resolves undefined static data symbols" {
@@ -7052,7 +7200,7 @@ test "encodeRelocatable roundtrip - preserves data symbols and data relocations"
         .offset = 0,
         .symbol_index = data_symbol.raw(),
         .addend = 7,
-        .data_segment_index = segment_index,
+        .data_segment_index = .some(segment_index),
     } });
 
     const encoded = try module.encodeRelocatable(allocator);
@@ -7083,7 +7231,7 @@ test "encodeRelocatable roundtrip - preserves data symbols and data relocations"
     try std.testing.expectEqual(@as(u32, 0), parsed_reloc.offset);
     try std.testing.expectEqual(parsed_data_symbol_index, parsed_reloc.symbol_index);
     try std.testing.expectEqual(@as(i32, 7), parsed_reloc.addend);
-    try std.testing.expectEqual(@as(u32, 0), parsed_reloc.data_segment_index);
+    try std.testing.expectEqual(@as(?u32, 0), parsed_reloc.data_segment_index.get());
 
     try std.testing.expectEqual(@as(usize, 1), parsed.reloc_code.entries.items.len);
     const parsed_code_reloc = parsed.reloc_code.entries.items[0].index;

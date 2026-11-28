@@ -157,11 +157,12 @@ pub const Operands = struct {
             .call_erased => |call| {
                 result.single(call.closure);
                 if (call.args) |args| result.single(args);
-                if (call.reuse_source) |source| result.single(source);
+                if (call.reuse_source.get()) |source| result.single(source);
             },
             .closure => |closure| {
                 result.single(closure.capture);
                 if (closure.reuse) |reuse| result.single(reuse);
+                if (closure.frame) |frame| result.single(frame);
             },
             .view => |view| {
                 result.single(view.address);
@@ -288,11 +289,12 @@ pub fn remapOperands(store: *LirStore, op: DynOp, context: anytype, comptime map
             .closure = try Remap.one(context, call.closure),
             .args = try Remap.opt(context, call.args),
             .reuse_closure = call.reuse_closure,
-            .reuse_source = try Remap.opt(context, call.reuse_source),
+            .reuse_source = .of(try Remap.opt(context, call.reuse_source.get())),
+            .result_reuse = call.result_reuse,
             .deferred = call.deferred,
             .drive = call.drive,
         } },
-        .closure => |closure| .{ .closure = .{ .proc = closure.proc, .capture = try Remap.one(context, closure.capture), .reuse = try Remap.opt(context, closure.reuse), .reuse_unique = closure.reuse_unique } },
+        .closure => |closure| .{ .closure = .{ .proc = closure.proc, .capture = try Remap.one(context, closure.capture), .reuse = try Remap.opt(context, closure.reuse), .reuse_unique = closure.reuse_unique, .frame = try Remap.opt(context, closure.frame) } },
         .view => |view| .{ .view = .{ .address = try Remap.one(context, view.address), .owner = try Remap.opt(context, view.owner) } },
         .adapt => |adapt| .{ .adapt = .{ .src = try Remap.one(context, adapt.src), .plan = try Remap.one(context, adapt.plan) } },
     };
@@ -320,7 +322,7 @@ test "dynamic erased call inventory includes its ownership source" {
         .closure = closure,
         .args = args,
         .reuse_closure = true,
-        .reuse_source = owner,
+        .reuse_source = .some(owner),
     } });
     try std.testing.expectEqualSlices(LocalId, &.{ closure, args, owner }, operands.singles[0..operands.single_count]);
 }

@@ -40,9 +40,10 @@ pub const ComptimeFailure = struct {
     checked_site: ?checked.CheckedExhaustivenessSiteId,
 
     /// The terminal a failed test ends in: the empirical failure of its
-    /// checked site, or, with no comptime failure, a runtime error.
-    pub fn terminal(failure: ?ComptimeFailure) LIR.CFStmt {
-        const comptime_failure = failure orelse return .runtime_error;
+    /// checked site, or, with no comptime failure, the crash every strategy
+    /// reports for a value no pattern matches.
+    pub fn terminal(failure: ?ComptimeFailure, store: *lir_core.LirStore) Allocator.Error!LIR.CFStmt {
+        const comptime_failure = failure orelse return .{ .crash = .{ .msg = .{ .literal = try store.insertString("pattern match failed") } } };
         return .{ .comptime_exhaustiveness_failed = .{ .owner = comptime_failure.owner, .checked_site = comptime_failure.checked_site } };
     }
 };
@@ -522,7 +523,7 @@ pub const Ctx = struct {
     }
 
     pub fn failTerminal(self: Ctx) Allocator.Error!LIR.CFStmtId {
-        return try self.b.store.addCFStmt(ComptimeFailure.terminal(self.state.comptime_failure), self.b.origin(.lowering_glue));
+        return try self.b.store.addCFStmt(try ComptimeFailure.terminal(self.state.comptime_failure, self.b.store), self.b.origin(.lowering_glue));
     }
 
     pub fn lirLocalForOcc(self: Ctx, step: match_tree.Step, ty: types.TypeId, parent: ?LIR.LocalId) Allocator.Error!LIR.LocalId {
@@ -552,6 +553,14 @@ pub const Ctx = struct {
         return self.b.store.getLocal(local).layout_idx == .zst;
     }
 
+    pub fn defineZst(self: Ctx, target: LIR.LocalId, next: LIR.CFStmtId) Allocator.Error!LIR.CFStmtId {
+        return try self.b.store.addCFStmt(.{ .assign_struct = .{
+            .target = target,
+            .fields = LIR.LocalSpan.empty(),
+            .next = next,
+        } }, self.b.origin(.source));
+    }
+
     pub fn readDiscriminant(self: Ctx, disc: LIR.LocalId, source: LIR.LocalId, next: LIR.CFStmtId) Allocator.Error!LIR.CFStmtId {
         return try self.b.store.addCFStmt(.{ .assign_ref = .{ .target = disc, .op = LIR.RefOp.discriminant(source), .next = next } }, self.b.origin(.source));
     }
@@ -568,21 +577,14 @@ pub const Ctx = struct {
         return try self.b.endBackward(start, next);
     }
 
-    pub fn readTagPayload(self: Ctx, dest: LIR.LocalId, _: types.TypeId, source: LIR.LocalId, variant: layout.VariantIndex, index: u32, _: bool, next: LIR.CFStmtId) Allocator.Error!LIR.CFStmtId {
+    pub fn readTagPayload(self: Ctx, dest: LIR.LocalId, payload_ty: types.TypeId, source: LIR.LocalId, variant: layout.VariantIndex, index: u32, single: bool, next: LIR.CFStmtId) Allocator.Error!LIR.CFStmtId {
         const union_ty = try self.b.structuralType(self.occType(source));
         const start = try self.b.beginBackward();
         if (try self.b.closed(union_ty)) {
-            const committed = self.b.program.result.layouts.getLayout(try self.b.program.layouts.layoutOf(union_ty));
-            if (committed.tag != .tag_union) {
-                // A union without storage has only zero-sized payloads.
-                if (self.b.store.getLocal(dest).layout_idx != .zst) invariant("a storage-free union has a payload with storage");
-                try self.b.emitLinear(.{ .assign_struct = .{ .target = dest, .fields = LIR.LocalSpan.empty(), .next = undefined } });
-            } else {
-                const payloads = self.store().span((try self.unionTags(union_ty))[variant].payloads);
-                try self.b.readTagPayloadInto(dest, source, union_ty, variant, payloads, index);
-            }
+            const payloads = self.store().span((try self.unionTags(union_ty))[variant].payloads);
+            try self.b.readTagPayloadInto(dest, source, union_ty, variant, payloads, index);
         } else {
-            try self.b.emitDyn(dest, .{ .tag_payload_addr = .{ .base = source, .desc = try self.b.descOf(union_ty), .payload_index = index } });
+            try self.b.readDynamicTagPayloadInto(dest, source, try self.b.descOf(union_ty), variant, index, single, payload_ty);
         }
         return try self.b.endBackward(start, next);
     }
@@ -787,13 +789,9 @@ pub const Ctx = struct {
 
     pub fn bindPatternLocal(self: Ctx, binder: BinderId, _: types.TypeId, source: LIR.LocalId, next: LIR.CFStmtId) Allocator.Error!LIR.CFStmtId {
         const local = self.state.binder_locals.get(binder) orelse invariant("a pattern binder has no local");
-        if (self.b.store.localDyn(local)) |dyn| {
-            return try self.b.store.addCFStmt(.{ .dyn = .{
-                .target = local,
-                .data = try self.b.store.addStmtRow(LIR.DynOp, .{ .copy = .{ .src = source, .desc = dyn.desc } }),
-                .next = next,
-            } }, self.b.origin(.source));
-        }
+        // A dynamic binder's `ref.local` copies the matched value's bytes by
+        // its descriptor, and is the pure same-value alias ARC follows from a
+        // tag payload read to its uses.
         return try self.b.store.addCFStmt(.{ .assign_ref = .{ .target = local, .op = LIR.RefOp.local(source), .next = next } }, self.b.origin(.source));
     }
 

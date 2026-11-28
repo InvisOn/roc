@@ -97,7 +97,7 @@ pub fn run(buf: [*]u8, len: isize, debug: bool, mode: Mode) void {
     const cwd = std.Io.Dir.cwd().realPathFileAlloc(fuzz_io, ".", gpa) catch @panic("failed to resolve cwd");
     defer gpa.free(cwd);
 
-    var build_env = BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, fuzz_io) catch @panic("OOM during BuildEnv init");
+    var build_env = BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, fuzz_io, .lss) catch @panic("OOM during BuildEnv init");
     defer build_env.deinit();
 
     build_env.discoverDependencies(abs_paths[app_index]) catch |err| switch (err) {
@@ -138,7 +138,7 @@ pub fn run(buf: [*]u8, len: isize, debug: bool, mode: Mode) void {
     };
     defer gpa.free(relations);
 
-    const lir_roots = lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_checked.root_requests.runtime_requests) catch |err| switch (err) {
+    const lir_roots = lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_checked.root_requests.runtime_requests.items()) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM while selecting LIR roots"),
     };
     defer gpa.free(lir_roots);

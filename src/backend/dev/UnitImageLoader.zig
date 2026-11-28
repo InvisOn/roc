@@ -27,6 +27,7 @@ const builtin = @import("builtin");
 const dev_diagnostics = @import("base").dev_diagnostics;
 const UnitImage = @import("UnitImage.zig");
 const PerfMap = @import("PerfMap.zig");
+const instruction_cache = @import("instruction_cache.zig");
 
 const page_size = std.heap.page_size_min;
 const stub_size: usize = 16;
@@ -45,8 +46,6 @@ const win32 = struct {
     extern "kernel32" fn VirtualAlloc(address: ?*anyopaque, size: usize, allocation_type: DWORD, protect: DWORD) callconv(.winapi) ?*anyopaque;
     extern "kernel32" fn VirtualFree(address: *anyopaque, size: usize, free_type: DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn VirtualProtect(address: *anyopaque, size: usize, new_protect: DWORD, old_protect: *DWORD) callconv(.winapi) BOOL;
-    extern "kernel32" fn GetCurrentProcess() callconv(.winapi) *anyopaque;
-    extern "kernel32" fn FlushInstructionCache(process: *anyopaque, address: ?*const anyopaque, size: usize) callconv(.winapi) BOOL;
     extern "ntdll" fn RtlAddFunctionTable(table: *anyopaque, count: u32, base_address: u64) callconv(.winapi) u8;
     extern "ntdll" fn RtlDeleteFunctionTable(table: *anyopaque) callconv(.winapi) u8;
 };
@@ -63,7 +62,56 @@ pub const Binding = struct {
 pub const Resolver = struct {
     context: *anyopaque,
     resolve: *const fn (context: *anyopaque, name: []const u8) ?Binding,
+    /// Where the image's pool imports (`UnitImage.import_pool`) bind; an
+    /// image that names none may be loaded without one.
+    pool: ?*Pool = null,
 };
+
+/// The stored constants' images loaded images name (design.md "Constant
+/// Pool"), each placed in this process once, at the first load naming it,
+/// with its pointer words holding the addresses they point at. Not
+/// thread-safe: its owner serializes loads.
+pub const Pool = struct {
+    gpa: std.mem.Allocator,
+    source: UnitImage.PoolSource,
+    placed: std.AutoHashMapUnmanaged([32]u8, []align(placed_alignment.toByteUnits()) u8) = .empty,
+
+    /// The alignment every placed image gets, at least any stored type's.
+    const placed_alignment: std.mem.Alignment = .@"16";
+
+    pub fn deinit(self: *Pool) void {
+        var blocks = self.placed.valueIterator();
+        while (blocks.next()) |block| self.gpa.free(block.*);
+        self.placed.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    /// The address of the image the pool import `name` names, placing it
+    /// the first time.
+    fn bind(self: *Pool, name: []const u8) error{OutOfMemory}!Binding {
+        const digest = UnitImage.poolDigestOfName(name) orelse invariant("a pool import names no image digest");
+        const gop = try self.placed.getOrPut(self.gpa, digest);
+        if (!gop.found_existing) {
+            errdefer self.placed.removeByPtr(gop.key_ptr);
+            const image = try self.source.find(self.source.context, digest) orelse invariant("no checked module of the compilation stores an image a unit names");
+            if (builtin.mode == .debug) std.debug.assert(image.alignment <= placed_alignment.toByteUnits());
+            const block = try self.gpa.alignedAlloc(u8, placed_alignment, image.bytes.len);
+            @memcpy(block, image.bytes);
+            const start = @intFromPtr(block.ptr);
+            for (image.pointers) |pointer| {
+                const target = std.mem.readInt(u64, block[pointer..][0..8], .little);
+                std.mem.writeInt(u64, block[pointer..][0..8], start + target, .little);
+            }
+            gop.value_ptr.* = block;
+        }
+        return .{ .address = @intFromPtr(gop.value_ptr.ptr), .function = false };
+    }
+};
+
+fn invariant(comptime message: []const u8) noreturn {
+    if (builtin.mode == .debug) std.debug.panic("unit image loader invariant violated: " ++ message, .{});
+    unreachable; // a compiler invariant: only a compiler bug reaches this, which debug builds report above
+}
 
 /// Why an image could not be loaded.
 pub const LoadError = error{
@@ -76,7 +124,7 @@ pub const LoadError = error{
     /// A site's value does not fit its field even through a stub;
     /// `Diagnostic.name` names its import, or is empty for a local site.
     SiteOutOfRange,
-};
+} || instruction_cache.Error;
 
 /// What a failed load was about.
 pub const Diagnostic = struct {
@@ -160,6 +208,11 @@ pub fn load(gpa: std.mem.Allocator, view: UnitImage.View, resolver: Resolver, di
     @memset(stubs, null);
     for (imports, bindings) |import, *binding| {
         const name = view.name(import.name);
+        if (import.flags & UnitImage.import_pool != 0) {
+            const pool = resolver.pool orelse invariant("an image names a pool image and its loader has no pool");
+            binding.* = try pool.bind(name);
+            continue;
+        }
         binding.* = resolver.resolve(resolver.context, name) orelse binding: {
             if (import.flags & UnitImage.symbol_weak == 0) {
                 diagnostic.name = name;
@@ -244,10 +297,15 @@ pub fn load(gpa: std.mem.Allocator, view: UnitImage.View, resolver: Resolver, di
         }
     }
 
+    try instruction_cache.flush(memory[0..exec_len]);
     if (windows) {
-        var old: win32.DWORD = undefined;
-        if (win32.VirtualProtect(memory.ptr, exec_len, win32.PAGE_EXECUTE_READ, &old) == 0) return error.OutOfMemory;
-        _ = win32.FlushInstructionCache(win32.GetCurrentProcess(), memory.ptr, exec_len);
+        // A unit with no code has no executable pages, and VirtualProtect
+        // rejects a zero length (ERROR_INVALID_PARAMETER) where mprotect
+        // accepts one.
+        if (exec_len != 0) {
+            var old: win32.DWORD = undefined;
+            if (win32.VirtualProtect(memory.ptr, exec_len, win32.PAGE_EXECUTE_READ, &old) == 0) return error.OutOfMemory;
+        }
         if (view.pdata().len != 0) {
             const entry_size: usize = if (arm64) 8 else 12;
             const table: *anyopaque = @ptrCast(memory.ptr + unwind_offset);
@@ -255,7 +313,6 @@ pub fn load(gpa: std.mem.Allocator, view: UnitImage.View, resolver: Resolver, di
             loaded.function_table = table;
         }
     } else {
-        if (arm64) flushInstructionCache(memory[0..exec_len]);
         const executable: std.posix.PROT = .{ .READ = true, .EXEC = true };
         if (std.c.mprotect(@ptrCast(memory.ptr), exec_len, executable) != 0) return error.OutOfMemory;
     }
@@ -299,14 +356,6 @@ fn writeStub(bytes: *[stub_size]u8, target: usize) void {
     std.mem.writeInt(u64, bytes[6..14], target, .little);
     bytes[14..16].* = .{ 0xcc, 0xcc };
 }
-
-/// Publish newly written instructions before they run, through compiler-rt's
-/// cache maintenance for the host.
-fn flushInstructionCache(memory: []const u8) void {
-    __clear_cache(memory.ptr, memory.ptr + memory.len);
-}
-
-extern fn __clear_cache(start: [*]const u8, end: [*]const u8) callconv(.c) void;
 
 /// An address below this binary's code, a preference for where the image
 /// lands so its calls into the compiler reach it directly. The kernel may
@@ -510,6 +559,20 @@ test "a loaded image runs, calls its imports and resets its zero-fill" {
     const pointer: *const Fn = @ptrFromInt(exportAddress(&loaded, "answer_pointer"));
     try std.testing.expectEqual(@as(i32, 42), pointer.*());
     try std.testing.expectEqual(@as(usize, if (arm64) 64 else 40), loaded.text().len);
+}
+
+test "an image with no code loads" {
+    // A unit whose module lowers to no procedures has an empty block, so
+    // nothing in its mapping becomes executable.
+    const allocator = std.testing.allocator;
+    const image = try UnitImage.build(allocator, &.{}, .{ .keep_debug = false, .atoms = .whole });
+    defer allocator.free(image);
+    const view = try UnitImage.View.init(image);
+    var resolver = TestResolver{ .ext = null };
+    var diagnostic: Diagnostic = .{};
+    var loaded = try load(allocator, view, .{ .context = &resolver, .resolve = TestResolver.resolve }, &diagnostic);
+    defer loaded.unload();
+    try std.testing.expectEqual(@as(usize, 0), loaded.text().len);
 }
 
 test "a call out of reach goes through a stub, and a missing import is reported" {

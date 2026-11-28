@@ -106,7 +106,7 @@ pub fn appendRegionInfoToSexprTree(self: *const AST, env: *const CommonEnv, tree
     const start = self.tokens.resolve(region.start);
     const region_end_idx = if (region.end > 0) region.end - 1 else region.end;
     const end = self.tokens.resolve(region_end_idx);
-    const info: base.RegionInfo = base.RegionInfo.position(self.env.source, env.line_starts.items.items, start.start.offset, end.end.offset) catch .{
+    const info: base.RegionInfo = base.RegionInfo.position(self.env.source, env.line_starts.items(), start.start.offset, end.end.offset) catch .{
         .start_line_idx = 0,
         .start_col_idx = 0,
         .end_line_idx = 0,
@@ -264,7 +264,7 @@ fn tokenizeReport(
         diagnostic.region.end.offset <= source_env.source.len)
     {
         var env = source_env.*;
-        const owns_line_starts = env.line_starts.items.items.len == 0;
+        const owns_line_starts = env.line_starts.items().len == 0;
         if (owns_line_starts) env.line_starts = try @TypeOf(env.line_starts).initCapacity(allocator, 0);
         defer if (owns_line_starts) env.line_starts.deinit(allocator);
         if (owns_line_starts) {
@@ -274,7 +274,7 @@ fn tokenizeReport(
         // Convert region to RegionInfo
         const region_info = base.RegionInfo.position(
             source_env.source,
-            env.line_starts.items.items,
+            env.line_starts.items(),
             diagnostic.region.start.offset,
             diagnostic.region.end.offset,
         ) catch {
@@ -288,7 +288,7 @@ fn tokenizeReport(
             .error_highlight,
             filename,
             source_env.source,
-            env.line_starts.items.items,
+            env.line_starts.items(),
         );
     }
 
@@ -354,14 +354,14 @@ const ParseReportOptions = struct {
 
 fn finishParseReport(ctx: ParseReportContext, report: *reporting.Report) Allocator.Error!reporting.Report {
     if (ctx.region.start.offset <= ctx.region.end.offset and ctx.region.end.offset <= ctx.env.source.len) {
-        const region_info = base.RegionInfo.position(ctx.env.source, ctx.env.line_starts.items.items, ctx.region.start.offset, ctx.region.end.offset) catch {
+        const region_info = base.RegionInfo.position(ctx.env.source, ctx.env.line_starts.items(), ctx.region.start.offset, ctx.region.end.offset) catch {
             return report.*;
         };
 
         try report.document.addLineBreaks(2);
 
         const owned_filename = try report.addOwnedString(ctx.filename);
-        try report.addSourceContext(region_info, owned_filename, ctx.env.source, ctx.env.line_starts.items.items);
+        try report.addSourceContext(region_info, owned_filename, ctx.env.source, ctx.env.line_starts.items());
     }
 
     return report.*;
@@ -543,8 +543,8 @@ fn parseReport(ctx: ParseReportContext) Allocator.Error!reporting.Report {
         .expected_symbol_string => reportParseProblem(ctx, "Expected Host Symbol", "I was parsing a host symbol map, and I expected a string symbol name.", "Each host symbol entry starts with the exported symbol name in quotes.", .{ .example = "\"roc_main\": main" }),
         .expected_symbol_map_colon => reportParseProblem(ctx, "Expected Symbol Colon", "I was parsing a host symbol map entry, and I expected `:` after the symbol string.", "Use a colon between the host symbol string and the Roc function that implements it.", .{ .example = "\"roc_main\": main" }),
         .expected_symbol_map_function => reportParseProblem(ctx, "Expected Roc Function", "I was parsing a host symbol map entry, and I expected a Roc function name.", "The right side of a host symbol entry must be a lowercase function name, optionally qualified by a module path.", .{ .example = "\"roc_main\": Platform.main!" }),
-        .expected_hosted_open_curly => reportParseProblem(ctx, "Expected Hosted Map", "I was parsing a `hosted` section, and I expected an opening `{`.", "Hosted symbol mappings are written inside braces.", .{ .example = "hosted { \"roc_alloc\": alloc }" }),
-        .expected_hosted_close_curly => reportParseProblem(ctx, "Expected Closing Brace", "I was parsing a `hosted` section, and I expected a closing `}`.", "Close the hosted symbol map after the final host function mapping.", .{ .example = "hosted { \"roc_alloc\": alloc }" }),
+        .expected_hosted_open_curly => reportParseProblem(ctx, "Expected Hosted Map", "I was parsing a `hosted` section, and I expected an opening `{`.", "Hosted symbol mappings are written inside braces.", .{ .example = "hosted { \"roc_stdout_line\": Stdout.line! }" }),
+        .expected_hosted_close_curly => reportParseProblem(ctx, "Expected Closing Brace", "I was parsing a `hosted` section, and I expected a closing `}`.", "Close the hosted symbol map after the final host function mapping.", .{ .example = "hosted { \"roc_stdout_line\": Stdout.line! }" }),
         .expected_requires => reportParseProblem(ctx, "Expected Requires", "I was parsing a platform header, and I expected the `requires` section.", "A platform header must state which entrypoints the app must provide.", .{ .example = "requires { main : {} => I32 }" }),
         .expected_requires_rigids_open_curly => reportParseProblem(ctx, "Expected Requires Entries", "I was parsing a `requires` section, and I expected an opening `{`.", "Required entrypoints are written inside braces after `requires`.", .{ .example = "requires { main : {} => I32 }" }),
         .expected_requires_signatures_close_curly => reportParseProblem(ctx, "Expected Closing Brace", "I was parsing a `requires` section, and I expected a closing `}`.", "Close the requires record after the final entrypoint signature.", .{ .example = "requires { main : {} => I32 }" }),
@@ -576,7 +576,7 @@ fn parseReport(ctx: ParseReportContext) Allocator.Error!reporting.Report {
         .multi_arrow_needs_parens => reportParseProblem(ctx, "Ambiguous Function Type", "I was parsing a function type, and multiple arrows need parentheses.", "Use parentheses to say whether the function returns another function or takes a function as an argument.", .{ .example = "a -> (b -> c)\n(a -> b) -> c", .show_found = false }),
         .expected_ty_close_curly_or_comma => reportParseProblem(ctx, "Expected Record Type Separator", "I was parsing a record type, and I expected `,` or `}`.", "Separate record type fields with commas and close the record type with `}`.", .{ .example = "{ name : Str, age : U64 }" }),
         .expected_ty_close_square_or_comma => reportParseProblem(ctx, "Expected Tag Union Separator", "I was parsing a tag union type, and I expected `,` or `]`.", "Separate tag union alternatives with commas and close the tag union with `]`.", .{ .example = "[Ok(a), Err(Str)]" }),
-        .expected_lower_name_after_exposed_item_as => reportParseProblem(ctx, "Expected Lowercase Alias", "I was parsing an exposed value alias, and I expected a lowercase name after `as`.", "Aliases for exposed lowercase values must also be lowercase value names.", .{ .example = "package [oldName as newName]" }),
+        .expected_lower_name_after_exposed_item_as => reportParseProblem(ctx, "Expected Lowercase Alias", "I was parsing an exposed value alias, and I expected a lowercase name after `as`.", "Aliases for exposed lowercase values must also be lowercase value names.", .{ .example = "import Json exposing [decode as decode_json]" }),
         .expected_upper_name_after_exposed_item_as => reportParseProblem(ctx, "Expected Uppercase Alias", "I was parsing an exposed type or tag alias, and I expected an uppercase name after `as`.", "Aliases for exposed uppercase names must also start with an uppercase letter.", .{ .example = "package [Result as Outcome]" }),
         .exposed_item_unexpected_token => reportParseProblem(ctx, "Expected Exposed Name", "I was parsing an exposing list, and I expected an exposed name.", "Exposing lists contain lowercase values, uppercase types or tags, and `Type.*` entries.", .{ .example = "package [main, Result, Result.*]" }),
         .expected_upper_name_after_import_as => reportParseProblem(ctx, "Expected Import Alias", "I was parsing an import alias, and I expected an uppercase name after `as`.", "Import aliases must start with an uppercase letter.", .{ .example = "import Json/Decode as Decode" }),
@@ -626,25 +626,23 @@ fn parseReport(ctx: ParseReportContext) Allocator.Error!reporting.Report {
         .file_import_expected_name => reportParseProblem(ctx, "Expected File Import Binding", "I was parsing a file import, and I expected a lowercase binding name.", "The name after `as` is the local value that will contain the imported file contents.", .{ .example = "import \"data.txt\" as data : Str" }),
         .file_import_expected_type => reportParseProblem(ctx, "Expected File Import Type", "I was parsing a file import, and I expected a type annotation.", "File imports must say whether the imported contents are `Str` or `List(U8)`.", .{ .example = "import \"data.bin\" as bytes : List(U8)" }),
         .file_import_invalid_type => reportParseProblem(ctx, "Invalid File Import Type", "I was parsing a file import type, and only `Str` or `List(U8)` is allowed.", "Use `Str` for text files and `List(U8)` for raw bytes.", .{ .example = "import \"data.txt\" as data : Str" }),
-        .nominal_associated_cannot_have_final_expression => reportParseProblem(ctx, "Unexpected Associated Expression", "I was parsing associated items for a nominal type, and I found a plain final expression.", "Associated item blocks can contain associated types and values. Remove the trailing expression or turn it into a named associated value.", .{ .example = "Id := [Id(U64)].{\n    zero = Id(0)\n}" }),
+        .associated_block_cannot_have_expression => reportParseProblem(ctx, "Unexpected Associated Expression", "I was parsing associated items for a nominal type, and I found a plain expression.", "Associated item blocks can contain associated types and values. Remove this expression or turn it into a named associated value.", .{ .example = "Id := [Id(U64)].{\n    zero = Id(0)\n}" }),
         .type_alias_cannot_have_associated => reportParseProblem(ctx, "Type Alias With Associated Items", "I was parsing a type alias, but only nominal types can have associated items.", "Use `:=` to define a nominal type with associated items, or remove the associated item block from this alias.", .{ .example = "Id := [Id(U64)].{\n    zero = Id(0)\n}" }),
         .where_alias_cannot_have_associated => reportParseProblem(ctx, "Where Alias With Associated Items", "I was parsing a where alias, but only nominal types can have associated items.", "A where alias names a set of method constraints, so it has no associated items. Remove the associated item block.", .{ .example = "a.Sortable : where [a.order_relative_to : a -> [Before, Same, After]]" }),
         .where_alias_expected_colon => reportParseProblem(ctx, "Expected Where Alias Colon", "I was parsing a where alias declaration, and I expected `:` after its name.", "A where alias separates its name from its `where` clause with a colon.", .{ .example = "a.Sortable : where [a.order_relative_to : a -> [Before, Same, After]]" }),
         .where_alias_expected_where => reportParseProblem(ctx, "Expected Where Clause", "I was parsing a where alias declaration, and I expected `where` after the `:`.", "A where alias is declared by naming a type variable and giving it a set of method constraints.", .{ .example = "a.Sortable : where [a.order_relative_to : a -> [Before, Same, After]]" }),
         .deprecated_number_suffix => reportDeprecatedNumberSuffix(ctx),
-        .expected_targets_colon => reportParseProblem(ctx, "Expected Targets Colon", "I was parsing a `targets` section, and I expected `:` after `targets`.", "The targets section starts with `targets:` followed by a configuration record.", .{ .example = "targets: { linux: { inputs: [app] } }" }),
-        .expected_targets_open_curly => reportParseProblem(ctx, "Expected Targets Record", "I was parsing a `targets` section, and I expected `{`.", "Targets are configured with fields inside a record.", .{ .example = "targets: { linux: { inputs: [app] } }" }),
-        .expected_targets_close_curly => reportParseProblem(ctx, "Expected Targets End", "I was parsing a `targets` section, and I expected `}`.", "Close the targets record after the final target entry.", .{ .example = "targets: { linux: { inputs: [app] } }" }),
-        .expected_targets_field_name => reportParseProblem(ctx, "Expected Targets Field", "I was parsing a target configuration, and I expected a lowercase field name.", "Target entries and target options start with lowercase field names.", .{ .example = "linux: { inputs: [app] }" }),
+        .expected_targets_colon => reportParseProblem(ctx, "Expected Targets Colon", "I was parsing a `targets` section, and I expected `:` after `targets`.", "The targets section starts with `targets:` followed by a configuration record.", .{ .example = "targets: { arm64mac: { inputs: [app] } }" }),
+        .expected_targets_open_curly => reportParseProblem(ctx, "Expected Targets Record", "I was parsing a `targets` section, and I expected `{`.", "Targets are configured with fields inside a record.", .{ .example = "targets: { arm64mac: { inputs: [app] } }" }),
+        .expected_targets_close_curly => reportParseProblem(ctx, "Expected Targets End", "I was parsing a `targets` section, and I expected `}`.", "Close the targets record after the final target entry.", .{ .example = "targets: { arm64mac: { inputs: [app] } }" }),
+        .expected_targets_field_name => reportParseProblem(ctx, "Expected Targets Field", "I was parsing a target configuration, and I expected a lowercase field name.", "Target entries and target options start with lowercase field names.", .{ .example = "arm64mac: { inputs: [app] }" }),
         .expected_targets_field_colon => reportParseProblem(ctx, "Expected Targets Field Value", "I was parsing a target field, and I expected `:` before the value.", "Use a colon between a target field name and its value.", .{ .example = "inputs: [app]" }),
-        .expected_target_link_open_curly => reportParseProblem(ctx, "Expected Link Config", "I was parsing a target link configuration, and I expected `{`.", "Link configuration values are written as records.", .{ .example = "link: { kind: static }" }),
-        .expected_target_link_close_curly => reportParseProblem(ctx, "Expected Link Config End", "I was parsing a target link configuration, and I expected `}`.", "Close the link configuration record after the final option.", .{ .example = "link: { kind: static }" }),
-        .expected_target_name => reportParseProblem(ctx, "Expected Target Name", "I was parsing a target entry, and I expected a lowercase target name.", "Target names are lowercase field names inside the targets record.", .{ .example = "linux: { inputs: [app] }" }),
-        .expected_target_colon => reportParseProblem(ctx, "Expected Target Config", "I was parsing a target entry, and I expected `:` before the target configuration.", "Use a colon between the target name and its configuration record.", .{ .example = "linux: { inputs: [app] }" }),
-        .expected_target_files_open_square => reportParseProblem(ctx, "Expected Input List", "I was parsing target inputs, and I expected `[`.", "The `inputs` field must contain a list of input files or special input names.", .{ .example = "inputs: [app, \"src/main.c\"]" }),
-        .expected_target_files_close_square => reportParseProblem(ctx, "Expected Input List End", "I was parsing target inputs, and I expected `]`.", "Close the input list after the final file or input name.", .{ .example = "inputs: [app, \"src/main.c\"]" }),
-        .expected_target_file => reportParseProblem(ctx, "Expected Target File", "I was parsing a target input list, and I expected a file string or special input name.", "Target inputs can be string file paths, lowercase special names, or `app`.", .{ .example = "inputs: [app, \"src/main.c\"]" }),
-        .expected_target_file_string_end => reportParseProblem(ctx, "Unclosed Target File", "I was parsing a target file string, and I expected the closing quote.", "Finish the file path string before continuing the target configuration.", .{ .example = "\"src/main.c\"" }),
+        .expected_target_name => reportParseProblem(ctx, "Expected Target Name", "I was parsing a target entry, and I expected a lowercase target name.", "Target names are lowercase field names inside the targets record.", .{ .example = "arm64mac: { inputs: [app] }" }),
+        .expected_target_colon => reportParseProblem(ctx, "Expected Target Config", "I was parsing a target entry, and I expected `:` before the target configuration.", "Use a colon between the target name and its configuration record.", .{ .example = "arm64mac: { inputs: [app] }" }),
+        .expected_target_files_open_square => reportParseProblem(ctx, "Expected Input List", "I was parsing target inputs, and I expected `[`.", "The `inputs` field must contain a list of input files or special input names.", .{ .example = "inputs: [\"host.o\", app]" }),
+        .expected_target_files_close_square => reportParseProblem(ctx, "Expected Input List End", "I was parsing target inputs, and I expected `]`.", "Close the input list after the final file or input name.", .{ .example = "inputs: [\"host.o\", app]" }),
+        .expected_target_file => reportParseProblem(ctx, "Expected Target File", "I was parsing a target input list, and I expected a file string or special input name.", "Each input is a file path string, `app` for the compiled application, or `win_gui`.", .{ .example = "inputs: [\"host.o\", app]" }),
+        .expected_target_file_string_end => reportParseProblem(ctx, "Unclosed Target File", "I was parsing a target file string, and I expected the closing quote.", "Finish the file path string before continuing the target configuration.", .{ .example = "\"host.o\"" }),
     };
 }
 
@@ -770,7 +768,7 @@ pub const Diagnostic = struct {
         file_import_expected_name,
         file_import_expected_type,
         file_import_invalid_type,
-        nominal_associated_cannot_have_final_expression,
+        associated_block_cannot_have_expression,
         type_alias_cannot_have_associated,
         where_alias_cannot_have_associated,
         where_alias_expected_colon,
@@ -785,8 +783,6 @@ pub const Diagnostic = struct {
         expected_targets_field_colon,
 
         // Target entry parse errors
-        expected_target_link_open_curly,
-        expected_target_link_close_curly,
         expected_target_name,
         expected_target_colon,
         expected_target_files_open_square,
@@ -2255,6 +2251,24 @@ pub const SymbolMapEntry = struct {
     module: ?Token.Idx, // UpperIdent for qualified functions (e.g. Stdout); null for bare ones
     func: Token.Idx, // LowerIdent (or NoSpaceDotLowerIdent when qualified) naming the function
     region: TokenizedRegion,
+
+    /// The identifier path below the module qualifier (e.g. `Idx.get!`).
+    /// Discovery and canonicalization must name the same exposed declaration.
+    pub fn functionPath(entry: SymbolMapEntry, ast: *const AST, gpa: std.mem.Allocator, buf: *std.ArrayList(u8)) std.mem.Allocator.Error!?[]const u8 {
+        const first = if (entry.module) |module| module + 1 else entry.func;
+        if (first == entry.func) {
+            const ident = ast.tokens.resolveIdentifier(first) orelse return null;
+            return ast.env.getIdent(ident);
+        }
+        buf.clearRetainingCapacity();
+        var token = first;
+        while (token <= entry.func) : (token += 1) {
+            const ident = ast.tokens.resolveIdentifier(token) orelse return null;
+            if (buf.items.len != 0) try buf.append(gpa, '.');
+            try buf.appendSlice(gpa, ast.env.getIdent(ident));
+        }
+        return buf.items;
+    }
 
     pub const Idx = enum(u32) { _ };
     pub const Span = struct {

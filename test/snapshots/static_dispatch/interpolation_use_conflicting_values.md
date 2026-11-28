@@ -38,7 +38,7 @@ TYPE MISMATCH - interpolation_use_conflicting_values.md:1:21:1:64
 			(line-break)
 			(annotation-start code-block)
 			(indent 1)
-			(text "U64")
+			(text "Str")
 			(annotation-end)
 			(line-break)
 			(line-break)
@@ -47,7 +47,7 @@ TYPE MISMATCH - interpolation_use_conflicting_values.md:1:21:1:64
 			(line-break)
 			(annotation-start code-block)
 			(indent 1)
-			(text "Str")
+			(text "U64")
 			(annotation-end)
 			(line-break)
 			(line-break)
@@ -154,7 +154,7 @@ NO CHANGE
 								(p-assign (ident "person"))))
 						(segments
 							(segment (name "age") (mode "required")))))
-				(e-interpolation (constraint-fn-var 301) (dispatcher-var 26)
+				(e-interpolation (constraint-fn-var 286) (dispatcher-var 27)
 					(first
 						(e-literal (string "")))
 					(parts

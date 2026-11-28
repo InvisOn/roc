@@ -3,12 +3,11 @@
 //! This module provides x86_64-specific code generation including
 //! function prologues/epilogues and instruction selection.
 //!
-//! CodeGen is parameterized by RocTarget to support cross-compilation.
-//! Use CodeGen(target) to get a specialized type for a specific target.
+//! CodeGen is parameterized by the dev-backend `Abi` it emits code for.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const RocTarget = @import("roc_target").RocTarget;
+const Abi = @import("../isa.zig").Abi;
 
 const EmitMod = @import("Emit.zig");
 const Registers = @import("Registers.zig");
@@ -24,21 +23,20 @@ const FloatReg = Registers.FloatReg;
 const RegisterWidth = Registers.RegisterWidth;
 
 /// Parameterized x86_64 code generator.
-/// Use CodeGen(target) to get a specialized type for a specific RocTarget.
-pub fn CodeGen(comptime target: RocTarget) type {
-    // Validate this is an x86_64 target
-    if (target.toCpuArch() != .x86_64) {
-        @compileError("x86_64.CodeGen requires an x86_64 target");
+/// Use CodeGen(machine_abi) to get a specialized type for one calling convention.
+pub fn CodeGen(comptime machine_abi: Abi) type {
+    if (machine_abi.isa() != .x86_64) {
+        @compileError("x86_64.CodeGen requires an x86_64 ABI");
     }
 
-    const Emit = EmitMod.Emit(target);
-    const CC = if (target.isWindows()) WindowsFastcall else SystemV;
+    const Emit = EmitMod.Emit(machine_abi);
+    const CC = if (machine_abi.isWindows()) WindowsFastcall else SystemV;
 
     return struct {
         const Self = @This();
 
-        /// The target this CodeGen was instantiated for
-        pub const roc_target = target;
+        /// The ABI this CodeGen was instantiated for
+        pub const code_abi = machine_abi;
 
         /// Number of general-purpose registers
         pub const NUM_GENERAL_REGS = 16;
@@ -52,7 +50,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// Bitmask of callee-saved general registers available for allocation
         /// System V: RBX, R12, R13, R14, R15 (not RBP - it's the frame pointer)
         /// Windows: RBX, RSI, RDI, R12, R13, R14, R15 (not RBP - it's the frame pointer)
-        pub const CALLEE_SAVED_GENERAL_MASK: u32 = if (target.isWindows())
+        pub const CALLEE_SAVED_GENERAL_MASK: u32 = if (machine_abi.isWindows())
             (1 << @backingInt(GeneralReg.RBX)) |
                 (1 << @backingInt(GeneralReg.RSI)) |
                 (1 << @backingInt(GeneralReg.RDI)) |
@@ -70,7 +68,7 @@ pub fn CodeGen(comptime target: RocTarget) type {
         /// Size of the callee-saved register area
         /// Windows: 7 registers * 8 bytes = 56 bytes
         /// System V: 5 registers * 8 bytes = 40 bytes
-        pub const CALLEE_SAVED_AREA_SIZE: i32 = if (target.isWindows()) 56 else 40;
+        pub const CALLEE_SAVED_AREA_SIZE: i32 = if (machine_abi.isWindows()) 56 else 40;
 
         emit: Emit,
         allocator: Allocator,
@@ -480,13 +478,10 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
         // Immediate loading
 
-        /// Load immediate value into register
+        /// Load immediate value into register, with the shortest move that
+        /// produces it.
         pub fn emitLoadImm(self: *Self, dst: GeneralReg, value: i64) Allocator.Error!void {
-            if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32)) {
-                try self.emit.movRegImm32(dst, @intCast(value));
-            } else {
-                try self.emit.movRegImm64(dst, value);
-            }
+            try self.emit.movRegImm(dst, value);
         }
 
         pub fn emitLoadDataAddress(self: *Self, dst: GeneralReg, symbol: SymbolTable.Id) Allocator.Error!void {
@@ -551,9 +546,8 @@ pub fn CodeGen(comptime target: RocTarget) type {
 
 // Tests - use explicit target instantiation for cross-platform testing
 
-const LinuxCodeGen = CodeGen(.x64linux);
-const WinCodeGen = CodeGen(.x64win);
-const MacCodeGen = CodeGen(.x64mac);
+const LinuxCodeGen = CodeGen(.x86_64_sysv);
+const WinCodeGen = CodeGen(.x86_64_windows);
 
 test "prologue and epilogue" {
     var cg = LinuxCodeGen.init(std.testing.allocator);
@@ -567,14 +561,14 @@ test "prologue and epilogue" {
     // With no callee-saved registers used and 0 stack allocation:
     // push rbp: 55 (1 byte)
     // mov rbp, rsp: 48 89 E5 (3 bytes)
-    // sub rsp, <callee_saved_area>: 48 81 EC xx xx xx xx (7 bytes)—always reserves callee-saved area
+    // sub rsp, <callee_saved_area>: 48 83 EC xx (4 bytes)—always reserves callee-saved area
     // (no MOV saves since callee_saved_used = 0)
     // (no MOV restores since callee_saved_used = 0)
     // mov rsp, rbp: 48 89 EC (3 bytes)
     // pop rbp: 5D (1 byte)
     // ret: C3 (1 byte)
-    // Total: 16 bytes
-    try std.testing.expectEqual(@as(usize, 16), code.len);
+    // Total: 13 bytes
+    try std.testing.expectEqual(@as(usize, 13), code.len);
     try std.testing.expectEqual(@as(u8, 0x55), code[0]); // push rbp
     try std.testing.expectEqual(@as(u8, 0xC3), code[code.len - 1]); // ret
 }
@@ -907,49 +901,12 @@ test "emitPrologueWithAlloc produces 16-byte aligned frame" {
 
     const code = cg.getCode();
 
-    // Find the SUB RSP instruction and verify the immediate is 16-byte aligned
-    // sub rsp, imm32 = 48 81 EC xx xx xx xx
-    for (0..code.len -| 6) |i| {
-        if (code[i] == 0x48 and code[i + 1] == 0x81 and code[i + 2] == 0xEC) {
-            // Extract the 32-bit immediate (little-endian)
-            const imm = @as(u32, code[i + 3]) |
-                (@as(u32, code[i + 4]) << 8) |
-                (@as(u32, code[i + 5]) << 16) |
-                (@as(u32, code[i + 6]) << 24);
-
-            // The allocated size should be 16-byte aligned
-            try std.testing.expect(imm % 16 == 0);
-            break;
-        }
-    }
-}
-
-test "MacCodeGen matches LinuxCodeGen (both System V)" {
-    // macOS and Linux both use System V ABI - verify they're identical
-    try std.testing.expectEqual(LinuxCodeGen.CALLEE_SAVED_GENERAL_MASK, MacCodeGen.CALLEE_SAVED_GENERAL_MASK);
-    try std.testing.expectEqual(LinuxCodeGen.CALLEE_SAVED_AREA_SIZE, MacCodeGen.CALLEE_SAVED_AREA_SIZE);
-    try std.testing.expectEqual(LinuxCodeGen.roc_target.isWindows(), MacCodeGen.roc_target.isWindows());
-
-    // Both should NOT be Windows
-    try std.testing.expect(!LinuxCodeGen.roc_target.isWindows());
-    try std.testing.expect(!MacCodeGen.roc_target.isWindows());
-}
-
-test "MacCodeGen prologue/epilogue matches LinuxCodeGen" {
-    // macOS and Linux should produce identical code (both System V)
-    var mac_cg = MacCodeGen.init(std.testing.allocator);
-    defer mac_cg.deinit();
-
-    var linux_cg = LinuxCodeGen.init(std.testing.allocator);
-    defer linux_cg.deinit();
-
-    // Emit prologue and epilogue for both
-    try mac_cg.emitPrologueWithAlloc(0);
-    try mac_cg.emitEpilogue();
-
-    try linux_cg.emitPrologueWithAlloc(0);
-    try linux_cg.emitEpilogue();
-
-    // Should produce identical code
-    try std.testing.expectEqualSlices(u8, linux_cg.getCode(), mac_cg.getCode());
+    // Find the SUB RSP instruction and verify the immediate is 16-byte aligned:
+    // sub rsp, imm8 = 48 83 EC xx, or sub rsp, imm32 = 48 81 EC xx xx xx xx.
+    const imm: u32 = for (0..code.len -| 3) |i| {
+        if (code[i] != 0x48 or code[i + 2] != 0xEC) continue;
+        if (code[i + 1] == 0x83) break code[i + 3];
+        if (code[i + 1] == 0x81) break std.mem.readInt(u32, code[i + 3 ..][0..4], .little);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(imm % 16 == 0);
 }

@@ -148,10 +148,11 @@ pub const PackedListLiteral = struct {
 /// Span into one of this IR's flat side tables.
 pub const Span = Common.Span;
 
-/// Source-level name of a local, interned in a `LocalNameTable`.
+/// Source-level name of a local, interned in a `LocalNameTable`. The table
+/// issues ids from one: a name's id is its `spans` row plus one.
 pub const LocalNameId = enum(u32) {
     /// A compiler-generated temporary with no source-level name.
-    none = std.math.maxInt(u32),
+    none = 0,
     _,
 };
 
@@ -201,12 +202,12 @@ pub const LocalNameTable = struct {
         );
         if (entry.found_existing) return @fromBackingInt(entry.key_ptr.*);
         errdefer self.index.removeByPtr(entry.key_ptr);
-        if (self.spans.items.len >= @backingInt(LocalNameId.none)) return error.OutOfMemory;
+        const id_raw = std.math.cast(u32, self.spans.items.len + 1) orelse return error.OutOfMemory;
         const start = std.math.cast(u32, self.bytes.items.len) orelse return error.OutOfMemory;
         const len = std.math.cast(u32, name.len) orelse return error.OutOfMemory;
         try self.spans.ensureUnusedCapacity(allocator, 1);
         try self.bytes.appendSlice(allocator, name);
-        const id: LocalNameId = @fromBackingInt(@intCast(self.spans.items.len));
+        const id: LocalNameId = @fromBackingInt(id_raw);
         self.spans.appendAssumeCapacity(.{ .start = start, .len = len });
         entry.key_ptr.* = @backingInt(id);
         return id;
@@ -215,7 +216,7 @@ pub const LocalNameTable = struct {
     /// The text of `id`; empty for `none`.
     pub fn text(self: *const LocalNameTable, id: LocalNameId) []const u8 {
         if (id == .none) return "";
-        const span = self.spans.items[@backingInt(id)];
+        const span = self.spans.items[@backingInt(id) - 1];
         return self.bytes.items[span.start .. span.start + span.len];
     }
 
@@ -227,7 +228,7 @@ pub const LocalNameTable = struct {
         var result: LocalNameTable = .{ .bytes = bytes, .spans = spans };
         try result.index.ensureTotalCapacityContext(allocator, @intCast(spans.items.len), IdContext{ .table = &result });
         for (0..spans.items.len) |index| {
-            result.index.putAssumeCapacityNoClobberContext(@intCast(index), {}, IdContext{ .table = &result });
+            result.index.putAssumeCapacityNoClobberContext(@intCast(index + 1), {}, IdContext{ .table = &result });
         }
         return result;
     }
@@ -316,6 +317,25 @@ pub const CodecContractIdentity = struct {
 pub const OptionalCodecContractIdentity = collections.OptionalStruct(CodecContractIdentity, "constructor_ty");
 
 /// Function template plus source and monomorphic type identities.
+/// What `FnTemplate.provided_low_level` records about a template's checked
+/// provided low-level operation.
+pub const ProvidedLowLevel = enum(u8) {
+    none,
+    operation,
+    /// The operation has type-only operands (`LowLevel.typeOnlyOperands`).
+    /// They have no runtime value, so every inline mode substitutes the body
+    /// at its calls.
+    operation_with_type_only_operands,
+
+    /// What a template whose checked provided operation is `op` records.
+    pub fn of(op: ?can.CIR.Expr.LowLevel) ProvidedLowLevel {
+        const provided = op orelse return .none;
+        return if (provided.typeOnlyOperands() == 0) .operation else .operation_with_type_only_operands;
+    }
+};
+
+/// Data a specialized function carries about the checked template it comes
+/// from.
 pub const FnTemplate = struct {
     /// Identity in the common frozen Monotype owner, stamped by lifting.
     /// Consumer-specific symbols and layout specializations never replace it.
@@ -344,12 +364,12 @@ pub const FnTemplate = struct {
     /// whose closed types commit the same layouts share one procedure
     /// (design.md "Layout-Keyed Builtin Procedures").
     procedure_keyed_by_layout: bool = false,
-    /// Set for a specialization of a Builtin template whose body is its
-    /// checked provided low-level operation
+    /// Whether this is a specialization of a Builtin template whose body is
+    /// its checked provided low-level operation
     /// (`CheckedProcedureTemplate.provided_low_level`). The compiler defines
     /// that body, so a caller that substitutes it at a call depends on no
     /// source but its own.
-    provides_low_level: bool = false,
+    provided_low_level: ProvidedLowLevel = .none,
     /// The checked template is called at exactly one site of its module's
     /// source and from nowhere else (`templateHasSingleSourceCall`), stamped
     /// when Monotype finalizes the program. Dev inline analysis decides
@@ -386,16 +406,9 @@ comptime {
     if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(FnTemplate) == 464);
 }
 
-/// Monotype function-specialization metadata.
-pub const SignatureRelation = enum(u8) {
-    independent_roots,
-    exact_graph,
-};
-
-/// A specialized Monotype function and its producer-authored signature relation.
+/// A specialized Monotype function.
 pub const Fn = struct {
     source: FnTemplate,
-    signature_relation: SignatureRelation = .independent_roots,
 };
 
 /// Direct function slot in a Monotype program.
@@ -1268,10 +1281,6 @@ pub fn procCalleeForSlot(slot: FnSlot) ProcCallee {
 pub const CallProc = struct {
     callee: ProcCallee,
     args: Span(ExprId),
-    /// Checker-authored identity for compiler-owned iterator calls.
-    /// This remains exact even when control-flow joins choose a different
-    /// monomorphic iterator representation for the call result.
-    iterator_procedure: ?static_dispatch.IteratorProcedureId = null,
     /// Explicit operands for the callee's lifted captures, keyed by `CaptureId`
     /// and sorted to match that callee's canonically-sorted capture slots. Empty
     /// before Monotype lifting has resolved direct call targets.
@@ -1457,10 +1466,10 @@ pub const StaticDataCandidateValue = union(enum) {
     /// Compiler-only data initializer. Runtime code reads its frozen value.
     runtime: ExprId,
     /// A non-empty list stored in a checked module's `ConstStore` whose items
-    /// reach no function value, crash, or checked error. Static data freezes
-    /// it straight from its stored node, which the candidate's static data
-    /// request names, through the target const plan of the candidate's type,
-    /// so no expression builds it or any of its items.
+    /// reach no function value, crash, or checked error, or a box or product
+    /// stored as an image. Static data freezes it straight from its stored
+    /// node or image, which the candidate's static data request names, so no
+    /// expression builds it or any of its parts.
     stored: StoredStaticList,
 
     /// The compiler-only initializer expression, when one is needed.
@@ -1598,6 +1607,130 @@ pub const ExprData = union(enum(u8)) {
     expect_err: ExpectErrExpr,
     expect: ExprId,
     literal_rejected: LiteralRejected,
+
+    /// Whether evaluating an expression of this form transfers control
+    /// instead of producing a value.
+    pub fn transfersControl(data: ExprData) bool {
+        return switch (data) {
+            .@"unreachable",
+            .return_,
+            .break_,
+            .continue_,
+            .jump,
+            .crash,
+            .checked_error,
+            .expect_err,
+            .literal_rejected,
+            .comptime_exhaustiveness_failed,
+            => true,
+            .local,
+            .unit,
+            .int_lit,
+            .frac_f32_lit,
+            .frac_f64_lit,
+            .dec_lit,
+            .str_lit,
+            .bytes_lit,
+            .static_data_candidate,
+            .comptime_value,
+            .typed_boundary,
+            .row_widen,
+            .list,
+            .tuple,
+            .record,
+            .record_update,
+            .tag,
+            .nominal,
+            .let_,
+            .lambda,
+            .def_ref,
+            .fn_def,
+            .fn_ref,
+            .call_value,
+            .call_proc,
+            .low_level,
+            .field_access,
+            .tuple_access,
+            .structural_eq,
+            .structural_hash,
+            .match_,
+            .if_,
+            .uninitialized,
+            .uninitialized_payload,
+            .if_initialized_payload,
+            .try_sequence,
+            .try_record_sequence,
+            .block,
+            .loop_,
+            .join_point,
+            .dbg,
+            .expect,
+            => false,
+        };
+    }
+
+    /// Whether an expression of this form has no expression inside it. Any
+    /// number of consumers may name one such expression; an expression with
+    /// expressions inside it has one parent (design.md "Operand
+    /// Sequencing").
+    pub fn isLeaf(data: ExprData) bool {
+        return switch (data) {
+            .local,
+            .unit,
+            .@"unreachable",
+            .int_lit,
+            .frac_f32_lit,
+            .frac_f64_lit,
+            .dec_lit,
+            .str_lit,
+            .bytes_lit,
+            .def_ref,
+            .uninitialized,
+            .uninitialized_payload,
+            .crash,
+            .checked_error,
+            .comptime_exhaustiveness_failed,
+            => true,
+            .static_data_candidate,
+            .comptime_value,
+            .typed_boundary,
+            .row_widen,
+            .list,
+            .tuple,
+            .record,
+            .record_update,
+            .tag,
+            .nominal,
+            .let_,
+            .lambda,
+            .fn_def,
+            .fn_ref,
+            .call_value,
+            .call_proc,
+            .low_level,
+            .field_access,
+            .tuple_access,
+            .structural_eq,
+            .structural_hash,
+            .match_,
+            .if_,
+            .if_initialized_payload,
+            .try_sequence,
+            .try_record_sequence,
+            .block,
+            .loop_,
+            .break_,
+            .continue_,
+            .join_point,
+            .jump,
+            .return_,
+            .dbg,
+            .expect_err,
+            .expect,
+            .literal_rejected,
+            => false,
+        };
+    }
 };
 
 /// A literal conversion rejected its literal: the conversion returned `Err`
@@ -1759,13 +1892,37 @@ pub const Def = struct {
 };
 
 comptime {
-    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Def) == 532);
+    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Def) == 536);
 }
 
 /// Body availability for a top-level or generated Monotype definition.
 pub const FnBody = union(enum(u8)) {
     roc: ExprId,
-    hosted,
+    /// A hosted function has no body to relate its signature's positions, so
+    /// it carries the occurrences of its declaration's type variables instead
+    /// (`SignatureVarStep`).
+    hosted: Span(SignatureVarStep),
+};
+
+/// One entry of a hosted function's signature variable occurrences: for every
+/// type variable its checked declaration names more than once, the path from
+/// the function type to each position the variable occupies. One variable's
+/// positions hold one value's representation however its instantiation
+/// changes (a row join, an erased callable), because the host may hand back
+/// any of them as any other. Distinct variables stay unrelated even when they
+/// instantiate to equal types.
+///
+/// An `occurrence` begins one position's path; the `child` entries after it,
+/// up to the next `occurrence`, descend from the function type to the
+/// position. A child index counts, by content: a function's arguments, then
+/// its result; a list's or box's element (0); a record's fields; a tuple's
+/// items; a tag union's payloads, tag after tag in order; a named type's
+/// arguments.
+pub const SignatureVarStep = union(enum(u8)) {
+    /// Begins a path; the payload numbers the declaration variable, densely
+    /// from 0 within one signature.
+    occurrence: u32,
+    child: u32,
 };
 
 /// Nested function definition discovered before lifting.
@@ -1875,7 +2032,39 @@ pub const RuntimeSchemaRequest = struct {
 };
 
 /// Request to make a Monotype value available as static data.
-pub const StaticDataValue = Common.StaticDataRequest;
+pub const StaticDataValue = union(enum) {
+    /// A checked constant's stored value, or one stored node of it.
+    stored: Common.StaticDataRequest,
+    /// The stored image of a compile-time root that no constant names, such
+    /// as a `literal_argument` root's (design.md "Stored Images").
+    stored_root: StoredRootStaticData,
+    /// A part holding no function of a stored value holding one, stored as
+    /// an image of its own.
+    stored_image: StoredImageStaticData,
+    /// A value-form expression its body keeps
+    /// (`CompileTimeRootTable.inline_literals`), built by the candidate's
+    /// initializer expression.
+    inline_literal: InlineLiteralStaticData,
+};
+
+/// The stored image `node` of `module`, at `checked_type` of that module.
+pub const StoredRootStaticData = struct {
+    module: checked.ModuleId,
+    node: checked.ConstNodeId,
+    checked_type: checked.CheckedTypeId,
+};
+
+/// The image node `node` of `module`'s constant store.
+pub const StoredImageStaticData = struct {
+    module: checked.ModuleId,
+    node: checked.ConstNodeId,
+};
+
+/// The value-form expression `expr` of `module` that its body keeps.
+pub const InlineLiteralStaticData = struct {
+    module: checked.ModuleId,
+    expr: can.CIR.Expr.Idx,
+};
 
 /// Errors reported by Monotype program-view call-target verification.
 pub const CallTargetVerifyError = enum {
@@ -1956,23 +2145,17 @@ pub const ProgramView = struct {
     local_name_table: *const LocalNameTable,
     next_symbol: u32,
 
-    pub fn getComptimeValueRoot(self: ProgramView, id: Common.ComptimeValueRootId) Common.ComptimeValueRoot {
+    pub fn getComptimeValueRoot(self: *const ProgramView, id: Common.ComptimeValueRootId) Common.ComptimeValueRoot {
         return self.comptime_value_roots[@backingInt(id)];
     }
 
-    pub fn fnSource(self: ProgramView, id: FnId) FnTemplate {
+    pub fn fnSource(self: *const ProgramView, id: FnId) FnTemplate {
         const raw = @backingInt(id);
         if (raw >= self.fns.len) Common.invariant("Monotype function id referenced a missing specialization");
         return self.fns[raw].source;
     }
 
-    pub fn fnSignatureRelation(self: ProgramView, id: FnId) SignatureRelation {
-        const raw = @backingInt(id);
-        if (raw >= self.fns.len) Common.invariant("Monotype function id referenced a missing specialization");
-        return self.fns[raw].signature_relation;
-    }
-
-    pub fn constFnEvidence(self: ProgramView, spans: ConstEvidenceSpans) check.ConstStore.ConstFnEvidenceVector {
+    pub fn constFnEvidence(self: *const ProgramView, spans: ConstEvidenceSpans) check.ConstStore.ConstFnEvidenceVector {
         return .{
             .nodes = self.const_fn_evidence[spans.nodes.start..][0..spans.nodes.len],
             .targets = self.const_fn_evidence_targets[spans.targets.start..][0..spans.targets.len],
@@ -1980,11 +2163,11 @@ pub const ProgramView = struct {
         };
     }
 
-    pub fn constFnEvidenceFrames(self: ProgramView, span: Span(check.ConstStore.ConstFnEvidenceFrame)) []const check.ConstStore.ConstFnEvidenceFrame {
+    pub fn constFnEvidenceFrames(self: *const ProgramView, span: Span(check.ConstStore.ConstFnEvidenceFrame)) []const check.ConstStore.ConstFnEvidenceFrame {
         return self.const_fn_evidence_frames[span.start..][0..span.len];
     }
 
-    pub fn procDebugName(self: ProgramView, symbol: Common.Symbol) ?names.ExportNameId {
+    pub fn procDebugName(self: *const ProgramView, symbol: Common.Symbol) ?names.ExportNameId {
         return self.proc_debug_names.get(symbol);
     }
 
@@ -1992,7 +2175,7 @@ pub const ProgramView = struct {
     /// ids. Active snapshots are rejected by graph-scoped sealing while the
     /// graph maps still exist; completed views must additionally be frozen and
     /// contain only in-bounds final type ids.
-    pub fn verifyCompletedTypeIds(self: ProgramView) ?CompletedTypeIdVerifyError {
+    pub fn verifyCompletedTypeIds(self: *const ProgramView) ?CompletedTypeIdVerifyError {
         if (!self.types.frozen) return .type_store_not_frozen;
 
         for (self.specs) |spec| {
@@ -2037,7 +2220,7 @@ pub const ProgramView = struct {
         return null;
     }
 
-    pub fn verifyCallTargets(self: ProgramView) ?CallTargetVerifyError {
+    pub fn verifyCallTargets(self: *const ProgramView) ?CallTargetVerifyError {
         for (self.defs) |def| {
             if (def.fn_id.get()) |fn_id| {
                 if (self.verifyFnDefinition(fn_id, def.args)) |err| return err;
@@ -2068,11 +2251,11 @@ pub const ProgramView = struct {
         return null;
     }
 
-    fn typeRefInBounds(self: ProgramView, ty: Type.TypeId) bool {
+    fn typeRefInBounds(self: *const ProgramView, ty: Type.TypeId) bool {
         return @backingInt(ty) < self.types.types.len;
     }
 
-    fn verifyFnDefinition(self: ProgramView, fn_id: FnId, args: Span(TypedLocal)) ?CallTargetVerifyError {
+    fn verifyFnDefinition(self: *const ProgramView, fn_id: FnId, args: Span(TypedLocal)) ?CallTargetVerifyError {
         const raw_fn = @backingInt(fn_id);
         if (raw_fn >= self.fns.len) return .local_fn_out_of_bounds;
         const raw_ty = @backingInt(self.fns[raw_fn].source.mono_fn_ty);
@@ -2120,6 +2303,8 @@ pub const ProgramBuilder = struct {
     branches: ProgramList(Branch, "branches"),
     if_branches: ProgramList(IfBranch, "if_branches"),
     string_literals: ProgramList(StringLiteral, "string_literals"),
+    /// Backing pool for `FnBody.hosted` spans.
+    signature_var_steps: ProgramList(SignatureVarStep, "signature_var_steps") = .empty,
     const_blob_backings: std.AutoHashMapUnmanaged(ConstBlobKey, *SharedLiteralBacking) = .empty,
     proc_debug_names: ProcDebugNameMap,
     roots: ProgramList(Root, "roots"),
@@ -2228,7 +2413,7 @@ pub const ProgramBuilder = struct {
         result.names = try self.names.clone(allocator);
         result.types = try self.types.cloneFrozen(allocator);
         try result.comptime_value_roots.appendSlice(allocator, self.comptime_value_roots.unsafeRawItemsForView());
-        inline for (.{ "specs", "fns", "const_fn_evidence", "const_fn_evidence_targets", "const_fn_evidence_structurals", "const_fn_evidence_frames", "defs", "nested_defs", "exprs", "pats", "stmts", "locals", "expr_ids", "pat_ids", "typed_locals", "stmt_ids", "field_exprs", "field_access_segments", "fn_def_captures", "capture_operands", "record_destructs", "str_pattern_steps", "branches", "if_branches", "roots", "literal_roots", "layout_requests", "comptime_value_reads", "runtime_schema_requests", "static_data_values", "lowering_modules", "expr_locs", "expr_regions", "stmt_locs", "stmt_regions" }) |field| {
+        inline for (.{ "specs", "fns", "const_fn_evidence", "const_fn_evidence_targets", "const_fn_evidence_structurals", "const_fn_evidence_frames", "defs", "nested_defs", "exprs", "pats", "stmts", "locals", "expr_ids", "pat_ids", "typed_locals", "stmt_ids", "field_exprs", "field_access_segments", "fn_def_captures", "capture_operands", "record_destructs", "str_pattern_steps", "branches", "if_branches", "signature_var_steps", "roots", "literal_roots", "layout_requests", "comptime_value_reads", "runtime_schema_requests", "static_data_values", "lowering_modules", "expr_locs", "expr_regions", "stmt_locs", "stmt_regions" }) |field| {
             try @field(result, field).appendSlice(allocator, @field(self, field).unsafeRawItemsForView());
         }
         try result.proc_debug_names.putAll(self.proc_debug_names.view());
@@ -2291,6 +2476,7 @@ pub const ProgramBuilder = struct {
         while (backings.next()) |owner| owner.*.release();
         self.const_blob_backings.deinit(self.allocator);
         self.string_literals.deinit(self.allocator);
+        self.signature_var_steps.deinit(self.allocator);
         self.if_branches.deinit(self.allocator);
         self.branches.deinit(self.allocator);
         self.str_pattern_steps.deinit(self.allocator);
@@ -2357,6 +2543,10 @@ pub const ProgramBuilder = struct {
 
     pub fn setFnSource(self: *ProgramBuilder, id: FnId, source: FnTemplate) void {
         self.fns.getPtrImmediate(@backingInt(id)).source = source;
+    }
+
+    pub fn addSignatureVarSteps(self: *ProgramBuilder, steps: []const SignatureVarStep) std.mem.Allocator.Error!Span(SignatureVarStep) {
+        return try Common.appendSpan(SignatureVarStep, &self.signature_var_steps, self.allocator, steps);
     }
 
     pub fn addDef(self: *ProgramBuilder, def: Def) std.mem.Allocator.Error!DefId {
@@ -2718,6 +2908,11 @@ pub const ProgramBuilder = struct {
         try self.roots.append(self.allocator, root);
     }
 
+    /// The content identity of every literal root's definition.
+    pub fn literalRootIdentities(self: *const ProgramBuilder) std.AutoHashMapUnmanaged(names.TypeDigest, Common.LiteralRootId).KeyIterator {
+        return self.literal_root_by_identity.keyIterator();
+    }
+
     pub fn addLiteralRoot(self: *ProgramBuilder, root: LiteralRoot) std.mem.Allocator.Error!Common.LiteralRootId {
         const id: Common.LiteralRootId = @fromBackingInt(@intCast(@as(u32, @intCast(self.literal_roots.len()))));
         try self.literal_roots.append(self.allocator, root);
@@ -2843,6 +3038,10 @@ pub const ProgramBuilder = struct {
 
     pub fn addExprSpan(self: *ProgramBuilder, ids: []const ExprId) std.mem.Allocator.Error!Span(ExprId) {
         return try Common.appendSpan(ExprId, &self.expr_ids, self.allocator, ids);
+    }
+
+    pub fn addStmtSpan(self: *ProgramBuilder, ids: []const StmtId) std.mem.Allocator.Error!Span(StmtId) {
+        return try Common.appendSpan(StmtId, &self.stmt_ids, self.allocator, ids);
     }
 
     pub fn addPatSpan(self: *ProgramBuilder, ids: []const PatId) std.mem.Allocator.Error!Span(PatId) {
@@ -3085,7 +3284,7 @@ test "monotype call target verifier checks local slots" {
             .symbol = undefined, // symbol is not inspected by the call-target verifier
             .fn_id = .some(fn_id),
             .args = Span(TypedLocal).empty(),
-            .body = .hosted,
+            .body = .{ .hosted = .empty() },
             .ret = unit_ty,
         });
         try std.testing.expectEqual(CallTargetVerifyError.local_fn_definition_arity_mismatch, program.verifyCallTargets().?);

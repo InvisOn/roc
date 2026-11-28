@@ -54,11 +54,16 @@ TYPE MISMATCH - effectful_callback_through_pure_join_map.md:8:8:8:40
 			(line-break)
 			(annotation-start code-block)
 			(indent 1)
-			(text "List(Str => List(Str)), ((a -> c) -> c) -> List(b)")
+			(text "List(Str => List(Str)), ((a -> c) -> c) -> List(_b)")
 			(line-break)
 			(indent 1)
 			(text "  where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]")
 			(annotation-end)
+			(line-break)
+			(line-break)
+			(annotated emphasis "Hint:")
+			(reflow " ")
+			(reflow "This function is effectful, but a pure function is expected.")
 			(line-break)
 			(line-break)
 			(reflow "This use needs that because of this code in the definition it uses:")
@@ -153,7 +158,7 @@ NO CHANGE
 			(args
 				(p-assign (ident "lines"))
 				(p-assign (ident "functions")))
-			(e-dispatch-call (method "join_map") (constraint-fn-var 280)
+			(e-dispatch-call (method "join_map") (constraint-fn-var 271)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "lines"))))
@@ -164,7 +169,7 @@ NO CHANGE
 						(e-lambda
 							(args
 								(p-assign (ident "line")))
-							(e-dispatch-call (method "join_map") (constraint-fn-var 278)
+							(e-dispatch-call (method "join_map") (constraint-fn-var 270)
 								(receiver
 									(e-lookup-local
 										(p-assign (ident "functions"))))
@@ -175,7 +180,7 @@ NO CHANGE
 										(e-lambda
 											(args
 												(p-assign (ident "f")))
-											(e-call (constraint-fn-var 277)
+											(e-call (constraint-fn-var 269)
 												(e-lookup-local
 													(p-assign (ident "f")))
 												(e-lookup-local
@@ -204,7 +209,7 @@ NO CHANGE
 				(ty-apply (name "List") (builtin)
 					(ty-lookup (name "Str") (builtin))))))
 	(s-expect
-		(e-call (constraint-fn-var 373)
+		(e-call (constraint-fn-var 322)
 			(e-lookup-external
 				(builtin))
 			(e-runtime-error (tag "erroneous_value_expr"))

@@ -107,8 +107,6 @@ pub const UniquenessOptions = struct {
     metrics: ?*UniquenessMetrics = null,
 };
 
-const no_local: u32 = std.math.maxInt(u32);
-
 const OptionalU32 = collections.OptionalU32;
 const WriteFirstSlice = collections.WriteFirstSlice;
 
@@ -137,9 +135,9 @@ pub const JoinBody = struct {
 /// ownership unit before the caller frame can be replaced.
 pub const TailCallLifetime = struct {
     stmt: LIR.CFStmtId,
-    /// Each argument's anchoring parameter position plus one; zero when the
+    /// Each argument's anchoring parameter position, absent when the
     /// argument has no anchor.
-    anchor_params: [arc_sig.tracked_param_count]u8 = @splat(0),
+    anchor_params: [arc_sig.tracked_param_count]collections.OptionalU8 = @splat(.none),
     carriers: [arc_sig.tracked_param_count]collections.OptionalId(LIR.LocalId) = @splat(.none),
 
     comptime {
@@ -148,8 +146,7 @@ pub const TailCallLifetime = struct {
 
     pub fn anchorParam(self: *const TailCallLifetime, position: usize) ?usize {
         if (position >= arc_sig.tracked_param_count) return null;
-        const anchor = self.anchor_params[position];
-        return if (anchor == 0) null else anchor - 1;
+        return if (self.anchor_params[position].get()) |anchor| anchor else null;
     }
 
     pub fn carrier(self: *const TailCallLifetime, position: usize) ?LIR.LocalId {
@@ -229,6 +226,9 @@ pub const Solution = struct {
     /// unit into the join body at every jump; their releases belong to the
     /// body, so emission must not end their lifetime from use scans alone.
     join_param: std.bit_set.DynamicBitSetUnmanaged,
+    /// Bindings for which the structural lift cannot name one definition.
+    /// Their incoming transfers are statement facts, never local-wide aliases.
+    multiple_definitions: std.bit_set.DynamicBitSetUnmanaged,
     /// Bit set => the local is a join parameter whose initial value may be
     /// uninitialized. These locals are released only after an explicit
     /// initialized-payload refinement.
@@ -304,6 +304,7 @@ pub const Solution = struct {
         self.allocator.free(self.switch_count_by_proc);
         self.allocator.free(self.switch_index_by_stmt);
         self.join_param.deinit(self.allocator);
+        self.multiple_definitions.deinit(self.allocator);
         self.maybe_uninitialized_join_param.deinit(self.allocator);
         self.maybe_uninitialized_condition.deinit(self.allocator);
         self.maybe_uninitialized_condition_mask.deinit(self.allocator);
@@ -374,6 +375,27 @@ pub const Solution = struct {
         if (index >= self.leader.len) return false;
         if (!self.unique_born.isSet(index) or self.unique_destroyed.isSet(index)) return false;
         return (self.unique_conds[index] & ~seeds) == 0;
+    }
+
+    /// `isUniqueUnder` for the value a runtime uniqueness check reads through
+    /// `local`. A borrowed pure same-value alias that is only ever read is a
+    /// view: it holds no unit and has no origin of its own, and the count the
+    /// check reads is that of the value it views. The claim therefore holds
+    /// when the local owning the viewed unit is unique under `seeds` and no
+    /// link of the borrowed alias chain down to it adds a holder.
+    pub fn isUniqueThroughViewsUnder(self: *const Solution, local: LIR.LocalId, seeds: arc_sig.ParamMask) bool {
+        var cursor = @backingInt(local);
+        var steps: usize = 0;
+        while (cursor < self.alias_source.len and
+            self.isBorrowed(@fromBackingInt(@intCast(cursor))))
+        {
+            const source = self.alias_source[cursor].get() orelse break;
+            if (cursor >= self.leader.len or self.unique_destroyed.isSet(cursor)) return false;
+            cursor = source;
+            steps += 1;
+            if (steps > self.alias_source.len) solveInvariant("ARC alias-source chain contained a cycle");
+        }
+        return self.isUniqueUnder(@fromBackingInt(@intCast(cursor)), seeds);
     }
 
     /// True when the proc's signature is pinned by ABI and must never be
@@ -558,12 +580,27 @@ pub const Solution = struct {
     /// The outcome span a call from `caller` to `callee` may demand. A stable
     /// procedure's outcome rows follow its current body, which code without
     /// a code key does not change with, so only a caller with one may demand
-    /// them.
+    /// them. A call within the callee's emission unit may demand them, and
+    /// so may every call of a procedure whose object publishes its outcome
+    /// variant (`publishesOutcomeVariant`).
     pub fn outcomeSpanForCall(self: *const Solution, store: *const LirStore, caller: LIR.LirProcSpecId, callee: LIR.LirProcSpecId) arc_sig.OutcomeSpan {
         const index = @backingInt(callee);
-        if (index < self.stability_pinned.capacity() and self.stability_pinned.isSet(index) and store.getProcSpec(caller).code_key == null) return .empty;
-        if (!sharesEmissionUnit(store, caller, callee)) return .empty;
+        if (index < self.stability_pinned.capacity() and self.stability_pinned.isSet(index) and store.getProcSpecImmediate(caller).code_key == null) return .empty;
+        if (!sharesEmissionUnit(store, caller, callee) and !self.publishesOutcomeVariant(store, callee)) return .empty;
         return self.availableOutcomeSpanOf(callee);
+    }
+
+    /// Whether a call from any emission unit may demand `proc`'s
+    /// outcome-restitution variant (design.md "Outcome-Conditioned Argument
+    /// Restitution", published outcome variants): a publishing worker
+    /// (`LIR.LirProcSpec.outcome_publisher`) this program emits whose solved
+    /// capability is nonempty and whose signature nothing pins, or an
+    /// external procedure whose object published one
+    /// (`LIR.LirProcSpec.rc_outcomes`).
+    pub fn publishesOutcomeVariant(self: *const Solution, store: *const LirStore, proc: LIR.LirProcSpecId) bool {
+        if (self.availableOutcomeSpanOf(proc).isEmpty()) return false;
+        const spec = store.getProcSpec(proc);
+        return spec.external or (spec.outcome_publisher and !self.isPinnedProc(proc));
     }
 
     pub fn availableOutcomeSpanOf(self: *const Solution, proc: LIR.LirProcSpecId) arc_sig.OutcomeSpan {
@@ -751,6 +788,13 @@ const UniqueCallFact = struct {
 
 const OwnershipFlow = struct { target: LIR.LocalId, source: LIR.LocalId };
 
+/// One consuming-result operation at `stmt` of procedure `proc`.
+const ConsumingSlice = struct {
+    flow: OwnershipFlow,
+    stmt: LIR.CFStmtId,
+    proc: u32,
+};
+
 const BindingFact = union(enum) {
     fresh: LIR.LocalId,
     multi: LIR.LocalId,
@@ -760,6 +804,11 @@ const BindingFact = union(enum) {
     /// An owned result selects the consuming primitive, so its input must
     /// supply a unit. This is ownership flow, not same-value aliasing.
     consuming_result: OwnershipFlow,
+    /// The only payload of a dynamic tag union's active variant, read as an
+    /// ownership-complete projection: it holds every refcounted byte of the
+    /// union on that path, so an ownership demand on it is a demand on the
+    /// union's unit, as on a same-value alias.
+    complete_projection: OwnershipFlow,
 };
 
 const VisibilityFact = union(enum) {
@@ -768,8 +817,6 @@ const VisibilityFact = union(enum) {
 };
 
 const UniqueFact = union(enum) {
-    birth: LIR.LocalId,
-    foreign: LIR.LocalId,
     /// A pure same-value alias definition at `stmt`.
     alias: struct { target: LIR.LocalId, source: LIR.LocalId, stmt: LIR.CFStmtId },
     join_target: LIR.LocalId,
@@ -779,7 +826,6 @@ const UniqueFact = union(enum) {
     consume: struct { local: LIR.LocalId, stmt: LIR.CFStmtId },
     destroy: LIR.LocalId,
     read: LIR.LocalId,
-    representation_read: LIR.LocalId,
 };
 
 const UniqueJoinIncoming = struct {
@@ -915,6 +961,10 @@ const Solver = struct {
     /// Static ARC facts projected during the sole reachable-statement lift.
     /// Later analyses consume these typed facts without decoding LIR again.
     binding_facts: std.ArrayList(BindingFact),
+    /// Every reachable operation whose owned result consumes its input
+    /// (`list_sublist`), with the procedure it was lifted from, so the
+    /// dead-lender transfer can ask what its lender does afterwards.
+    consuming_slices: std.ArrayList(ConsumingSlice),
     visibility_facts: std.ArrayList(VisibilityFact),
     unique_facts: std.ArrayList(UniqueFact),
     address_taken: std.bit_set.DynamicBitSetUnmanaged,
@@ -938,7 +988,7 @@ const Solver = struct {
 };
 
 fn inferenceRcEffect(solver: *const Solver, op: anytype, declared: anytype) @TypeOf(declared) {
-    if (!solver.consume_dead_boxes and op == .box_unbox) return op.arcBorrowedResultVariant().?.rcEffect();
+    if (!solver.consume_dead_boxes and op.deadLenderArg() != null) return op.arcLiveLenderRcEffect();
     return op.arcInferenceRcEffect(declared);
 }
 
@@ -994,6 +1044,7 @@ pub fn solveWithOptions(
         .maybe_uninitialized_condition_mask = .empty,
         .param_uses = .empty,
         .binding_facts = .empty,
+        .consuming_slices = .empty,
         .visibility_facts = .empty,
         .unique_facts = .empty,
         .address_taken = .{},
@@ -1025,6 +1076,7 @@ pub fn solveWithOptions(
         solver.maybe_uninitialized_condition_mask.deinit(allocator);
         solver.param_uses.deinit(allocator);
         solver.binding_facts.deinit(allocator);
+        solver.consuming_slices.deinit(allocator);
         solver.visibility_facts.deinit(allocator);
         solver.unique_facts.deinit(allocator);
         solver.address_taken.deinit(allocator);
@@ -1181,6 +1233,7 @@ pub fn solveWithOptions(
             solveInvariant("incremental return binding update disagreed with independent solve");
         }
     }
+    try demandDeadLenderSlices(&solver, &binding);
 
     // Allocation-level cleanup ends at this ownership-transfer boundary.
     // Later failures are handled exclusively by Solution.deinit.
@@ -1241,6 +1294,8 @@ pub fn solveWithOptions(
         errdefer maybe_uninitialized_condition_mask.deinit(allocator);
         var join_param = try std.bit_set.DynamicBitSetUnmanaged.initEmpty(allocator, local_count);
         errdefer join_param.deinit(allocator);
+        var multiple_definitions = try std.bit_set.DynamicBitSetUnmanaged.initEmpty(allocator, local_count);
+        errdefer multiple_definitions.deinit(allocator);
         var maybe_uninitialized_join_param = try std.bit_set.DynamicBitSetUnmanaged.initEmpty(allocator, local_count);
         errdefer maybe_uninitialized_join_param.deinit(allocator);
         for (leader, 0..) |*entry, index| entry.* = @intCast(index);
@@ -1263,6 +1318,7 @@ pub fn solveWithOptions(
             }
             if (solver.alias_source[arc_index].get()) |source| alias_source[local_index] = .some(domain.localAt(source));
             if (solver.join_param.isSet(arc_index)) join_param.set(local_index);
+            if (solver.defs[arc_index] == .multi) multiple_definitions.set(local_index);
             if (solver.maybe_uninitialized_join_param.isSet(arc_index)) {
                 maybe_uninitialized_join_param.set(local_index);
                 maybe_uninitialized_condition.set(local_index, solver.maybe_uninitialized_condition.get(arc_index));
@@ -1308,6 +1364,7 @@ pub fn solveWithOptions(
             .switch_count_by_proc = solver.switch_count_by_proc,
             .switch_index_by_stmt = solver.switch_index_by_stmt,
             .join_param = join_param,
+            .multiple_definitions = multiple_definitions,
             .maybe_uninitialized_join_param = maybe_uninitialized_join_param,
             .maybe_uninitialized_condition = maybe_uninitialized_condition,
             .maybe_uninitialized_condition_mask = maybe_uninitialized_condition_mask,
@@ -1346,15 +1403,37 @@ pub fn solveWithOptions(
 const OutcomeWalkState = struct {
     stmt: u32,
     present: bool,
-    discriminant: u32,
+    /// The discriminant the returned local was last tagged with, absent
+    /// when no `assign_tag` witnesses it.
+    discriminant: OptionalU32,
 };
 
 /// One walk state a statement was entered with; `next` chains the other
 /// states of the same statement.
 const OutcomeSeenState = struct {
     present: bool,
-    discriminant: u32,
-    next: u32,
+    discriminant: OptionalU32,
+    next: OptionalU32,
+};
+
+/// The discriminant every walk reaching an escape returned with: none yet,
+/// several different ones, or one, stored plus `first_discriminant`.
+const EscapeDiscriminant = enum(u32) {
+    none = 0,
+    ambiguous = 1,
+    _,
+
+    const first_discriminant: u32 = 2;
+
+    fn of(value: u32) EscapeDiscriminant {
+        return @fromBackingInt(value + first_discriminant);
+    }
+
+    /// The one discriminant, or null for none or several.
+    fn single(self: EscapeDiscriminant) ?u32 {
+        if (@backingInt(self) < first_discriminant) return null;
+        return @backingInt(self) - first_discriminant;
+    }
 };
 
 /// Records `walk` as entered at its statement's inventory position, reporting
@@ -1366,16 +1445,15 @@ fn enterOutcomeWalk(
     index: u32,
     walk: OutcomeWalkState,
 ) Allocator.Error!bool {
-    const head = heads.get(index) orelse no_local;
-    var cursor = head;
-    while (cursor != no_local) {
+    const head = heads.get(index);
+    var next = head;
+    while (next) |cursor| {
         const state = states.items[cursor];
         if (state.present == walk.present and state.discriminant == walk.discriminant) return true;
-        cursor = state.next;
+        next = state.next.get();
     }
-    const position = std.math.cast(u32, states.items.len) orelse return error.OutOfMemory;
-    if (position == no_local) return error.OutOfMemory;
-    try states.append(allocator, .{ .present = walk.present, .discriminant = walk.discriminant, .next = head });
+    const position = try collections.nextBiasedId(states.items.len);
+    try states.append(allocator, .{ .present = walk.present, .discriminant = walk.discriminant, .next = .of(head) });
     heads.set(index, position);
     return false;
 }
@@ -1567,11 +1645,11 @@ fn computeOutcomeRestitution(
     // has already collected it; restitution performs no reachability walk.
     var statement_indices = collections.DenseMap(LIR.CFStmtId, u32).init(allocator);
     defer statement_indices.deinit();
-    var discriminant_buffer = std.ArrayList(OptionalU32).empty;
+    var discriminant_buffer = std.ArrayList(EscapeDiscriminant).empty;
     defer discriminant_buffer.deinit(allocator);
     var mask_buffer = std.ArrayList(arc_sig.ParamMask).empty;
     defer mask_buffer.deinit(allocator);
-    var bit_discriminant_buffer = std.ArrayList(OptionalU32).empty;
+    var bit_discriminant_buffer = std.ArrayList(EscapeDiscriminant).empty;
     defer bit_discriminant_buffer.deinit(allocator);
     var bit_present_buffer = std.ArrayList(bool).empty;
     defer bit_present_buffer.deinit(allocator);
@@ -1589,13 +1667,17 @@ fn computeOutcomeRestitution(
     defer seen_heads.deinit(allocator);
     var seen_states = std.ArrayList(OutcomeSeenState).empty;
     defer seen_states.deinit(allocator);
-    // An escape reached with different discriminants on different paths.
-    const ambiguous_discriminant: OptionalU32 = .some(no_local - 1);
 
     for (0..store.procSpecCount()) |proc_index| {
         const proc_id: LIR.LirProcSpecId = @fromBackingInt(@intCast(@as(u32, @intCast(proc_index))));
-        if (solution.isPinnedProc(proc_id) and !solution.stability_pinned.isSet(proc_index)) continue;
         const proc = store.getProcSpec(proc_id);
+        if (proc.external) {
+            // Another object defines this procedure and the outcome variant
+            // it publishes; its capability is that variant's outcome table.
+            try appendPublishedOutcomes(allocator, store, proc, &all_outcomes, &solution.available_outcome_spans[proc_index]);
+            continue;
+        }
+        if (solution.isPinnedProc(proc_id) and !solution.stability_pinned.isSet(proc_index)) continue;
         const body = proc.arcBody() orelse continue;
         if (layouts.getLayout(proc.ret_layout).tag != .tag_union) continue;
 
@@ -1675,7 +1757,7 @@ fn computeOutcomeRestitution(
             try stack.append(allocator, .{
                 .stmt = @backingInt(body),
                 .present = true,
-                .discriminant = no_local,
+                .discriminant = .none,
             });
             while (stack.pop()) |walk| {
                 const walk_index = statement_indices.get(@fromBackingInt(walk.stmt)) orelse
@@ -1688,7 +1770,7 @@ fn computeOutcomeRestitution(
                 // Only `assign_tag` witnesses a result discriminant; every
                 // other write to the returned local kills the witness first.
                 if (body_clone.writtenLocal(stmt.*)) |target| {
-                    if (target == ret_local) next_state.discriminant = no_local;
+                    if (target == ret_local) next_state.discriminant = .none;
                 }
 
                 const pushNext = struct {
@@ -1724,13 +1806,13 @@ fn computeOutcomeRestitution(
                     },
                     .assign_packed_erased_fn => |assign_stmt| {
                         const assign = store.stmtRow(assign_stmt.data);
-                        if (assign.capture) |capture| {
+                        if (assign.capture.get()) |capture| {
                             if (!consumeOutcomeLocal(solution, active_param, &next_state.present, capture)) {
                                 valid = false;
                                 break;
                             }
                         }
-                        if (assign.reuse) |reuse| {
+                        if (assign.reuse.get()) |reuse| {
                             if (!consumeOutcomeLocal(solution, active_param, &next_state.present, reuse)) {
                                 valid = false;
                                 break;
@@ -1738,8 +1820,8 @@ fn computeOutcomeRestitution(
                         }
                     },
                     .assign_low_level => |assign| {
-                        const effect = if (!consume_dead_boxes and assign.op == .box_unbox)
-                            assign.op.arcBorrowedResultVariant().?.rcEffect()
+                        const effect = if (!consume_dead_boxes and assign.op.deadLenderArg() != null)
+                            assign.op.arcLiveLenderRcEffect()
                         else
                             assign.op.arcInferenceRcEffect(store.stmtRow(assign.rc_effect));
                         // Stored arguments may move their entry unit into the
@@ -1784,7 +1866,7 @@ fn computeOutcomeRestitution(
                             valid = false;
                             break;
                         }
-                        if (assign.target == ret_local) next_state.discriminant = assign.discriminant;
+                        if (assign.target == ret_local) next_state.discriminant = .some(assign.discriminant);
                     },
                     .store_tag => |assign| {
                         if (assign.payload) |payload| {
@@ -1850,34 +1932,34 @@ fn computeOutcomeRestitution(
                             break;
                         };
                         const target_stmt = store.getCFStmtImmediate(target);
-                        if (next_state.discriminant != no_local and
+                        if (next_state.discriminant != .none and
                             !(target_stmt.* == .ret and target_stmt.ret.value == ret_local))
                         {
                             valid = false;
                             break;
                         }
-                        if (target_stmt.* == .ret and target_stmt.ret.value == ret_local and next_state.discriminant != no_local) {
+                        if (target_stmt.* == .ret and target_stmt.ret.value == ret_local) if (next_state.discriminant.get()) |discriminant| {
                             const stmt_index = statement_indices.get(current) orelse
                                 solveInvariant("ARC outcome escape was outside its lifted procedure inventory");
                             const old = bit_escape_discriminants[stmt_index];
                             if (old == .none) {
-                                bit_escape_discriminants[stmt_index] = .some(next_state.discriminant);
+                                bit_escape_discriminants[stmt_index] = .of(discriminant);
                                 bit_escape_present[stmt_index] = next_state.present;
-                            } else if (old == OptionalU32.some(next_state.discriminant)) {
+                            } else if (old == EscapeDiscriminant.of(discriminant)) {
                                 bit_escape_present[stmt_index] = bit_escape_present[stmt_index] and next_state.present;
                             } else {
-                                bit_escape_discriminants[stmt_index] = ambiguous_discriminant;
+                                bit_escape_discriminants[stmt_index] = .ambiguous;
                                 bit_escape_present[stmt_index] = false;
                             }
-                        }
+                        };
                         try pushNext(&stack, allocator, next_state, target);
                     },
                     .ret => |ret_stmt| {
-                        if (ret_stmt.value != ret_local or next_state.discriminant == no_local) {
+                        if (ret_stmt.value != ret_local or next_state.discriminant == .none) {
                             valid = false;
                             break;
                         }
-                        const discriminant: u32 = @intCast(next_state.discriminant);
+                        const discriminant: u32 = next_state.discriminant.get().?;
                         const entry = try bit_accum.getOrPut(discriminant);
                         if (entry.found_existing) {
                             entry.value_ptr.present_on_all_paths = entry.value_ptr.present_on_all_paths and next_state.present;
@@ -1888,12 +1970,12 @@ fn computeOutcomeRestitution(
                             solveInvariant("ARC outcome escape was outside its lifted procedure inventory");
                         const old = bit_escape_discriminants[stmt_index];
                         if (old == .none) {
-                            bit_escape_discriminants[stmt_index] = .some(discriminant);
+                            bit_escape_discriminants[stmt_index] = .of(discriminant);
                             bit_escape_present[stmt_index] = next_state.present;
-                        } else if (old == OptionalU32.some(discriminant)) {
+                        } else if (old == EscapeDiscriminant.of(discriminant)) {
                             bit_escape_present[stmt_index] = bit_escape_present[stmt_index] and next_state.present;
                         } else {
-                            bit_escape_discriminants[stmt_index] = ambiguous_discriminant;
+                            bit_escape_discriminants[stmt_index] = .ambiguous;
                             bit_escape_present[stmt_index] = false;
                         }
                     },
@@ -1903,7 +1985,7 @@ fn computeOutcomeRestitution(
                 // Every other statement continues along its flow edges with
                 // the state it leaves.
                 var successors: OutcomeSuccessors = .{ .stack = &stack, .allocator = allocator, .state = next_state };
-                body_clone.forEachSuccessor(store, stmt.*, .{ .switch_edges = .arms_only, .join_body = false }, &successors, OutcomeSuccessors.push);
+                body_clone.forEachSuccessor(store, stmt, .{ .switch_edges = .arms_only, .join_body = false }, &successors, OutcomeSuccessors.push);
                 if (successors.failure) |err| return err;
             }
             if (!valid) break;
@@ -1938,11 +2020,11 @@ fn computeOutcomeRestitution(
                 if (old == .none) {
                     escape_discriminants[stmt_index] = discriminant;
                 } else if (old != discriminant) {
-                    escape_discriminants[stmt_index] = ambiguous_discriminant;
+                    escape_discriminants[stmt_index] = .ambiguous;
                     escape_masks[stmt_index] = 0;
                     continue;
                 }
-                if (discriminant != ambiguous_discriminant and bit_escape_present[stmt_index]) {
+                if (discriminant != .ambiguous and bit_escape_present[stmt_index]) {
                     escape_masks[stmt_index] |= param_bit;
                 }
             }
@@ -1970,17 +2052,13 @@ fn computeOutcomeRestitution(
             });
         }
         std.mem.sort(arc_sig.Outcome, all_outcomes.items[start..], {}, outcomeLessThan);
-        if (start > std.math.maxInt(u32) or all_outcomes.items.len - start > std.math.maxInt(u32)) {
-            solveInvariant("ARC outcome table exceeded its span representation");
-        }
         solution.available_outcome_spans[proc_index] = .{
-            .start = @intCast(start),
-            .len = @intCast(all_outcomes.items.len - start),
+            .start = std.math.cast(u32, start) orelse solveInvariant("ARC outcome table exceeded its span representation"),
+            .len = std.math.cast(u32, all_outcomes.items.len - start) orelse solveInvariant("ARC outcome table exceeded its span representation"),
         };
         if (@import("builtin").mode == .debug) outcome_scratch_entries += escape_discriminants.len;
         for (escape_discriminants, 0..) |maybe_discriminant, stmt_index| {
-            if (maybe_discriminant == ambiguous_discriminant) continue;
-            const discriminant = maybe_discriminant.get() orelse continue;
+            const discriminant = maybe_discriminant.single() orelse continue;
             const outcome = accum.get(@intCast(discriminant)) orelse
                 solveInvariant("ARC outcome escape named an unreturned discriminant");
             solution.restitution_params_by_stmt[@backingInt(proc_stmts[stmt_index])] = escape_masks[stmt_index] & outcome.remaining_on_all_paths;
@@ -1988,6 +2066,38 @@ fn computeOutcomeRestitution(
     }
 
     solution.outcomes = try all_outcomes.toOwnedSlice(allocator);
+}
+
+/// Append the outcome table an external procedure's object published with
+/// its outcome-restitution variant (`LIR.LirProcSpec.rc_outcomes`) and
+/// record it as the procedure's available span; a procedure that publishes
+/// none keeps an empty span.
+fn appendPublishedOutcomes(
+    allocator: Allocator,
+    store: *const LirStore,
+    proc: LIR.LirProcSpec,
+    all_outcomes: *std.ArrayList(arc_sig.Outcome),
+    span: *arc_sig.OutcomeSpan,
+) Allocator.Error!void {
+    const words = store.getU32Span(proc.rc_outcomes);
+    const word_count = GuardedList.borrowLen(words);
+    if (word_count == 0) return;
+    if (word_count % 2 != 0) solveInvariant("ARC read a published outcome table with an incomplete row");
+    const start = all_outcomes.items.len;
+    var restituted: arc_sig.ParamMask = 0;
+    var row: usize = 0;
+    while (row < word_count) : (row += 2) {
+        const mask = std.math.cast(arc_sig.ParamMask, GuardedList.at(words, row + 1)) orelse
+            solveInvariant("ARC read a published outcome row naming an untracked parameter");
+        const outcome: arc_sig.Outcome = .{ .discriminant = GuardedList.at(words, row), .restituted_params = mask };
+        if (all_outcomes.items.len > start and !outcomeLessThan({}, all_outcomes.items[all_outcomes.items.len - 1], outcome)) {
+            solveInvariant("ARC read a published outcome table out of discriminant order");
+        }
+        restituted |= outcome.restituted_params;
+        try all_outcomes.append(allocator, outcome);
+    }
+    if (restituted == 0) solveInvariant("ARC read a published outcome table that restitutes nothing");
+    span.* = .{ .start = @intCast(start), .len = @intCast(all_outcomes.items.len - start) };
 }
 
 /// Allocation demand over the already-lifted occurrence inventory. Each local
@@ -2028,7 +2138,6 @@ fn solveRepresentationAliases(solver: *const Solver, layouts: *const layout_mod.
             if (target == null or !aliases.isSet(target.?)) try Seed.add(solver, &required, &work, alias.source);
         },
         .join_incoming => |incoming| try Seed.add(solver, &required, &work, incoming.source),
-        .birth, .foreign, .representation_read => {},
     };
     for (solver.unique_calls.items) |call| {
         const args = solver.store.getLocalSpan(call.args);
@@ -2156,7 +2265,7 @@ fn buildTailCallTable(
             if (solver.param_proc[leader] != OptionalU32.some(call.caller)) continue;
             const anchor = solver.param_position.get(leader);
             if (anchor >= arc_sig.tracked_param_count) continue;
-            fact.anchor_params[position] = @intCast(anchor + 1);
+            fact.anchor_params[position] = .some(@intCast(anchor));
         }
 
         facts[fill[call.caller]] = fact;
@@ -2271,16 +2380,9 @@ fn liftReachableStatements(solver: *Solver) SolveError!void {
     for (0..solver.store.procSpecCount()) |proc_index| {
         const proc = solver.store.getProcSpecImmediate(@fromBackingInt(@intCast(@as(u32, @intCast(proc_index)))));
         const params = solver.store.getLocalSpan(proc.args);
-        for (0..GuardedList.borrowLen(params)) |param_index| {
-            const param = GuardedList.at(params, param_index);
-            try solver.unique_facts.append(solver.allocator, .{ .foreign = param });
-        }
         try solver.proc_stmts.open(solver.allocator);
         try solver.proc_returns.open(solver.allocator);
         try solver.proc_join_bodies.open(solver.allocator);
-        // Bodyless procedures still have ABI parameter definitions. They
-        // contribute no reachable statements, but their params are foreign
-        // uniqueness origins just like the independent whole-store model.
         const body = proc.arcBody() orelse continue;
         for (0..GuardedList.borrowLen(params)) |param_index| {
             try solver.binding_facts.append(solver.allocator, .{ .fresh = GuardedList.at(params, param_index) });
@@ -2296,7 +2398,7 @@ fn liftReachableStatements(solver: *Solver) SolveError!void {
             try liftProcStmtFacts(solver, @intCast(proc_index), current);
             if (!facts_seen.isSet(stmt_index)) {
                 facts_seen.set(stmt_index);
-                try liftSharedStmtFacts(solver, current);
+                try liftSharedStmtFacts(solver, @intCast(proc_index), current);
             }
             try body_clone.appendSuccessorsInOrder(solver.store, &solver.stack, current, solver.allocator, .{ .switch_edges = .arms_first });
         }
@@ -2509,7 +2611,7 @@ fn collectAll(solver: *Solver) SolveError!void {
         .borrow => |borrow| noteBorrowDef(solver, borrow.target, borrow.source),
         .alias => |alias| noteAlias(solver, alias.target, alias.source),
         .demand => |local| noteDemand(solver, local),
-        .consuming_result => {},
+        .consuming_result, .complete_projection => {},
     };
 
     // Direct-call demands depend on the current optimistic parameter
@@ -2541,9 +2643,24 @@ fn bindingOwnershipFlow(solver: *const Solver, fact: BindingFact) ?OwnershipFlow
             if (solver.defs[target] != .multi) edge else null
         else
             null,
-        .consuming_result => |edge| edge,
+        .consuming_result, .complete_projection => |edge| edge,
         .fresh, .multi, .borrow, .demand => null,
     };
+}
+
+/// One write of a pure same-value alias into a join parameter, as dense
+/// indices: the parameter and the value the write names.
+const JoinParamWrite = struct { target: u32, source: u32 };
+
+fn joinParamWrite(solver: *const Solver, fact: BindingFact) ?JoinParamWrite {
+    const edge = switch (fact) {
+        .alias => |edge| edge,
+        .fresh, .multi, .borrow, .demand, .consuming_result, .complete_projection => return null,
+    };
+    const target = solver.domain.indexOf(edge.target) orelse return null;
+    if (!solver.join_param.isSet(target)) return null;
+    const source = solver.domain.indexOf(edge.source) orelse return null;
+    return .{ .target = target, .source = source };
 }
 
 /// Settles the borrowed-parameter lattice from the facts collected above.
@@ -2600,18 +2717,47 @@ fn solveParameterModes(solver: *Solver) SolveError!void {
 
     // A returned truncation must transfer ownership too: lending its input
     // and retaining at the return would discard a unique buffer's capacity.
-    // Ordinary payload reads and same-value returns retain their borrow rules.
+    // The returned value reaches the truncation through pure same-value
+    // aliases and through the join parameters a value join writes them
+    // into, each write naming one alias source of the parameter. Ordinary
+    // payload reads and same-value returns retain their borrow rules.
+    const join_offsets = try solver.allocator.alloc(u32, local_count + 1);
+    defer solver.allocator.free(join_offsets);
+    @memset(join_offsets, 0);
+    for (solver.binding_facts.items) |fact| {
+        const edge = joinParamWrite(solver, fact) orelse continue;
+        join_offsets[edge.target + 1] += 1;
+    }
+    for (1..join_offsets.len) |index| join_offsets[index] += join_offsets[index - 1];
+    const join_sources = try solver.allocator.alloc(u32, join_offsets[local_count]);
+    defer solver.allocator.free(join_sources);
+    const join_fill = try solver.allocator.dupe(u32, join_offsets[0..local_count]);
+    defer solver.allocator.free(join_fill);
+    for (solver.binding_facts.items) |fact| {
+        const edge = joinParamWrite(solver, fact) orelse continue;
+        join_sources[join_fill[edge.target]] = edge.source;
+        join_fill[edge.target] += 1;
+    }
     var returned_aliases = try std.bit_set.DynamicBitSetUnmanaged.initEmpty(solver.allocator, local_count);
     defer returned_aliases.deinit(solver.allocator);
+    var returned_work = std.ArrayList(u32).empty;
+    defer returned_work.deinit(solver.allocator);
     for (solver.proc_returns.items.items) |local| {
-        var cursor = solver.domain.indexOf(@fromBackingInt(@intCast(local))) orelse continue;
+        const start = solver.domain.indexOf(@fromBackingInt(@intCast(local))) orelse continue;
+        try returned_work.append(solver.allocator, start);
+    }
+    while (returned_work.pop()) |start| {
+        var cursor = start;
         while (!returned_aliases.isSet(cursor)) {
             returned_aliases.set(cursor);
             if (consuming_results.isSet(cursor)) {
                 solver.demand[cursor] = true;
                 break;
             }
-            if (solver.defs[cursor] == .multi) break;
+            if (solver.defs[cursor] == .multi) {
+                try returned_work.appendSlice(solver.allocator, join_sources[join_offsets[cursor]..join_offsets[cursor + 1]]);
+                break;
+            }
             cursor = solver.alias_source[cursor].get() orelse break;
         }
     }
@@ -2644,6 +2790,125 @@ fn solveParameterModes(solver: *Solver) SolveError!void {
     }
 }
 
+/// A slice solved as a borrow keeps its lender's whole allocation live until
+/// the slice's last read, items it drops included. When the lender is an
+/// owned binding whose place is not read at or after some read of the slice,
+/// the borrow stretches the lender past its own last use, holding a buffer
+/// the slice may have dropped and the items it holds shared. Each such slice
+/// is demanded: the lender's unit (or, when the lender is read after the
+/// slice, one retain of it) moves into the consuming operation, which
+/// releases an emptied list, shrinks a unique list in place and releases the
+/// items it drops at once, and the lender is released at its own last use.
+/// A demand removes the slice's readers from its lender's place, which can
+/// leave another slice of that place outliving the rest of it in turn, so
+/// the demands are settled to a fixpoint.
+fn demandDeadLenderSlices(solver: *Solver, binding: *BindingResult) SolveError!void {
+    if (solver.consuming_slices.items.len == 0) return;
+    const allocator = solver.allocator;
+    while (true) {
+        var places = try EdgeRows.build(allocator, binding.leader.len, binding.leader);
+        defer places.deinit(allocator);
+        var order: ?UseOrder = null;
+        defer if (order) |*active| active.deinit();
+        var order_proc: u32 = 0;
+        var demanded = false;
+        for (solver.consuming_slices.items) |slice| {
+            const target = solver.domain.indexOf(slice.flow.target) orelse continue;
+            if (solver.demand[target] or !binding.borrowed.isSet(target)) continue;
+            const lender = binding.leader[target];
+            if (binding.borrowed.isSet(lender)) continue;
+            if (!unitIsLenders(solver, slice.flow.source, lender)) continue;
+            if (order == null or order_proc != slice.proc) {
+                if (order) |*active| active.deinit();
+                order = null;
+                order = try UseOrder.initFromStore(allocator, solver.store, @as(LIR.LirProcSpecId, @fromBackingInt(slice.proc)));
+                order_proc = slice.proc;
+            }
+            if (!try sliceOutlivesLender(solver, binding, places, &order.?, slice.stmt, lender, target)) continue;
+            // The demand flows exactly as the ownership-flow edges carry it:
+            // into the consumed input and along its pure aliases to the
+            // lender, which is already owned, so no signature changes and a
+            // lender read after the slice is retained for it.
+            solver.demand[target] = true;
+            var cursor = solver.domain.indexOf(slice.flow.source).?;
+            while (true) {
+                solver.demand[cursor] = true;
+                if (cursor == lender) break;
+                cursor = solver.alias_source[cursor].get().?;
+            }
+            demanded = true;
+        }
+        if (!demanded) return;
+        const resolved = try resolveBindings(solver);
+        binding.deinit(allocator);
+        binding.* = resolved;
+    }
+}
+
+/// Whether `source` holds the lender's own unit: it is the lender or a chain
+/// of pure same-value aliases of it, so a demand on it moves that unit.
+fn unitIsLenders(solver: *const Solver, source: LIR.LocalId, lender: u32) bool {
+    var cursor = solver.domain.indexOf(source) orelse return false;
+    while (cursor != lender) {
+        cursor = solver.alias_source[cursor].get() orelse return false;
+    }
+    return true;
+}
+
+/// Whether the slice, or a borrow anchored through it, has a read (or its
+/// definition at `stmt`) after which no other member of the lender's place
+/// is read, so that the borrow would keep the lender live past its own last
+/// use.
+fn sliceOutlivesLender(
+    solver: *const Solver,
+    binding: *const BindingResult,
+    places: EdgeRows,
+    order: *UseOrder,
+    stmt: LIR.CFStmtId,
+    lender: u32,
+    slice: u32,
+) SolveError!bool {
+    const allocator = solver.allocator;
+    var slice_members: std.ArrayList(u32) = .empty;
+    defer slice_members.deinit(allocator);
+    var lender_members: std.ArrayList(u32) = .empty;
+    defer lender_members.deinit(allocator);
+    members: for (places.row(lender)) |member| {
+        std.debug.assert(binding.leader[member] == lender);
+        var cursor = member;
+        while (cursor != lender) {
+            if (cursor == slice) {
+                try slice_members.append(allocator, member);
+                continue :members;
+            }
+            cursor = switch (solver.defs[cursor]) {
+                .borrow_capable => |source| source,
+                .none, .multi, .fresh => solveInvariant("ARC borrowed binding had no lender link"),
+            };
+        }
+        try lender_members.append(allocator, member);
+    }
+    if (!try lenderReadAfter(solver, order, lender_members.items, @backingInt(stmt), false)) return true;
+    for (slice_members.items) |member| {
+        const local: LIR.LocalId = @fromBackingInt(@intCast(solver.domain.localAt(member)));
+        for (order.topology.reads_of.row(local)) |read| {
+            if (!try lenderReadAfter(solver, order, lender_members.items, read, true)) return true;
+        }
+    }
+    return false;
+}
+
+/// Whether a member of `lender_members` is read after the statement `from`,
+/// or, when `inclusive`, by `from` itself.
+fn lenderReadAfter(solver: *const Solver, order: *UseOrder, lender_members: []const u32, from: u32, inclusive: bool) SolveError!bool {
+    for (lender_members) |member| {
+        const local: LIR.LocalId = @fromBackingInt(@intCast(solver.domain.localAt(member)));
+        if (inclusive and order.reads(from, local)) return true;
+        if (try order.usesAfter(from, local)) return true;
+    }
+    return false;
+}
+
 fn flipParamIfRequired(solver: *Solver, local_index: u32, work: *std.ArrayList(u32)) SolveError!void {
     const proc_index = solver.param_proc[local_index].get() orelse return;
     const position = solver.param_position.get(local_index);
@@ -2670,11 +2935,11 @@ fn updateDirectCallResultDefs(solver: *Solver, changed: *std.ArrayList(u32)) Sol
         const source = if (callee_sig.ret_mode == .borrowed)
             callRetBorrowSource(solver, callee_sig, args)
         else
-            no_local;
-        const updated: DefKind = if (source == no_local)
-            .fresh
+            null;
+        const updated: DefKind = if (source) |borrow_source|
+            .{ .borrow_capable = borrow_source }
         else
-            .{ .borrow_capable = source };
+            .fresh;
         if (!std.meta.eql(solver.defs[target], updated)) {
             solver.defs[target] = updated;
             try changed.append(solver.allocator, target);
@@ -2873,7 +3138,7 @@ fn joinParamCarriesUnit(solver: *const Solver, param: LIR.LocalId) bool {
     return !solver.layouts.layoutHoldsHole(solver.store.getLocal(param).layout_idx);
 }
 
-fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
+fn liftSharedStmtFacts(solver: *Solver, proc_index: u32, current: LIR.CFStmtId) SolveError!void {
     const store = solver.store;
     const allocator = solver.allocator;
     switch (store.getCFStmtImmediate(current).*) {
@@ -2890,7 +3155,12 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
                 .discriminant => try solver.binding_facts.append(allocator, .{ .fresh = assign.target }),
                 .field => try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = assign.target, .source = assign.op.source } }),
                 .tag_payload => try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = assign.target, .source = assign.op.source } }),
-                .tag_payload_struct => try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = assign.target, .source = assign.op.source } }),
+                .tag_payload_struct => {
+                    try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = assign.target, .source = assign.op.source } });
+                    if (solver.layouts.getLayout(store.getLocal(assign.op.source).layout_idx).tag == .dynamic) {
+                        try solver.binding_facts.append(allocator, .{ .complete_projection = .{ .target = assign.target, .source = assign.op.source } });
+                    }
+                },
                 inline .list_reinterpret, .nominal => {
                     try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = assign.target, .source = assign.op.source } });
                     try solver.binding_facts.append(allocator, .{ .alias = .{ .target = assign.target, .source = assign.op.source } });
@@ -2907,11 +3177,9 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
                 },
                 inline .field, .tag_payload, .tag_payload_struct => {
                     try liftVisibilityLink(solver, assign.target, assign.op.source);
-                    try solver.unique_facts.append(allocator, .{ .foreign = assign.target });
                     try solver.unique_facts.append(allocator, .{ .read = assign.op.source });
                 },
                 .discriminant => {
-                    try solver.unique_facts.append(allocator, .{ .foreign = assign.target });
                     try solver.unique_facts.append(allocator, .{ .read = assign.op.source });
                 },
             }
@@ -2920,18 +3188,6 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
             try solver.binding_facts.append(allocator, .{ .fresh = assign.target });
             if (assign.value == .proc_ref) {
                 solver.address_taken.set(@backingInt(assign.value.proc_ref));
-            } else if (assign.value == .str_literal or assign.value == .static_data or assign.value == .bytes_literal) {
-                try solver.unique_facts.append(allocator, .{ .foreign = assign.target });
-            }
-            switch (assign.value) {
-                .str_literal, .static_data, .bytes_literal => {},
-                .i64_literal,
-                .i128_literal,
-                .f64_literal,
-                .f32_literal,
-                .dec_literal,
-                .proc_ref,
-                => try solver.unique_facts.append(allocator, .{ .birth = assign.target }),
             }
         },
         .init_uninitialized => {},
@@ -2960,15 +3216,13 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
         },
         .assign_call_erased => |assign_stmt| {
             const assign = store.stmtRow(assign_stmt.data);
-            if (!LIR.erasedCallReuseFieldsMatch(assign)) {
-                solveInvariant("erased call reuse flag and ownership source disagreed");
-            }
+            if (assign.reuse_closure) solveInvariant("erased call was marked transferring before ARC");
             try solver.binding_facts.append(allocator, .{ .fresh = assign_stmt.target });
-            if (assign.reuse_source) |reuse_source| {
-                try solver.binding_facts.append(allocator, .{ .demand = reuse_source });
-            } else {
-                try solver.binding_facts.append(allocator, .{ .demand = assign.closure });
-            }
+            // An erased call demands its closure's unit: where the unit dies
+            // at the call, emission moves it into the callee, which reads the
+            // captures out of it unshared and can repack it as its result.
+            // Where it does not die there, the call borrows it.
+            try solver.binding_facts.append(allocator, .{ .demand = LIR.erasedCallOwner(assign) });
             const args = store.getLocalSpan(assign.args);
             for (0..GuardedList.borrowLen(args)) |index| {
                 const arg = GuardedList.at(args, index);
@@ -2977,9 +3231,8 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
             }
             try liftVisibilitySeed(solver, assign.closure);
             try liftVisibilitySeed(solver, assign_stmt.target);
-            try solver.unique_facts.append(allocator, .{ .foreign = assign_stmt.target });
-            if (assign.reuse_source) |reuse_source| {
-                try solver.unique_facts.append(allocator, .{ .consume = .{ .local = reuse_source, .stmt = current } });
+            if (assign.result_reuse) {
+                try solver.unique_facts.append(allocator, .{ .consume = .{ .local = LIR.erasedCallOwner(assign), .stmt = current } });
             } else {
                 try solver.unique_facts.append(allocator, .{ .destroy = assign.closure });
             }
@@ -2991,29 +3244,30 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
             const assign = store.stmtRow(assign_stmt.data);
             solver.address_taken.set(@backingInt(assign.proc));
             try solver.binding_facts.append(allocator, .{ .fresh = assign_stmt.target });
-            if (assign.capture) |capture| try solver.binding_facts.append(allocator, .{ .demand = capture });
-            if (assign.reuse) |reuse| try solver.binding_facts.append(allocator, .{ .demand = reuse });
-            if (assign.capture) |capture| try liftVisibilityLink(solver, assign_stmt.target, capture);
-            try solver.unique_facts.append(allocator, .{ .birth = assign_stmt.target });
-            if (assign.capture) |capture| try solver.unique_facts.append(allocator, .{ .destroy = capture });
-            if (assign.reuse) |reuse| try solver.unique_facts.append(allocator, .{ .consume = .{ .local = reuse, .stmt = current } });
+            if (assign.capture.get()) |capture| try solver.binding_facts.append(allocator, .{ .demand = capture });
+            if (assign.reuse.get()) |reuse| try solver.binding_facts.append(allocator, .{ .demand = reuse });
+            if (assign.capture.get()) |capture| try liftVisibilityLink(solver, assign_stmt.target, capture);
+            if (assign.capture.get()) |capture| try solver.unique_facts.append(allocator, .{ .destroy = capture });
+            if (assign.reuse.get()) |reuse| try solver.unique_facts.append(allocator, .{ .consume = .{ .local = reuse, .stmt = current } });
         },
         .assign_low_level => |assign| {
             const rc_effect = inferenceRcEffect(solver, assign.op, store.stmtRow(assign.rc_effect));
             const args = store.getLocalSpan(assign.args);
-            if (assign.op.arcBorrowedResultVariant() != null and assign.op != .box_unbox) {
+            if (assign.op.arcBorrowedResultVariant() != null and assign.op.deadLenderArg() == null) {
                 const consumed = store.stmtRow(assign.rc_effect).consume_args;
                 for (0..@min(GuardedList.borrowLen(args), 64)) |position| {
                     if ((consumed & (@as(u64, 1) << @as(u6, @intCast(position)))) == 0) continue;
-                    try solver.binding_facts.append(allocator, .{ .consuming_result = .{
+                    const flow: OwnershipFlow = .{
                         .target = assign.target,
                         .source = GuardedList.at(args, position),
-                    } });
+                    };
+                    try solver.binding_facts.append(allocator, .{ .consuming_result = flow });
+                    try solver.consuming_slices.append(allocator, .{ .flow = flow, .stmt = current, .proc = proc_index });
                 }
             }
             const borrow_source = lowLevelBorrowSource(solver.domain, rc_effect, args);
-            if (rc_effect.retain_result and borrow_source != no_local) {
-                const source: LIR.LocalId = @fromBackingInt(@intCast(solver.domain.localAt(borrow_source)));
+            if (rc_effect.retain_result and borrow_source != null) {
+                const source: LIR.LocalId = @fromBackingInt(@intCast(solver.domain.localAt(borrow_source.?)));
                 try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = assign.target, .source = source } });
             } else {
                 try solver.binding_facts.append(allocator, .{ .fresh = assign.target });
@@ -3051,10 +3305,6 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
                     }
                 }
             }
-            try solver.unique_facts.append(allocator, if (rc_effect.result_unique)
-                .{ .birth = assign.target }
-            else
-                .{ .foreign = assign.target });
             for (0..GuardedList.borrowLen(args)) |position| {
                 const arg = GuardedList.at(args, position);
                 if (position >= 64) {
@@ -3071,15 +3321,12 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
                     try solver.unique_facts.append(allocator, .{ .destroy = arg });
                     read_only = false;
                 }
-                if (read_only) try solver.unique_facts.append(allocator, if ((assign.op.representationArgs() & bit) != 0)
-                    .{ .representation_read = arg }
-                else
-                    .{ .read = arg });
+                if (read_only and (assign.op.representationArgs() & bit) == 0)
+                    try solver.unique_facts.append(allocator, .{ .read = arg });
             }
         },
         .assign_list => |assign| {
             try solver.binding_facts.append(allocator, .{ .fresh = assign.target });
-            try solver.unique_facts.append(allocator, .{ .birth = assign.target });
             const elems = store.getLocalSpan(assign.elems);
             for (0..GuardedList.borrowLen(elems)) |index| {
                 const elem = GuardedList.at(elems, index);
@@ -3090,7 +3337,6 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
         },
         .assign_struct => |assign| {
             try solver.binding_facts.append(allocator, .{ .fresh = assign.target });
-            try solver.unique_facts.append(allocator, .{ .birth = assign.target });
             const fields = store.getLocalSpan(assign.fields);
             for (0..GuardedList.borrowLen(fields)) |index| {
                 const field = GuardedList.at(fields, index);
@@ -3101,7 +3347,6 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
         },
         .assign_tag => |assign| {
             try solver.binding_facts.append(allocator, .{ .fresh = assign.target });
-            try solver.unique_facts.append(allocator, .{ .birth = assign.target });
             if (assign.payload) |payload| {
                 try solver.binding_facts.append(allocator, .{ .demand = payload });
                 try liftVisibilityLink(solver, assign.target, payload);
@@ -3141,7 +3386,6 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
                     } });
                 },
                 .replace_existing => {
-                    try solver.unique_facts.append(allocator, .{ .foreign = assign.target });
                     try solver.unique_facts.append(allocator, .{ .destroy = assign.target });
                     try solver.unique_facts.append(allocator, .{ .destroy = assign.value });
                 },
@@ -3176,7 +3420,6 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
                     .view => |local| {
                         try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = local, .source = str_match_stmt.source } });
                         try liftVisibilityLink(solver, local, str_match_stmt.source);
-                        try solver.unique_facts.append(allocator, .{ .foreign = local });
                     },
                 }
             }
@@ -3194,7 +3437,6 @@ fn liftSharedStmtFacts(solver: *Solver, current: LIR.CFStmtId) SolveError!void {
                         .view => |local| {
                             try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = local, .source = str_match_set.source } });
                             try liftVisibilityLink(solver, local, str_match_set.source);
-                            try solver.unique_facts.append(allocator, .{ .foreign = local });
                         },
                     }
                 }
@@ -3274,12 +3516,10 @@ fn liftDynStmtFacts(solver: *Solver, current: LIR.CFStmtId, target: ?LIR.LocalId
             const defined = target orelse solveInvariant("ARC dyn component read had no target");
             if (solver.domain.indexOf(base) == null) {
                 try solver.binding_facts.append(allocator, .{ .fresh = defined });
-                try solver.unique_facts.append(allocator, .{ .foreign = defined });
                 return;
             }
             try solver.binding_facts.append(allocator, .{ .borrow = .{ .target = defined, .source = base } });
             try liftVisibilityLink(solver, defined, base);
-            try solver.unique_facts.append(allocator, .{ .foreign = defined });
             try solver.unique_facts.append(allocator, .{ .read = base });
         },
         .alias => |source| {
@@ -3289,7 +3529,6 @@ fn liftDynStmtFacts(solver: *Solver, current: LIR.CFStmtId, target: ?LIR.LocalId
             // fresh value.
             if (solver.domain.indexOf(source) == null) {
                 try solver.binding_facts.append(allocator, .{ .fresh = defined });
-                try solver.unique_facts.append(allocator, .{ .birth = defined });
                 return;
             }
             if (defined != source) {
@@ -3304,36 +3543,30 @@ fn liftDynStmtFacts(solver: *Solver, current: LIR.CFStmtId, target: ?LIR.LocalId
         .construct => {
             const defined = target orelse solveInvariant("ARC dyn construction had no target");
             try solver.binding_facts.append(allocator, .{ .fresh = defined });
-            try solver.unique_facts.append(allocator, .{ .birth = defined });
             const lift: Lift = .{ .solver = solver, .target = defined };
             try DynOps.Operands.of(op).each(solver.store, &lift, Lift.consumed);
         },
         .borrow_operands => {
             const defined = target orelse solveInvariant("ARC dyn operand read had no target");
             try solver.binding_facts.append(allocator, .{ .fresh = defined });
-            try solver.unique_facts.append(allocator, .{ .foreign = defined });
             const lift: Lift = .{ .solver = solver, .target = defined };
             try DynOps.Operands.of(op).each(solver.store, &lift, Lift.borrowed);
         },
         .call_erased => {
             const defined = target orelse solveInvariant("ARC dyn erased call had no target");
             const call = op.call_erased;
-            if (!LIR.erasedCallReuseFieldsMatch(call)) {
-                solveInvariant("erased call reuse flag and ownership source disagreed");
-            }
+            if (call.reuse_closure) solveInvariant("erased call was marked transferring before ARC");
             try solver.binding_facts.append(allocator, .{ .fresh = defined });
-            if (call.reuse_source) |reuse_source| {
-                try solver.binding_facts.append(allocator, .{ .demand = reuse_source });
-            }
+            // As for `assign_call_erased`: the call demands its closure's unit.
+            try solver.binding_facts.append(allocator, .{ .demand = LIR.erasedCallOwner(call) });
             if (call.args) |args| {
                 try solver.binding_facts.append(allocator, .{ .demand = args });
                 try liftVisibilitySeed(solver, args);
             }
             try liftVisibilitySeed(solver, call.closure);
             try liftVisibilitySeed(solver, defined);
-            try solver.unique_facts.append(allocator, .{ .foreign = defined });
-            if (call.reuse_source) |reuse_source| {
-                try solver.unique_facts.append(allocator, .{ .consume = .{ .local = reuse_source, .stmt = current } });
+            if (call.result_reuse) {
+                try solver.unique_facts.append(allocator, .{ .consume = .{ .local = LIR.erasedCallOwner(call), .stmt = current } });
             } else {
                 try solver.unique_facts.append(allocator, .{ .destroy = call.closure });
             }
@@ -3343,38 +3576,38 @@ fn liftDynStmtFacts(solver: *Solver, current: LIR.CFStmtId, target: ?LIR.LocalId
 }
 
 /// Returns the single refcounted argument a borrowed-return call result may
-/// borrow from, or `no_local` when the lender mask names zero or several
+/// borrow from, or null when the lender mask names zero or several
 /// refcounted arguments (the caller then keeps the result owned and retains
 /// it after the call).
-fn callRetBorrowSource(solver: *const Solver, callee_sig: arc_sig.RcSig, args: anytype) u32 {
-    var source: u32 = no_local;
+fn callRetBorrowSource(solver: *const Solver, callee_sig: arc_sig.RcSig, args: anytype) ?u32 {
+    var source: ?u32 = null;
     for (0..GuardedList.borrowLen(args)) |position| {
         const arg = GuardedList.at(args, position);
         const bit = arc_sig.paramBit(position) orelse break;
         if ((callee_sig.ret_lenders & bit) == 0) continue;
         const arg_index = solver.domain.indexOf(arg) orelse continue;
-        if (source != no_local and source != arg_index) return no_local;
+        if (source != null and source != arg_index) return null;
         source = arg_index;
     }
     return source;
 }
 
 /// Returns the single refcounted argument named by `result_borrows_args`, or
-/// `no_local` when the mask names zero or several refcounted arguments.
+/// null when the mask names zero or several refcounted arguments.
 fn lowLevelBorrowSource(
     domain: *const ArcLocalDomain,
     rc_effect: LIR.LowLevel.RcEffect,
     args: anytype,
-) u32 {
-    if (rc_effect.result_borrows_args == 0) return no_local;
-    var source: u32 = no_local;
+) ?u32 {
+    if (rc_effect.result_borrows_args == 0) return null;
+    var source: ?u32 = null;
     for (0..GuardedList.borrowLen(args)) |index| {
         const arg = GuardedList.at(args, index);
         if (index >= 64) break;
         const bit = @as(u64, 1) << @as(u6, @intCast(index));
         if ((rc_effect.result_borrows_args & bit) == 0) continue;
         const arg_index = domain.indexOf(arg) orelse continue;
-        if (source != no_local and source != arg_index) return no_local;
+        if (source != null and source != arg_index) return null;
         source = arg_index;
     }
     return source;
@@ -3692,7 +3925,7 @@ fn computeVisibilityFromLift(
             .store_struct, .store_tag => {},
             .assign_packed_erased_fn => |assign_stmt| {
                 const assign = store.stmtRow(assign_stmt.data);
-                if (assign.capture) |capture| {
+                if (assign.capture.get()) |capture| {
                     addEdge(&sets, rc_local, @backingInt(assign_stmt.target), @backingInt(capture));
                 }
             },
@@ -3752,7 +3985,7 @@ fn computeVisibilityFromLift(
                 // The callee is unknown; the boundary is treated like a
                 // pinned signature.
                 seedLocal(&visible, rc_local, @backingInt(assign.closure));
-                if (assign.reuse_source) |reuse_source| seedLocal(&visible, rc_local, @backingInt(reuse_source));
+                if (assign.reuse_source.get()) |reuse_source| seedLocal(&visible, rc_local, @backingInt(reuse_source));
                 const args = store.getLocalSpan(assign.args);
                 for (0..GuardedList.borrowLen(args)) |arg_index| {
                     const arg = GuardedList.at(args, arg_index);
@@ -3891,7 +4124,13 @@ pub const Uniqueness = struct {
     /// Bit set => some statement consumes the local's value (moves its
     /// unit, or would retain to do so).
     consumed: std.bit_set.DynamicBitSetUnmanaged,
+    /// Per local bound by exactly one definition that is a pure same-value
+    /// alias or a read-only view, the local it aliases. A runtime uniqueness
+    /// check that only reads such a local reads the count of that source's
+    /// value.
+    read_source: []OptionalU32,
     pub fn deinit(self: *Uniqueness, allocator: Allocator) void {
+        allocator.free(self.read_source);
         self.born_unique.deinit(allocator);
         self.unique.deinit(allocator);
         self.destroyed.deinit(allocator);
@@ -3914,6 +4153,7 @@ pub const Uniqueness = struct {
                 .conds = try allocator.dupe(arc_sig.ParamMask, self.field_conds.conds),
             },
             .consumed = try self.consumed.clone(allocator),
+            .read_source = try allocator.dupe(OptionalU32, self.read_source),
         };
     }
 };
@@ -4038,9 +4278,11 @@ const ConsumeAt = struct {
     stmt: u32,
 };
 
-/// One transfer edge (alias definition or join-parameter initialization)
-/// whose target is foreign when the source is used again after `stmt`.
-const EdgeCheck = struct { source: LIR.LocalId, stmt: u32, target: u32 };
+/// One transfer edge (alias definition or join-parameter initialization),
+/// checked against one member `source` of the edge's source place. When that
+/// member is used again after `stmt`, the target is foreign and `origin`,
+/// the edge's source, holds a second reference.
+const EdgeCheck = struct { source: LIR.LocalId, stmt: u32, target: u32, origin: u32 };
 
 /// The ownership place of every analyzed local: its liveness group, the
 /// leader together with every borrowed local anchored on it. Each member
@@ -4112,7 +4354,7 @@ const OwnershipPlaces = struct {
         var single: [1]u32 = undefined;
         for (self.membersOf(source, &single)) |member| {
             if (member == target) continue;
-            try checks.append(allocator, .{ .source = @fromBackingInt(@intCast(index_to_local[member])), .stmt = stmt, .target = target });
+            try checks.append(allocator, .{ .source = @fromBackingInt(@intCast(index_to_local[member])), .stmt = stmt, .target = target, .origin = source });
         }
     }
 };
@@ -4125,7 +4367,7 @@ fn settleEdgeChecks(order: *UseOrder, checks: []EdgeCheck, ctx: anytype) SolveEr
         }
     }.lessThan);
     for (checks) |check| {
-        if (try order.usesAfter(check.stmt, check.source)) ctx.dead(check.target);
+        if (try order.usesAfter(check.stmt, check.source)) ctx.dead(check.target, check.origin);
     }
 }
 
@@ -4822,7 +5064,7 @@ const UniquenessStructure = struct {
             }
         }
         // Callers are placed in procedure order, then statement order.
-        if (caller_count > std.math.maxInt(u32)) return error.OutOfMemory;
+        if (std.math.cast(u32, caller_count) == null) return error.OutOfMemory;
         for (1..caller_starts.len) |index| caller_starts[index] += caller_starts[index - 1];
         const caller_items = try arena.alloc(u32, caller_count);
         const caller_fill = try arena.dupe(u32, caller_starts[0..proc_count]);
@@ -5060,7 +5302,7 @@ const UniquenessComponentTask = struct {
                     .unresolved = self.component.unresolved,
                 },
                 .marks = try .init(persistent, self.component.stmts.len),
-                .marked_local = no_local,
+                .marked_local = .none,
                 .marked_uses = false,
                 .work = .empty,
             };
@@ -5169,8 +5411,8 @@ const UniquenessComponentTask = struct {
             const node = self.store.getCFStmtImmediate(stmt);
             if (node.* == .assign_low_level) {
                 const assign = node.assign_low_level;
-                const effect = if (!self.consume_dead_boxes and assign.op == .box_unbox)
-                    assign.op.arcBorrowedResultVariant().?.rcEffect()
+                const effect = if (!self.consume_dead_boxes and assign.op.deadLenderArg() != null)
+                    assign.op.arcLiveLenderRcEffect()
                 else
                     assign.op.arcInferenceRcEffect(self.store.stmtRow(assign.rc_effect));
                 const args = self.store.getLocalSpan(assign.args);
@@ -5286,9 +5528,9 @@ pub fn settleUniquenessWithOptions(
     const arena = memory.allocator();
     const proc_count = store.procSpecCount();
     const structure = solution.uniqueness_structure orelse solveInvariant("uniqueness settlement ran on a solution without its structure");
-    if (structure.store != store or structure.stmt_count != store.cfStmtCount() or
+    if (builtin.mode == .debug and (structure.store != store or structure.stmt_count != store.cfStmtCount() or
         structure.local_count != store.localCount() or structure.proc_count != proc_count or
-        !sameResourceTable(structure.rc_local, rc_local))
+        !sameResourceTable(structure.rc_local, rc_local)))
     {
         solveInvariant("uniqueness settlement reused a structure built for a different store");
     }
@@ -5562,8 +5804,8 @@ fn settleUniquenessOracle(
                 const node = store.getCFStmtImmediate(stmt);
                 if (node.* == .assign_low_level) {
                     const assign = node.assign_low_level;
-                    const rc_effect = if (!consume_dead_boxes and assign.op == .box_unbox)
-                        assign.op.arcBorrowedResultVariant().?.rcEffect()
+                    const rc_effect = if (!consume_dead_boxes and assign.op.deadLenderArg() != null)
+                        assign.op.arcLiveLenderRcEffect()
                     else
                         assign.op.arcInferenceRcEffect(store.stmtRow(assign.rc_effect));
                     const check_mask = rc_effect.may_runtime_uniqueness_check_args;
@@ -6038,8 +6280,8 @@ fn computeUniquenessDetailed(
                 const assign = store.stmtRow(assign_stmt.data);
                 marks.trackDef(&has_def, &multi_def, assign_stmt.target);
                 marks.destroy(&foreign_def, assign_stmt.target);
-                if (assign.reuse_source) |reuse_source| {
-                    try marks.consumeAt(allocator, &consumes, reuse_source, @intCast(stmt_index));
+                if (assign.result_reuse) {
+                    try marks.consumeAt(allocator, &consumes, LIR.erasedCallOwner(assign), @intCast(stmt_index));
                 } else {
                     marks.destroy(&destroyed, assign.closure);
                 }
@@ -6053,8 +6295,8 @@ fn computeUniquenessDetailed(
                 const assign = store.stmtRow(assign_stmt.data);
                 marks.trackDef(&has_def, &multi_def, assign_stmt.target);
                 marks.noteBirth(&born, assign_stmt.target);
-                if (assign.capture) |capture| marks.destroy(&destroyed, capture);
-                if (assign.reuse) |reuse| try marks.consumeAt(allocator, &consumes, reuse, @intCast(stmt_index));
+                if (assign.capture.get()) |capture| marks.destroy(&destroyed, capture);
+                if (assign.reuse.get()) |reuse| try marks.consumeAt(allocator, &consumes, reuse, @intCast(stmt_index));
             },
             .str_match => |str_match_stmt| {
                 const str_match = store.stmtRow(str_match_stmt.data);
@@ -6088,8 +6330,8 @@ fn computeUniquenessDetailed(
                 }
             },
             .assign_low_level => |assign| {
-                const rc_effect = if (!consume_dead_boxes and assign.op == .box_unbox)
-                    assign.op.arcBorrowedResultVariant().?.rcEffect()
+                const rc_effect = if (!consume_dead_boxes and assign.op.deadLenderArg() != null)
+                    assign.op.arcLiveLenderRcEffect()
                 else
                     assign.op.arcInferenceRcEffect(store.stmtRow(assign.rc_effect));
                 marks.trackDef(&has_def, &multi_def, assign.target);
@@ -6498,12 +6740,24 @@ fn computeUniquenessDetailed(
         for (join_incoming.items, join_incoming_stmts.items) |incoming, stmt| {
             try places.appendEdgeChecks(allocator, &checks, index_to_local, incoming.source, stmt, incoming.target);
         }
+        // A rejected edge leaves the target holding a retained reference to
+        // the source's allocation, so the source (through any view chain,
+        // its viewed root) gains a second holder as well.
         try settleEdgeChecks(order, checks.items, struct {
             foreign: *std.bit_set.DynamicBitSetUnmanaged,
-            fn dead(ctx: @This(), target: u32) void {
+            destroyed: *std.bit_set.DynamicBitSetUnmanaged,
+            view_source: []const OptionalU32,
+            fn dead(ctx: @This(), target: u32, origin: u32) void {
                 ctx.foreign.set(target);
+                var root = origin;
+                var steps: usize = 0;
+                while (ctx.view_source[root].get()) |source| : (steps += 1) {
+                    root = source;
+                    if (steps > ctx.view_source.len) solveInvariant("ARC uniqueness view chain contained a cycle");
+                }
+                ctx.destroyed.set(root);
             }
-        }{ .foreign = &foreign_def });
+        }{ .foreign = &foreign_def, .destroyed = &destroyed, .view_source = view_source });
     }
     if (workspace) |cached| {
         try cached.consumption.apply(cached.allocator, order, consumes.items, index_to_local, &destroyed);
@@ -6681,7 +6935,20 @@ fn computeUniquenessDetailed(
         if (conds[index] != 0) unique.unset(index);
     }
 
+    // The value a check that only reads `local` reads: the source of the one
+    // pure same-value alias or view definition that binds it.
+    const read_source = try allocator.alloc(OptionalU32, local_count);
+    for (read_source, 0..) |*slot, index| {
+        slot.* = if (def_counts[index] != 1)
+            .none
+        else if (view_source[index] != .none)
+            view_source[index]
+        else
+            alias_source[index];
+    }
+
     const result = Uniqueness{
+        .read_source = read_source,
         .born_unique = born,
         .unique = unique,
         .destroyed = destroyed,
@@ -6990,7 +7257,7 @@ test "uniqueness workspace reuses topology and exact use queries across signatur
         if (round == 2) try testing.expect(actual.unique.isSet(@backingInt(taken)));
         // Evict the current generation's local, not the immutable answers.
         // Re-querying all recorded edges must not walk a single predecessor.
-        workspace.order.marked_local = no_local;
+        workspace.order.marked_local = .none;
         const visits = workspace.order.backward_visits;
         for (workspace.use_answers.entries.items) |entry| {
             try testing.expectEqual(entry.answer, try workspace.order.usesAfter(@backingInt(entry.stmt), entry.local));
@@ -7773,9 +8040,10 @@ test "ARC shared predicates have one definition across the ARC stage" {
 /// Whether a direct call from `caller` to `callee` may demand an ownership
 /// variant of `callee`: the two share an emission unit (design.md "Mode
 /// Specialization", emission units). A call across units adapts to the
-/// callee's solved base signature.
+/// callee's solved base signature, except that it may demand an outcome
+/// variant the callee's object publishes (`Solution.outcomeSpanForCall`).
 pub fn sharesEmissionUnit(store: *const LirStore, caller: LIR.LirProcSpecId, callee: LIR.LirProcSpecId) bool {
-    return LIR.EmissionUnit.shares(store.getProcSpec(caller).emission_unit, store.getProcSpec(callee).emission_unit);
+    return LIR.EmissionUnit.shares(store.getProcSpecImmediate(caller).emission_unit, store.getProcSpecImmediate(callee).emission_unit);
 }
 
 test "uniqueness never treats a completed static list as a fresh allocation" {

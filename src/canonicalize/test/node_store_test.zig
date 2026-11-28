@@ -43,6 +43,28 @@ fn rand_ident_idx() Ident.Idx {
     return @bitCast(rand.random().int(u32));
 }
 
+/// Checks that the kind, view and per-kind readers of a stored node of the
+/// family named `family` ("expr", "pattern", ...) agree with its full decode.
+fn expectReadersAgree(comptime family: []const u8, store: *const NodeStore, idx: anytype, decoded: anytype) error{ TestUnexpectedResult, TestExpectedEqual }!void {
+    const kind = @field(NodeStore, family ++ "Kind")(store, idx);
+    try testing.expectEqual(std.meta.activeTag(decoded), kind);
+    const view = @field(NodeStore, family ++ "View")(store, idx);
+    inline for (comptime std.enums.values(@TypeOf(kind))) |k| {
+        if (kind == k) {
+            const variant = @field(decoded, @tagName(k));
+            const kind_view = @field(view, @tagName(k));
+            try testing.expectEqualDeep(variant, kind_view.decode());
+            try testing.expectEqualDeep(variant, @field(NodeStore, family ++ "As")(store, idx, k).?);
+            const Variant = @TypeOf(variant);
+            if (@typeInfo(Variant) == .@"struct") {
+                inline for (comptime std.meta.fieldNames(Variant)) |name| {
+                    try testing.expectEqualDeep(@field(variant, name), kind_view.get(@field(std.meta.FieldEnum(Variant), name)));
+                }
+            }
+        }
+    }
+}
+
 /// Helper to create a random region.
 fn rand_region() base.Region {
     const start = rand.random().int(u32);
@@ -220,6 +242,7 @@ test "NodeStore round trip - Statements" {
         const retrieved = store.getStatement(idx);
 
         try testing.expectEqualDeep(stmt, retrieved);
+        try expectReadersAgree("statement", &store, idx, retrieved);
     }
 
     const actual_test_count = statements.items.len;
@@ -554,7 +577,7 @@ test "NodeStore round trip - Expressions" {
     });
     try expressions.append(gpa, CIR.Expr{
         .e_nominal_external = .{
-            .module_idx = rand_idx_u16(CIR.Import.Idx),
+            .module = .{ .import = rand_idx_u16(CIR.Import.Idx) },
             .target_node_idx = rand.random().int(u16),
             .backing_expr = rand_idx(CIR.Expr.Idx),
             .backing_type = .tag,
@@ -633,6 +656,7 @@ test "NodeStore round trip - Expressions" {
         const retrieved = store.getExpr(idx);
 
         try testing.expectEqualDeep(expr, retrieved);
+        try expectReadersAgree("expr", &store, idx, retrieved);
     }
 
     const actual_test_count = expressions.items.len;
@@ -979,6 +1003,12 @@ test "NodeStore round trip - Diagnostics" {
     });
 
     try diagnostics.append(gpa, CIR.Diagnostic{
+        .module_name_reserved = .{
+            .module_name = rand_ident_idx(),
+        },
+    });
+
+    try diagnostics.append(gpa, CIR.Diagnostic{
         .default_app_wrong_arity = .{
             .arity = 2,
             .region = rand_region(),
@@ -1070,6 +1100,13 @@ test "NodeStore round trip - Diagnostics" {
 
     try diagnostics.append(gpa, CIR.Diagnostic{
         .builtin_type_shadowed_warning = .{
+            .name = rand_ident_idx(),
+            .region = rand_region(),
+        },
+    });
+
+    try diagnostics.append(gpa, CIR.Diagnostic{
+        .builtin_import_conflict = .{
             .name = rand_ident_idx(),
             .region = rand_region(),
         },
@@ -1531,6 +1568,7 @@ test "NodeStore round trip - TypeAnno" {
         const retrieved = store.getTypeAnno(idx);
 
         try testing.expectEqualDeep(type_anno, retrieved);
+        try expectReadersAgree("typeAnno", &store, idx, retrieved);
     }
 
     // We have extra tests for:
@@ -1618,7 +1656,7 @@ test "NodeStore round trip - Pattern" {
     });
     try patterns.append(gpa, CIR.Pattern{
         .nominal_external = .{
-            .module_idx = rand_idx_u16(CIR.Import.Idx),
+            .module = .{ .import = rand_idx_u16(CIR.Import.Idx) },
             .target_node_idx = rand.random().int(u16),
             .backing_pattern = rand_idx(CIR.Pattern.Idx),
             .backing_type = .tag,
@@ -1712,6 +1750,7 @@ test "NodeStore round trip - Pattern" {
         const retrieved = store.getPattern(idx);
 
         try testing.expectEqualDeep(pattern, retrieved);
+        try expectReadersAgree("pattern", &store, idx, retrieved);
 
         // Also verify the region was stored correctly
         const stored_region = store.getRegionAt(@fromBackingInt(@intCast(@backingInt(idx))));
@@ -1915,7 +1954,7 @@ test "write occurrences preserve binding identity and token regions across CIR c
     const gpa = testing.allocator;
     var original = try NodeStore.init(gpa);
     defer original.deinit();
-    try testing.expectEqual(@as(usize, 0), original.write_occurrences.items.capacity);
+    try testing.expectEqual(@as(usize, 0), original.write_occurrences.capacity);
     try testing.expectEqual(@as(usize, 12), @sizeOf(NodeStore.WriteOccurrence));
 
     const declaration = from_raw_offsets(4, 6);
@@ -1925,7 +1964,7 @@ test "write occurrences preserve binding identity and token regions across CIR c
 
     var cloned = try original.clone(gpa);
     defer cloned.deinit();
-    try testing.expectEqualDeep(original.write_occurrences.items.items, cloned.write_occurrences.items.items);
+    try testing.expectEqualDeep(original.write_occurrences.items(), cloned.write_occurrences.items());
     try testing.expectEqualDeep(declaration, cloned.getPatternRegion(pattern));
 
     var writer = @import("collections").CompactWriter.init();
@@ -1937,16 +1976,19 @@ test "write occurrences preserve binding identity and token regions across CIR c
     _ = try writer.writeToBuffer(buffer);
     const stored: *const NodeStore.Serialized = @ptrCast(@alignCast(buffer.ptr));
     const restored = stored.deserializeInto(@intFromPtr(buffer.ptr), gpa);
-    try testing.expectEqualDeep(original.write_occurrences.items.items, restored.write_occurrences.items.items);
+    try testing.expectEqualDeep(original.write_occurrences.items(), restored.write_occurrences.items());
     try testing.expectEqualDeep(declaration, restored.getPatternRegion(pattern));
-    for (restored.write_occurrences.items.items) |write| {
+    for (restored.write_occurrences.items()) |write| {
         try testing.expectEqual(pattern, write.pattern_idx);
         try testing.expectEqualDeep(from_raw_offsets(write.start, write.end), write.region());
     }
 
-    // Mutable cached modules own their region column, but borrow source write
-    // metadata from the cache just like their other canonical data.
-    var mutable = try stored.deserializeWithCopy(@intFromPtr(buffer.ptr), gpa);
-    defer mutable.regions.deinit(gpa);
-    try testing.expectEqualDeep(original.write_occurrences.items.items, mutable.write_occurrences.items.items);
+    // A loaded store grows its region column by copying it, and keeps
+    // reading source write metadata from the serialized bytes.
+    var loaded = stored.deserializeInto(@intFromPtr(buffer.ptr), gpa);
+    defer loaded.deinit();
+    _ = try loaded.regions.append(gpa, declaration);
+    try testing.expect(loaded.regions.capacity != 0);
+    try testing.expectEqualDeep(original.write_occurrences.items(), loaded.write_occurrences.items());
+    try testing.expectEqualDeep(declaration, loaded.getPatternRegion(pattern));
 }

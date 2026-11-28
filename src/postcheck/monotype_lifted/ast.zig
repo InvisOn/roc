@@ -111,15 +111,6 @@ pub const Stmt = Mono.Stmt;
 pub const Fn = struct {
     symbol: Common.Symbol,
     source: ?Mono.FnTemplate = null,
-    /// Exact producer-authored Monotype signature graph. This is present only
-    /// while the lifted function still has that signature; transformations
-    /// that synthesize a different ABI clear it explicitly.
-    signature: collections.OptionalId(Type.TypeId) = .none,
-    /// The iterator-fusion pass normalized this function from explicit
-    /// checker-stamped iterator producers. Later structural LIR passes consume
-    /// this provenance directly instead of rediscovering iterator intent from
-    /// procedure names or body shape.
-    iterator_fusion_scope: bool = false,
     /// Digest of the SpecConstr call pattern this function was cloned for, or
     /// null for a function that is not a call-pattern clone. Clones share
     /// their source's checked template, so this is what keeps two clones of
@@ -155,10 +146,6 @@ pub const FnShapes = packed struct(u8) {
     /// A tag, record, tuple, nominal, list, closure or compile-time value
     /// construction: the only sources of a known-shaped call argument.
     constructs_value: bool = false,
-    /// A direct call to an iterator procedure.
-    iterator_call: bool = false,
-    /// A direct call to an iterator procedure that produces an iterator value.
-    iterator_producer: bool = false,
     /// A loop.
     loop: bool = false,
     /// A loop whose result is a tuple of at least two values.
@@ -167,6 +154,7 @@ pub const FnShapes = packed struct(u8) {
     self_call: bool = false,
     /// A `return` expression.
     contains_return: bool = false,
+    _: u2 = 0,
 
     pub fn merged(self: FnShapes, other: FnShapes) FnShapes {
         return @bitCast(@as(u8, @bitCast(self)) | @as(u8, @bitCast(other)));
@@ -176,10 +164,14 @@ pub const FnShapes = packed struct(u8) {
 /// Source procedure names for runtime diagnostics, keyed by generated symbol.
 pub const ProcDebugNameMap = Mono.ProcDebugNameMap;
 
+/// See `Mono.SignatureVarStep`.
+pub const SignatureVarStep = Mono.SignatureVarStep;
+
 /// Body availability for a lifted function.
 pub const FnBody = union(enum) {
     roc: ExprId,
-    hosted,
+    /// See `Mono.FnBody.hosted`.
+    hosted: Span(SignatureVarStep),
 };
 
 /// Root request bound to a lifted function.
@@ -209,25 +201,12 @@ pub const LayoutRequest = struct {
 pub const RuntimeSchemaRequest = Mono.RuntimeSchemaRequest;
 /// Request to make a lifted value available as static data.
 pub const StaticDataValue = Mono.StaticDataValue;
-/// A virtual source frame introduced by post-check inlining, or `none`. A
-/// frame's id is its row in `inline_scopes` plus one, so a zeroed column
-/// holds `none`.
-pub const InlineScopeId = enum(u32) {
-    none = 0,
-    _,
+/// A row of `inline_scopes`: one virtual source frame introduced by
+/// post-check inlining.
+pub const InlineScopeRow = enum(u32) { _ };
 
-    /// The id of the frame at `inline_scopes` row `row_index`.
-    pub fn fromRow(row_index: u32) InlineScopeId {
-        std.debug.assert(row_index < std.math.maxInt(u32));
-        return @fromBackingInt(row_index + 1);
-    }
-
-    /// The `inline_scopes` row of a frame.
-    pub fn row(self: InlineScopeId) u32 {
-        std.debug.assert(self != .none);
-        return @backingInt(self) - 1;
-    }
-};
+/// A virtual source frame, or `none`; a zeroed column holds `none`.
+pub const InlineScopeId = collections.OptionalId(InlineScopeRow);
 
 /// One source-level procedure frame retained across post-check inlining.
 pub const InlineScope = struct {
@@ -267,6 +246,7 @@ pub const ProgramView = struct {
     branches: []const Branch,
     if_branches: []const IfBranch,
     string_literals: []const Mono.StringLiteral,
+    signature_var_steps: []const SignatureVarStep,
     proc_debug_names: *const ProcDebugNameMap,
     roots: []const Root,
     literal_roots: []const LiteralRoot,
@@ -293,7 +273,7 @@ pub const ProgramView = struct {
     local_name_table: *const Mono.LocalNameTable,
 
     /// A template's stored evidence vector in this program's evidence columns.
-    pub fn constFnEvidence(self: ProgramView, spans: Mono.ConstEvidenceSpans) check.ConstStore.ConstFnEvidenceVector {
+    pub fn constFnEvidence(self: *const ProgramView, spans: Mono.ConstEvidenceSpans) check.ConstStore.ConstFnEvidenceVector {
         return .{
             .nodes = self.const_fn_evidence[spans.nodes.start..][0..spans.nodes.len],
             .targets = self.const_fn_evidence_targets[spans.targets.start..][0..spans.targets.len],
@@ -301,98 +281,102 @@ pub const ProgramView = struct {
         };
     }
 
-    pub fn getComptimeValueRoot(self: ProgramView, id: Common.ComptimeValueRootId) Common.ComptimeValueRoot {
+    pub fn getComptimeValueRoot(self: *const ProgramView, id: Common.ComptimeValueRootId) Common.ComptimeValueRoot {
         return self.comptime_value_roots[@backingInt(id)];
     }
 
-    pub fn procDebugName(self: ProgramView, symbol: Common.Symbol) ?names.ExportNameId {
+    pub fn procDebugName(self: *const ProgramView, symbol: Common.Symbol) ?names.ExportNameId {
         return self.proc_debug_names.get(symbol);
     }
 
-    pub fn exprLoc(self: ProgramView, id: ExprId) base.SourceLoc {
+    pub fn exprLoc(self: *const ProgramView, id: ExprId) base.SourceLoc {
         return self.expr_locs[@backingInt(id)];
     }
 
-    pub fn exprRegion(self: ProgramView, id: ExprId) base.Region {
+    pub fn exprRegion(self: *const ProgramView, id: ExprId) base.Region {
         return self.expr_regions[@backingInt(id)];
     }
 
-    pub fn stmtLoc(self: ProgramView, id: StmtId) base.SourceLoc {
+    pub fn stmtLoc(self: *const ProgramView, id: StmtId) base.SourceLoc {
         return self.stmt_locs[@backingInt(id)];
     }
 
-    pub fn stmtRegion(self: ProgramView, id: StmtId) base.Region {
+    pub fn stmtRegion(self: *const ProgramView, id: StmtId) base.Region {
         return self.stmt_regions[@backingInt(id)];
     }
 
-    pub fn comptimeSite(self: ProgramView, id: ComptimeSiteId) ComptimeSite {
+    pub fn comptimeSite(self: *const ProgramView, id: ComptimeSiteId) ComptimeSite {
         return self.comptime_sites[@backingInt(id)];
     }
 
-    pub fn localName(self: ProgramView, id: LocalId) []const u8 {
+    pub fn localName(self: *const ProgramView, id: LocalId) []const u8 {
         return self.local_name_table.text(self.local_names[@backingInt(id)]);
     }
 
     /// The CaptureId of a local. Every local that participates in a capture set
     /// carries one; asserts it is present.
-    pub fn captureIdOfLocal(self: ProgramView, id: LocalId) check.CheckedModule.CaptureId {
+    pub fn captureIdOfLocal(self: *const ProgramView, id: LocalId) check.CheckedModule.CaptureId {
         return self.locals[@backingInt(id)].identity.captureId() orelse
             Common.invariant("lifted capture local had no CaptureId");
     }
 
-    pub fn exprSpan(self: ProgramView, span_: Span(ExprId)) []const ExprId {
+    pub fn exprSpan(self: *const ProgramView, span_: Span(ExprId)) []const ExprId {
         return self.expr_ids[span_.start..][0..span_.len];
     }
 
-    pub fn patSpan(self: ProgramView, span_: Span(PatId)) []const PatId {
+    pub fn patSpan(self: *const ProgramView, span_: Span(PatId)) []const PatId {
         return self.pat_ids[span_.start..][0..span_.len];
     }
 
-    pub fn typedLocalSpan(self: ProgramView, span_: Span(TypedLocal)) []const TypedLocal {
+    pub fn typedLocalSpan(self: *const ProgramView, span_: Span(TypedLocal)) []const TypedLocal {
         return self.typed_locals[span_.start..][0..span_.len];
     }
 
-    pub fn captureOperandSpan(self: ProgramView, span_: Span(CaptureOperand)) []const CaptureOperand {
+    pub fn signatureVarSteps(self: *const ProgramView, span_: Span(SignatureVarStep)) []const SignatureVarStep {
+        return self.signature_var_steps[span_.start..][0..span_.len];
+    }
+
+    pub fn captureOperandSpan(self: *const ProgramView, span_: Span(CaptureOperand)) []const CaptureOperand {
         return self.capture_operands[span_.start..][0..span_.len];
     }
 
-    pub fn stmtSpan(self: ProgramView, span_: Span(StmtId)) []const StmtId {
+    pub fn stmtSpan(self: *const ProgramView, span_: Span(StmtId)) []const StmtId {
         return self.stmt_ids[span_.start..][0..span_.len];
     }
 
-    pub fn fieldExprSpan(self: ProgramView, span_: Span(FieldExpr)) []const FieldExpr {
+    pub fn fieldExprSpan(self: *const ProgramView, span_: Span(FieldExpr)) []const FieldExpr {
         return self.field_exprs[span_.start..][0..span_.len];
     }
 
-    pub fn fieldAccessSegmentSpan(self: ProgramView, span_: Span(FieldAccessSegment)) []const FieldAccessSegment {
+    pub fn fieldAccessSegmentSpan(self: *const ProgramView, span_: Span(FieldAccessSegment)) []const FieldAccessSegment {
         return self.field_access_segments[span_.start..][0..span_.len];
     }
 
-    pub fn recordDestructSpan(self: ProgramView, span_: Span(RecordDestruct)) []const RecordDestruct {
+    pub fn recordDestructSpan(self: *const ProgramView, span_: Span(RecordDestruct)) []const RecordDestruct {
         return self.record_destructs[span_.start..][0..span_.len];
     }
 
-    pub fn strPatternStepSpan(self: ProgramView, span_: Span(Mono.StrPatternStep)) []const Mono.StrPatternStep {
+    pub fn strPatternStepSpan(self: *const ProgramView, span_: Span(Mono.StrPatternStep)) []const Mono.StrPatternStep {
         return self.str_pattern_steps[span_.start..][0..span_.len];
     }
 
-    pub fn branchSpan(self: ProgramView, span_: Span(Branch)) []const Branch {
+    pub fn branchSpan(self: *const ProgramView, span_: Span(Branch)) []const Branch {
         return self.branches[span_.start..][0..span_.len];
     }
 
-    pub fn getExpr(self: ProgramView, id: ExprId) Expr {
+    pub fn getExpr(self: *const ProgramView, id: ExprId) Expr {
         return self.exprs[@backingInt(id)];
     }
 
-    pub fn getPat(self: ProgramView, id: PatId) Pat {
+    pub fn getPat(self: *const ProgramView, id: PatId) Pat {
         return self.pats[@backingInt(id)];
     }
 
-    pub fn getFn(self: ProgramView, id: FnId) Fn {
+    pub fn getFn(self: *const ProgramView, id: FnId) Fn {
         return self.fns[@backingInt(id)];
     }
 
-    pub fn ifBranchSpan(self: ProgramView, span_: Span(IfBranch)) []const IfBranch {
+    pub fn ifBranchSpan(self: *const ProgramView, span_: Span(IfBranch)) []const IfBranch {
         return self.if_branches[span_.start..][0..span_.len];
     }
 };
@@ -480,6 +464,8 @@ pub const Program = struct {
     branches: ProgramList(Branch, "branches"),
     if_branches: ProgramList(IfBranch, "if_branches"),
     string_literals: ProgramList(Mono.StringLiteral, "string_literals"),
+    /// Backing pool for `FnBody.hosted` spans, moved from Monotype.
+    signature_var_steps: ProgramList(SignatureVarStep, "signature_var_steps") = .empty,
     proc_debug_names: ProcDebugNameMap,
     /// Next generated `CaptureId` index for a lift-synthesized capturable local.
     next_lift_capture_id: u32,
@@ -798,6 +784,7 @@ pub const Program = struct {
         self.proc_debug_names.deinit();
         for (self.string_literals.unsafeRawItemsForView()) |literal| literal.deinit(self.allocator);
         self.string_literals.deinit(self.allocator);
+        self.signature_var_steps.deinit(self.allocator);
         self.if_branches.deinit(self.allocator);
         self.branches.deinit(self.allocator);
         self.str_pattern_steps.deinit(self.allocator);
@@ -851,6 +838,7 @@ pub const Program = struct {
             .branches = self.branches.unsafeRawItemsForView(),
             .if_branches = self.if_branches.unsafeRawItemsForView(),
             .string_literals = self.string_literals.unsafeRawItemsForView(),
+            .signature_var_steps = self.signature_var_steps.unsafeRawItemsForView(),
             .proc_debug_names = &self.proc_debug_names,
             .roots = self.roots.unsafeRawItemsForView(),
             .literal_roots = self.literal_roots.unsafeRawItemsForView(),
@@ -1009,11 +997,10 @@ pub const Program = struct {
         for (self.string_literals.unsafeRawItemsForView()[start..]) |literal| literal.deinit(self.allocator);
     }
 
-    /// The id the next function takes. The largest `u32` is never a
-    /// function id, so it can mark an absent one.
+    /// The id the next function takes, leaving room for its biased optional
+    /// form (`collections.OptionalId(FnId)`).
     fn nextFnId(self: *const Program) std.mem.Allocator.Error!FnId {
-        const raw = std.math.cast(u32, self.fns.len()) orelse return error.OutOfMemory;
-        if (raw == std.math.maxInt(u32)) return error.OutOfMemory;
+        const raw = try collections.nextBiasedId(self.fns.len());
         return @fromBackingInt(raw);
     }
 
@@ -1090,10 +1077,6 @@ pub const Program = struct {
         switch (expr.data) {
             .call_proc => |call| {
                 self.shapes.direct_call = true;
-                if (call.iterator_procedure) |procedure| {
-                    self.shapes.iterator_call = true;
-                    if (procedure.producesIteratorValue()) self.shapes.iterator_producer = true;
-                }
                 // The lifter records a call before and after it rewrites the
                 // callee to a lifted function; only the lifted form can name
                 // the owner.
@@ -1164,11 +1147,11 @@ pub const Program = struct {
     }
 
     pub fn inlineScope(self: *const Program, id: InlineScopeId) InlineScope {
-        return self.row("inline_scopes", id.row());
+        return self.row("inline_scopes", @backingInt(id.get().?));
     }
 
     pub fn addInlineScope(self: *Program, scope: InlineScope) std.mem.Allocator.Error!InlineScopeId {
-        const id: InlineScopeId = .fromRow(@intCast(self.rowCount("inline_scopes")));
+        const id: InlineScopeId = .some(@fromBackingInt(@intCast(self.rowCount("inline_scopes"))));
         try self.inline_scopes.append(self.allocator, scope);
         return id;
     }
@@ -1339,7 +1322,6 @@ pub const Program = struct {
         } else {
             writeIdentityBytes(hasher, "source");
         }
-        writeIdentityBytes(hasher, if (fn_.iterator_fusion_scope) "iterator-fusion" else "plain");
         return true;
     }
 
@@ -1567,6 +1549,189 @@ pub const Program = struct {
         };
     }
 
+    /// The binding groups of this program (`BindingGroups`). Reads only the
+    /// explicit function references of the bodies, so a pass that changes
+    /// which functions a body references must run before this is taken.
+    pub fn bindingGroups(self: *const Program, allocator: std.mem.Allocator) std.mem.Allocator.Error!BindingGroups {
+        const fn_count = self.fnCount();
+        if (fn_count == 0) return .empty;
+        if (std.math.cast(u32, fn_count) == null) return error.OutOfMemory;
+
+        // Every function each function references, in one flat list.
+        var edges = std.ArrayList(u32).empty;
+        defer edges.deinit(allocator);
+        const edge_starts = try allocator.alloc(u32, fn_count + 1);
+        defer allocator.free(edge_starts);
+        // The function whose body first reached each expression, and the
+        // functions whose bodies share an expression with another's.
+        const expr_fns = try allocator.alloc(collections.OptionalU32, self.exprCount());
+        defer allocator.free(expr_fns);
+        @memset(expr_fns, .none);
+        var sharing = try std.DynamicBitSetUnmanaged.initEmpty(allocator, fn_count);
+        defer sharing.deinit(allocator);
+        // One work stack serves every body. Which functions a body names does
+        // not depend on the order its positions are visited in.
+        var pending = std.ArrayList(ExprChild).empty;
+        defer pending.deinit(allocator);
+        for (0..fn_count) |raw| {
+            edge_starts[raw] = std.math.cast(u32, edges.items.len) orelse return error.OutOfMemory;
+            const fn_id: FnId = @fromBackingInt(@intCast(raw));
+            switch (self.getFn(fn_id).body) {
+                .roc => |body_expr| try pending.append(allocator, .{ .expr = body_expr }),
+                .hosted => {},
+            }
+            while (pending.pop()) |child| switch (child) {
+                .stmt => |stmt_id| try appendStmtChildren(allocator, self, stmt_id, &pending),
+                .expr => |expr_id| {
+                    const first = &expr_fns[@backingInt(expr_id)];
+                    if (first.get()) |first_fn| {
+                        if (first_fn != raw) {
+                            sharing.set(first_fn);
+                            sharing.set(raw);
+                        }
+                    } else {
+                        first.* = .some(@intCast(raw));
+                    }
+                    const data = self.getExpr(expr_id).data;
+                    if (data == .fn_ref) try edges.append(allocator, @backingInt(data.fn_ref.fn_id));
+                    if (data == .call_proc) switch (data.call_proc.callee) {
+                        .lifted => |callee| try edges.append(allocator, @backingInt(callee)),
+                        .func => Common.invariant("unlifted call target reached Monotype Lifted binding groups"),
+                    };
+                    try appendChildren(allocator, self, expr_id, &pending);
+                },
+            };
+        }
+        edge_starts[fn_count] = std.math.cast(u32, edges.items.len) orelse return error.OutOfMemory;
+
+        const fns = try allocator.alloc(FnId, fn_count);
+        errdefer allocator.free(fns);
+        var starts = try std.ArrayList(u32).initCapacity(allocator, 1);
+        errdefer starts.deinit(allocator);
+        starts.appendAssumeCapacity(0);
+
+        // Tarjan's algorithm on an explicit stack. A component is complete
+        // only once every component it reaches is, so components complete
+        // callee-first.
+        const unvisited: u32 = 0;
+        const index_of = try allocator.alloc(u32, fn_count);
+        defer allocator.free(index_of);
+        @memset(index_of, unvisited);
+        const low = try allocator.alloc(u32, fn_count);
+        defer allocator.free(low);
+        const on_stack = try allocator.alloc(bool, fn_count);
+        defer allocator.free(on_stack);
+        @memset(on_stack, false);
+        var component = std.ArrayList(u32).empty;
+        defer component.deinit(allocator);
+        const Frame = struct { node: u32, next: u32 };
+        var frames = std.ArrayList(Frame).empty;
+        defer frames.deinit(allocator);
+        var next_index: u32 = 1;
+        var written: usize = 0;
+
+        for (0..fn_count) |start| {
+            if (index_of[start] != unvisited) continue;
+            try frames.append(allocator, .{ .node = @intCast(start), .next = edge_starts[start] });
+            index_of[start] = next_index;
+            low[start] = next_index;
+            next_index += 1;
+            try component.append(allocator, @intCast(start));
+            on_stack[start] = true;
+            while (frames.items.len > 0) {
+                const frame = &frames.items[frames.items.len - 1];
+                const node = frame.node;
+                if (frame.next < edge_starts[node + 1]) {
+                    const callee = edges.items[frame.next];
+                    frame.next += 1;
+                    if (index_of[callee] == unvisited) {
+                        index_of[callee] = next_index;
+                        low[callee] = next_index;
+                        next_index += 1;
+                        try component.append(allocator, callee);
+                        on_stack[callee] = true;
+                        try frames.append(allocator, .{ .node = callee, .next = edge_starts[callee] });
+                    } else if (on_stack[callee]) {
+                        low[node] = @min(low[node], index_of[callee]);
+                    }
+                    continue;
+                }
+                frames.items.len -= 1;
+                if (frames.items.len > 0) {
+                    const caller = frames.items[frames.items.len - 1].node;
+                    low[caller] = @min(low[caller], low[node]);
+                }
+                if (low[node] != index_of[node]) continue;
+                const component_start = std.mem.findScalarLast(u32, component.items, node).?;
+                const members = component.items[component_start..];
+                // Members in ascending `FnId` order, so a group's order does
+                // not depend on where the walk entered it.
+                std.mem.sort(u32, members, {}, std.sort.asc(u32));
+                for (members) |member| {
+                    on_stack[member] = false;
+                    fns[written] = @fromBackingInt(member);
+                    written += 1;
+                }
+                try starts.append(allocator, @intCast(written));
+                component.items.len = component_start;
+            }
+        }
+        std.debug.assert(written == fn_count);
+        const group_starts = try starts.toOwnedSlice(allocator);
+        errdefer allocator.free(group_starts);
+        const shares_exprs = try allocator.alloc(bool, group_starts.len - 1);
+        for (shares_exprs, 0..) |*shares, group_index| {
+            shares.* = for (fns[group_starts[group_index]..group_starts[group_index + 1]]) |fn_id| {
+                if (sharing.isSet(@backingInt(fn_id))) break true;
+            } else false;
+        }
+        return .{ .fns = fns, .starts = group_starts, .shares_exprs = shares_exprs };
+    }
+
+    /// A local that functions of two binding groups both name—as an
+    /// argument, a capture slot, a binder, or a read in a body—or null when
+    /// each local is named within one group, as giving every function its
+    /// own capture slots (`own_captures.zig`) arranges.
+    /// Lambda solving gives each local one type, so a later group relating
+    /// it would relate a scheme node of the group that generalized it
+    /// (design.md "Lambda Set Generalization").
+    pub fn localSharedAcrossGroups(
+        self: *const Program,
+        allocator: std.mem.Allocator,
+        groups: BindingGroups,
+    ) std.mem.Allocator.Error!?SharedLocal {
+        const owners = try allocator.alloc(LocalClaims.OptionalOwner, self.localCount());
+        defer allocator.free(owners);
+        @memset(owners, .none);
+        var claims: LocalClaims = .{ .owners = owners };
+        var pending = std.ArrayList(ExprChild).empty;
+        defer pending.deinit(allocator);
+        for (0..groups.count()) |group_index| {
+            claims.group = @intCast(group_index);
+            for (groups.group(group_index)) |fn_id| {
+                claims.fn_id = fn_id;
+                const fn_ = self.getFn(fn_id);
+                try visitSignatureLocals(self, fn_, &claims);
+                switch (fn_.body) {
+                    .roc => |body_expr| try pending.append(allocator, .{ .expr = body_expr }),
+                    .hosted => {},
+                }
+                while (pending.pop()) |child| switch (child) {
+                    .stmt => |stmt_id| {
+                        try visitStmtLocals(allocator, self, stmt_id, &claims);
+                        try appendStmtChildren(allocator, self, stmt_id, &pending);
+                    },
+                    .expr => |expr_id| {
+                        try visitExprLocals(allocator, self, expr_id, &claims);
+                        try appendChildren(allocator, self, expr_id, &pending);
+                    },
+                };
+                if (claims.shared) |shared| return shared;
+            }
+        }
+        return null;
+    }
+
     /// Checked source identity of a function whose template is keyed by
     /// layout (`Mono.FnTemplate.procedure_keyed_by_layout`): the template and
     /// its evidence, without the Monotype type, whose place in the procedure
@@ -1581,7 +1746,6 @@ pub const Program = struct {
         writeIdentityBytes(&hasher, "roc.lifted.fn-layout-keyed-source.v1");
         writeFnDefDigest(&hasher, &self.names, template.fn_def, template.site_identity);
         hasher.update(&template.evidence_digest.bytes);
-        writeIdentityBytes(&hasher, if (fn_.iterator_fusion_scope) "iterator-fusion" else "plain");
         return hasher.finalResult();
     }
 
@@ -1736,6 +1900,23 @@ pub const Program = struct {
             .capture_kind = capture_kind,
         });
         try self.local_names.append(self.allocator, .none);
+        return id;
+    }
+
+    /// Add a local that is a copy of `source` in a copy of its function: the
+    /// same Monotype, name and complete capture identity under `symbol`.
+    /// Copies of one function capture one-to-one, so every identity a
+    /// capture operand matches carries over.
+    pub fn addLocalCopy(self: *Program, source: LocalId, symbol: Common.Symbol) std.mem.Allocator.Error!LocalId {
+        const original = self.getLocal(source);
+        const id: LocalId = @fromBackingInt(@intCast(@as(u32, @intCast(self.localCount()))));
+        try self.locals.ensureUnusedCapacity(self.allocator, 1);
+        try self.local_names.ensureUnusedCapacity(self.allocator, 1);
+        var copy = original;
+        copy.id = id;
+        copy.symbol = symbol;
+        try self.locals.append(self.allocator, copy);
+        try self.local_names.append(self.allocator, self.localNameId(source));
         return id;
     }
 
@@ -2298,6 +2479,179 @@ pub fn anyChild(allocator: std.mem.Allocator, program: *const Program, root: Exp
 /// A decision `anyExpr` asks its visitor for at each expression.
 pub const ExprSearch = enum { found, skip, descend, children };
 
+/// A local that functions of two binding groups name, as
+/// `localSharedAcrossGroups` finds it.
+pub const SharedLocal = struct {
+    local: LocalId,
+    /// The function that named it first.
+    first: FnId,
+    /// A function of another group that names it.
+    second: FnId,
+};
+
+/// Call `visitor.bindLocal` with every local a function's signature names:
+/// its arguments and its capture slots.
+fn visitSignatureLocals(program: *const Program, fn_: Fn, visitor: anytype) std.mem.Allocator.Error!void {
+    try visitTypedLocals(program, fn_.args, visitor);
+    try visitTypedLocals(program, fn_.captures, visitor);
+}
+
+fn visitTypedLocals(program: *const Program, locals: Span(TypedLocal), visitor: anytype) std.mem.Allocator.Error!void {
+    const values = program.typedLocalSpan(locals);
+    for (0..values.len) |index| try visitor.bindLocal(GuardedList.at(values, index).local);
+}
+
+/// Call `visitor.bindLocal` with every local a statement's patterns bind.
+fn visitStmtLocals(allocator: std.mem.Allocator, program: *const Program, stmt_id: StmtId, visitor: anytype) std.mem.Allocator.Error!void {
+    switch (program.getStmt(stmt_id)) {
+        .let_ => |let_| try forEachBoundLocal(allocator, program, let_.pat, visitor),
+        .uninitialized => |pat| try forEachBoundLocal(allocator, program, pat, visitor),
+        .expr, .expect, .dbg, .return_, .crash, .checked_error => {},
+    }
+}
+
+/// Call `visitor.bindLocal` with every local an expression names directly,
+/// as a read, a binder, or a parameter. Its child expressions and statements
+/// (`appendChildren`) are visited separately.
+fn visitExprLocals(allocator: std.mem.Allocator, program: *const Program, expr_id: ExprId, visitor: anytype) std.mem.Allocator.Error!void {
+    switch (program.getExpr(expr_id).data) {
+        .local => |local| try visitor.bindLocal(local),
+        .let_ => |let_| try forEachBoundLocal(allocator, program, let_.bind, visitor),
+        .lambda => |lambda| {
+            try visitTypedLocals(program, lambda.args, visitor);
+            try visitTypedLocals(program, lambda.stored_captures, visitor);
+        },
+        .match_ => |match| {
+            const branches = program.branchSpan(match.branches);
+            for (0..branches.len) |index| {
+                try forEachBoundLocal(allocator, program, GuardedList.at(branches, index).pat, visitor);
+            }
+        },
+        .uninitialized_payload => |payload| try visitor.bindLocal(payload.condition),
+        .if_initialized_payload => |payload_switch| try visitor.bindLocal(payload_switch.payload),
+        .try_sequence => |sequence| try visitor.bindLocal(sequence.ok_local),
+        .try_record_sequence => |sequence| {
+            try visitor.bindLocal(sequence.value_local);
+            try visitor.bindLocal(sequence.rest_local);
+        },
+        .loop_ => |loop| try visitTypedLocals(program, loop.params, visitor),
+        .join_point => |join_point| {
+            try visitTypedLocals(program, join_point.params, visitor);
+            try visitTypedLocals(program, join_point.retained, visitor);
+        },
+        .jump => |jump| try visitTypedLocals(program, jump.loop_params, visitor),
+        .unit,
+        .@"unreachable",
+        .int_lit,
+        .frac_f32_lit,
+        .frac_f64_lit,
+        .dec_lit,
+        .str_lit,
+        .bytes_lit,
+        .static_data_candidate,
+        .comptime_value,
+        .typed_boundary,
+        .row_widen,
+        .list,
+        .tuple,
+        .record,
+        .record_update,
+        .tag,
+        .nominal,
+        .def_ref,
+        .fn_def,
+        .fn_ref,
+        .call_value,
+        .call_proc,
+        .low_level,
+        .field_access,
+        .tuple_access,
+        .structural_eq,
+        .structural_hash,
+        .if_,
+        .uninitialized,
+        .block,
+        .break_,
+        .continue_,
+        .return_,
+        .crash,
+        .checked_error,
+        .comptime_exhaustiveness_failed,
+        .dbg,
+        .expect_err,
+        .expect,
+        .literal_rejected,
+        => {},
+    }
+}
+
+/// The binding group, and its function, that first named each local, for
+/// `localSharedAcrossGroups`.
+const LocalClaims = struct {
+    const Owner = struct {
+        group: u32,
+        fn_id: FnId,
+    };
+
+    /// Zero (`.none`) for a local no group has named yet.
+    const OptionalOwner = collections.OptionalStruct(Owner, "group");
+
+    owners: []OptionalOwner,
+    group: u32 = 0,
+    /// Set before each function's locals are claimed.
+    fn_id: FnId = undefined,
+    shared: ?SharedLocal = null,
+
+    pub fn bindLocal(self: *LocalClaims, local: LocalId) std.mem.Allocator.Error!void {
+        const slot = &self.owners[@backingInt(local)];
+        if (slot.get()) |owner| {
+            if (owner.group != self.group and self.shared == null) {
+                self.shared = .{ .local = local, .first = owner.fn_id, .second = self.fn_id };
+            }
+        } else {
+            slot.* = .some(.{ .group = self.group, .fn_id = self.fn_id });
+        }
+    }
+};
+
+/// The strongly connected components of the lifted-function reference graph,
+/// whose edges are the functions a body names (`fn_ref` and direct
+/// `call_proc`). A capture operand is supplied by the reference that names
+/// the function, like an argument, and the function's body reads capture
+/// slots of its own (`own_captures.zig`), so a closure joins the group of a
+/// function whose locals it captures only when it also names that function.
+/// Every lifted function belongs to
+/// exactly one group. Groups are listed callee-first: a group follows every
+/// group its functions reference, so the functions of one group reference
+/// each other or earlier groups only. Within a group, functions are in
+/// ascending `FnId` order.
+pub const BindingGroups = struct {
+    /// Group `g` is `fns[starts[g]..starts[g + 1]]`.
+    fns: []FnId = &.{},
+    starts: []u32 = &.{},
+    /// Per group: whether one of its bodies shares an expression with a
+    /// body outside the group (SpecConstr reuses unchanged expressions of a
+    /// body it copies). Such an expression has one type for both bodies.
+    shares_exprs: []bool = &.{},
+
+    pub const empty: BindingGroups = .{};
+
+    pub fn deinit(self: *BindingGroups, allocator: std.mem.Allocator) void {
+        allocator.free(self.fns);
+        allocator.free(self.starts);
+        allocator.free(self.shares_exprs);
+        self.* = .empty;
+    }
+
+    pub fn count(self: BindingGroups) usize {
+        return if (self.starts.len == 0) 0 else self.starts.len - 1;
+    }
+
+    pub fn group(self: BindingGroups, index: usize) []const FnId {
+        return self.fns[self.starts[index]..self.starts[index + 1]];
+    }
+};
+
 /// What `walkExprs` does at one expression.
 pub const ExprWalk = enum {
     /// Leave the expression's children unvisited.
@@ -2408,7 +2762,7 @@ fn testSourceDigestKey(comptime byte: u8) names.TypeDigest {
 }
 
 /// One lifted function carrying `source`, with no body of its own: the source
-/// digest reads the template, the clone pattern, and the fusion scope only.
+/// digest reads the template and the clone pattern only.
 fn addSourceDigestFn(
     program: *Program,
     symbols: *Common.SymbolGen,
@@ -2420,7 +2774,7 @@ fn addSourceDigestFn(
         .source = source,
         .args = Span(TypedLocal).empty(),
         .captures = Span(TypedLocal).empty(),
-        .body = .hosted,
+        .body = .{ .hosted = .empty() },
         .ret = ret_ty,
     });
 }
@@ -2513,7 +2867,7 @@ test "lifted source digest drops caller provenance and keeps generated bodies ap
         .spec_constr_pattern = testSourceDigestKey(9),
         .args = Span(TypedLocal).empty(),
         .captures = Span(TypedLocal).empty(),
-        .body = .hosted,
+        .body = .{ .hosted = .empty() },
         .ret = ret_ty,
     });
     program.next_symbol = symbols.next;
@@ -2598,6 +2952,96 @@ test "code reaching the app digests what it reaches there and names its app call
     try std.testing.expect(!std.mem.eql(u8, &before[0], &(try program.fnSourceDigest(callers[0])).?));
     try std.testing.expectEqualSlices(u8, &before[1], &(try program.fnSourceDigest(callers[1])).?);
     try std.testing.expectEqualSlices(u8, &before[2], &(try program.fnSourceDigest(outer)).?);
+}
+
+test "binding groups are the reference graph's components, callee-first" {
+    var symbols: Common.SymbolGen = .{};
+    var program = testLiftedProgram(std.testing.allocator);
+    defer program.deinit();
+    const ret_ty = try program.types.add(.zst);
+
+    // Callers precede their callees in `FnId` order: the first function
+    // refers to the fourth, which calls into the cycle of the second and
+    // third; the fifth references nothing.
+    var fn_ids: [5]FnId = undefined;
+    for (&fn_ids) |*fn_id| fn_id.* = try program.reserveFnSlot();
+    const bodies = [_]?ExprData{
+        .{ .fn_ref = .{ .fn_id = fn_ids[3] } },
+        .{ .call_proc = .{ .callee = .{ .lifted = fn_ids[2] }, .args = Span(ExprId).empty() } },
+        .{ .call_proc = .{ .callee = .{ .lifted = fn_ids[1] }, .args = Span(ExprId).empty() } },
+        .{ .call_proc = .{ .callee = .{ .lifted = fn_ids[1] }, .args = Span(ExprId).empty() } },
+        null,
+    };
+    for (bodies, fn_ids) |maybe_body, fn_id| {
+        const body: FnBody = if (maybe_body) |data| .{ .roc = try program.addExpr(.{ .ty = ret_ty, .data = data }) } else .{ .hosted = .empty() };
+        program.setFn(fn_id, .{
+            .symbol = symbols.fresh(),
+            .args = Span(TypedLocal).empty(),
+            .captures = Span(TypedLocal).empty(),
+            .body = body,
+            .ret = ret_ty,
+        });
+    }
+    program.next_symbol = symbols.next;
+
+    var groups = try program.bindingGroups(std.testing.allocator);
+    defer groups.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), groups.count());
+    try std.testing.expectEqualSlices(FnId, &.{ fn_ids[1], fn_ids[2] }, groups.group(0));
+    try std.testing.expectEqualSlices(FnId, &.{fn_ids[3]}, groups.group(1));
+    try std.testing.expectEqualSlices(FnId, &.{fn_ids[0]}, groups.group(2));
+    try std.testing.expectEqualSlices(FnId, &.{fn_ids[4]}, groups.group(3));
+}
+
+test "issue 13197: a closure its encloser no longer names shares no local with it" {
+    var symbols: Common.SymbolGen = .{};
+    var program = testLiftedProgram(std.testing.allocator);
+    defer program.deinit();
+    const ty = try program.types.add(.zst);
+
+    // The closure's capture slot is the encloser's argument, but no body
+    // names the closure (a rewrite replaced its only reference), so no
+    // reference edge relates the two.
+    const arg = try program.addLocal(symbols.fresh(), ty);
+    _ = program.ensureLiftCaptureId(arg);
+    const encloser_body = try program.addExpr(.{ .ty = ty, .data = .{ .local = arg } });
+    const encloser = try program.addFn(.{
+        .symbol = symbols.fresh(),
+        .args = try program.addTypedLocalSpan(&.{.{ .local = arg, .ty = ty }}),
+        .captures = Span(TypedLocal).empty(),
+        .body = .{ .roc = encloser_body },
+        .ret = ty,
+    });
+    const closure_body = try program.addExpr(.{ .ty = ty, .data = .{ .local = arg } });
+    const closure = try program.addFn(.{
+        .symbol = symbols.fresh(),
+        .args = Span(TypedLocal).empty(),
+        .captures = try program.addTypedLocalSpan(&.{.{ .local = arg, .ty = ty }}),
+        .body = .{ .roc = closure_body },
+        .ret = ty,
+    });
+    const unrelated_body = try program.addExpr(.{ .ty = ty, .data = .unit });
+    const unrelated = try program.addFn(.{
+        .symbol = symbols.fresh(),
+        .args = Span(TypedLocal).empty(),
+        .captures = Span(TypedLocal).empty(),
+        .body = .{ .roc = unrelated_body },
+        .ret = ty,
+    });
+    program.next_symbol = symbols.next;
+
+    // Lambda Solved's first step gives the closure capture slots of its own,
+    // so the closure needs no group with an encloser that no longer names it.
+    try @import("own_captures.zig").run(&program);
+    var groups = try program.bindingGroups(std.testing.allocator);
+    defer groups.deinit(std.testing.allocator);
+    // Lambda solving gives a local one type, which a later group must never
+    // relate after the first group generalized it.
+    try std.testing.expectEqual(@as(usize, 3), groups.count());
+    try std.testing.expectEqualSlices(FnId, &.{encloser}, groups.group(0));
+    try std.testing.expectEqualSlices(FnId, &.{closure}, groups.group(1));
+    try std.testing.expectEqualSlices(FnId, &.{unrelated}, groups.group(2));
+    try std.testing.expectEqual(@as(?SharedLocal, null), try program.localSharedAcrossGroups(std.testing.allocator, groups));
 }
 
 test "a folded match resolves only a layout-resolved site to the branch its answer selects" {

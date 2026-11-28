@@ -86,9 +86,15 @@ pub const TypeAnno = union(enum) {
         diagnostic: CIR.Diagnostic.Idx, // The error that occurred
     },
 
+    /// Which variant a type annotation is, without its fields. `NodeStore` reads it
+    /// from a node's tag alone.
+    pub const Kind = std.meta.Tag(@This());
+
     pub const Idx = enum(u32) {
-        /// Placeholder value indicating the anno hasn't been set yet.
-        /// Used during forward reference resolution.
+        /// A declaration whose annotation has not been set: the forward
+        /// placeholder a reference creates ahead of its declaration. Zero is
+        /// the node store's reserved node (`Node.Tag.reserved`), so no
+        /// annotation ever has this index.
         placeholder = 0,
         _,
     };
@@ -111,8 +117,8 @@ pub const TypeAnno = union(enum) {
                     },
                     .external => |external| {
                         const module_idx_int = @backingInt(external.module_idx);
-                        std.debug.assert(module_idx_int < ir.imports.imports.items.items.len);
-                        const string_lit_idx = ir.imports.imports.items.items[module_idx_int];
+                        std.debug.assert(module_idx_int < ir.imports.imports.items().len);
+                        const string_lit_idx = ir.imports.imports.items()[module_idx_int];
                         const module_name = ir.common.strings.get(string_lit_idx);
                         // Special case: Builtin module is an implementation detail, print as (builtin)
                         if (std.mem.eql(u8, module_name, "Builtin") or CIR.Import.isCompilerBuiltinImportName(module_name)) {
@@ -124,8 +130,8 @@ pub const TypeAnno = union(enum) {
                     },
                     .pending => |pending| {
                         const module_idx_int = @backingInt(pending.module_idx);
-                        std.debug.assert(module_idx_int < ir.imports.imports.items.items.len);
-                        const string_lit_idx = ir.imports.imports.items.items[module_idx_int];
+                        std.debug.assert(module_idx_int < ir.imports.imports.items().len);
+                        const string_lit_idx = ir.imports.imports.items()[module_idx_int];
                         const module_name = ir.common.strings.get(string_lit_idx);
                         try tree.pushStringPair("pending-module", module_name);
                     },
@@ -174,8 +180,8 @@ pub const TypeAnno = union(enum) {
                     },
                     .external => |external| {
                         const module_idx_int = @backingInt(external.module_idx);
-                        std.debug.assert(module_idx_int < ir.imports.imports.items.items.len);
-                        const string_lit_idx = ir.imports.imports.items.items[module_idx_int];
+                        std.debug.assert(module_idx_int < ir.imports.imports.items().len);
+                        const string_lit_idx = ir.imports.imports.items()[module_idx_int];
                         const module_name = ir.common.strings.get(string_lit_idx);
                         // Special case: Builtin module is an implementation detail, print as (builtin)
                         if (std.mem.eql(u8, module_name, "Builtin") or CIR.Import.isCompilerBuiltinImportName(module_name)) {
@@ -187,8 +193,8 @@ pub const TypeAnno = union(enum) {
                     },
                     .pending => |pending| {
                         const module_idx_int = @backingInt(pending.module_idx);
-                        std.debug.assert(module_idx_int < ir.imports.imports.items.items.len);
-                        const string_lit_idx = ir.imports.imports.items.items[module_idx_int];
+                        std.debug.assert(module_idx_int < ir.imports.imports.items().len);
+                        const string_lit_idx = ir.imports.imports.items()[module_idx_int];
                         const module_name = ir.common.strings.get(string_lit_idx);
                         try tree.pushStringPair("pending-module", module_name);
                     },

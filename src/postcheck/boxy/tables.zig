@@ -9,6 +9,12 @@
 //! variables, dictionaries, argument-record descriptors, and the tables of
 //! the workers it calls.
 //!
+//! A lambda worker's table does not repeat the inputs of the worker that
+//! creates it: its first input is its creator's table, and its other inputs
+//! are only those its own scope adds (`InputLayout`). Its recipes name an
+//! input of an enclosing scope as `inherited`, which filling the table
+//! resolves through that chain of tables.
+//!
 //! A worker's needs list says what each word of its table is, as a recipe
 //! over the worker's own inputs. Filling a table evaluates each recipe with
 //! the instantiation's inputs, which are static, so every word is static
@@ -30,7 +36,6 @@ const StaticDescs = static_descs_file.StaticDescs;
 
 const Allocator = std.mem.Allocator;
 const LIR = lir_core.LIR;
-const LirProgram = lir_core.Program;
 const TypeId = types.TypeId;
 const NameId = types.NameId;
 const WorkerId = lower.WorkerId;
@@ -48,6 +53,15 @@ pub const RecipeId = enum(u32) { _ };
 pub const Recipe = union(enum) {
     /// Input word `index` of the worker's table.
     input: u32,
+    /// Input `index` of the scope of the worker's creator, in the creator's
+    /// scope order (`InputLayout`), which a lambda worker's table does not
+    /// repeat: its value is read through the creator's table, its first
+    /// input, when the table is filled.
+    inherited: u32,
+    /// The table `levels` steps up the worker's chain of creators: zero is
+    /// the table holding this word, one its creator's (its first input),
+    /// and so on (`InputLayout.scope_table`).
+    scope_table: u32,
     /// The descriptor of `ty`, a type over the worker's variables that
     /// mentions one of them. `scoped` holds the override callables of the
     /// nominal types in its reach whose overrides only this worker's body
@@ -98,17 +112,101 @@ pub const Operand = union(enum) {
 /// or one whose requirements the worker's own dictionaries discharge.
 pub const ScopedOverride = struct { nominal: TypeId, methods: [3]?Operand };
 
+/// How many descriptors, dictionaries and literal arguments a scope holds.
+pub const InputCounts = struct {
+    descs: u32 = 0,
+    dicts: u32 = 0,
+    literals: u32 = 0,
+
+    pub fn total(self: InputCounts) u32 {
+        return self.descs + self.dicts + self.literals;
+    }
+};
+
+/// Where a worker's scope inputs are. A worker's scope is, in order, the
+/// descriptors of its variables, its dictionaries, then its literal
+/// arguments. A lambda worker's scope extends its creator's: its variables
+/// follow the creator's, and its own dictionaries and literal arguments lead
+/// the creator's (`lower.Worker.dict_scopes`). Its table's inputs are its
+/// creator's table, when the creator has one (`scope_table`), then only the
+/// inputs its own scope adds; every other worker's inputs are its scope.
+pub const InputLayout = struct {
+    /// Whether the first input is the creator's table.
+    scope_table: bool = false,
+    /// The creator's scope, which the table reads through its first input.
+    inherited: InputCounts = .{},
+    /// The inputs the worker's own scope adds.
+    own: InputCounts = .{},
+
+    /// A worker that inherits no scope, whose inputs are its scope.
+    pub fn flat(own: InputCounts) InputLayout {
+        return .{ .own = own };
+    }
+
+    /// The number of the worker's table inputs.
+    pub fn inputCount(self: InputLayout) u32 {
+        return @as(u32, @intFromBool(self.scope_table)) + self.own.total();
+    }
+
+    /// The number of the worker's scope inputs.
+    pub fn scopeCounts(self: InputLayout) InputCounts {
+        return .{
+            .descs = self.inherited.descs + self.own.descs,
+            .dicts = self.inherited.dicts + self.own.dicts,
+            .literals = self.inherited.literals + self.own.literals,
+        };
+    }
+
+    /// Whether the worker's scope is its creator's: it inherits a scope and
+    /// adds nothing to it.
+    pub fn passesThrough(self: InputLayout) bool {
+        return self.scope_table and self.own.total() == 0;
+    }
+
+    pub const Location = union(enum) {
+        /// The worker's own table input.
+        input: u32,
+        /// The creator's scope input.
+        inherited: u32,
+    };
+
+    /// Where scope input `index` is.
+    pub fn locate(self: InputLayout, index: u32) Location {
+        const base: u32 = @intFromBool(self.scope_table);
+        const scope = self.scopeCounts();
+        if (index < scope.descs) {
+            if (index < self.inherited.descs) return .{ .inherited = index };
+            return .{ .input = base + index - self.inherited.descs };
+        }
+        const dict = index - scope.descs;
+        if (dict < scope.dicts) {
+            if (dict < self.own.dicts) return .{ .input = base + self.own.descs + dict };
+            return .{ .inherited = self.inherited.descs + dict - self.own.dicts };
+        }
+        const literal = dict - scope.dicts;
+        if (literal >= scope.literals) invariant("a scope input index is past its worker's scope");
+        if (literal < self.own.literals) return .{ .input = base + self.own.descs + self.own.dicts + literal };
+        return .{ .inherited = self.inherited.descs + self.inherited.dicts + literal - self.own.literals };
+    }
+};
+
+/// The descriptor-guided operations a worker's body performs on the
+/// descriptor table word `word` holds.
+pub const Demand = struct { word: u32, ops: StaticDescs.OpSet };
+
 /// A worker's needs list: what each word of its table is.
 pub const Needs = struct {
     /// How many inputs lead the table.
     input_count: u32,
-    /// How many of the inputs are the descriptors of the worker's type
-    /// variables, the leading ones, in variable order.
-    desc_count: u32,
     /// The worker's recipes, which `slots` and one another name.
     recipes: []const Recipe,
     /// The recipe of table word `input_count + index`.
     slots: []const RecipeId,
+    /// The descriptor-guided operations the worker's body performs on the
+    /// descriptor table words name, by ascending word (design.md "Type
+    /// Descriptors"): filling a table demands each operation of the
+    /// descriptor its word holds there.
+    demand: []const Demand = &.{},
 
     /// The recipe of table word `word`; null for an input.
     pub fn slotRecipe(self: Needs, word: u32) ?RecipeId {
@@ -180,7 +278,7 @@ pub const Recipes = struct {
         std.debug.assert(self.items.items[@backingInt(id)] == .reserved);
         switch (recipe) {
             .callable, .table, .desc => {},
-            .input, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => invariant("a reserved recipe is not a callable, a table, or a descriptor"),
+            .input, .inherited, .scope_table, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => invariant("a reserved recipe is not a callable, a table, or a descriptor"),
         }
         if (self.interned.get(recipe)) |existing| {
             self.items.items[@backingInt(id)] = .{ .same = existing };
@@ -221,12 +319,12 @@ pub const Recipes = struct {
         return self.peek(id) orelse invariant("a reserved recipe was read before it was set");
     }
 
-    /// The needs list of a worker with `input_count` inputs, the first
-    /// `desc_count` its variables' descriptors, whose table's remaining words
+    /// The needs list of a worker with `input_count` inputs, whose table's remaining words
     /// are `slots`, allocated in `allocator`: the recipes the slots reach,
     /// numbered in the order a walk from the slots first reaches them, so
-    /// equal lists are equal data.
-    pub fn needs(self: *const Recipes, allocator: Allocator, scratch: Allocator, input_count: u32, desc_count: u32, slots: []const RecipeId) Allocator.Error!Needs {
+    /// equal lists are equal data. `demand` names table words, sorted by
+    /// word.
+    pub fn needs(self: *const Recipes, allocator: Allocator, scratch: Allocator, input_count: u32, slots: []const RecipeId, demand: []const Demand) Allocator.Error!Needs {
         var numbers = try collections.OptionalIndexColumn(RecipeId).initFilled(scratch, self.items.items.len);
         defer numbers.deinit(scratch);
         var order: std.ArrayList(RecipeId) = .empty;
@@ -274,7 +372,7 @@ pub const Recipes = struct {
         };
         const recipes = try allocator.alloc(Recipe, order.items.len);
         for (recipes, order.items) |*recipe, id| recipe.* = switch (self.get(id)) {
-            .input => |index| .{ .input = index },
+            .input, .inherited, .scope_table => self.get(id),
             .desc => |desc| blk: {
                 const scoped = try allocator.alloc(ScopedOverride, desc.scoped.len);
                 for (scoped, desc.scoped) |*out, override| {
@@ -294,14 +392,18 @@ pub const Recipes = struct {
         };
         const numbered_slots = try allocator.alloc(RecipeId, slots.len);
         for (numbered_slots, slots) |*out, slot| out.* = numbers.get(@backingInt(self.resolve(slot))).?;
-        return .{ .input_count = input_count, .desc_count = desc_count, .recipes = recipes, .slots = numbered_slots };
+        for (demand, 0..) |entry, index| {
+            if (entry.word >= input_count + slots.len) invariant("a descriptor demand names a word past its worker's table");
+            if (index != 0 and demand[index - 1].word >= entry.word) invariant("a needs list's demand is not sorted by word");
+        }
+        return .{ .input_count = input_count, .recipes = recipes, .slots = numbered_slots, .demand = try allocator.dupe(Demand, demand) };
     }
 
     /// `recipe` with its slices copied into the arena.
     fn own(self: *Recipes, recipe: Recipe) Allocator.Error!Recipe {
         const arena = self.arena.allocator();
         return switch (recipe) {
-            .input => recipe,
+            .input, .inherited, .scope_table => recipe,
             .desc => |desc| .{ .desc = .{ .ty = desc.ty, .scoped = try arena.dupe(ScopedOverride, desc.scoped), .substitute_inputs = desc.substitute_inputs } },
             .args_desc => |args| .{ .args_desc = .{ .leading = args.leading, .elems = try arena.dupe(Operand, args.elems), .capture_record = args.capture_record } },
             .callable => |callable| .{ .callable = .{ .entry = callable.entry, .captures = try arena.dupe(Operand, callable.captures) } },
@@ -327,7 +429,7 @@ pub const Recipes = struct {
 /// Append the operands `recipe` reads, in order.
 pub fn appendOperands(allocator: Allocator, out: *std.ArrayList(Operand), recipe: Recipe) Allocator.Error!void {
     switch (recipe) {
-        .input => {},
+        .input, .inherited, .scope_table => {},
         .desc => |desc| for (desc.scoped) |override| {
             for (override.methods) |method| if (method) |operand| try out.append(allocator, operand);
         },
@@ -381,8 +483,11 @@ pub const Evaluation = struct {
     allocator: Allocator,
     source: Source,
     inputs: []const StaticDescs.CaptureWord,
-    /// How many leading inputs are the worker's variables' descriptors.
-    desc_count: u32,
+    /// Where the worker's scope inputs are among `inputs`.
+    layout: InputLayout,
+    /// The table being filled, which `scope_table` zero names; null for an
+    /// evaluation of recipes that read no input.
+    self_table: ?StaticDescs.CaptureWord,
     words: std.ArrayList(?StaticDescs.CaptureWord) = .empty,
     /// The search's order of visit and low link of each recipe it visited,
     /// and whether it is on the search's stack.
@@ -393,11 +498,37 @@ pub const Evaluation = struct {
     /// The next visit order. Orders are issued from one, so zero marks an
     /// unvisited recipe.
     visited: u32 = 1,
+    /// The search's frames and, after one another, each frame's operands;
+    /// both empty between searches.
+    frames: std.ArrayList(Frame) = .empty,
+    frame_operands: std.ArrayList(Operand) = .empty,
+    /// The members of the group being evaluated, and the operands
+    /// `readsItself` lists; scratch kept with its capacity.
+    group: std.ArrayList(RecipeId) = .empty,
+    own_operands: std.ArrayList(Operand) = .empty,
 
     const unvisited: u32 = 0;
 
-    pub fn init(program: *lower.Program, source: Source, inputs: []const StaticDescs.CaptureWord, desc_count: u32) Evaluation {
-        return .{ .program = program, .allocator = program.allocator, .source = source, .inputs = inputs, .desc_count = desc_count };
+    pub fn init(program: *lower.Program, source: Source, inputs: []const StaticDescs.CaptureWord, layout: InputLayout, self_table: ?StaticDescs.CaptureWord) Evaluation {
+        if (inputs.len != layout.inputCount()) invariant("a table's inputs differ from its worker's input layout");
+        return .{ .program = program, .allocator = program.allocator, .source = source, .inputs = inputs, .layout = layout, .self_table = self_table };
+    }
+
+    /// The creator's table, this table's first input.
+    fn creatorTable(self: *const Evaluation) u32 {
+        if (!self.layout.scope_table) invariant("a table recipe reads a creator's scope its worker does not inherit");
+        return switch (self.inputs[0]) {
+            .table => |node| node,
+            .desc, .scoped_desc, .callable, .node, .zero, .int => invariant("a lambda table's first input is not its creator's table"),
+        };
+    }
+
+    /// The word of scope input `index` (`InputLayout.locate`).
+    fn scopeWord(self: *Evaluation, index: u32) Allocator.Error!StaticDescs.CaptureWord {
+        return switch (self.layout.locate(index)) {
+            .input => |input| self.inputs[input],
+            .inherited => |inherited| try self.program.inheritedWord(self.creatorTable(), inherited),
+        };
     }
 
     pub fn deinit(self: *Evaluation) void {
@@ -406,6 +537,10 @@ pub const Evaluation = struct {
         self.low.deinit(self.allocator);
         self.on_stack.deinit(self.allocator);
         self.stack.deinit(self.allocator);
+        self.frames.deinit(self.allocator);
+        self.frame_operands.deinit(self.allocator);
+        self.group.deinit(self.allocator);
+        self.own_operands.deinit(self.allocator);
     }
 
     /// The word of recipe `named` at this instantiation.
@@ -438,22 +573,26 @@ pub const Evaluation = struct {
         @memset(self.on_stack.items[old..], false);
     }
 
-    const Frame = struct { id: RecipeId, operands: []const Operand, next: usize };
+    /// A visited recipe and its operands, `frame_operands[start..end]`.
+    const Frame = struct { id: RecipeId, start: usize, end: usize, next: usize };
 
     /// Evaluate every recipe `root` reaches that has no word yet, a strongly
     /// connected group at a time, each after the groups it reads (Tarjan's
     /// search, with an explicit stack).
     fn search(self: *Evaluation, root: RecipeId) Allocator.Error!void {
-        var frames: std.ArrayList(Frame) = .empty;
+        // A group's evaluation never searches again, so the search's frames
+        // are this evaluation's own.
+        const frames = &self.frames;
+        std.debug.assert(frames.items.len == 0 and self.frame_operands.items.len == 0);
         defer {
-            for (frames.items) |frame| self.allocator.free(frame.operands);
-            frames.deinit(self.allocator);
+            frames.clearRetainingCapacity();
+            self.frame_operands.clearRetainingCapacity();
         }
-        try self.enter(&frames, root);
+        try self.enter(root);
         while (frames.items.len != 0) {
             const top = &frames.items[frames.items.len - 1];
-            if (top.next < top.operands.len) {
-                const operand = top.operands[top.next];
+            if (top.start + top.next < top.end) {
+                const operand = self.frame_operands.items[top.start + top.next];
                 top.next += 1;
                 const next = switch (operand) {
                     .recipe => |id| self.source.resolve(id),
@@ -461,7 +600,7 @@ pub const Evaluation = struct {
                 };
                 if (self.words.items[@backingInt(next)] != null) continue;
                 if (self.visit.items[@backingInt(next)] == unvisited) {
-                    try self.enter(&frames, next);
+                    try self.enter(next);
                 } else if (self.on_stack.items[@backingInt(next)]) {
                     const from = @backingInt(top.id);
                     self.low.items[from] = @min(self.low.items[from], self.visit.items[@backingInt(next)]);
@@ -469,7 +608,7 @@ pub const Evaluation = struct {
                 continue;
             }
             const done = frames.pop().?;
-            self.allocator.free(done.operands);
+            self.frame_operands.shrinkRetainingCapacity(done.start);
             const id = @backingInt(done.id);
             if (frames.items.len != 0) {
                 const parent = @backingInt(frames.items[frames.items.len - 1].id);
@@ -478,26 +617,24 @@ pub const Evaluation = struct {
             if (self.low.items[id] != self.visit.items[id]) continue;
             // `done` heads a group: the stack's recipes from it on.
             const start = std.mem.findScalarLast(RecipeId, self.stack.items, done.id) orelse invariant("a searched recipe left the search's stack");
-            const members = try self.allocator.dupe(RecipeId, self.stack.items[start..]);
-            defer self.allocator.free(members);
+            self.group.clearRetainingCapacity();
+            try self.group.appendSlice(self.allocator, self.stack.items[start..]);
+            const members = self.group.items;
             self.stack.shrinkRetainingCapacity(start);
             for (members) |member| self.on_stack.items[@backingInt(member)] = false;
             try self.evaluateGroup(members);
         }
     }
 
-    fn enter(self: *Evaluation, frames: *std.ArrayList(Frame), id: RecipeId) Allocator.Error!void {
-        var operands: std.ArrayList(Operand) = .empty;
-        errdefer operands.deinit(self.allocator);
-        try appendOperands(self.allocator, &operands, self.source.get(id));
+    fn enter(self: *Evaluation, id: RecipeId) Allocator.Error!void {
+        const start = self.frame_operands.items.len;
+        try appendOperands(self.allocator, &self.frame_operands, self.source.get(id));
         self.visit.items[@backingInt(id)] = self.visited;
         self.low.items[@backingInt(id)] = self.visited;
         self.visited += 1;
         self.on_stack.items[@backingInt(id)] = true;
         try self.stack.append(self.allocator, id);
-        const owned = try operands.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(owned);
-        try frames.append(self.allocator, .{ .id = id, .operands = owned, .next = 0 });
+        try self.frames.append(self.allocator, .{ .id = id, .start = start, .end = self.frame_operands.items.len, .next = 0 });
     }
 
     /// Evaluate the strongly connected group `members`.
@@ -510,9 +647,9 @@ pub const Evaluation = struct {
     }
 
     fn readsItself(self: *Evaluation, id: RecipeId) Allocator.Error!bool {
-        var operands: std.ArrayList(Operand) = .empty;
-        defer operands.deinit(self.allocator);
-        try appendOperands(self.allocator, &operands, self.source.get(id));
+        const operands = &self.own_operands;
+        operands.clearRetainingCapacity();
+        try appendOperands(self.allocator, operands, self.source.get(id));
         for (operands.items) |operand| switch (operand) {
             .recipe => |next| if (self.source.resolve(next) == id) return true,
             .static => {},
@@ -525,6 +662,11 @@ pub const Evaluation = struct {
         const program = self.program;
         return switch (recipe) {
             .input => |index| if (index < self.inputs.len) self.inputs[index] else invariant("a table recipe reads an input its instantiation lacks"),
+            .inherited => |index| try self.program.inheritedWord(self.creatorTable(), index),
+            .scope_table => |levels| if (levels == 0)
+                self.self_table orelse invariant("a recipe naming its own table was evaluated outside a table")
+            else
+                try self.program.ancestorTable(self.creatorTable(), levels - 1),
             .desc => |desc| try self.descWord(desc.ty, desc.scoped, desc.substitute_inputs),
             .args_desc => |args| blk: {
                 const elems = try self.allocator.alloc(TypeId, args.elems.len);
@@ -583,28 +725,59 @@ pub const Evaluation = struct {
         for (self.program.static_descs.scopeEntries(scope)) |entry| try mergeEntry(self.allocator, &self.program.static_descs, entries, entry);
     }
 
+    /// The variables of the worker's scope that `ty` and the nominal types
+    /// of `scoped` mention, ascending, with their descriptor words and the
+    /// types those describe.
+    const Instance = struct {
+        variables: std.ArrayList(u32) = .empty,
+        words: std.ArrayList(StaticDescs.CaptureWord) = .empty,
+        bindings: lower.Bindings.Map = .empty,
+
+        fn deinit(self: *Instance, allocator: Allocator) void {
+            self.variables.deinit(allocator);
+            self.words.deinit(allocator);
+            self.bindings.deinit(allocator);
+        }
+    };
+
+    /// With `representation`, only the variables `ty`'s representation
+    /// depends on (`lower.Program.appendTypeVariables`).
+    fn instance(self: *Evaluation, ty: TypeId, scoped: []const ScopedOverride, representation: bool) Allocator.Error!Instance {
+        var result: Instance = .{};
+        errdefer result.deinit(self.allocator);
+        var found: lower.Program.TypeVariables = .{};
+        defer found.deinit(self.allocator);
+        try self.program.appendTypeVariables(self.allocator, ty, representation, &found);
+        for (scoped) |override| try self.program.appendTypeVariables(self.allocator, override.nominal, representation, &found);
+        std.mem.swap(std.ArrayList(u32), &result.variables, &found.list);
+        std.mem.sortUnstable(u32, result.variables.items, {}, std.sort.asc(u32));
+        try result.words.ensureTotalCapacity(self.allocator, result.variables.items.len);
+        for (result.variables.items) |variable| {
+            const word_ = try self.scopeWord(variable);
+            result.words.appendAssumeCapacity(word_);
+            try result.bindings.put(self.allocator, variable, describedType(word_));
+        }
+        return result;
+    }
+
     /// The descriptor word of the type `ty` over the worker's variables at
-    /// this instantiation: the type with each variable at the type its
-    /// descriptor input describes, in the override scope of those inputs and
-    /// of `scoped`.
+    /// this instantiation: the type with each variable it mentions at the
+    /// type that variable's descriptor describes, in the override scope of
+    /// those descriptors and of `scoped`.
     fn descWord(self: *Evaluation, ty: TypeId, scoped: []const ScopedOverride, substitute_inputs: bool) Allocator.Error!StaticDescs.CaptureWord {
         const program = self.program;
-        if (self.desc_count > self.inputs.len) invariant("a table's instantiation lacks a variable's descriptor");
-        const desc_count = if (substitute_inputs) self.desc_count else 0;
-        const bound = try self.allocator.alloc(TypeId, desc_count);
-        defer self.allocator.free(bound);
+        var inst: Instance = if (substitute_inputs) try self.instance(ty, scoped, true) else .{};
+        defer inst.deinit(self.allocator);
+        const bindings: lower.Bindings = .{ .sparse = &inst.bindings };
         var entries: std.ArrayList(StaticDescs.ScopedMethods) = .empty;
         defer entries.deinit(self.allocator);
-        for (bound, self.inputs[0..desc_count]) |*slot, input| {
-            slot.* = describedType(input);
-            try self.appendScope(&entries, input);
-        }
-        const closed = if (substitute_inputs) try program.substituteRepresentation(self.allocator, ty, bound) else ty;
+        for (inst.words.items) |input| try self.appendScope(&entries, input);
+        const closed = if (substitute_inputs) try program.substituteRepresentationIn(self.allocator, ty, bindings) else ty;
         if (!try program.converter().representationClosed(closed)) invariant("a table's descriptor recipe is open at its instantiation");
         for (scoped) |override| {
             var methods: [3]?StaticDescs.CaptureWord = .{ null, null, null };
             for (&methods, override.methods) |*method, maybe| method.* = if (maybe) |operand| self.operandWord(operand) else null;
-            try mergeEntry(self.allocator, &program.static_descs, &entries, .{ .nominal = if (substitute_inputs) try program.substituteRepresentation(self.allocator, override.nominal, bound) else override.nominal, .methods = methods });
+            try mergeEntry(self.allocator, &program.static_descs, &entries, .{ .nominal = if (substitute_inputs) try program.substituteRepresentationIn(self.allocator, override.nominal, bindings) else override.nominal, .methods = methods });
         }
         const scope = try program.static_descs.restrictScope(try program.static_descs.internScope(entries.items), closed);
         if (scope == .none) return .{ .desc = closed };
@@ -647,23 +820,44 @@ pub const Evaluation = struct {
         for (order) |member| switch (self.source.get(member)) {
             .callable => |callable| self.words.items[@backingInt(member)] = .{ .callable = try static_descs.reserveCallable(program.worker(callable.entry).proc, @intCast(callable.captures.len)) },
             .desc, .table => {},
-            .input, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => invariant("only callables, descriptors, and tables lead back to themselves"),
+            .input, .inherited, .scope_table, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => invariant("only callables, descriptors, and tables lead back to themselves"),
         };
         for (order) |member| switch (self.source.get(member)) {
             .desc => |desc| self.words.items[@backingInt(member)] = try self.descWord(desc.ty, desc.scoped, desc.substitute_inputs),
-            .callable, .table, .input, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => {},
+            .callable, .table, .input, .inherited, .scope_table, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => {},
         };
+        // A table reads its creator's table, which can be a member too, so
+        // each is evaluated once the members it reads are. No two tables read
+        // each other: a table is keyed by its inputs.
+        var tables_left: usize = 0;
         for (order) |member| switch (self.source.get(member)) {
-            .table => |table| self.words.items[@backingInt(member)] = try self.evaluateOne(.{ .table = table }),
-            .callable, .desc, .input, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => {},
+            .table => tables_left += 1,
+            .callable, .desc, .input, .inherited, .scope_table, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => {},
         };
+        while (tables_left != 0) {
+            const before = tables_left;
+            for (order) |member| switch (self.source.get(member)) {
+                .table => |table| {
+                    if (self.words.items[@backingInt(member)] != null) continue;
+                    const ready = for (table.inputs) |operand| switch (operand) {
+                        .recipe => |id| if (self.words.items[@backingInt(self.source.resolve(id))] == null) break false,
+                        .static => {},
+                    } else true;
+                    if (!ready) continue;
+                    self.words.items[@backingInt(member)] = try self.evaluateOne(.{ .table = table });
+                    tables_left -= 1;
+                },
+                .callable, .desc, .input, .inherited, .scope_table, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => {},
+            };
+            if (tables_left == before) invariant("the tables of a recipe group read one another");
+        }
         for (order) |member| switch (self.source.get(member)) {
             .callable => |callable| {
                 const words = try self.operandWords(callable.captures);
                 defer self.allocator.free(words);
                 try static_descs.fillCallable(self.words.items[@backingInt(member)].?.callable, program.worker(callable.entry).proc, words);
             },
-            .desc, .table, .input, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => {},
+            .desc, .table, .input, .inherited, .scope_table, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => {},
         };
         const words = try self.allocator.alloc(StaticDescs.CaptureWord, order.len);
         defer self.allocator.free(words);
@@ -706,23 +900,25 @@ pub const Evaluation = struct {
     fn groupKey(self: *Evaluation, order: []const RecipeId, key: *std.ArrayList(u8)) Allocator.Error!void {
         const allocator = self.allocator;
         const program = self.program;
-        const bound = try allocator.alloc(TypeId, self.desc_count);
-        defer allocator.free(bound);
-        for (bound, self.inputs[0..self.desc_count]) |*slot, input| slot.* = describedType(input);
         for (order) |member| {
             const recipe = self.source.get(member);
             try key.append(allocator, @backingInt(std.meta.activeTag(recipe)));
             switch (recipe) {
                 .desc => |desc| {
-                    try static_descs_file.appendKeyWord(allocator, key, @backingInt(if (desc.substitute_inputs) try program.substitute(allocator, desc.ty, bound) else desc.ty));
-                    // The variables' scopes are part of the descriptor.
-                    try static_descs_file.appendKeyWord(allocator, key, if (desc.substitute_inputs) self.desc_count else 0);
-                    if (desc.substitute_inputs) {
-                        for (self.inputs[0..self.desc_count]) |input| try static_descs_file.appendCaptureWordKey(allocator, key, input);
+                    var inst: Instance = if (desc.substitute_inputs) try self.instance(desc.ty, desc.scoped, false) else .{};
+                    defer inst.deinit(allocator);
+                    const bindings: lower.Bindings = .{ .sparse = &inst.bindings };
+                    try static_descs_file.appendKeyWord(allocator, key, @backingInt(if (desc.substitute_inputs) try program.substituteIn(allocator, desc.ty, bindings) else desc.ty));
+                    // The scopes of the variables it mentions are part of
+                    // the descriptor.
+                    try static_descs_file.appendKeyWord(allocator, key, @intCast(inst.variables.items.len));
+                    for (inst.variables.items, inst.words.items) |variable, input| {
+                        try static_descs_file.appendKeyWord(allocator, key, variable);
+                        try static_descs_file.appendCaptureWordKey(allocator, key, input);
                     }
                     try static_descs_file.appendKeyWord(allocator, key, @intCast(desc.scoped.len));
                     for (desc.scoped) |override| {
-                        try static_descs_file.appendKeyWord(allocator, key, @backingInt(if (desc.substitute_inputs) try program.substitute(allocator, override.nominal, bound) else override.nominal));
+                        try static_descs_file.appendKeyWord(allocator, key, @backingInt(if (desc.substitute_inputs) try program.substituteIn(allocator, override.nominal, bindings) else override.nominal));
                         for (override.methods) |method| {
                             if (method) |operand| try self.operandKey(order, operand, key) else try key.append(allocator, 2);
                         }
@@ -738,7 +934,7 @@ pub const Evaluation = struct {
                     try static_descs_file.appendKeyWord(allocator, key, @intCast(table.inputs.len));
                     for (table.inputs) |operand| try self.operandKey(order, operand, key);
                 },
-                .input, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => invariant("only callables, descriptors, and tables lead back to themselves"),
+                .input, .inherited, .scope_table, .args_desc, .tag_index, .field_index, .update_plan, .adapt_plan, .names_block => invariant("only callables, descriptors, and tables lead back to themselves"),
             }
         }
     }
@@ -792,7 +988,7 @@ fn hashWord(hasher: *std.hash.Wyhash, value: u32) void {
 fn hashRecipe(hasher: *std.hash.Wyhash, recipe: Recipe) void {
     hashWord(hasher, @backingInt(std.meta.activeTag(recipe)));
     switch (recipe) {
-        .input => |index| hashWord(hasher, index),
+        .input, .inherited, .scope_table => |index| hashWord(hasher, index),
         .desc => |desc| {
             hashWord(hasher, @backingInt(desc.ty));
             hashWord(hasher, @intFromBool(desc.substitute_inputs));
@@ -800,7 +996,8 @@ fn hashRecipe(hasher: *std.hash.Wyhash, recipe: Recipe) void {
             for (desc.scoped) |override| {
                 hashWord(hasher, @backingInt(override.nominal));
                 for (override.methods) |method| {
-                    if (method) |operand| hashOperand(hasher, operand) else hashWord(hasher, std.math.maxInt(u32));
+                    hasher.update(&.{@intFromBool(method != null)});
+                    if (method) |operand| hashOperand(hasher, operand);
                 }
             }
         },
@@ -861,6 +1058,8 @@ fn recipesEqual(a: Recipe, b: Recipe) bool {
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
         .input => |index| index == b.input,
+        .inherited => |index| index == b.inherited,
+        .scope_table => |levels| levels == b.scope_table,
         .desc => |desc| desc.ty == b.desc.ty and desc.substitute_inputs == b.desc.substitute_inputs and scopedEqual(desc.scoped, b.desc.scoped),
         .args_desc => |args| args.leading == b.args_desc.leading and args.capture_record == b.args_desc.capture_record and operandsEqual(args.elems, b.args_desc.elems),
         .callable => |callable| callable.entry == b.callable.entry and operandsEqual(callable.captures, b.callable.captures),
@@ -940,7 +1139,7 @@ test "recipes are interned by content, reserved ones included" {
     // the callable it captures.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const needs = try recipes.needs(arena.allocator(), std.testing.allocator, 2, 1, &.{ table, alias });
+    const needs = try recipes.needs(arena.allocator(), std.testing.allocator, 2, &.{ table, alias }, &.{});
     try std.testing.expectEqual(@as(u32, 4), needs.wordCount());
     try std.testing.expectEqual(@as(usize, 5), needs.recipes.len);
     try std.testing.expectEqual(@as(?RecipeId, null), needs.slotRecipe(1));
@@ -954,37 +1153,27 @@ test "recipes are interned by content, reserved ones included" {
 
 test "a cyclic group has the same words whichever member its evaluation enters by" {
     const allocator = std.testing.allocator;
-    // An evaluation reads the program's allocator, store, layouts, result,
-    // static data and workers; every other field stays unread.
-    var program: lower.Program = undefined;
-    program.allocator = allocator;
-    program.store = types.Store.init(allocator);
-    defer program.store.deinit();
-    program.modules = .{ .allocator = allocator };
-    defer program.modules.deinit();
-    program.result = try LirProgram.Result.init(allocator, .u64);
-    defer program.result.deinit();
-    program.layouts = .{
-        .allocator = allocator,
-        .store = &program.store,
-        .converter = .{ .store = &program.store, .modules = &program.modules },
-        .layouts = &program.result.layouts,
-    };
-    defer program.layouts.deinit();
-    program.static_descs = StaticDescs.init(allocator, &program.store, &program.layouts, &program.result, .u64);
-    defer program.static_descs.deinit();
-    program.workers = .empty;
-    defer program.workers.deinit(allocator);
+    var test_program: lower.TestProgram = undefined;
+    try test_program.init(allocator, .program);
+    defer test_program.deinit();
+    const program = test_program.program;
 
     const store = &program.result.store;
     const target = try store.addLocal(.{ .layout_idx = .u8 });
     const ret = try store.addCFStmt(.{ .ret = .{ .value = target } }, .test_fixture);
     const proc = try store.addProcSpec(.{ .name = .fromRaw(0), .identity = LIR.ProcIdentity.forTest(1), .args = .empty(), .frame_locals = try store.addLocalSpan(&.{target}), .body = .some(ret), .ret_layout = .u8 }, .none);
     // The evaluation reads a callable's worker for its procedure alone.
-    var entry: lower.Worker = undefined;
-    entry.proc = proc;
+    const module = try program.modules.add(&test_program.view(1));
     const entry_id: WorkerId = @fromBackingInt(@intCast(program.workers.items.len));
-    try program.workers.append(allocator, entry);
+    try program.workers.append(allocator, .{
+        .key = .{ .structural = .is_eq },
+        .proc = proc,
+        .module = module,
+        .scheme_vars = &.{},
+        .dictionary_params = &.{},
+        .params = &.{},
+        .ret = try program.store.primitive(.u8),
+    });
 
     // A dictionary capturing a table whose input is that dictionary.
     var recipes = Recipes.init(allocator);
@@ -993,12 +1182,12 @@ test "a cyclic group has the same words whichever member its evaluation enters b
     const table = try recipes.intern(.{ .table = .{ .worker = @fromBackingInt(1), .inputs = &.{.{ .recipe = callable }} } });
     try recipes.set(callable, .{ .callable = .{ .entry = entry_id, .captures = &.{.{ .recipe = table }} } });
 
-    var from_callable = Evaluation.init(&program, .{ .building = &recipes }, &.{}, 0);
+    var from_callable = Evaluation.init(program, .{ .building = &recipes }, &.{}, .{}, null);
     defer from_callable.deinit();
     const callable_word = try from_callable.word(callable);
     const table_word = try from_callable.word(table);
 
-    var from_table = Evaluation.init(&program, .{ .building = &recipes }, &.{}, 0);
+    var from_table = Evaluation.init(program, .{ .building = &recipes }, &.{}, .{}, null);
     defer from_table.deinit();
     try std.testing.expect(StaticDescs.captureWordsEqual(table_word, try from_table.word(table)));
     try std.testing.expect(StaticDescs.captureWordsEqual(callable_word, try from_table.word(callable)));
@@ -1006,25 +1195,10 @@ test "a cyclic group has the same words whichever member its evaluation enters b
 
 test "position and plan recipes evaluate to the instantiation's positions and plans" {
     const allocator = std.testing.allocator;
-    // An evaluation of these recipes reads the program's allocator, store,
-    // layouts, result, and static data; every other field stays unread.
-    var program: lower.Program = undefined;
-    program.allocator = allocator;
-    program.store = types.Store.init(allocator);
-    defer program.store.deinit();
-    program.modules = .{ .allocator = allocator };
-    defer program.modules.deinit();
-    program.result = try LirProgram.Result.init(allocator, .u64);
-    defer program.result.deinit();
-    program.layouts = .{
-        .allocator = allocator,
-        .store = &program.store,
-        .converter = .{ .store = &program.store, .modules = &program.modules },
-        .layouts = &program.result.layouts,
-    };
-    defer program.layouts.deinit();
-    program.static_descs = StaticDescs.init(allocator, &program.store, &program.layouts, &program.result, .u64);
-    defer program.static_descs.deinit();
+    var test_program: lower.TestProgram = undefined;
+    try test_program.init(allocator, .program);
+    defer test_program.deinit();
+    const program = test_program.program;
     const store = &program.store;
     const desc_format = @import("boxy_runtime").desc;
 
@@ -1053,7 +1227,7 @@ test "position and plan recipes evaluate to the instantiation's positions and pl
     const update = try recipes.intern(.{ .update_plan = .{ .base = .{ .static = .{ .desc = record } }, .result = .{ .static = .{ .desc = record } }, .names = &.{y} } });
     const widen = try recipes.intern(.{ .adapt_plan = .{ .from = .{ .static = .{ .desc = narrow } }, .to = .{ .recipe = input } } });
 
-    var evaluation = Evaluation.init(&program, .{ .building = &recipes }, &.{.{ .desc = wide }}, 1);
+    var evaluation = Evaluation.init(program, .{ .building = &recipes }, &.{.{ .desc = wide }}, InputLayout.flat(.{ .descs = 1 }), null);
     defer evaluation.deinit();
     try std.testing.expectEqual(@as(u32, 1), (try evaluation.word(static_tag)).int);
     try std.testing.expectEqual(@as(u32, 2), (try evaluation.word(input_tag)).int);
@@ -1084,8 +1258,8 @@ test "position and plan recipes evaluate to the instantiation's positions and pl
         if (relocation.offset == plan_layout.of(.entries)) break program.static_descs.exports.items[@backingInt(relocation.target.data_symbol)];
     } else return error.TestUnexpectedResult;
     const variant_layout = desc_format.AdaptVariant.layout(.u64);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, entries_node.bytes[variant_layout.of(.discriminant)..][0..4], .little));
-    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, entries_node.bytes[variant_layout.size + variant_layout.of(.discriminant) ..][0..4], .little));
+    try std.testing.expectEqual(@backingInt(desc_format.TargetDiscriminant.of(0)), std.mem.readInt(u32, entries_node.bytes[variant_layout.of(.discriminant)..][0..4], .little));
+    try std.testing.expectEqual(@backingInt(desc_format.TargetDiscriminant.of(2)), std.mem.readInt(u32, entries_node.bytes[variant_layout.size + variant_layout.of(.discriminant) ..][0..4], .little));
     // A has no payload plan; C's is a copy.
     try std.testing.expectEqual(@as(usize, 1), entries_node.relocations.len);
     try std.testing.expectEqual(variant_layout.size + variant_layout.of(.plan), entries_node.relocations[0].offset);
@@ -1093,7 +1267,7 @@ test "position and plan recipes evaluate to the instantiation's positions and pl
     try std.testing.expectEqual(@as(u8, @backingInt(desc_format.AdaptKind.copy)), payload_plan.bytes[plan_layout.of(.kind)]);
 
     // A recipe over no input folds where it is lowered: a static position.
-    var fold = Evaluation.init(&program, .{ .building = &recipes }, &.{}, 0);
+    var fold = Evaluation.init(program, .{ .building = &recipes }, &.{}, .{}, null);
     defer fold.deinit();
     try std.testing.expectEqual(@as(u32, 1), (try fold.word(static_tag)).int);
 }
@@ -1102,4 +1276,28 @@ test "table words sit at consecutive pointer-sized offsets" {
     try std.testing.expectEqual(@as(u32, 0), entryOffset(0, 8));
     try std.testing.expectEqual(@as(u32, 24), entryOffset(3, 8));
     try std.testing.expectEqual(@as(u32, 12), entryOffset(3, 4));
+}
+
+test "a lambda's scope inputs are its own inputs or its creator's scope's" {
+    // The creator's scope: two variables, one dictionary, one literal
+    // argument. The lambda adds a variable, a dictionary and a literal
+    // argument, which lead the creator's dictionaries and literal arguments.
+    const layout: InputLayout = .{
+        .scope_table = true,
+        .inherited = .{ .descs = 2, .dicts = 1, .literals = 1 },
+        .own = .{ .descs = 1, .dicts = 1, .literals = 1 },
+    };
+    try std.testing.expectEqual(@as(u32, 4), layout.inputCount());
+    const expected = [_]InputLayout.Location{
+        .{ .inherited = 0 }, .{ .inherited = 1 }, .{ .input = 1 },
+        .{ .input = 2 },     .{ .inherited = 2 }, .{ .input = 3 },
+        .{ .inherited = 3 },
+    };
+    for (expected, 0..) |location, index| try std.testing.expectEqual(location, layout.locate(@intCast(index)));
+    try std.testing.expect(!layout.passesThrough());
+    try std.testing.expect((InputLayout{ .scope_table = true, .inherited = .{ .descs = 3 } }).passesThrough());
+
+    // A worker inheriting no scope reads every input from its own table.
+    const flat = InputLayout.flat(.{ .descs = 1, .dicts = 1 });
+    try std.testing.expectEqual(InputLayout.Location{ .input = 1 }, flat.locate(1));
 }

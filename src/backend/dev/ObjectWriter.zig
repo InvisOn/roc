@@ -14,6 +14,7 @@ const IndexedRelocation = @import("Relocation.zig").IndexedRelocation;
 const SymbolTable = @import("SymbolTable.zig");
 const isaOf = @import("isa.zig").isaOf;
 const isaOfOrNull = @import("isa.zig").isaOfOrNull;
+const UnitImage = @import("UnitImage.zig");
 
 /// Generate an object file from code and relocations.
 ///
@@ -72,7 +73,8 @@ pub fn generateObjectFileWithDebug(
         .symbol = table.indices.get(rel.target_symbol_name).?,
         .addend = rel.addend,
     };
-    return generateIndexedObjectFileWithDebug(allocator, target, code, rodata, 0, symbols, indexed.items, indexed_data, &.{}, debug, output);
+    const rodata_piece = [1]UnitImage.SectionPiece{.{ .offset = 0, .bytes = rodata }};
+    return generateIndexedObjectFileWithDebug(allocator, target, code, .whole(&rodata_piece), 0, symbols, indexed.items, indexed_data, &.{}, debug, output);
 }
 
 /// Write producer-resolved relocations. Every target indexes the supplied symbol column.
@@ -89,7 +91,7 @@ pub fn generateIndexedObjectFileWithDebug(
     allocator: Allocator,
     target: RocTarget,
     code: []const u8,
-    rodata: []const u8,
+    rodata: UnitImage.PiecedBytes,
     zero_fill_size: u64,
     symbols: []const Symbol,
     relocations: []const IndexedRelocation,
@@ -98,6 +100,64 @@ pub fn generateIndexedObjectFileWithDebug(
     debug: ?DebugSections,
     output: *std.ArrayList(u8),
 ) (Allocator.Error || error{UnsupportedTarget})!void {
+    emitIndexed(allocator, target, code, rodata, zero_fill_size, symbols, relocations, rodata_relocations, unwind_functions, debug, .{ .bytes = output }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedTarget => return error.UnsupportedTarget,
+        // Only reading an object into its image form fails these ways.
+        error.InvalidObject,
+        error.UnsupportedSection,
+        error.UnsupportedSymbol,
+        error.UnsupportedRelocation,
+        error.DuplicateDefinition,
+        error.RelocationOutOfRange,
+        error.ImageTooLarge,
+        => unreachable, // encoding bytes reads nothing back
+    };
+}
+
+/// The object `generateIndexedObjectFileWithDebug` encodes for these inputs,
+/// in the form a unit image is built from (`UnitImage.Object`): exactly what
+/// `UnitImage` reads back from the encoded bytes, with no object encoded.
+/// Section contents are borrowed from the inputs or allocated from `arena`.
+pub fn indexedImageObject(
+    arena: Allocator,
+    target: RocTarget,
+    code: []const u8,
+    rodata: UnitImage.PiecedBytes,
+    zero_fill_size: u64,
+    symbols: []const Symbol,
+    relocations: []const IndexedRelocation,
+    rodata_relocations: []const IndexedDataRelocation,
+    unwind_functions: []const object.coff.FunctionInfo,
+    debug: ?DebugSections,
+    keep_debug: bool,
+) (UnitImage.BuildError || error{UnsupportedTarget})!UnitImage.Object {
+    var out: UnitImage.Object = undefined;
+    try emitIndexed(arena, target, code, rodata, zero_fill_size, symbols, relocations, rodata_relocations, unwind_functions, debug, .{ .image_object = .{ .arena = arena, .keep_debug = keep_debug, .out = &out } });
+    return out;
+}
+
+/// What `emitIndexed` produces from a populated format writer.
+const Emit = union(enum) {
+    /// The encoded object, appended to an empty list.
+    bytes: *std.ArrayList(u8),
+    /// The object in its unit image form (`UnitImage.Object`).
+    image_object: struct { arena: Allocator, keep_debug: bool, out: *UnitImage.Object },
+};
+
+fn emitIndexed(
+    allocator: Allocator,
+    target: RocTarget,
+    code: []const u8,
+    rodata: UnitImage.PiecedBytes,
+    zero_fill_size: u64,
+    symbols: []const Symbol,
+    relocations: []const IndexedRelocation,
+    rodata_relocations: []const IndexedDataRelocation,
+    unwind_functions: []const object.coff.FunctionInfo,
+    debug: ?DebugSections,
+    emit: Emit,
+) (UnitImage.BuildError || error{UnsupportedTarget})!void {
     const target_indices = try allocator.alloc(u32, symbols.len);
     defer allocator.free(target_indices);
     const isa = isaOfOrNull(target) orelse return error.UnsupportedTarget;
@@ -143,7 +203,10 @@ pub fn generateIndexedObjectFileWithDebug(
             }
             for (rodata_relocations) |rel| try elf.addRodataRelocation(rel.offset, target_indices[@backingInt(rel.symbol)], rel.addend);
 
-            try elf.write(output);
+            switch (emit) {
+                .bytes => |output| try elf.write(output),
+                .image_object => |image| image.out.* = try elf.imageObject(image.arena, image.keep_debug),
+            }
         },
         .macos => {
             const macho_arch: object.macho.Architecture = switch (isa) {
@@ -181,7 +244,10 @@ pub fn generateIndexedObjectFileWithDebug(
             }
             for (rodata_relocations) |rel| try macho.addRodataRelocation(@intCast(rel.offset), target_indices[@backingInt(rel.symbol)], true, rel.addend);
 
-            try macho.write(output);
+            switch (emit) {
+                .bytes => |output| try macho.write(output),
+                .image_object => |image| image.out.* = try macho.imageObject(image.arena, image.keep_debug),
+            }
         },
         .windows => {
             const coff_arch: object.coff.Architecture = switch (isa) {
@@ -254,7 +320,10 @@ pub fn generateIndexedObjectFileWithDebug(
             }
             for (rodata_relocations) |rel| try coff_writer.addRdataRelocation(@intCast(rel.offset), target_indices[@backingInt(rel.symbol)], rel.addend);
 
-            try coff_writer.write(output);
+            switch (emit) {
+                .bytes => |output| try coff_writer.write(output),
+                .image_object => |image| image.out.* = try coff_writer.imageObject(image.arena, image.keep_debug),
+            }
         },
         .other => return error.UnsupportedTarget,
     }
@@ -603,7 +672,7 @@ test "x86_64 windows object covers recorded helper ranges without symbols" {
     }) |case| {
         var output: std.ArrayList(u8) = .empty;
         defer output.deinit(allocator);
-        try generateIndexedObjectFileWithDebug(allocator, .x64win, code, &.{}, 0, symbols, &.{}, &.{}, case.recorded, null, &output);
+        try generateIndexedObjectFileWithDebug(allocator, .x64win, code, .{}, 0, symbols, &.{}, &.{}, case.recorded, null, &output);
 
         // No .rdata, so .pdata is the second section header; each x64 entry is 12 bytes.
         const num_sections = std.mem.readInt(u16, output.items[2..4], .little);
@@ -978,7 +1047,8 @@ test "indexed object relocations preserve targets through format symbol ordering
         };
         var output: std.ArrayList(u8) = .empty;
         defer output.deinit(allocator);
-        try generateIndexedObjectFileWithDebug(allocator, target, &(@as([32]u8, @splat(0))), &(@as([32]u8, @splat(0))), 0, &symbols, &relocations, &data_relocations, &.{}, null, &output);
+        const zero_piece = [1]UnitImage.SectionPiece{.{ .offset = 0, .bytes = &(@as([32]u8, @splat(0))) }};
+        try generateIndexedObjectFileWithDebug(allocator, target, &(@as([32]u8, @splat(0))), .whole(&zero_piece), 0, &symbols, &relocations, &data_relocations, &.{}, null, &output);
         const decoded = try TestObjectTables.read(target, output.items);
         const expected = [_][]const u8{ "local_data", "external_function", "local_data", "global_data" };
         try std.testing.expectEqual(@as(usize, 4), decoded.text.len / decoded.relocation_size);

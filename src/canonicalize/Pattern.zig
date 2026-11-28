@@ -85,7 +85,7 @@ pub const Pattern = union(enum) {
     /// MyModule.Point.(1.0)                # Values
     /// ```
     nominal_external: struct {
-        module_idx: CIR.Import.Idx,
+        module: CIR.Expr.NominalExternalModule,
         target_node_idx: u32,
         backing_pattern: Pattern.Idx,
         backing_type: CIR.Expr.NominalBackingType,
@@ -250,6 +250,10 @@ pub const Pattern = union(enum) {
         diagnostic: CIR.Diagnostic.Idx,
     },
 
+    /// Which variant a pattern is, without its fields. `NodeStore` reads it
+    /// from a node's tag alone.
+    pub const Kind = std.meta.Tag(@This());
+
     pub const Idx = enum(u32) { _ };
     pub const Span = extern struct { span: base.DataSpan };
 
@@ -277,13 +281,13 @@ pub const Pattern = union(enum) {
     pub const RecordDestruct = struct {
         label: Ident.Idx,
         ident: Ident.Idx,
-        kind: Kind,
+        kind: FieldKind,
 
         pub const Idx = enum(u32) { _ };
         pub const Span = extern struct { span: base.DataSpan };
 
         /// The kind of record field destructuring pattern.
-        pub const Kind = union(enum) {
+        pub const FieldKind = union(enum) {
             /// Required field that must be present in the record.
             /// ```roc
             /// { name, age } => ... # Both name and age are Required
@@ -300,7 +304,7 @@ pub const Pattern = union(enum) {
             /// ```
             Rest: Pattern.Idx,
 
-            pub fn toPatternIdx(kind: Kind) Pattern.Idx {
+            pub fn toPatternIdx(kind: FieldKind) Pattern.Idx {
                 switch (kind) {
                     inline .Required, .SubPattern, .Rest => |p_idx| return p_idx,
                 }
@@ -388,7 +392,7 @@ pub const Pattern = union(enum) {
             .deferred_import_ref => |n| {
                 const begin = try ir.beginSExprNodeAt(tree, "p-deferred-import-ref", pattern_idx);
 
-                const entry = ir.deferred_import_refs.items.items[@backingInt(n.ref)];
+                const entry = ir.deferred_import_refs.items()[@backingInt(n.ref)];
                 try tree.pushStringPair("module", ir.getIdent(entry.moduleName()));
                 try tree.pushStringPair("path", ir.getIdent(entry.path()));
 
@@ -399,17 +403,7 @@ pub const Pattern = union(enum) {
             .nominal_external => |n| {
                 const begin = try ir.beginSExprNodeAt(tree, "p-nominal-external", pattern_idx);
 
-                const module_idx_int = @backingInt(n.module_idx);
-                std.debug.assert(module_idx_int < ir.imports.imports.items.items.len);
-                const string_lit_idx = ir.imports.imports.items.items[module_idx_int];
-                const module_name = ir.common.strings.get(string_lit_idx);
-                // Special case: Builtin module is an implementation detail, print as (builtin)
-                if (std.mem.eql(u8, module_name, "Builtin") or CIR.Import.isCompilerBuiltinImportName(module_name)) {
-                    const field_begin = try tree.beginNamedNode("builtin");
-                    try tree.endNodeWithoutChildren(field_begin);
-                } else {
-                    try tree.pushStringPair("external-module", module_name);
-                }
+                try ir.pushNominalExternalModuleToSExprTree(tree, n.module);
 
                 const attrs = tree.beginNode();
                 try ir.store.getPattern(n.backing_pattern).pushToSExprTree(ir, tree, n.backing_pattern);

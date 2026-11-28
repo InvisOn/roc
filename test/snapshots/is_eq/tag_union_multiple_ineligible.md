@@ -31,25 +31,7 @@ TYPE DOES NOT SUPPORT EQUALITY - tag_union_multiple_ineligible.md:6:8:6:24
 			(line-break)
 			(annotation-start code-block)
 			(indent 1)
-			(text "[Err(a), Ok(b), Transform(c -> c), Validate(d -> Bool)]")
-			(line-break)
-			(indent 1)
-			(text "  where [")
-			(line-break)
-			(indent 1)
-			(text "    a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)]),")
-			(line-break)
-			(indent 1)
-			(text "    b.from_quote : Str -> Try(b, [BadQuotedBytes(Str)]),")
-			(line-break)
-			(indent 1)
-			(text "    d.from_numeral : Numeral -> Try(d, [InvalidNumeral(Str)]),")
-			(line-break)
-			(indent 1)
-			(text "    d.is_gt : d, d -> Bool,")
-			(line-break)
-			(indent 1)
-			(text "  ]")
+			(text "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]")
 			(annotation-end)
 			(line-break)
 			(line-break)
@@ -70,7 +52,7 @@ TYPE DOES NOT SUPPORT EQUALITY - tag_union_multiple_ineligible.md:6:8:6:24
 			(text "    ")
 			(annotated emphasis "Validate")
 			(text " (")
-			(annotated type "a -> Bool\n  where [\n    a.from_numeral : Numeral -> Try(a, [InvalidNumeral(Str)]),\n    a.is_gt : a, a -> Bool,\n  ]")
+			(annotated type "Dec -> Bool")
 			(text ")")
 			(line-break)
 			(text "        ")
@@ -191,7 +173,7 @@ expect result == result
 				(e-lambda
 					(args
 						(p-assign (ident "n")))
-					(e-dispatch-call (method "is_gt") (constraint-fn-var 275)
+					(e-dispatch-call (method "is_gt") (constraint-fn-var 255)
 						(receiver
 							(e-lookup-local
 								(p-assign (ident "n"))))
@@ -246,15 +228,15 @@ expect result == result
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
-		(patt (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
-		(patt (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
-		(patt (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
+		(patt (type "[Ok(Str)]"))
+		(patt (type "[Validate(Dec -> Bool)]"))
+		(patt (type "[Transform(a -> a)]"))
+		(patt (type "[Err(Str)]"))
 		(patt (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]")))
 	(expressions
-		(expr (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
-		(expr (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
-		(expr (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
-		(expr (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))
+		(expr (type "[Ok(Str)]"))
+		(expr (type "[Validate(Dec -> Bool)]"))
+		(expr (type "[Transform(a -> a)]"))
+		(expr (type "[Err(Str)]"))
 		(expr (type "[Err(Str), Ok(Str), Transform(a -> a), Validate(Dec -> Bool)]"))))
 ~~~

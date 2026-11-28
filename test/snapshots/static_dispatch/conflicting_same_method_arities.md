@@ -41,13 +41,13 @@ TYPE MISMATCH - conflicting_same_method_arities.md:1:31:1:36
 			(text "  where [")
 			(line-break)
 			(indent 1)
-			(text "    _b.convert : c, d -> _ret,")
+			(text "    _a.convert : b, c -> _ret,")
 			(line-break)
 			(indent 1)
-			(text "    c.convert : c -> _ret2,")
+			(text "    b.convert : b -> _ret2,")
 			(line-break)
 			(indent 1)
-			(text "    d.from_numeral : Numeral -> Try(d, [InvalidNumeral(Str)]),")
+			(text "    c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)]),")
 			(line-break)
 			(indent 1)
 			(text "  ]")
@@ -93,12 +93,12 @@ NO CHANGE
 				(p-assign (ident "value")))
 			(e-tuple
 				(elems
-					(e-dispatch-call (method "convert") (constraint-fn-var 223)
+					(e-dispatch-call (method "convert") (constraint-fn-var 218)
 						(receiver
 							(e-lookup-local
 								(p-assign (ident "value"))))
 						(args))
-					(e-dispatch-call (method "convert") (constraint-fn-var 232)
+					(e-dispatch-call (method "convert") (constraint-fn-var 219)
 						(receiver
 							(e-runtime-error (tag "erroneous_value_expr")))
 						(args

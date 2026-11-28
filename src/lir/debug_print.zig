@@ -41,6 +41,7 @@ pub fn writeProc(
         try writer.print(" transform={s}", .{@tagName(proc.tail_transform)});
     }
     if (proc.tail_group.get()) |group| try writer.print(" tail_group={d}", .{@backingInt(group)});
+    if (proc.tail_carry) try writer.writeAll(" tail_carry");
     try writer.writeAll("\n");
 
     if (proc.body.get()) |body| {
@@ -85,6 +86,7 @@ const Printer = struct {
                         .nominal => try writer.print("ref.nominal l{d}", .{@backingInt(s.op.source)}),
                     }
                     if (self.store.stmtRowOrDefault(s.extra).take_kind == .take) try writer.writeAll(" take");
+                    if (self.store.stmtRowOrDefault(s.extra).releases_recursion_box) try writer.writeAll(" release_box");
                     const absent_fields = self.store.getU32Span(self.store.stmtRowOrDefault(s.extra).residual_shell_absent_fields);
                     if (absent_fields.len != 0) {
                         try writer.writeAll(" shell_absent={");
@@ -142,9 +144,10 @@ const Printer = struct {
                     try self.writeLocals(s.args, writer);
                     try writer.writeByte(')');
                     if (s.reuse_closure) try writer.writeAll(" reuse_closure");
-                    if (s.reuse_source) |reuse_source| {
+                    if (s.reuse_source.get()) |reuse_source| {
                         try writer.print(" reuse_source=l{d}", .{@backingInt(reuse_source)});
                     }
+                    if (s.result_reuse) try writer.writeAll(" result_reuse");
                     if (s.deferred) try writer.writeAll(" deferred");
                     if (s.drive != .none) try writer.print(" drive={s}", .{@tagName(s.drive)});
                     try writer.writeByte('\n');
@@ -154,18 +157,19 @@ const Printer = struct {
                     const s = self.store.stmtRow(s_stmt.data);
                     try self.writeTarget(s_stmt.target, indent, writer);
                     try writer.print("packed_erased_fn p{d}", .{@backingInt(s.proc)});
-                    if (s.capture) |capture| {
+                    if (s.capture.get()) |capture| {
                         try writer.print(" capture=l{d}", .{@backingInt(capture)});
                     }
-                    if (s.capture_layout) |capture_layout| {
+                    if (s.capture_layout.get()) |capture_layout| {
                         try writer.writeAll(" capture_layout=");
                         try writeLayout(self.layouts, capture_layout, writer);
                     }
                     try writer.print(" on_drop={s}", .{@tagName(s.on_drop)});
-                    if (s.reuse) |reuse| {
+                    if (s.reuse.get()) |reuse| {
                         try writer.print(" reuse=l{d}", .{@backingInt(reuse)});
                         if (s.reuse_unique) try writer.writeAll(" unique");
                     }
+                    if (s.frame) try writer.writeAll(" frame");
                     try writer.writeByte('\n');
                     current = s_stmt.next;
                 },
@@ -455,9 +459,11 @@ const Printer = struct {
             .closure => |closure| {
                 try writer.print(" p{d}", .{@backingInt(closure.proc)});
                 if (closure.reuse != null and closure.reuse_unique) try writer.writeAll(" reuse_unique");
+                if (closure.frame) |frame| try writer.print(" frame=l{d}", .{@backingInt(frame)});
             },
             .call_erased => |call| {
                 if (call.reuse_closure) try writer.writeAll(" owned");
+                if (call.result_reuse) try writer.writeAll(" result_reuse");
                 if (call.deferred) try writer.writeAll(" deferred");
                 if (call.drive != .none) try writer.print(" drive={s}", .{@tagName(call.drive)});
             },
@@ -672,7 +678,7 @@ test "proc fingerprint ignores program numbering but not content" {
             for (0..padding) |_| _ = try store.addLocal(.{ .layout_idx = .u64 });
             for (0..padding) |index| {
                 _ = try store.addProcSpec(.{
-                    .name = .none,
+                    .name = .fromRaw(1),
                     .identity = LIR.ProcIdentity.forTest(@intCast(100 + index)),
                     .args = .empty(),
                     .body = .none,
@@ -680,7 +686,7 @@ test "proc fingerprint ignores program numbering but not content" {
                 }, .none);
             }
             const callee = try store.addProcSpec(.{
-                .name = .none,
+                .name = .fromRaw(1),
                 .identity = LIR.ProcIdentity.forTest(callee_identity),
                 .args = .empty(),
                 .body = .none,
@@ -695,7 +701,7 @@ test "proc fingerprint ignores program numbering but not content" {
                 .next = ret,
             } }, .test_fixture);
             return try store.addProcSpec(.{
-                .name = .none,
+                .name = .fromRaw(1),
                 .identity = LIR.ProcIdentity.forTest(1),
                 .args = .empty(),
                 .body = .some(call),

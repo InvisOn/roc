@@ -40,6 +40,12 @@ pub const StaticDataExport = struct {
     /// link keeps one definition for all of them. Never set with
     /// `is_exported`.
     content_named: bool = false,
+    /// A stored constant's image, named by its digest
+    /// (`poolImageSymbolName`) rather than by the program: every program
+    /// holding the image names it so, and a unit image leaves it to the
+    /// constant pool (design.md "Constant Pool"). Never set with
+    /// `is_exported`.
+    pool_image: bool = false,
     /// Pointer relocations from this symbol's bytes to other symbols.
     relocations: []const StaticDataRelocation = &.{},
 };
@@ -130,11 +136,14 @@ pub const FnVariantId = enum(u32) { _ };
 /// Own captures belong to `source`; solved captures name their producer span.
 pub const FrozenCallableContext = struct {
     abi: enum { finite, erased },
+    /// The function at its instance (`Instances.SpecFnId`).
     source: u32,
     fn_type: u32,
+    /// The instance `fn_type` reads under.
+    fn_type_env: u32 = 0,
     captures: union(enum) {
         own: u32,
-        solved: struct { start: u32, len: u32 },
+        solved: struct { start: u32, len: u32, env: u32 = 0 },
     },
 };
 
@@ -157,7 +166,7 @@ pub const FnTemplate = struct {
 };
 
 comptime {
-    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(FnTemplate) == 392);
+    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(FnTemplate) == 400);
 }
 
 /// Capture field copied from a checked binding into a callable payload. `id`
@@ -191,7 +200,7 @@ pub const FnVariant = struct {
 };
 
 comptime {
-    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(FnVariant) == 424);
+    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(FnVariant) == 432);
 }
 
 /// Runtime tag-union encoding for a finite callable set.
@@ -210,7 +219,7 @@ pub const ErasedFn = struct {
 };
 
 comptime {
-    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(ErasedFn) == 440);
+    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(ErasedFn) == 448);
 }
 
 /// Runtime encoding for an erased callable value type.
@@ -223,7 +232,7 @@ pub const ErasedFns = struct {
 pub const ConstPlanId = enum(u32) { _ };
 
 const ExpectSiteKey = struct {
-    file: u32,
+    file: collections.OptionalU32,
     line: u32,
     column: u32,
     region_start: u32,
@@ -259,8 +268,6 @@ pub const ConstPlan = union(enum) {
     str,
     list: ConstPlanId,
     box: ConstPlanId,
-    /// A semantic Box(sequence), whose record is a view of its erased allocation.
-    boxed_sequence: BoxedSequencePlan,
     tuple: []const ConstPlanId,
     record: []const ConstPlanId,
     tag_union: []const ConstTagVariant,
@@ -273,27 +280,6 @@ pub const ConstPlan = union(enum) {
     /// A function value of a `.boxy` compile-time program, stored by what
     /// it captured (`postcheck.Boxy.StoredFn`).
     boxy_fn,
-};
-
-/// The semantic payload and committed record view of a boxed Iter or Stream.
-pub const BoxedSequencePlan = struct {
-    payload: ConstPlanId,
-    view_layout: layout.Idx,
-
-    /// The length and step plans in the builtin record's canonical logical order.
-    pub fn recordPlans(self: BoxedSequencePlan, plans: []const ConstPlan) [2]ConstPlanId {
-        var current = self.payload;
-        for (0..plans.len) |_| {
-            const plan = plans[@backingInt(current)];
-            if (plan == .named) {
-                current = plan.named.backing;
-                continue;
-            }
-            if (plan != .record or plan.record.len != 2) base.invariant("boxed sequence plan omitted its two-field record", .{});
-            return .{ plan.record[0], plan.record[1] };
-        }
-        base.invariant("boxed sequence plan contains a nominal cycle", .{});
-    }
 };
 
 /// Constant root metadata needed after LIR interpretation finishes.
@@ -311,6 +297,11 @@ pub const ConstRootPlan = struct {
     /// representation evidence from the public checked type.
     ret_type: const_store.ConstTypeId,
     plan: ConstPlanId,
+    /// The shape of `ret_type` when it is not the evaluated value's: a
+    /// Solved program's root is stored at its declaring module's rows, which
+    /// rows the program joined can widen past. An image of the root is
+    /// written at this shape, each tag at its variant of the same name.
+    stored: ?RootShape = null,
     /// Consumer-requested materialization slot, when the root manifest asks
     /// for one. Other reads may declare additional representation-specific
     /// slots; this field is not the complete publication inventory.
@@ -401,10 +392,11 @@ pub const StaticDataParts = struct {
     kind: union(enum) {
         word: u64,
         product,
-        list,
+        /// A list of the children, with room for this many items: the
+        /// capacity the list was evaluated with, never fewer than the
+        /// children.
+        list: u64,
         box,
-        /// One sequence record child, with its committed step byte offset.
-        boxed_sequence: u32,
         tag: u32,
         callable: struct {
             proc: LIR.LirProcSpecId,
@@ -462,6 +454,17 @@ pub const compiler_symbol_namespace = "roc__";
 /// object-cache pack carries.
 pub const content_data_symbol_prefix = compiler_symbol_namespace ++ "h";
 
+/// Prefix of a stored constant's image named by its digest:
+/// `roc__i{digest}`, the digest in lowercase hex (design.md "Constant
+/// Pool"). A unit image references such an image as a pool import, which a
+/// link resolves to the one copy it places.
+pub const pool_image_symbol_prefix = compiler_symbol_namespace ++ "i";
+
+/// The symbol of the stored image whose digest is `digest`.
+pub fn poolImageSymbolName(allocator: Allocator, digest: [32]u8) Allocator.Error![]u8 {
+    return try std.fmt.allocPrint(allocator, pool_image_symbol_prefix ++ "{s}", .{&std.fmt.bytesToHex(digest, .lower)});
+}
+
 /// Symbol of the value in static-data slot `id`: `roc__d{id}`. The naming
 /// scheme is in design.md, "Object Symbol Names".
 pub fn staticDataSymbolName(allocator: Allocator, id: LIR.StaticDataId) Allocator.Error![]u8 {
@@ -477,6 +480,19 @@ pub fn staticDataNodeSymbolName(allocator: Allocator, owner: u32, index: u32) Al
     return try std.fmt.allocPrint(allocator, "roc__d{d}_{d}", .{ owner, index });
 }
 
+/// What a `.boxy` unit's export record says of a worker beyond the
+/// interface ARC solved for it (design.md "Caching Under `.boxy`").
+pub const BoxyExport = struct {
+    /// For a template's worker, generic or integer list: the template's
+    /// position in its module's checked table, which a needs list naming
+    /// the worker by identity resolves it to in the module's current
+    /// checked module. Absent for a worker that is no template's.
+    template: collections.OptionalU32 = .none,
+    /// Whether another unit can read the record: only these records are in
+    /// the module's export digest, which its importers' keys fold in.
+    visible: bool = false,
+};
+
 /// Everything one lowering produced: the procedure store, its layouts, the
 /// root and specialization tables, and the static data the program carries.
 pub const Result = struct {
@@ -491,6 +507,10 @@ pub const Result = struct {
     /// type table, by its procedure's identity: what an importer fills the
     /// worker's tables from (`postcheck.Boxy.Tables`).
     boxy_table_needs: std.AutoHashMapUnmanaged(LIR.ProcIdentity, []const u8) = .empty,
+    /// What an importer resolves each exported `.boxy` worker to and whether
+    /// it is importer-visible, by its procedure's identity
+    /// (design.md "Caching Under `.boxy`").
+    boxy_exports: std.AutoHashMapUnmanaged(LIR.ProcIdentity, BoxyExport) = .empty,
     root_metadata: std.ArrayList(root.RootMetadata) = .empty,
     requested_layouts: std.ArrayList(RequestedLayout) = .empty,
     const_types: const_store.ConstTypeStore,
@@ -513,6 +533,10 @@ pub const Result = struct {
     /// name their owner through this table; nothing resolves an owner from
     /// row order or from the procedure a row ended up in.
     lowering_modules: std.ArrayList(checked.ModuleId) = .empty,
+    /// Each lowering module by the identity this program's failure meanings
+    /// name it by (`LirStore.lowering_module_identities`), so a consumer
+    /// reads a meaning in checked keys by one lookup per module it names.
+    modules_by_failure_identity: std.AutoHashMapUnmanaged([32]u8, LIR.LoweringModuleId) = .empty,
     expect_sites: std.ArrayList(LIR.ExpectSite) = .empty,
     expect_site_ids: std.AutoHashMapUnmanaged(ExpectSiteKey, LIR.ExpectSiteId) = .empty,
 
@@ -529,6 +553,7 @@ pub const Result = struct {
         const allocator = self.store.allocator;
         self.comptime_sites.deinit(allocator);
         self.lowering_modules.deinit(allocator);
+        self.modules_by_failure_identity.deinit(allocator);
         self.expect_site_ids.deinit(allocator);
         self.expect_sites.deinit(allocator);
         for (self.static_data_values.items) |value| if (value.parts) |parts| allocator.free(parts.children);
@@ -551,6 +576,7 @@ pub const Result = struct {
         var needs = self.boxy_table_needs.valueIterator();
         while (needs.next()) |bytes| allocator.free(bytes.*);
         self.boxy_table_needs.deinit(allocator);
+        self.boxy_exports.deinit(allocator);
         self.layouts.deinit();
         self.store.deinit();
     }
@@ -574,21 +600,48 @@ pub const Result = struct {
         return id;
     }
 
-    /// Publish the lowering's checked module table. The producer writes it
-    /// once, before any consumer resolves an owner out of it.
+    /// Publish a program's checked module table. The producer writes it
+    /// once, before any consumer resolves an owner out of it. A program's
+    /// failure meanings name each module by its checked key.
     pub fn setLoweringModules(self: *Result, modules: []const checked.ModuleId) Allocator.Error!void {
         self.lowering_modules.clearRetainingCapacity();
-        self.store.lowering_module_keys.clearRetainingCapacity();
-        for (modules) |module| _ = try self.appendLoweringModule(module);
+        self.modules_by_failure_identity.clearRetainingCapacity();
+        self.store.lowering_module_identities.clearRetainingCapacity();
+        for (modules) |module| _ = try self.appendLoweringModule(module, module.bytes);
     }
 
-    /// Give a checked module the next dense lowering id.
-    pub fn appendLoweringModule(self: *Result, module: checked.ModuleId) Allocator.Error!LIR.LoweringModuleId {
+    /// Give a checked module the next dense lowering id. `identity` is what
+    /// the program's failure meanings name the module by
+    /// (`LirStore.lowering_module_identities`): its checked key in a
+    /// program, its link name in a module unit.
+    pub fn appendLoweringModule(self: *Result, module: checked.ModuleId, identity: [32]u8) Allocator.Error!LIR.LoweringModuleId {
         const id: LIR.LoweringModuleId = @fromBackingInt(@intCast(self.lowering_modules.items.len));
         try self.lowering_modules.ensureUnusedCapacity(self.store.allocator, 1);
-        try self.store.lowering_module_keys.append(self.store.allocator, module.bytes);
+        const named = try self.modules_by_failure_identity.getOrPut(self.store.allocator, identity);
+        if (named.found_existing) base.invariant("two lowering modules share the identity failure meanings name them by", .{});
+        named.value_ptr.* = id;
+        try self.store.lowering_module_identities.append(self.store.allocator, identity);
         self.lowering_modules.appendAssumeCapacity(module);
         return id;
+    }
+
+    /// `meaning`, read from this program's code or from an object it loaded,
+    /// with every module it names by checked key: a module unit's code and
+    /// its objects name modules by link name, which this program's table
+    /// maps to the modules it lowers (design.md "Compile-Time Failure
+    /// Sites").
+    pub fn meaningByCheckedKey(self: *const Result, meaning: LIR.FailureMeaning) LIR.FailureMeaning {
+        return switch (meaning) {
+            .checked_error => .checked_error,
+            .literal_rejection => |literal| .{ .literal_rejection = .{ .module = self.checkedKeyOfFailureIdentity(literal.module), .node = literal.node, .kind = literal.kind } },
+            .exhaustiveness => |failure| .{ .exhaustiveness = .{ .module = self.checkedKeyOfFailureIdentity(failure.module), .checked_site = failure.checked_site } },
+            .failed_value => |value| .{ .failed_value = .{ .module = self.checkedKeyOfFailureIdentity(value.module), .producer = value.producer } },
+        };
+    }
+
+    fn checkedKeyOfFailureIdentity(self: *const Result, identity: [32]u8) [32]u8 {
+        const id = self.modules_by_failure_identity.get(identity) orelse base.invariant("a failure meaning names a module its program does not lower", .{});
+        return self.lowering_modules.items[@backingInt(id)].bytes;
     }
 
     /// The dense id this program gave a checked module, when the module was
@@ -644,7 +697,6 @@ pub fn deinitConstPlans(allocator: Allocator, plans: []const ConstPlan) void {
             .str,
             .list,
             .box,
-            .boxed_sequence,
             .named,
             .boxy_fn,
             => {},

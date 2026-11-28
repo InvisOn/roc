@@ -80,6 +80,7 @@ fn expectConstantListNotRebuilt(target: lir.CheckedPipeline.TargetConfig) (harne
         build_options.compiler_compatibility_id,
         null,
         CoreCtx.os(allocator, allocator, io),
+        .lss,
     );
     defer coord.deinit();
     coord.enable_hosted_transform = true;
@@ -100,7 +101,7 @@ fn expectConstantListNotRebuilt(target: lir.CheckedPipeline.TargetConfig) (harne
     // Evaluation Under `.lss`").
     try std.testing.expect(session.runtime_stages == .evaluation);
     try std.testing.expect(space_bytes_evaluated: {
-        for (coord.appRootCheckedArtifact().compile_time_roots.roots) |root| {
+        for (coord.appRootCheckedArtifact().compile_time_roots.roots.items()) |root| {
             if (root.kind == .constant and root.payload == .const_node) break :space_bytes_evaluated true;
         }
         break :space_bytes_evaluated false;
@@ -135,7 +136,7 @@ fn countStaticListReads(result: *const lir.Program.Result) usize {
 }
 
 test "issue 11527: a dev build does not rebuild a small uniform compile-time list constant at every use" {
-    try expectConstantListNotRebuilt(.{ .inline_mode = .wrappers, .spec_constr_clone_inlining = .iterator_fusion });
+    try expectConstantListNotRebuilt(.{ .inline_mode = .wrappers, .spec_constr_clone_inlining = .no_calls });
 }
 
 test "issue 11527: an optimized build does not rebuild a small uniform compile-time list constant at every use" {

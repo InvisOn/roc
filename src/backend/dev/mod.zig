@@ -15,6 +15,8 @@ pub const aarch64 = @import("aarch64/mod.zig");
 pub const object = @import("object/mod.zig");
 /// The instruction sets the dev backend emits.
 pub const isa = @import("isa.zig");
+/// The shared driver's register widths, named by kind of value.
+pub const widths = @import("widths.zig");
 const relocation_mod = @import("Relocation.zig");
 pub const Relocation = relocation_mod.Relocation;
 pub const applyRelocations = relocation_mod.applyRelocations;
@@ -31,6 +33,8 @@ pub const ExecutableMemory = if (builtin.os.tag == .freestanding)
     void
 else
     @import("ExecutableMemory.zig").ExecutableMemory;
+/// Publishes newly written machine code to instruction fetch before it runs.
+pub const instruction_cache = @import("instruction_cache.zig");
 
 // LirCodeGen - LIR-based code generator parameterized by RocTarget
 pub const LirCodeGenMod = @import("LirCodeGen.zig");
@@ -58,6 +62,12 @@ pub const HostSplice = if (builtin.os.tag == .freestanding) void else @import("H
 pub const UnitPieces = @import("UnitPieces.zig");
 /// One unit's machine code laid out for a fast dev link.
 pub const UnitImage = @import("UnitImage.zig");
+
+comptime {
+    // A unit image reads the pool names static data writes, without
+    // importing it (`UnitImage` builds on `std` alone).
+    std.debug.assert(std.mem.eql(u8, UnitImage.pool_symbol_prefix, @import("lir").Program.pool_image_symbol_prefix));
+}
 /// The perf map of the functions the compiler places in its own process.
 pub const PerfMap = @import("PerfMap.zig");
 /// Loads a unit image into this process: every 64-bit x86 or ARM host the
@@ -91,4 +101,5 @@ test "backend module imports" {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(@import("CallingConvention.zig"));
     std.testing.refAllDecls(@import("FrameBuilder.zig"));
+    std.testing.refAllDecls(@import("instruction_cache.zig"));
 }

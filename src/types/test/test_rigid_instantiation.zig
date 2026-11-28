@@ -405,7 +405,7 @@ test "instantiate - alias preserves structure" {
 
     const rigid_a = try env.types.freshFromContentWithRank(try env.mkRigidVar("a"), .generalized);
     const list_ident_idx = try env.idents.insert(gpa, .for_text("List"));
-    const builtin_module_idx = base.ModuleIdentity.Idx.NONE;
+    const builtin_module_idx = @as(base.ModuleIdentity.Idx, @fromBackingInt(1));
     const backing_content = try env.types.mkNominal(
         .{ .ident_idx = list_ident_idx },
         &[_]Var{rigid_a},
@@ -454,7 +454,7 @@ test "instantiate - nominal type application instantiates its args" {
     // Test Box a
     {
         const box_ident_idx = try env.idents.insert(gpa, .for_text("Box"));
-        const builtin_module_idx = base.ModuleIdentity.Idx.NONE;
+        const builtin_module_idx = @as(base.ModuleIdentity.Idx, @fromBackingInt(1));
         const box_content = try env.types.mkNominal(
             .{ .ident_idx = box_ident_idx },
             &[_]Var{rigid_a},
@@ -492,7 +492,7 @@ test "instantiate - multiple instantiations are independent" {
     const original = try env.types.freshFromContentWithRank(func_content, .generalized);
 
     // First instantiation
-    var var_map1 = @import("collections").DenseMap(Var, Var).init(gpa);
+    var var_map1 = @import("collections").EpochMap(Var, Var).init(gpa);
     defer var_map1.deinit();
 
     var instantiator1 = Instantiator{
@@ -506,7 +506,7 @@ test "instantiate - multiple instantiations are independent" {
     const inst1 = try instantiator1.instantiateVar(original);
 
     // Second instantiation
-    var var_map2 = @import("collections").DenseMap(Var, Var).init(gpa);
+    var var_map2 = @import("collections").EpochMap(Var, Var).init(gpa);
     defer var_map2.deinit();
 
     var instantiator2 = Instantiator{
@@ -542,14 +542,14 @@ const TestEnv = struct {
     gpa: std.mem.Allocator,
     types: Store,
     idents: Ident.Store,
-    var_map: @import("collections").DenseMap(Var, Var),
+    var_map: @import("collections").EpochMap(Var, Var),
 
     fn init(gpa: std.mem.Allocator) std.mem.Allocator.Error!Self {
         return .{
             .gpa = gpa,
             .types = try Store.initCapacity(gpa, 16, 8),
             .idents = try Ident.Store.initCapacity(gpa, 16),
-            .var_map = @import("collections").DenseMap(Var, Var).init(gpa),
+            .var_map = @import("collections").EpochMap(Var, Var).init(gpa),
         };
     }
 
@@ -676,7 +676,7 @@ test "instantiate - rejected nominal positions produce error and unwind partial 
         defer env.deinit();
         const first = try env.types.freshFromContentWithRank(.{ .flex = Flex.init() }, .generalized);
         const second = try env.types.freshFromContentWithRank(.{ .flex = Flex.init() }, .generalized);
-        const content = try env.types.mkNominal(try env.mkTypeIdent("Rejected"), &.{ first, second }, .NONE, false);
+        const content = try env.types.mkNominal(try env.mkTypeIdent("Rejected"), &.{ first, second }, @fromBackingInt(1), false);
         const original = try env.types.freshFromContentWithRank(content, .generalized);
         var instantiator = Instantiator{
             .store = &env.types,
@@ -762,7 +762,7 @@ test "instantiate - markers in a constraint signature get their own choices" {
     const copy = try instantiator.instantiateVar(source);
     const copied_constraints = env.types.resolveVar(copy).desc.content.flex.constraints;
     try std.testing.expectEqual(@as(usize, 1), copied_constraints.len());
-    const copied_method = env.types.static_dispatch_constraints.items.items[@backingInt(copied_constraints.start)].fn_var;
+    const copied_method = env.types.static_dispatch_constraints.items()[@backingInt(copied_constraints.start)].fn_var;
     const func = env.types.resolveVar(copied_method).desc.content.structure.fn_pure;
     const copied_arg = env.types.resolveVar(env.types.getVarAt(func.args, 0)).desc.content.structure.tag_union;
     const copied_ret = env.types.resolveVar(func.ret).desc.content.structure.tag_union;
@@ -810,7 +810,7 @@ test "instantiate - markers in interpolation metadata get their own choices" {
     const copy = try instantiator.instantiateVar(source);
     const copied_constraints = env.types.resolveVar(copy).desc.content.flex.constraints;
     try std.testing.expectEqual(@as(usize, 1), copied_constraints.len());
-    const metadata = env.types.getInterpolationMetadata(env.types.static_dispatch_constraints.items.items[@backingInt(copied_constraints.start)].interpolation);
+    const metadata = env.types.getInterpolationMetadata(env.types.static_dispatch_constraints.items()[@backingInt(copied_constraints.start)].interpolation);
     try std.testing.expect(metadata.isPresent());
     const copied_part = env.types.resolveVar(env.types.getInterpolationPartAt(metadata.interpolated_parts, 0).var_).desc.content.structure.tag_union;
     const copied_item = env.types.resolveVar(metadata.item_var).desc.content.structure.tag_union;
@@ -853,7 +853,7 @@ test "instantiate - markers reached through a record presence var get their own 
     const copied_presence = env.types.getRecordFieldAt(record.fields, 0).presence.presenceVar().?;
     const copied_constraints = env.types.resolveVar(copied_presence).desc.content.flex.constraints;
     try std.testing.expectEqual(@as(usize, 1), copied_constraints.len());
-    const copied_method = env.types.static_dispatch_constraints.items.items[@backingInt(copied_constraints.start)].fn_var;
+    const copied_method = env.types.static_dispatch_constraints.items()[@backingInt(copied_constraints.start)].fn_var;
     const copied_ret = env.types.resolveVar(env.types.resolveVar(copied_method).desc.content.structure.fn_pure.ret).desc.content.structure.tag_union;
     try std.testing.expect(env.types.resolveVar(copied_ret.ext).desc.content == .flex);
 }

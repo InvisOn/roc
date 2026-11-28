@@ -29,6 +29,7 @@ const BuildEnvHandle = @import("build_env_handle.zig").BuildEnvHandle;
 const doc_comments = @import("doc_comments.zig");
 const rename_rules = @import("rename.zig");
 const code_action = @import("code_action.zig");
+const source_symbols = @import("source_symbols.zig");
 
 const BuildEnv = compile.BuildEnv;
 const CacheManager = compile.CacheManager;
@@ -894,6 +895,8 @@ pub const SyntaxChecker = struct {
             cwd,
             self.std_io,
             builtin_modules,
+            // A check has no runtime consumer.
+            .boxy,
         );
         errdefer env.deinit();
         env.compiler_version = build_options.compiler_compatibility_id;
@@ -1724,7 +1727,7 @@ pub const SyntaxChecker = struct {
             }
         }
 
-        const file_deps = module_env.file_dependencies.items.items;
+        const file_deps = module_env.file_dependencies.items();
         for (file_deps) |dep| {
             if (cir_queries.regionContainsOffset(dep.region(), target_offset)) {
                 const path_text = module_env.getString(dep.relative_path);
@@ -1961,7 +1964,7 @@ pub const SyntaxChecker = struct {
         if (store.nodes.get(node_idx).tag != .def) return null;
         const def = store.getDef(@fromBackingInt(value_node));
         const ident = module_lookup.extractIdentFromPattern(store, def.pattern) orelse return null;
-        for (module_env.method_idents.entries.items) |entry| {
+        for (module_env.method_idents.entries.items()) |entry| {
             if (entry.value.eql(ident)) return entry.key.owner;
         }
         return null;
@@ -1969,7 +1972,7 @@ pub const SyntaxChecker = struct {
 
     /// The checked environment `module_env`'s import `import_idx` resolved to.
     fn importedEnvForImport(env: *BuildEnv, module_env: *ModuleEnv, doc_path: []const u8, import_idx: CIR.Import.Idx) ?*ModuleEnv {
-        const import_name = module_env.common.getString(module_env.imports.imports.items.items[@backingInt(import_idx)]);
+        const import_name = module_env.common.getString(module_env.imports.imports.items()[@backingInt(import_idx)]);
         return env.importedModuleEnv(doc_path, import_name);
     }
 
@@ -2032,14 +2035,14 @@ pub const SyntaxChecker = struct {
     }
 
     fn findTagInTypeAnno(store: *const can.NodeStore, common: *const base.CommonEnv, type_anno_idx: CIR.TypeAnno.Idx, tag_name: []const u8) ?Region {
-        const type_anno = store.getTypeAnno(type_anno_idx);
-        switch (type_anno) {
-            .tag_union => |tu| {
+        switch (store.typeAnnoKind(type_anno_idx)) {
+            .tag_union => {
+                const tu = store.typeAnnoView(type_anno_idx).tag_union.decode();
                 const tags_slice = store.sliceTypeAnnos(tu.tags);
                 for (tags_slice) |tag_idx| {
-                    const tag = store.getTypeAnno(tag_idx);
-                    if (tag == .tag) {
-                        const name = common.idents.getText(tag.tag.name);
+                    const tag = store.typeAnnoAs(tag_idx, .tag);
+                    if (tag != null) {
+                        const name = common.idents.getText(tag.?.name);
                         if (std.mem.eql(u8, name, tag_name)) {
                             return store.getTypeAnnoRegion(tag_idx);
                         }
@@ -2049,7 +2052,8 @@ pub const SyntaxChecker = struct {
                     if (findTagInTypeAnno(store, common, ext_idx, tag_name)) |r| return r;
                 }
             },
-            .tag => |t| {
+            .tag => {
+                const t = store.typeAnnoView(type_anno_idx).tag.decode();
                 const name = common.idents.getText(t.name);
                 if (std.mem.eql(u8, name, tag_name)) {
                     return store.getTypeAnnoRegion(type_anno_idx);
@@ -2099,42 +2103,45 @@ pub const SyntaxChecker = struct {
         // 1. If the tag reference carries an explicit external nominal import identity,
         // navigate directly to that imported module and declaration.
         if (tag_ref.nominal_external) |nom_ext| {
-            const import_idx_int = @backingInt(nom_ext.module_idx);
-            if (import_idx_int < module_env.imports.imports.len()) {
-                const string_idx = module_env.imports.imports.items.items[import_idx_int];
-                const module_name = module_env.common.getString(string_idx);
-                const env = build_env;
-                const importing_pkg = env.findPackageForModulePath(doc_path);
-                const mod_state_opt = if (std.mem.find(u8, module_name, ".") != null)
-                    env.findModuleByQualifiedNameInPackage(importing_pkg, module_name)
-                else
-                    env.findModuleByNameInPackage(importing_pkg, module_name);
-                if (mod_state_opt) |mod_state| {
-                    if (mod_state.moduleEnv()) |target_mod_env| {
-                        const target_node_idx: CIR.Node.Idx = @fromBackingInt(@intCast(nom_ext.target_node_idx));
-                        const node_tag = target_mod_env.store.nodes.get(target_node_idx).tag;
-                        if (node_tag == .statement_nominal_decl or node_tag == .statement_alias_decl) {
-                            const stmt = target_mod_env.store.getSourceStatement(@fromBackingInt(@backingInt(target_node_idx)));
-                            const maybe_anno = typeDeclAnno(stmt);
-                            if (maybe_anno) |anno_idx| {
-                                if (findTagInTypeAnno(&target_mod_env.store, &target_mod_env.common, anno_idx, tag_name)) |tag_region| {
-                                    const range = cir_queries.regionToRange(target_mod_env, tag_region) orelse return null;
-                                    const module_uri = noteOom(oom, self.uriForPath(mod_state.path)) orelse return null;
-                                    return DefinitionResult{
-                                        .uri = module_uri,
-                                        .range = range,
-                                    };
-                                }
+            const found_mod_state: ?*compile.coordinator.ModuleState = switch (nom_ext.module) {
+                .import => |import_idx| blk: {
+                    const import_idx_int = @backingInt(import_idx);
+                    if (import_idx_int >= module_env.imports.imports.len()) break :blk null;
+                    const string_idx = module_env.imports.imports.items()[import_idx_int];
+                    const module_name = module_env.common.getString(string_idx);
+                    const importing_pkg = build_env.findPackageForModulePath(doc_path);
+                    break :blk if (std.mem.find(u8, module_name, ".") != null)
+                        build_env.findModuleByQualifiedNameInPackage(importing_pkg, module_name)
+                    else
+                        build_env.findModuleByNameInPackage(importing_pkg, module_name);
+                },
+                .identity => |identity| findModuleByContentIdentity(build_env, module_env.moduleIdentityHash(identity)),
+            };
+            if (found_mod_state) |mod_state| {
+                if (mod_state.moduleEnv()) |target_mod_env| {
+                    const target_node_idx: CIR.Node.Idx = @fromBackingInt(@intCast(nom_ext.target_node_idx));
+                    const node_tag = target_mod_env.store.nodes.get(target_node_idx).tag;
+                    if (node_tag == .statement_nominal_decl or node_tag == .statement_alias_decl) {
+                        const stmt = target_mod_env.store.getSourceStatement(@fromBackingInt(@backingInt(target_node_idx)));
+                        const maybe_anno = typeDeclAnno(stmt);
+                        if (maybe_anno) |anno_idx| {
+                            if (findTagInTypeAnno(&target_mod_env.store, &target_mod_env.common, anno_idx, tag_name)) |tag_region| {
+                                const range = cir_queries.regionToRange(target_mod_env, tag_region) orelse return null;
+                                const module_uri = noteOom(oom, self.uriForPath(mod_state.path)) orelse return null;
+                                return DefinitionResult{
+                                    .uri = module_uri,
+                                    .range = range,
+                                };
                             }
                         }
-                        if (findTagInModuleEnv(target_mod_env, tag_name)) |tag_region| {
-                            const range = cir_queries.regionToRange(target_mod_env, tag_region) orelse return null;
-                            const module_uri = noteOom(oom, self.uriForPath(mod_state.path)) orelse return null;
-                            return DefinitionResult{
-                                .uri = module_uri,
-                                .range = range,
-                            };
-                        }
+                    }
+                    if (findTagInModuleEnv(target_mod_env, tag_name)) |tag_region| {
+                        const range = cir_queries.regionToRange(target_mod_env, tag_region) orelse return null;
+                        const module_uri = noteOom(oom, self.uriForPath(mod_state.path)) orelse return null;
+                        return DefinitionResult{
+                            .uri = module_uri,
+                            .range = range,
+                        };
                     }
                 }
             }
@@ -2334,9 +2341,9 @@ pub const SyntaxChecker = struct {
         const region = module_env.store.getTypeAnnoRegion(type_anno_idx);
         if (!cir_queries.regionContainsOffset(region, target_offset)) return null;
 
-        const type_anno = module_env.store.getTypeAnno(type_anno_idx);
-        switch (type_anno) {
-            .lookup => |lookup| {
+        switch (module_env.store.typeAnnoKind(type_anno_idx)) {
+            .lookup => {
+                const lookup = module_env.store.typeAnnoView(type_anno_idx).lookup.decode();
                 const type_name = module_env.common.idents.getText(lookup.name);
                 self.logDebug(.build, "[DEF] TypeAnno.lookup: type='{s}', base={s}", .{
                     type_name,
@@ -2344,7 +2351,8 @@ pub const SyntaxChecker = struct {
                 });
                 return self.resolveTypeBase(build_env, module_env, doc_path, current_uri, lookup.base, oom);
             },
-            .apply => |apply| {
+            .apply => {
+                const apply = module_env.store.typeAnnoView(type_anno_idx).apply.decode();
                 // Type with args like `List(Str)` - check args first, then the base type
                 const args_slice = module_env.store.sliceTypeAnnos(apply.args);
                 for (args_slice) |arg_idx| {
@@ -2360,7 +2368,8 @@ pub const SyntaxChecker = struct {
                 });
                 return self.resolveTypeBase(build_env, module_env, doc_path, current_uri, apply.base, oom);
             },
-            .record => |rec| {
+            .record => {
+                const rec = module_env.store.typeAnnoView(type_anno_idx).record.decode();
                 // Check record field types
                 const fields_slice = module_env.store.sliceAnnoRecordFields(rec.fields);
                 for (fields_slice) |field_idx| {
@@ -2371,7 +2380,8 @@ pub const SyntaxChecker = struct {
                 }
                 return null;
             },
-            .tag_union => |tu| {
+            .tag_union => {
+                const tu = module_env.store.typeAnnoView(type_anno_idx).tag_union.decode();
                 // Check tag types
                 const tags_slice = module_env.store.sliceTypeAnnos(tu.tags);
                 for (tags_slice) |tag_idx| {
@@ -2386,7 +2396,8 @@ pub const SyntaxChecker = struct {
                 }
                 return null;
             },
-            .tag => |t| {
+            .tag => {
+                const t = module_env.store.typeAnnoView(type_anno_idx).tag.decode();
                 // Check tag argument types
                 const args_slice = module_env.store.sliceTypeAnnos(t.args);
                 for (args_slice) |arg_idx| {
@@ -2396,7 +2407,8 @@ pub const SyntaxChecker = struct {
                 }
                 return null;
             },
-            .@"fn" => |f| {
+            .@"fn" => {
+                const f = module_env.store.typeAnnoView(type_anno_idx).@"fn".decode();
                 // Check function argument and return types
                 const args_slice = module_env.store.sliceTypeAnnos(f.args);
                 for (args_slice) |arg_idx| {
@@ -2409,7 +2421,8 @@ pub const SyntaxChecker = struct {
                 }
                 return null;
             },
-            .tuple => |t| {
+            .tuple => {
+                const t = module_env.store.typeAnnoView(type_anno_idx).tuple.decode();
                 // Check tuple element types
                 const elems_slice = module_env.store.sliceTypeAnnos(t.elems);
                 for (elems_slice) |elem_idx| {
@@ -2419,7 +2432,8 @@ pub const SyntaxChecker = struct {
                 }
                 return null;
             },
-            .parens => |p| {
+            .parens => {
+                const p = module_env.store.typeAnnoView(type_anno_idx).parens.decode();
                 // Unwrap and recurse
                 return self.findTypeAnnoAtOffset(build_env, module_env, doc_path, current_uri, p.anno, target_offset, oom);
             },
@@ -2573,6 +2587,11 @@ pub const SyntaxChecker = struct {
 
         // Convert LSP position to byte offset
         const target_offset = pos.positionToOffset(module_env, line, character) orelse return null;
+
+        const symbols = try build.handle.sourceSymbols(module_env, resolveSourceMethod);
+        if (symbols.at(target_offset)) |occurrence| {
+            return HighlightResult{ .regions = try symbols.ranges(occurrence.pattern, true) };
+        }
 
         // Resolve the symbol at this position. The cursor may sit on the
         // definition or on any reference to it; both resolve to the pattern
@@ -3038,6 +3057,10 @@ pub const SyntaxChecker = struct {
 
         const module_env = build.getModuleEnv() orelse return null;
         const target_offset = pos.positionToOffset(module_env, line, character) orelse return null;
+        const symbols = try build.handle.sourceSymbols(module_env, resolveSourceMethod);
+        if (symbols.at(target_offset)) |occurrence| {
+            return ReferencesResult{ .regions = try symbols.ranges(occurrence.pattern, include_declaration) };
+        }
         const target_pattern = cir_queries.resolveSymbolAtOffset(module_env, target_offset) orelse return null;
 
         var regions: std.ArrayList(LspRange) = .empty;
@@ -3105,7 +3128,7 @@ pub const SyntaxChecker = struct {
         for (bindings) |binding| {
             if (@backingInt(binding.pattern_idx) == @backingInt(target_pattern)) continue;
             if (!std.mem.eql(u8, module_env.common.idents.getText(binding.ident), new_name)) continue;
-            if (binding.visible_from <= target.visible_to and target.visible_from <= binding.visible_to) {
+            if (scope_map.ScopeMap.scopesOverlap(binding, target)) {
                 return .taken;
             }
         }
@@ -3127,6 +3150,10 @@ pub const SyntaxChecker = struct {
         /// The binding's own declaration could not be pinned to exactly its
         /// name, so rewriting it would take neighbouring source with it.
         declaration_not_isolated,
+        /// Generic or implicit dispatch has no unambiguous editable name.
+        ambiguous_method,
+        /// The edited document could not preserve the original binding graph.
+        changes_resolution,
     };
 
     /// The edits a rename produces, all within the requested document.
@@ -3189,20 +3216,13 @@ pub const SyntaxChecker = struct {
 
         const module_env = build.getModuleEnv() orelse return null;
         const target_offset = pos.positionToOffset(module_env, line, character) orelse return null;
-        const target = renameTargetAt(module_env, target_offset) orelse return null;
-        if (cir_queries.declarationNameRegion(module_env, target.pattern) == null) return null;
-
-        const regions = try self.collectSymbolRegions(module_env, target.pattern);
-        defer self.allocator.free(regions);
-
-        // Prompt on the occurrence the cursor is actually in, not on the
-        // definition, so the editor highlights what the user clicked.
-        const cursor_range = rangeContaining(regions, line, character) orelse return null;
-
-        const name = module_env.common.idents.getText(target.ident);
+        const symbols = try build.handle.sourceSymbols(module_env, resolveSourceMethod);
+        const occurrence = symbols.at(target_offset) orelse return null;
+        const binding = symbols.bindings.get(occurrence.pattern) orelse return null;
+        if (!symbols.complete(occurrence.pattern)) return null;
         return PrepareRenameResult{
-            .range = cursor_range,
-            .placeholder = try self.allocator.dupe(u8, name),
+            .range = cir_queries.regionToRange(module_env, occurrence.region) orelse return null,
+            .placeholder = try self.allocator.dupe(u8, binding.name),
         };
     }
 
@@ -3236,33 +3256,76 @@ pub const SyntaxChecker = struct {
         const target_offset = pos.positionToOffset(module_env, line, character) orelse
             return RenameOutcome{ .rejected = .not_a_local_binding };
 
-        const target = renameTargetAt(module_env, target_offset) orelse
+        const symbols = try build.handle.sourceSymbols(module_env, resolveSourceMethod);
+        const occurrence = symbols.at(target_offset) orelse
             return RenameOutcome{ .rejected = .not_a_local_binding };
-
-        // Renaming the uses while leaving the declaration behind is exactly the
-        // partial rewrite this must not produce.
-        if (cir_queries.declarationNameRegion(module_env, target.pattern) == null) {
+        const binding = symbols.bindings.get(occurrence.pattern) orelse
             return RenameOutcome{ .rejected = .declaration_not_isolated };
-        }
-
-        const old_name = module_env.common.idents.getText(target.ident);
+        if (!symbols.complete(occurrence.pattern)) return RenameOutcome{ .rejected = .ambiguous_method };
+        const old_name = binding.name;
         if (try rename_rules.checkNewName(self.allocator, old_name, new_name)) |rejection| {
             return RenameOutcome{ .rejected = .{ .bad_new_name = rejection } };
         }
 
-        switch (try checkNewNameAgainstScope(build.handle, module_env, target.pattern, new_name)) {
-            .clear => {},
-            .taken => return RenameOutcome{ .rejected = .name_already_in_scope },
-            .scope_unavailable => return RenameOutcome{ .rejected = .scope_unavailable },
+        if (binding.associated) {
+            if (!std.mem.eql(u8, old_name, new_name) and
+                !try self.validateAssociatedRename(&build, symbols, occurrence.pattern, uri, new_name))
+            {
+                return RenameOutcome{ .rejected = .changes_resolution };
+            }
+        } else {
+            switch (try checkNewNameAgainstScope(build.handle, module_env, occurrence.pattern, new_name)) {
+                .clear => {},
+                .taken => return RenameOutcome{ .rejected = .name_already_in_scope },
+                .scope_unavailable => return RenameOutcome{ .rejected = .scope_unavailable },
+            }
         }
 
-        const regions = try self.collectSymbolRegions(module_env, target.pattern);
+        const regions = try symbols.ranges(occurrence.pattern, true);
         errdefer self.allocator.free(regions);
 
         return RenameOutcome{ .edits = .{
             .regions = regions,
             .old_name = try self.allocator.dupe(u8, old_name),
         } };
+    }
+
+    /// Checking the edit uses the compiler's real associated-name resolution,
+    /// including aliases and forward references. The speculative build is never
+    /// installed as the open document or published, and never edits source files.
+    fn validateAssociatedRename(
+        self: *SyntaxChecker,
+        original: *DocumentBuild,
+        symbols: *const source_symbols.Index,
+        pattern: CIR.Pattern.Idx,
+        uri: []const u8,
+        new_name: []const u8,
+    ) QueryError!bool {
+        var edit = try symbols.edit(pattern, new_name);
+        defer edit.deinit();
+        // createBuildEnv can release the previous build; keep the original
+        // explicitly alive even if this query was answered from that snapshot.
+        original.handle.retain("rename_validation");
+        defer original.handle.release("rename_validation");
+        const candidate = try self.createBuildEnv();
+        defer candidate.release(owner_build);
+        var session = try BuildSession.init(self.allocator, self.std_io, candidate.envPtr(), uri, edit.text.items, self.workspace_root);
+        defer session.deinit();
+        if (!session.build_succeeded or !documentParsedCleanly(candidate.envPtr(), session.absolute_path)) return false;
+        if (!original.has_reports and self.documentHasReports(session.absolute_path, session.drained_reports)) return false;
+        const env = session.getModuleEnv() orelse return false;
+        const after = try candidate.sourceSymbols(env, resolveSourceMethod);
+        const declaration = symbols.bindings.get(pattern) orelse return false;
+        const renamed = after.at(edit.mapRegion(declaration.region).start.offset) orelse return false;
+        if (!after.complete(renamed.pattern)) return false;
+        return symbols.preservesBindings(after, &edit);
+    }
+
+    fn resolveSourceMethod(env: *ModuleEnv, receiver: CIR.Expr.Idx, method: base.Ident.Idx) source_symbols.MethodTarget {
+        const owner = resolveMethodOwnerForLookup(env, ModuleEnv.varFrom(receiver)) orelse return .unresolved;
+        if (owner.builtin_origin or owner.origin_module != env.selfModuleIdentity()) return .external;
+        const binding = env.lookupMethodBindingForOwnerConst(owner.owner, method) orelse return .unresolved;
+        return .{ .local = env.store.getDef(binding.def_idx).pattern };
     }
 
     /// Find the pattern_idx at the given offset.
@@ -3923,54 +3986,6 @@ fn extractSymbolFromDecl(
         line_offsets,
         if (is_function) .function else .variable,
     );
-}
-
-/// The binding a rename request refers to.
-const RenameTarget = struct {
-    pattern: CIR.Pattern.Idx,
-    ident: base.Ident.Idx,
-};
-
-/// Resolve a source offset to a binding that can be renamed.
-///
-/// Only a plain `assign` pattern names a single binding whose every occurrence
-/// this server can account for. Destructuring, literal, and tag patterns bind
-/// through structure that a name-for-name rewrite cannot express, so they are
-/// refused rather than half-renamed.
-fn renameTargetAt(module_env: *ModuleEnv, offset: u32) ?RenameTarget {
-    const pattern_idx = cir_queries.resolveSymbolAtOffset(module_env, offset) orelse return null;
-    return switch (module_env.store.getSourcePattern(pattern_idx)) {
-        .assign => |assign| .{ .pattern = pattern_idx, .ident = assign.ident },
-        .var_assign => |assign| .{ .pattern = pattern_idx, .ident = assign.ident },
-        .as,
-        .applied_tag,
-        .nominal,
-        .nominal_external,
-        .record_destructure,
-        .list,
-        .tuple,
-        .num_literal,
-        .small_dec_literal,
-        .dec_literal,
-        .frac_f32_literal,
-        .frac_f64_literal,
-        .num_from_numeral_literal,
-        .str_literal,
-        .str_interpolation,
-        .underscore,
-        .runtime_error,
-        => null,
-        .deferred_import_ref => base.invariant("compiler invariant violated: deferred import reference pattern reached a stage that runs after import resolution", .{}),
-    };
-}
-
-/// Find the collected range that contains the given position.
-fn rangeContaining(regions: []const cir_queries.LspRange, line: u32, character: u32) ?cir_queries.LspRange {
-    for (regions) |range| {
-        if (range.start_line != line or range.end_line != line) continue;
-        if (character >= range.start_col and character <= range.end_col) return range;
-    }
-    return null;
 }
 
 /// How much of a rendered type an inlay hint shows.

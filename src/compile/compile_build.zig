@@ -233,10 +233,10 @@ pub const BuildEnv = struct {
     runtime_lowering: ?RuntimeLoweringConfig = null,
     /// The strategy whose compile-time evaluator completes every module's
     /// compile-time roots (`Coordinator.specialization_strategy`).
-    specialization_strategy: base.SpecializationStrategy = .lss,
+    specialization_strategy: base.SpecializationStrategy,
     debug_observer: ?eval.CompileTimeFinalization.DebugObserver = null,
-    /// Instrumentation only (`Coordinator.boxy_program_observer`).
-    boxy_program_observer: ?eval.CompileTimeFinalization.BoxyProgramObserver = null,
+    /// Instrumentation only (`Coordinator.compile_time_program_observer`).
+    compile_time_program_observer: ?eval.CompileTimeFinalization.CompileTimeProgramObserver = null,
     /// Instrumentation only; never participates in checked or object identity.
     detailed_monotype_diagnostics: bool = false,
     /// The lowering of the module objects a `.boxy` compile-time evaluation
@@ -381,7 +381,7 @@ pub const BuildEnv = struct {
     discovered_entry_parse: ?DiscoveredParse = null,
     discovered_platform_parse: ?DiscoveredParse = null,
 
-    pub fn init(gpa: Allocator, mode: Mode, max_threads: usize, target: roc_target.RocTarget, cwd: []const u8, std_io: std.Io) InitError!BuildEnv {
+    pub fn init(gpa: Allocator, mode: Mode, max_threads: usize, target: roc_target.RocTarget, cwd: []const u8, std_io: std.Io, specialization_strategy: base.SpecializationStrategy) InitError!BuildEnv {
         // Allocate builtin modules on heap to prevent moves that would invalidate internal pointers
         const builtin_modules = try gpa.create(BuiltinModules);
         errdefer gpa.destroy(builtin_modules);
@@ -389,7 +389,7 @@ pub const BuildEnv = struct {
         builtin_modules.* = try BuiltinModules.init(gpa, std_io);
         errdefer builtin_modules.deinit();
 
-        return initWithBuiltinModules(gpa, mode, max_threads, target, cwd, std_io, builtin_modules, true);
+        return initWithBuiltinModules(gpa, mode, max_threads, target, cwd, std_io, builtin_modules, true, specialization_strategy);
     }
 
     pub fn initBorrowingBuiltinModules(
@@ -400,8 +400,9 @@ pub const BuildEnv = struct {
         cwd: []const u8,
         std_io: std.Io,
         builtin_modules: *BuiltinModules,
+        specialization_strategy: base.SpecializationStrategy,
     ) BuildEnv {
-        return initWithBuiltinModules(gpa, mode, max_threads, target, cwd, std_io, builtin_modules, false);
+        return initWithBuiltinModules(gpa, mode, max_threads, target, cwd, std_io, builtin_modules, false, specialization_strategy);
     }
 
     fn initWithBuiltinModules(
@@ -413,6 +414,7 @@ pub const BuildEnv = struct {
         std_io: std.Io,
         builtin_modules: *BuiltinModules,
         owns_builtin_modules: bool,
+        specialization_strategy: base.SpecializationStrategy,
     ) BuildEnv {
         var env = BuildEnv{
             .gpa = gpa,
@@ -425,6 +427,7 @@ pub const BuildEnv = struct {
             .builtin_modules = builtin_modules,
             .owns_builtin_modules = owns_builtin_modules,
             .filesystem = CoreCtx.default(gpa, gpa, std_io),
+            .specialization_strategy = specialization_strategy,
         };
 
         // On native targets, enable HTTP downloads for URL packages.
@@ -631,6 +634,18 @@ pub const BuildEnv = struct {
     ) void {
         self.setSyntheticRootSourceMapping(original_path, original_source, header_len);
         self.synthetic_root_header_lines = header_lines;
+    }
+
+    /// How the synthetic root's lines map to the user's file. The staging
+    /// keeps the user's source byte-for-byte after its header, so whatever
+    /// follows it is appended wiring.
+    fn syntheticRootSourceMap(self: *const BuildEnv) base.StagedSourceMap {
+        const original = self.synthetic_root_original_source orelse
+            return .{ .header_lines = self.synthetic_root_header_lines, .footer_start = base.StagedSourceMap.no_footer };
+        return .{
+            .header_lines = self.synthetic_root_header_lines,
+            .footer_start = @intCast(self.synthetic_root_header_len + original.len),
+        };
     }
 
     /// Declare that the root is a staged copy of the user's file at
@@ -945,11 +960,15 @@ pub const BuildEnv = struct {
             self.compiler_version,
             self.cache_manager,
             self.filesystem,
+            self.specialization_strategy,
         );
-        coord.specialization_strategy = self.specialization_strategy;
         coord.source_pin_version = self.source_pin_version;
         if (self.staged_entry_user_path) |user_path| {
-            if (self.discovered_root_abs) |staged_path| coord.staged_entry = .{ .staged_path = staged_path, .user_path = user_path };
+            if (self.discovered_root_abs) |staged_path| coord.staged_entry = .{
+                .staged_path = staged_path,
+                .user_path = user_path,
+                .source_map = self.syntheticRootSourceMap(),
+            };
         }
         // Enable hosted transform for platform modules - converts e_anno_only to e_hosted_lambda
         // This is required for roc build so that hosted functions can be called at runtime
@@ -958,18 +977,14 @@ pub const BuildEnv = struct {
         coord.cancel_request = self.cancel_request;
         coord.runtime_lowering = self.runtime_lowering;
         coord.debug_observer = self.debug_observer;
-        coord.boxy_program_observer = self.boxy_program_observer;
+        coord.compile_time_program_observer = self.compile_time_program_observer;
         coord.setDetailedLoweringTiming(self.detailed_lowering_timing);
         coord.boxy_object_lowering = self.boxy_object_lowering;
-        if (self.detailed_monotype_diagnostics) coord.ctfe_timing.lowering.enableDetailedMonotypeBody();
+        if (self.detailed_monotype_diagnostics) {
+            coord.ctfe_timing.lowering.enableDetail();
+            coord.detailed_publication_timing = true;
+        }
         self.coordinator = coord;
-    }
-
-    /// Set the strategy whose compile-time evaluator completes every
-    /// module's compile-time roots, before any module is checked.
-    pub fn setSpecializationStrategy(self: *BuildEnv, strategy: base.SpecializationStrategy) void {
-        if (self.coordinator) |coordinator| coordinator.specialization_strategy = strategy;
-        self.specialization_strategy = strategy;
     }
 
     pub fn setRuntimeLowering(self: *BuildEnv, config: RuntimeLoweringConfig) void {
@@ -1260,6 +1275,17 @@ pub const BuildEnv = struct {
         // entry module is its package's root, exactly as when it is built
         // without an owning `main.roc`.
         const entry_is_only_root = has_separate_entry and self.entry_closure_only;
+        // Resolve the selected header's slots as their owning modules finish.
+        // This neither checks nor adds the platform root to a module test.
+        if (self.selected_platform_package_name) |platform_name| {
+            coord.markPlatformPackage(platform_name);
+            // A specialized compilation never schedules Boxy library units.
+            // Its hosted calls use the checked platform, not a library plan.
+            if (self.specialization_strategy == .boxy) {
+                const parsed = if (std.mem.eql(u8, platform_name, pkg_name)) self.discovered_root_parse else self.discovered_platform_parse;
+                if (parsed) |platform| coord.hosted_header = try @import("hosted_header.zig").Plan.init(self.gpa, platform.ast);
+            }
+        }
         if (entry_is_only_root) {
             replaceDiscoveredParse(&self.discovered_root_parse, null);
         } else {
@@ -1324,7 +1350,6 @@ pub const BuildEnv = struct {
             const pf_pkg = self.packages.get(platform_name) orelse return error.Internal;
             std.debug.assert(pf_pkg.kind == .platform);
             if (coord.getPackage(platform_name)) |platform_coord_pkg| {
-                coord.markPlatformPackage(platform_coord_pkg.name);
                 // A selected platform that is itself the build root was
                 // already queued above; marking it is sufficient here.
                 if (!entry_is_only_root and !std.mem.eql(u8, platform_name, pkg_name)) {
@@ -1596,7 +1621,6 @@ pub const BuildEnv = struct {
     fn headerInfo(self: *BuildEnv, parsed: DiscoveredParse) BuildError!HeaderInfo {
         errdefer parsed.deinit();
         const file_abs = parsed.path;
-        const src = parsed.module_env.common.source;
         const ast = parsed.ast;
 
         if (ast.hasErrors() and !try parse.fileHeaderIsUsable(self.gpa, ast)) {
@@ -1627,7 +1651,7 @@ pub const BuildEnv = struct {
         const file = ast.store.getFile();
         const header = ast.store.getHeader(file.header);
 
-        const resolver_root = try package_resolution.scanParsedHeader(self.gpa, file_abs, src, ast, header);
+        const resolver_root = try package_resolution.scanParsedHeader(self.gpa, file_abs, ast, header);
         var info = HeaderInfo{
             .kind = .package,
             .source_file_state = parsed.source_file_state,
@@ -1713,7 +1737,7 @@ pub const BuildEnv = struct {
         errdefer allocator.free(path);
         const env = try allocator.create(ModuleEnv);
         errdefer allocator.destroy(env);
-        env.* = try ModuleEnv.init(allocator, source_read.source);
+        env.* = try ModuleEnv.initWithSourceDigest(allocator, source_read.source, source_read.digest);
         errdefer env.deinit();
         try env.initCIRFields(base.module_path.getModuleName(path));
         try env.common.calcLineStarts(allocator);
@@ -1732,12 +1756,18 @@ pub const BuildEnv = struct {
     }
 
     const SourceRead = struct {
+        /// The file's bytes with line endings normalized.
         source: []u8,
+        /// The digest of `source`. The env parsed from this read carries it,
+        /// so the coordinator's parse task and package resolution never hash
+        /// the text again.
+        digest: base.SourceDigest,
         file_state: ?watch_inputs.State,
     };
 
     /// Read a source file with the allocator the coordinator's workers use for
-    /// module sources, so its parse can be handed to the coordinator.
+    /// module sources, so its parse can be handed to the coordinator. The
+    /// source is digested here, once.
     fn readSourceFile(self: *BuildEnv, path: []const u8) (Allocator.Error || error{ FileNotFound, AccessDenied, StreamTooLong, IoError })!SourceRead {
         const allocator = Coordinator.workerAllocatorFor(self.gpa, self.mode);
         const data = self.filesystem.readFile(path, allocator) catch |err| switch (err) {
@@ -1747,17 +1777,16 @@ pub const BuildEnv = struct {
             error.IoError => return error.IoError,
             error.OutOfMemory => return error.OutOfMemory,
         };
-        const file_state: ?watch_inputs.State = if (self.track_watch_inputs) .{ .hash = watch_inputs.hashBytes(data) } else null;
-
         // Normalize line endings (CRLF -> LF) for consistent cross-platform behavior.
-        const source = base.source_utils.normalizeLineEndingsRealloc(allocator, data) catch |err| {
+        const digested = base.source_utils.normalizeAndDigest(allocator, data, self.track_watch_inputs) catch |err| {
             allocator.free(data);
             return err;
         };
 
         return .{
-            .source = source,
-            .file_state = file_state,
+            .source = digested.source,
+            .digest = digested.digest,
+            .file_state = if (digested.file_digest) |file_digest| watch_inputs.fileState(file_digest) else null,
         };
     }
 
@@ -1769,7 +1798,7 @@ pub const BuildEnv = struct {
         };
         defer self.gpa.free(data);
 
-        return .{ .hash = watch_inputs.hashBytes(data) };
+        return watch_inputs.fileState(base.SourceDigest.of(data));
     }
 
     /// Cross-platform environment variable lookup.
@@ -1977,7 +2006,8 @@ pub const BuildEnv = struct {
                 if (url_view == null)
                     try self.currentFileWatchState(package.root_file)
                 else
-                    .{ .hash = package.root_source_hash }
+                    // Resolution records the root digest of every URL package.
+                    .{ .hash = package.root_source_hash.? }
             else
                 null;
             try self.ensurePackage(package_keys.identity(i), kind, package.root_file, root_file_state, url_view);
@@ -2453,7 +2483,7 @@ pub const BuildEnv = struct {
             try self.remapSyntheticRootDocumentElement(
                 &report.document,
                 element,
-                original_line_starts.items.items,
+                original_line_starts.items(),
             );
         }
     }
@@ -2669,7 +2699,7 @@ pub const BuildEnv = struct {
         source_dir: []const u8,
         env: *const ModuleEnv,
     ) Allocator.Error!void {
-        for (env.file_dependencies.items.items) |dep| {
+        for (env.file_dependencies.items()) |dep| {
             const relative_path = env.fileDependencyRelativePath(dep);
             const full_path = try std.fs.path.resolve(self.gpa, &.{ source_dir, relative_path });
             defer self.gpa.free(full_path);
@@ -2752,7 +2782,7 @@ pub const BuildEnv = struct {
             while (coordinator_packages.next()) |pkg| {
                 for (pkg.*.modules.items) |*mod| {
                     try Owned.append(allocator, &inputs, mod.path, mod.source_file_state.?);
-                    if (mod.moduleEnv()) |env| for (env.file_dependencies.items.items) |dep| {
+                    if (mod.moduleEnv()) |env| for (env.file_dependencies.items()) |dep| {
                         const path = try std.fs.path.resolve(allocator, &.{ mod.canonicalSourceDir(), env.fileDependencyRelativePath(dep) });
                         defer allocator.free(path);
                         const state: watch_inputs.State = switch (dep.state) {
@@ -2944,7 +2974,7 @@ pub const BuildEnv = struct {
         is_app: bool,
         /// True if this is a platform sibling module (e.g., Stdout, Stderr)
         is_platform_sibling: bool,
-        /// Dependency depth from root
+        /// Dependency depth from root, or `ModuleState.unreached_depth`
         depth: u32,
         /// Platform provides entries (only populated for platform main modules)
         provides_entries: []const ProvidesEntry = &.{},
@@ -3285,6 +3315,27 @@ pub const BuildEnv = struct {
         return public_modules.toOwnedSlice(allocator);
     }
 
+    /// Every checked module of the root package, public or not.
+    pub fn getRootPackageModuleEnvs(self: *BuildEnv, allocator: Allocator) Allocator.Error![]*const ModuleEnv {
+        const root_name = self.discovered_pkg_name orelse {
+            base.invariant("build env invariant violated: root package modules requested before dependency discovery", .{});
+        };
+        const coord = self.coordinator orelse {
+            base.invariant("build env invariant violated: root package modules requested before coordinator initialization", .{});
+        };
+        const root_coord_pkg = coord.packages.get(root_name) orelse {
+            base.invariant("build env invariant violated: root coordinator package is unavailable", .{});
+        };
+
+        var envs = std.ArrayList(*const ModuleEnv).empty;
+        errdefer envs.deinit(allocator);
+        for (root_coord_pkg.modules.items) |*module_state| {
+            const checked = module_state.checkedModule() orelse continue;
+            try envs.append(allocator, checked.env);
+        }
+        return envs.toOwnedSlice(allocator);
+    }
+
     /// Return the compiled modules that belong in generated documentation.
     /// Package roots use their public modules. Platform roots additionally use
     /// their root module when the header exposes root-owned names. Callers
@@ -3467,8 +3518,8 @@ pub const BuildEnv = struct {
         if (self.getPlatformSemanticData()) |platform| {
             if (platform.checked_artifact) |artifact| {
                 if (artifact.checking_context_identity.platform_app_relation != null or
-                    artifact.root_requests.requests.len > 0 or
-                    artifact.provided_exports.exports.len > 0)
+                    artifact.root_requests.requests.items().len > 0 or
+                    artifact.provided_exports.exports.items().len > 0)
                 {
                     return platform;
                 }
@@ -3494,7 +3545,7 @@ pub const BuildEnv = struct {
         var artifacts = std.ArrayList(*const check.CheckedArtifact.CheckedModuleArtifact).empty;
         errdefer artifacts.deinit(allocator);
         const builtin_artifact = &self.builtin_modules.checked_artifact;
-        for (root_artifact.lowering_visibility.module_ids) |key| {
+        for (root_artifact.lowering_visibility.module_ids.items()) |key| {
             if (checkedArtifactKeysEqual(key, root_artifact.key.digest())) continue;
             if (checkedArtifactKeysEqual(key, builtin_artifact.key.digest())) continue;
             const artifact = self.artifactByKey(key) orelse continue;
@@ -3503,9 +3554,25 @@ pub const BuildEnv = struct {
         return artifacts.toOwnedSlice(allocator);
     }
 
+    /// Register the constant store of every checked module of this build
+    /// with `index` (`Coordinator.registerConstStores`).
+    pub fn registerConstStores(self: *BuildEnv, index: *check.ConstStore.ImageIndex) Allocator.Error!void {
+        try self.builtCoordinator().registerConstStores(index);
+    }
+
     /// The digests of every checked module of this build, its link.
     pub fn boxyLinkDigests(self: *BuildEnv) Allocator.Error!boxy_interface.Digests {
         return self.builtCoordinator().boxyLinkDigests();
+    }
+
+    /// The modules whose units `artifact`'s unit waits for
+    /// (`Coordinator.unitDependencyKeys`). The caller owns the result.
+    pub fn unitDependencyKeys(
+        self: *BuildEnv,
+        allocator: Allocator,
+        artifact: *const check.CheckedArtifact.CheckedModuleArtifact,
+    ) Allocator.Error![]const [32]u8 {
+        return self.builtCoordinator().unitDependencyKeys(allocator, artifact);
     }
 
     /// Collect published checked artifacts available to post-check lowering.
@@ -3671,7 +3738,7 @@ pub const BuildEnv = struct {
                         );
                         const region_info = base.RegionInfo.position(
                             original_source,
-                            line_starts.items.items,
+                            line_starts.items(),
                             mapped_region.start.offset,
                             mapped_region.end.offset,
                         ) catch |err| base.invariant(
@@ -3685,7 +3752,7 @@ pub const BuildEnv = struct {
                             .warning_highlight,
                             owned_path,
                             original_source,
-                            line_starts.items.items,
+                            line_starts.items(),
                         );
                         return;
                     }
@@ -3725,22 +3792,25 @@ pub const BuildEnv = struct {
         regions: *std.ArrayList(base.Region),
         statement_idx: CIR.Statement.Idx,
     ) Allocator.Error!void {
-        switch (env.store.getStatement(statement_idx)) {
-            inline .s_decl, .s_var, .s_reassign, .s_expr => |stmt| try collectDbgRegionsInExpr(allocator, env, regions, stmt.expr),
+        switch (env.store.statementKind(statement_idx)) {
+            inline .s_decl, .s_var, .s_reassign, .s_expr => |kind| try collectDbgRegionsInExpr(allocator, env, regions, @field(env.store.statementView(statement_idx), @tagName(kind)).get(.expr)),
             .s_expect => {},
-            .s_dbg => |stmt| {
+            .s_dbg => {
+                const stmt = env.store.statementView(statement_idx).s_dbg.decode();
                 try regions.append(allocator, env.store.getStatementRegion(statement_idx));
                 try collectDbgRegionsInExpr(allocator, env, regions, stmt.expr);
             },
-            .s_for => |stmt| {
+            .s_for => {
+                const stmt = env.store.statementView(statement_idx).s_for.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, stmt.expr);
                 try collectDbgRegionsInExpr(allocator, env, regions, stmt.body);
             },
-            inline .s_while, .s_infinite_loop, .s_breakable_loop => |stmt| {
+            inline .s_while, .s_infinite_loop, .s_breakable_loop => |kind| {
+                const stmt = @field(env.store.statementView(statement_idx), @tagName(kind)).decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, stmt.cond);
                 try collectDbgRegionsInExpr(allocator, env, regions, stmt.body);
             },
-            .s_return => |stmt| try collectDbgRegionsInExpr(allocator, env, regions, stmt.expr),
+            .s_return => try collectDbgRegionsInExpr(allocator, env, regions, env.store.statementView(statement_idx).s_return.get(.expr)),
             .s_crash,
             .s_var_uninitialized,
             .s_break,
@@ -3772,24 +3842,27 @@ pub const BuildEnv = struct {
         regions: *std.ArrayList(base.Region),
         expr_idx: CIR.Expr.Idx,
     ) Allocator.Error!void {
-        switch (env.store.getExpr(expr_idx)) {
-            .e_str => |str| try collectDbgRegionsInExprSpan(allocator, env, regions, str.span),
-            .e_list => |list| try collectDbgRegionsInExprSpan(allocator, env, regions, list.elems),
-            .e_tuple => |tuple| try collectDbgRegionsInExprSpan(allocator, env, regions, tuple.elems),
-            .e_record => |record| {
+        switch (env.store.exprKind(expr_idx)) {
+            .e_str => try collectDbgRegionsInExprSpan(allocator, env, regions, env.store.exprView(expr_idx).e_str.get(.span)),
+            .e_list => try collectDbgRegionsInExprSpan(allocator, env, regions, env.store.exprView(expr_idx).e_list.get(.elems)),
+            .e_tuple => try collectDbgRegionsInExprSpan(allocator, env, regions, env.store.exprView(expr_idx).e_tuple.get(.elems)),
+            .e_record => {
+                const record = env.store.exprView(expr_idx).e_record.decode();
                 if (record.ext) |ext| try collectDbgRegionsInExpr(allocator, env, regions, ext);
                 for (env.store.sliceRecordFields(record.fields)) |field_idx| {
                     try collectDbgRegionsInExpr(allocator, env, regions, env.store.getRecordField(field_idx).value);
                 }
             },
-            .e_block => |block| {
+            .e_block => {
+                const block = env.store.exprView(expr_idx).e_block.decode();
                 var offset: usize = 0;
                 while (offset < block.stmts.span.len) : (offset += 1) {
                     try collectDbgRegionsInStatement(allocator, env, regions, env.store.statementAt(block.stmts, offset));
                 }
                 try collectDbgRegionsInExpr(allocator, env, regions, block.final_expr);
             },
-            .e_if => |if_expr| {
+            .e_if => {
+                const if_expr = env.store.exprView(expr_idx).e_if.decode();
                 for (env.store.sliceIfBranches(if_expr.branches)) |branch_idx| {
                     const branch = env.store.getIfBranch(branch_idx);
                     try collectDbgRegionsInExpr(allocator, env, regions, branch.cond);
@@ -3797,7 +3870,8 @@ pub const BuildEnv = struct {
                 }
                 try collectDbgRegionsInExpr(allocator, env, regions, if_expr.final_else);
             },
-            .e_match => |match_expr| {
+            .e_match => {
+                const match_expr = env.store.exprView(expr_idx).e_match.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, match_expr.cond);
                 for (env.store.sliceMatchBranches(match_expr.branches)) |branch_idx| {
                     const branch = env.store.getMatchBranch(branch_idx);
@@ -3805,56 +3879,65 @@ pub const BuildEnv = struct {
                     try collectDbgRegionsInExpr(allocator, env, regions, branch.value);
                 }
             },
-            .e_call => |call| {
+            .e_call => {
+                const call = env.store.exprView(expr_idx).e_call.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, call.func);
                 try collectDbgRegionsInExprSpan(allocator, env, regions, call.args);
             },
-            .e_lambda => |lambda| try collectDbgRegionsInExpr(allocator, env, regions, lambda.body),
-            .e_closure => |closure| try collectDbgRegionsInExpr(allocator, env, regions, closure.lambda_idx),
-            .e_nominal => |nominal| try collectDbgRegionsInExpr(allocator, env, regions, nominal.backing_expr),
-            .e_nominal_external => |nominal| try collectDbgRegionsInExpr(allocator, env, regions, nominal.backing_expr),
-            .e_binop => |binop| {
+            .e_lambda => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_lambda.get(.body)),
+            .e_closure => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_closure.get(.lambda_idx)),
+            .e_nominal => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_nominal.get(.backing_expr)),
+            .e_nominal_external => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_nominal_external.get(.backing_expr)),
+            .e_binop => {
+                const binop = env.store.exprView(expr_idx).e_binop.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, binop.lhs);
                 try collectDbgRegionsInExpr(allocator, env, regions, binop.rhs);
             },
-            .e_unary_minus => |unary| try collectDbgRegionsInExpr(allocator, env, regions, unary.expr),
-            .e_field_access => |field| try collectDbgRegionsInExpr(allocator, env, regions, field.receiver),
-            inline .e_method_call, .e_dispatch_call => |call| {
+            .e_unary_minus => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_unary_minus.get(.expr)),
+            .e_field_access => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_field_access.get(.receiver)),
+            inline .e_method_call, .e_dispatch_call => |kind| {
+                const call = @field(env.store.exprView(expr_idx), @tagName(kind)).decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, call.receiver);
                 try collectDbgRegionsInExprSpan(allocator, env, regions, call.args);
             },
-            .e_interpolation => |interpolation| {
+            .e_interpolation => {
+                const interpolation = env.store.exprView(expr_idx).e_interpolation.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, interpolation.first);
                 try collectDbgRegionsInExprSpan(allocator, env, regions, interpolation.parts);
             },
-            .e_structural_eq => |eq| {
+            .e_structural_eq => {
+                const eq = env.store.exprView(expr_idx).e_structural_eq.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, eq.lhs);
                 try collectDbgRegionsInExpr(allocator, env, regions, eq.rhs);
             },
-            .e_structural_hash => |hash| {
+            .e_structural_hash => {
+                const hash = env.store.exprView(expr_idx).e_structural_hash.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, hash.value);
                 try collectDbgRegionsInExpr(allocator, env, regions, hash.hasher);
             },
-            .e_method_eq => |eq| {
+            .e_method_eq => {
+                const eq = env.store.exprView(expr_idx).e_method_eq.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, eq.lhs);
                 try collectDbgRegionsInExpr(allocator, env, regions, eq.rhs);
             },
-            .e_type_method_call => |call| try collectDbgRegionsInExprSpan(allocator, env, regions, call.args),
-            .e_type_dispatch_call => |call| try collectDbgRegionsInExprSpan(allocator, env, regions, call.args),
-            .e_tuple_access => |access| try collectDbgRegionsInExpr(allocator, env, regions, access.tuple),
-            .e_dbg => |dbg| {
+            .e_type_method_call => try collectDbgRegionsInExprSpan(allocator, env, regions, env.store.exprView(expr_idx).e_type_method_call.get(.args)),
+            .e_type_dispatch_call => try collectDbgRegionsInExprSpan(allocator, env, regions, env.store.exprView(expr_idx).e_type_dispatch_call.get(.args)),
+            .e_tuple_access => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_tuple_access.get(.tuple)),
+            .e_dbg => {
+                const dbg = env.store.exprView(expr_idx).e_dbg.decode();
                 try regions.append(allocator, env.store.getExprRegion(expr_idx));
                 try collectDbgRegionsInExpr(allocator, env, regions, dbg.expr);
             },
-            .e_expect_err => |expect_err| try collectDbgRegionsInExpr(allocator, env, regions, expect_err.expr),
+            .e_expect_err => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_expect_err.get(.expr)),
             .e_expect => {},
-            .e_return => |ret| try collectDbgRegionsInExpr(allocator, env, regions, ret.expr),
-            .e_for => |for_expr| {
+            .e_return => try collectDbgRegionsInExpr(allocator, env, regions, env.store.exprView(expr_idx).e_return.get(.expr)),
+            .e_for => {
+                const for_expr = env.store.exprView(expr_idx).e_for.decode();
                 try collectDbgRegionsInExpr(allocator, env, regions, for_expr.expr);
                 try collectDbgRegionsInExpr(allocator, env, regions, for_expr.body);
             },
-            .e_run_low_level => |run| try collectDbgRegionsInExprSpan(allocator, env, regions, run.args),
-            .e_tag => |tag| try collectDbgRegionsInExprSpan(allocator, env, regions, tag.args),
+            .e_run_low_level => try collectDbgRegionsInExprSpan(allocator, env, regions, env.store.exprView(expr_idx).e_run_low_level.get(.args)),
+            .e_tag => try collectDbgRegionsInExprSpan(allocator, env, regions, env.store.exprView(expr_idx).e_tag.get(.args)),
             .e_num,
             .e_frac_f32,
             .e_frac_f64,
@@ -3898,11 +3981,90 @@ test "BuildEnv coordinator initialization releases every failed allocation" {
     defer builtins.deinit();
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: Allocator, borrowed: *BuiltinModules) Allocator.Error!void {
-            var env = BuildEnv.initBorrowingBuiltinModules(allocator, .single_threaded, 1, roc_target.RocTarget.detectNative(), ".", std.testing.io, borrowed);
+            var env = BuildEnv.initBorrowingBuiltinModules(allocator, .single_threaded, 1, roc_target.RocTarget.detectNative(), ".", std.testing.io, borrowed, .lss);
             defer env.deinit();
             try env.initCoordinator();
         }
     }.run, .{&builtins});
+}
+
+test "hosted library slots agree with the checked platform for aliased nested targets" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "platform", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.roc", .data =
+        \\app [main!] { pf: platform "./platform/main.roc" }
+        \\main! = || {}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "platform/Device.roc", .data =
+        \\Device := [].{
+        \\    number = |_| 42
+        \\    Port := [].{
+        \\        read! : {} => U8
+        \\    }
+        \\    write! : U8 => {}
+        \\}
+    });
+    const app = try tmp.dir.realPathFileAlloc(io, "app.roc", gpa);
+    defer gpa.free(app);
+    try tmp.dir.writeFile(io, .{ .sub_path = "Probe.roc", .data =
+        \\import pf.Device
+        \\expect Device.number({}) == 42
+    });
+    const probe = try tmp.dir.realPathFileAlloc(io, "Probe.roc", gpa);
+    defer gpa.free(probe);
+    const cwd = std.fs.path.dirname(app).?;
+    var builtins = try BuiltinModules.init(gpa, io);
+    defer builtins.deinit();
+
+    const read = "\"roc_in\": Driver.Port.read!";
+    const write = "\"roc_out\": Driver.write!";
+    for ([_][]const u8{ read ++ ", " ++ write, write ++ ", " ++ read }, 0..) |entries, pass| {
+        const platform = try std.fmt.allocPrint(gpa,
+            \\platform ""
+            \\    requires {{ main! : () => {{}} }}
+            \\    exposes [Driver as Device]
+            \\    packages {{}}
+            \\    provides {{ "roc_main": entry! }}
+            \\    hosted {{ {s} }}
+            \\
+            \\import Device as Driver
+            \\entry! = main!
+        , .{entries});
+        defer gpa.free(platform);
+        try tmp.dir.writeFile(io, .{ .sub_path = "platform/main.roc", .data = platform });
+        var env = BuildEnv.initBorrowingBuiltinModules(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, &builtins, .boxy);
+        defer env.deinit();
+        try env.discoverDependencies(app);
+        try env.compileDiscovered();
+        const coord = env.coordinator.?;
+        try std.testing.expect(!coord.hasUserErrors());
+        const pkg = coord.getPackage(env.selected_platform_package_name.?).?;
+        const device = pkg.getModule(pkg.getModuleId("Device").?).?.checkedArtifact().?;
+        const checked_platform = env.getPlatformSemanticData().?.checked_artifact.?;
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const expected = try @import("boxy_unit.zig").checkedHostedBindings(arena.allocator(), device, check.CheckedArtifact.importedView(checked_platform));
+        var module_env = BuildEnv.initBorrowingBuiltinModules(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, &builtins, .boxy);
+        defer module_env.deinit();
+        module_env.setEntryClosureOnly(true);
+        try module_env.buildResolvingMain(probe, app);
+        const module_coord = module_env.coordinator.?;
+        try std.testing.expect(!module_coord.hasUserErrors());
+        try std.testing.expect(module_env.getPlatformSemanticData() == null);
+        const module_pkg = module_coord.getPackage(module_env.selected_platform_package_name.?).?;
+        const module_device = module_pkg.getModule(module_pkg.getModuleId("Device").?).?.checkedArtifact().?;
+        const actual = (try module_coord.libraryHostedBindings(module_device, arena.allocator())).?;
+        try std.testing.expectEqual(@as(usize, 2), expected.len);
+        try std.testing.expectEqual(expected.len, actual.len);
+        for (expected, actual, 0..) |canonical, slot, index| {
+            try std.testing.expectEqualStrings(if (pass == index) "roc_in" else "roc_out", slot.symbol);
+            try std.testing.expectEqual(index, slot.dispatch_index);
+            try std.testing.expectEqualDeep(canonical, slot);
+        }
+    }
 }
 
 test "BuildEnv collectWatchInputStates includes package root state" {
@@ -3919,6 +4081,7 @@ test "BuildEnv collectWatchInputStates includes package root state" {
         roc_target.RocTarget.detectNative(),
         cwd,
         testing.io,
+        .lss,
     );
     defer env.deinit();
     env.setWatchInputTracking(true);
@@ -3975,6 +4138,7 @@ test "BuildEnv collectWatchInputStates resolves file dependencies from module so
         roc_target.RocTarget.detectNative(),
         tmp_root,
         testing.io,
+        .lss,
     );
     defer env.deinit();
     env.setWatchInputTracking(true);
@@ -3998,6 +4162,7 @@ test "BuildEnv collectWatchInputStates resolves file dependencies from module so
         build_options.compiler_compatibility_id,
         null,
         env.filesystem,
+        .lss,
     );
     coord.setWatchInputTracking(true);
     env.coordinator = coord;
@@ -4056,6 +4221,7 @@ test "BuildEnv header watch state hashes raw CRLF source bytes" {
         roc_target.RocTarget.detectNative(),
         tmp_root,
         testing.io,
+        .lss,
     );
     defer env.deinit();
     env.setWatchInputTracking(true);
@@ -4063,7 +4229,7 @@ test "BuildEnv header watch state hashes raw CRLF source bytes" {
     var header_info = try env.parseHeaderDeps(main_path);
     defer header_info.deinit(allocator);
 
-    const expected_hash = watch_inputs.hashBytes(source);
+    const expected_hash = base.SourceDigest.of(source).bytes;
     switch (header_info.source_file_state orelse return error.ExpectedWatchInputState) {
         .hash => |hash| try testing.expectEqualSlices(u8, &expected_hash, &hash),
         .missing, .unreadable => try testing.expect(false),
@@ -4107,7 +4273,7 @@ pub const OrderedSink = struct {
     const Entry = struct {
         pkg_name: []const u8, // borrowed from BuildEnv.packages
         module_name: []const u8, // borrowed from Coordinator module state
-        depth: u32, // min dependency depth
+        depth: u32, // min dependency depth, or `ModuleState.unreached_depth`
         reports: std.array_list.Managed(Report), // zero or more reports for this module
         ready: bool,
         emitted: bool,
@@ -4258,7 +4424,7 @@ pub const OrderedSink = struct {
             try self.entries.append(.{
                 .pkg_name = pkg_name,
                 .module_name = module_name,
-                .depth = std.math.maxInt(u32),
+                .depth = coordinator_mod.ModuleState.unreached_depth,
                 .reports = reports_list,
                 .ready = false,
                 .emitted = false,
@@ -4488,6 +4654,7 @@ test "discoverDependencies rejects absolute platform spec with Absolute Platform
         roc_target.RocTarget.detectNative(),
         tmp_root,
         testing.io,
+        .lss,
     );
     defer env.deinit();
 

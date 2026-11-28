@@ -248,6 +248,12 @@ const max_wrapper_inline_stmts: usize = 32;
 /// loops exceeds the work it does.
 const max_leaf_inline_stmts: usize = 400;
 
+/// The longest literal a string equality compares inline against constants,
+/// which reads every byte of a string of the literal's length. A longer
+/// literal is compared by the general loop, which stops at the first
+/// difference.
+const max_inline_literal_eq_bytes: usize = 64;
+
 /// One crash block a function shares among the checked operations that fail
 /// with one message. A framed block reads each site's source frames from
 /// phis whose operands accumulate as sites branch to it.
@@ -267,6 +273,12 @@ const SharedCrash = struct {
         self.frames_lens.deinit(allocator);
         self.from_blocks.deinit(allocator);
     }
+};
+
+/// A debug scope together with the source file of the code placed in it.
+const DebugFileScope = struct {
+    scope: LlvmBuilder.Metadata,
+    file: collections.OptionalU32,
 };
 
 /// Lowers statement-only LIR procedures to LLVM bitcode.
@@ -355,7 +367,7 @@ pub const MonoLlvmCodeGen = struct {
     /// result is dynamic (`LirProcSpec.dyn_result`).
     current_dyn_result: ?LocalId = null,
     /// The tail carry the procedure being compiled receives, when it takes
-    /// one (`procCarriesTailArgs`).
+    /// one (`LirProcSpec.takesTailCarry`).
     current_carry: ?LlvmBuilder.Value = null,
     /// The frame locals of the procedure being compiled, whose `frame`
     /// dynamic locals `frame_alloc` places.
@@ -367,6 +379,10 @@ pub const MonoLlvmCodeGen = struct {
     /// One address slot per `frame` dynamic local of the procedure being
     /// compiled, in run order.
     frame_slots: LlvmBuilder.Value = .none,
+    /// The `frame_callable` dynamic locals of the procedure being compiled,
+    /// whose storage `frame_alloc` places after the runs (design.md "Frame
+    /// Callables").
+    frame_callable_locals: std.ArrayListUnmanaged(LocalId) = .empty,
     /// Group storage this function allocated to enter other groups, and the
     /// function those slots belong to.
     tail_scratch_slots: std.ArrayList(?LlvmBuilder.Value) = .empty,
@@ -387,6 +403,10 @@ pub const MonoLlvmCodeGen = struct {
     /// so the argument local's own slot address never escapes into the call.
     /// Follows `wip`: saved and restored wherever the active function swaps.
     rc_arg_scratch: ?LlvmBuilder.Value = null,
+    /// While a `decref_queued` helper's body is emitted: the drop queue it
+    /// received, which it passes to each `decref_queued` child and each
+    /// queued teardown. Null in every other body, which passes a null queue.
+    rc_queue_arg: ?LlvmBuilder.Value = null,
     /// Shims that give cold-path builtin calls the preserve_most convention,
     /// indexed by `BuiltinSymbol`. See `emitBuiltinCall`.
     cold_shims: [builtin_symbol_count]?ColdShim = @splat(null),
@@ -454,6 +474,11 @@ pub const MonoLlvmCodeGen = struct {
     local_slots: []LocalSlot = &.{},
     /// The current procedure's local representations (see `ValuePlan`).
     value_plan: ValuePlan,
+    /// The active procedure's one array of `str_from_parts` operands, sized
+    /// for its largest concatenation, once a concatenation needs it. Each
+    /// concatenation's builtin reads its parts before returning, so every
+    /// concatenation in the procedure reuses the same frame bytes.
+    str_parts_slot: ?LlvmBuilder.Value = null,
     /// By local id, the current definition of each SSA local. Rows are set
     /// from the procedure's own plan and cleared from its SSA inventory.
     local_value_storage: std.ArrayList(LocalValue) = .empty,
@@ -502,11 +527,9 @@ pub const MonoLlvmCodeGen = struct {
     /// Synthetic default-platform apps preserve source proc names and local
     /// debug locations for crash and stack-overflow diagnostics.
     enable_default_platform_diagnostics: bool = false,
-    /// Every function this module defines is optimized for size rather than
-    /// speed (`--opt=size`): it carries LLVM's `optsize` and `minsize`, no
-    /// `inlinehint`, and no shape-based `alwaysinline`, so LLVM's size cost
-    /// model is the one measure of every inlining decision.
-    optimize_for_size: bool = false,
+    /// What LLVM optimizes this module's functions for, which decides the
+    /// inlining attributes they carry (`addInliningAttrs`).
+    optimization: Optimization = .speed,
     /// Translates to DW_AT_producer for the compile unit (in DWARF). Users of
     /// this module for codegen should set the value (with the following format)
     /// so that it carries the compiler version:
@@ -520,7 +543,7 @@ pub const MonoLlvmCodeGen = struct {
     debug_enums_fwd_ref: LlvmBuilder.Metadata.Optional = .none,
     debug_globals_fwd_ref: LlvmBuilder.Metadata.Optional = .none,
     current_subprogram: LlvmBuilder.Metadata.Optional = .none,
-    current_debug_file: u32 = SourceLoc.no_file,
+    current_debug_file: collections.OptionalU32 = .none,
     /// The current procedure's source line, where SSA locals' debug values
     /// are placed when their defining statement is in an inline scope.
     current_proc_line: u32 = 0,
@@ -529,6 +552,9 @@ pub const MonoLlvmCodeGen = struct {
     /// call-site scope is that procedure's concrete `DISubprogram`.
     debug_inline_subprograms: std.AutoHashMap(u32, LlvmBuilder.Metadata),
     debug_inline_callsites: std.AutoHashMap(u32, LlvmBuilder.Metadata),
+    /// Lexical blocks that put a scope's code from another source file under
+    /// that file (see `debugScopeInFile`), cleared with the inline scopes.
+    debug_file_scopes: std.AutoHashMap(DebugFileScope, LlvmBuilder.Metadata),
     /// Debug type metadata per layout index, memoized per module build.
     debug_types: std.AutoHashMap(u32, LlvmBuilder.Metadata),
 
@@ -704,6 +730,7 @@ pub const MonoLlvmCodeGen = struct {
             .stmt_entry_blocks = collections.DenseMap(u32, LlvmBuilder.Function.Block.Index).init(allocator),
             .debug_inline_subprograms = std.AutoHashMap(u32, LlvmBuilder.Metadata).init(allocator),
             .debug_inline_callsites = std.AutoHashMap(u32, LlvmBuilder.Metadata).init(allocator),
+            .debug_file_scopes = std.AutoHashMap(DebugFileScope, LlvmBuilder.Metadata).init(allocator),
             .debug_types = std.AutoHashMap(u32, LlvmBuilder.Metadata).init(allocator),
         };
     }
@@ -741,6 +768,7 @@ pub const MonoLlvmCodeGen = struct {
         for (self.shared_crashes.items) |*shared| shared.deinit(self.allocator);
         self.shared_crashes.deinit(self.allocator);
         self.frame_runs.deinit(self.allocator);
+        self.frame_callable_locals.deinit(self.allocator);
         self.inline_everywhere.deinit(self.allocator);
         self.stack_check_procs.deinit(self.allocator);
         self.local_slot_storage.deinit(self.allocator);
@@ -754,6 +782,7 @@ pub const MonoLlvmCodeGen = struct {
         self.deferred_str_captures.deinit();
         self.deferred_str_capture_scratch.deinit(self.allocator);
         self.debug_types.deinit();
+        self.debug_file_scopes.deinit();
         self.debug_inline_callsites.deinit();
         self.debug_inline_subprograms.deinit();
         self.proc_registry.deinit();
@@ -813,10 +842,11 @@ pub const MonoLlvmCodeGen = struct {
         self.debug_enums_fwd_ref = .none;
         self.debug_globals_fwd_ref = .none;
         self.current_subprogram = .none;
-        self.current_debug_file = SourceLoc.no_file;
+        self.current_debug_file = .none;
         self.current_source_stmt = null;
         self.debug_inline_subprograms.clearRetainingCapacity();
         self.debug_inline_callsites.clearRetainingCapacity();
+        self.debug_file_scopes.clearRetainingCapacity();
         self.debug_types.clearRetainingCapacity();
         self.stack_check_decls = null;
     }
@@ -1258,10 +1288,10 @@ pub const MonoLlvmCodeGen = struct {
                 allocated_name = symbol_name;
                 break :blk symbol_name;
             };
-            const file = if (loc.file == SourceLoc.no_file or loc.file >= self.store.sourceFileCount())
+            const file = if (loc.file.get()) |file_index| (if (file_index >= self.store.sourceFileCount())
                 ""
             else
-                self.store.sourceFileName(loc.file);
+                self.store.sourceFileName(file_index)) else "";
 
             const name_ptr = (try self.staticBytes(name)).toConst().?;
             const file_ptr = (try self.staticBytes(file)).toConst().?;
@@ -1309,15 +1339,62 @@ pub const MonoLlvmCodeGen = struct {
 
     /// DIFile metadata for one source file table entry (interned by the
     /// builder, so repeated calls are cheap).
-    fn debugFileFor(self: *MonoLlvmCodeGen, builder: *LlvmBuilder, file: u32) Error!LlvmBuilder.Metadata {
-        const name = if (file == SourceLoc.no_file)
-            "<roc-generated>"
+    fn debugFileFor(self: *MonoLlvmCodeGen, builder: *LlvmBuilder, file: collections.OptionalU32) Error!LlvmBuilder.Metadata {
+        const name = if (file.get()) |file_index|
+            self.store.sourceFileName(file_index)
         else
-            self.store.sourceFileName(file);
+            "<roc-generated>";
         return builder.debugFile(
             builder.metadataString(name) catch return error.OutOfMemory,
             builder.metadataString(".") catch return error.OutOfMemory,
         ) catch return error.OutOfMemory;
+    }
+
+    /// Gives the generated function under construction an artificial
+    /// subprogram and puts its instructions at line 0 in it. LLVM keeps the
+    /// locations of inlined code only in callers that have a subprogram, so
+    /// every generated function that calls Roc procs needs one.
+    fn beginGeneratedFunctionDebugInfo(
+        self: *MonoLlvmCodeGen,
+        name: LlvmBuilder.Metadata.String,
+        linkage_name: LlvmBuilder.Metadata.String,
+        loc: SourceLoc,
+    ) Error!void {
+        const builder, const wip = try self.builderAndWip();
+        if (wip.strip) return;
+        const compile_unit = self.debug_compile_unit.unwrap() orelse return;
+        const line = if (loc.hasLocation()) loc.line else 0;
+        const func = wip.function;
+        const subprogram = builder.debugSubprogram(
+            try self.debugFileFor(builder, loc.file),
+            name,
+            linkage_name,
+            line,
+            line,
+            builder.debugSubroutineType(null) catch return error.OutOfMemory,
+            .{
+                .di_flags = .{ .Artificial = true },
+                .sp_flags = .{
+                    .Definition = true,
+                    .LocalToUnit = func.ptrConst(builder).global.ptrConst(builder).linkage == .internal,
+                },
+            },
+            compile_unit,
+        ) catch return error.OutOfMemory;
+        func.setSubprogram(subprogram, builder);
+        wip.debug_location = .{ .location = .{
+            .line = 0,
+            .column = 0,
+            .scope = subprogram.toOptional(),
+            .inlined_at = .none,
+        } };
+    }
+
+    fn beginEntrypointWrapperDebugInfo(self: *MonoLlvmCodeGen, symbol_name: []const u8, entry_proc: LirProcSpecId) Error!void {
+        const builder = self.builder orelse return error.CompilationFailed;
+        if (builder.strip) return;
+        const name = builder.metadataString(symbol_name) catch return error.OutOfMemory;
+        try self.beginGeneratedFunctionDebugInfo(name, name, self.store.procLoc(entry_proc));
     }
 
     fn procDebugName(
@@ -1326,10 +1403,8 @@ pub const MonoLlvmCodeGen = struct {
         proc_id: LirProcSpecId,
         proc: LirProcSpec,
     ) Error!LlvmBuilder.Metadata.String {
-        if (self.enable_default_platform_diagnostics) {
-            if (self.store.procDebugName(proc_id)) |name| {
-                return builder.metadataString(name) catch return error.OutOfMemory;
-            }
+        if (self.store.procDebugName(proc_id)) |name| {
+            return builder.metadataString(name) catch return error.OutOfMemory;
         }
         return try self.procSymbolDebugName(builder, proc_id, proc);
     }
@@ -1940,21 +2015,6 @@ pub const MonoLlvmCodeGen = struct {
         return if (proc.dyn_result != .none) .zst else proc.ret_layout;
     }
 
-    /// Whether `proc` takes a tail carry: a hidden parameter after its
-    /// arguments holding the storage a frame-replacing call moved its dynamic
-    /// arguments into, because their bytes lived in the frame it replaced.
-    /// Such a procedure has a dynamic parameter and can receive
-    /// frame-replacing calls; it releases its carry when it returns or
-    /// replaces its own frame. Every other caller passes none.
-    fn procCarriesTailArgs(store: *const lir.LirStore, proc: LirProcSpec) bool {
-        if (proc.abi != .roc or proc.tail_group == .none) return false;
-        const params = store.getLocalSpan(proc.args);
-        for (0..params.len) |i| {
-            if (store.getLocal(GuardedList.at(params, i)).dyn != null) return true;
-        }
-        return false;
-    }
-
     /// The signature of a procedure's register-passing function: its C-ABI
     /// classification of arguments and result. The classification only decides how a
     /// value splits into scalars; `fastCallConv` leaves register assignment to
@@ -1967,7 +2027,7 @@ pub const MonoLlvmCodeGen = struct {
         /// Parameter index of the address of the caller's result storage,
         /// for a procedure whose result is dynamic (`LirProcSpec.dyn_result`).
         dyn_result_index: ?u32,
-        /// Parameter index of the tail carry (`procCarriesTailArgs`).
+        /// Parameter index of the tail carry (`LirProcSpec.takesTailCarry`).
         carry_index: ?u32,
         /// Parameter index of the caller's pending cell
         /// (`LirProcSpec.takesPendingCell`).
@@ -2030,7 +2090,7 @@ pub const MonoLlvmCodeGen = struct {
             cursor += 1;
             break :blk cursor - 1;
         } else null;
-        const carry_index: ?u32 = if (procCarriesTailArgs(self.store, proc)) blk: {
+        const carry_index: ?u32 = if (proc.takesTailCarry()) blk: {
             cursor += 1;
             break :blk cursor - 1;
         } else null;
@@ -2074,7 +2134,7 @@ pub const MonoLlvmCodeGen = struct {
         // The dynamic result address, the tail carry, the pending cell, and
         // the storage pointer follow the arguments, so their registers are
         // reserved up front.
-        const trailing_pointers: u32 = @as(u32, @intFromBool(proc.dyn_result != .none)) + @intFromBool(procCarriesTailArgs(self.store, proc)) + @intFromBool(proc.takesPendingCell());
+        const trailing_pointers: u32 = @as(u32, @intFromBool(proc.dyn_result != .none)) + @intFromBool(proc.takesTailCarry()) + @intFromBool(proc.takesPendingCell());
         if (self.usesTailDrivers()) {
             // Only a signature past the wasm parameter limit takes a storage
             // pointer, which then counts against the limit too.
@@ -2272,6 +2332,10 @@ pub const MonoLlvmCodeGen = struct {
         var wip = LlvmBuilder.WipFunction.init(builder, .{ .function = driver.function, .strip = builder.strip }) catch return error.OutOfMemory;
         defer wip.deinit();
         self.wip = &wip;
+        if (!builder.strip) {
+            const name = builder.metadataString(driver.function.name(builder).slice(builder).?) catch return error.OutOfMemory;
+            try self.beginGeneratedFunctionDebugInfo(name, name, .none);
+        }
         const ptr_ty = try self.ptrType();
         const pending_ptr = self.tail_pending_ptr.?;
         const args_ptr = self.tail_args_ptr.?;
@@ -2401,7 +2465,7 @@ pub const MonoLlvmCodeGen = struct {
         const carry_offset = self.tailArgOffsets(arg_layouts, offsets);
         const moved = try self.allocator.alloc(LlvmBuilder.Value, arg_locals.len);
         defer self.allocator.free(moved);
-        const carry: ?LlvmBuilder.Value = if (procCarriesTailArgs(self.store, proc)) try self.emitTailCarry(proc, arg_locals, moved) else null;
+        const carry: ?LlvmBuilder.Value = if (proc.takesTailCarry()) try self.emitTailCarry(proc, arg_locals, moved) else null;
         const param_locals = self.store.getLocalSpan(proc.args);
         for (arg_layouts, offsets, 0..) |arg_layout, offset, i| {
             const dst = try self.offsetPtr(self.tail_args_ptr.?, offset);
@@ -2655,6 +2719,11 @@ pub const MonoLlvmCodeGen = struct {
         var wip = LlvmBuilder.WipFunction.init(builder, .{ .function = packed_fn, .strip = builder.strip }) catch return error.OutOfMemory;
         defer wip.deinit();
         self.wip = &wip;
+        if (!builder.strip) try self.beginGeneratedFunctionDebugInfo(
+            try self.procDebugName(builder, proc_id, proc),
+            try self.procSymbolDebugName(builder, proc_id, proc),
+            self.store.procLoc(proc_id),
+        );
         const entry = wip.block(0, "entry") catch return error.OutOfMemory;
         wip.cursor = .{ .block = entry };
         if (self.stack_checks) try self.emitStackCheck(packed_fn);
@@ -2825,6 +2894,7 @@ pub const MonoLlvmCodeGen = struct {
         self.stmt_entry_blocks.clearRetainingCapacity();
         self.debug_inline_subprograms.clearRetainingCapacity();
         self.debug_inline_callsites.clearRetainingCapacity();
+        self.debug_file_scopes.clearRetainingCapacity();
 
         const outer_subprogram = self.current_subprogram;
         const outer_debug_file = self.current_debug_file;
@@ -2833,18 +2903,16 @@ pub const MonoLlvmCodeGen = struct {
             self.current_debug_file = outer_debug_file;
         }
         self.current_subprogram = .none;
-        self.current_debug_file = SourceLoc.no_file;
+        self.current_debug_file = .none;
         if (!builder.strip) {
             const proc_loc = self.store.procLoc(proc_id);
             const file = try self.debugFileFor(builder, proc_loc.file);
-            const name_str = if (self.enable_default_platform_diagnostics)
-                try self.procDebugName(builder, proc_id, proc)
-            else
-                try self.procSymbolDebugName(builder, proc_id, proc);
-            const linkage_name_str = if (self.enable_default_platform_diagnostics)
-                try self.procSymbolDebugName(builder, proc_id, proc)
-            else
-                name_str;
+            // The debug name is the procedure's source name and the linkage
+            // name is its symbol, so a debugger shows the Roc function and
+            // still finds the code. A compiler-generated procedure has only
+            // its symbol.
+            const name_str = try self.procDebugName(builder, proc_id, proc);
+            const linkage_name_str = try self.procSymbolDebugName(builder, proc_id, proc);
             const subprogram = builder.debugSubprogram(
                 file,
                 name_str,
@@ -2966,11 +3034,13 @@ pub const MonoLlvmCodeGen = struct {
             try self.unpackProcArgs(proc);
         }
         for (self.value_plan.inventory.items) |local| {
-            const place = self.value_plan.place(local);
-            if (place != .view) continue;
+            const view = switch (self.value_plan.place(local)) {
+                .view, .part => |view| view,
+                .slot, .parameter => continue,
+            };
             const sa = self.sizeAlignOf(self.localLayout(local));
             self.local_slots[@backingInt(local)] = .{
-                .ptr = try self.offsetPtr(self.slot(place.view.source).ptr, place.view.offset),
+                .ptr = try self.offsetPtr(self.slot(view.source).ptr, view.offset),
                 .layout_idx = self.localLayout(local),
                 .size = sa.size,
                 .alignment = self.llvmAlignment(sa.alignment),
@@ -3034,6 +3104,7 @@ pub const MonoLlvmCodeGen = struct {
     }
 
     fn clearValuePlan(self: *MonoLlvmCodeGen) void {
+        self.str_parts_slot = null;
         for (self.value_plan.ssaLocals()) |local| self.local_values[@backingInt(local)] = .{};
         self.value_plan.clear();
         self.value_journal.clearRetainingCapacity();
@@ -3059,24 +3130,32 @@ pub const MonoLlvmCodeGen = struct {
             return self.proc.tail_group == .none and (sig.tail_args.stored[index] or sig.lowered.args[index] == .indirect);
         }
 
+        /// A whole-value alias of a record, tuple, tag union, string, list, or
+        /// box, or a record or tag payload component of a record or tag union,
+        /// names the bytes of its source. Every emitter of these layouts writes
+        /// a local's slot only at the local's own definition (builtins and
+        /// in-place updates write through the target's address or into heap
+        /// memory), so the planner's single-definition proof covers them all.
         pub fn memoryView(self: PlanOps, assign: @FieldType(lir.LIR.CFStmt, "assign_ref")) ?ValuePlan.View {
             const cg = self.codegen;
             const target_layout = cg.localLayout(assign.target);
             const target = cg.layoutValue(target_layout);
-            if (target.tag != .struct_ and target.tag != .tag_union) return null;
             const source_layout = cg.localLayout(assign.op.source);
             const source = cg.layoutValue(source_layout);
-            if (source.tag != .struct_ and source.tag != .tag_union) return null;
             var field_layout = source_layout;
             var offset: u32 = 0;
             switch (assign.op.kind) {
-                .local, .nominal, .list_reinterpret => {},
+                .local, .nominal, .list_reinterpret => {
+                    if (!wholeValueViewable(target_layout, target) or !wholeValueViewable(source_layout, source)) return null;
+                },
                 .field => {
+                    if (target.tag != .struct_ and target.tag != .tag_union) return null;
                     if (source.tag != .struct_) return null;
                     offset = cg.layouts().getStructFieldOffsetByOriginalIndex(source.getStruct().idx, assign.op.index);
                     field_layout = cg.layouts().getStructFieldLayoutByOriginalIndex(source.getStruct().idx, assign.op.index);
                 },
                 .tag_payload, .tag_payload_struct => {
+                    if (target.tag != .struct_ and target.tag != .tag_union) return null;
                     if (source.tag != .tag_union) return null;
                     field_layout = cg.tagPayloadLayout(source_layout, assign.op.tag_discriminant);
                     const payload = cg.layoutValue(field_layout);
@@ -3092,6 +3171,44 @@ pub const MonoLlvmCodeGen = struct {
             const target_sa = cg.sizeAlignOf(target_layout);
             if (target_sa.size > source_sa.size or target_sa.alignment.toByteUnits() > source_sa.alignment.toByteUnits()) return null;
             return .{ .source = assign.op.source, .offset = offset };
+        }
+
+        fn wholeValueViewable(layout_idx: layout.Idx, value: layout.Layout) bool {
+            if (layout_idx == .str) return true;
+            return switch (value.tag) {
+                .struct_, .tag_union, .list, .list_of_zst, .box, .box_of_zst => true,
+                .scalar, .closure, .erased_callable, .zst, .ptr, .hole, .dynamic => false,
+            };
+        }
+
+        /// Where a record or tag construction stores operand `operand` in its
+        /// target's own slot, when the operand has exactly the stored layout
+        /// and nonzero size: a record field's offset, or a tag payload's 0. A
+        /// box target's bytes live in a fresh heap cell instead.
+        pub fn partOffset(self: PlanOps, target: LocalId, operand: LocalId, construction: ValuePlan.Construction) ?u32 {
+            const cg = self.codegen;
+            if (cg.localDyn(target) != null or cg.localDyn(operand) != null) return null;
+            const target_layout = cg.localLayout(target);
+            const target_value = cg.layoutValue(target_layout);
+            switch (construction) {
+                .field => |index| {
+                    if (target_value.tag != .struct_) return null;
+                    const struct_idx = target_value.getStruct().idx;
+                    const field_layout = cg.layouts().getStructFieldLayoutByOriginalIndex(struct_idx, index);
+                    if (cg.localLayout(operand) != field_layout or cg.layoutDataSize(field_layout) == 0) return null;
+                    return cg.layouts().getStructFieldOffsetByOriginalIndex(struct_idx, index);
+                },
+                .payload => |discriminant| {
+                    if (target_value.tag != .tag_union) return null;
+                    const payload_layout = cg.tagPayloadLayout(target_layout, discriminant);
+                    if (cg.localLayout(operand) != payload_layout or cg.layoutByteSize(payload_layout) == 0) return null;
+                    return 0;
+                },
+            }
+        }
+
+        pub fn slotSize(self: PlanOps, local: LocalId) u32 {
+            return self.codegen.sizeAlignOf(self.codegen.localLayout(local)).size;
         }
 
         /// The prologue reads register pieces and copies packed or erased
@@ -3237,10 +3354,11 @@ pub const MonoLlvmCodeGen = struct {
             self.rc_arg_scratch = outer_rc_scratch;
         }
 
-        var wip = LlvmBuilder.WipFunction.init(builder, .{ .function = wrapper, .strip = true }) catch return error.OutOfMemory;
+        var wip = LlvmBuilder.WipFunction.init(builder, .{ .function = wrapper, .strip = builder.strip }) catch return error.OutOfMemory;
         defer wip.deinit();
         self.wip = &wip;
         self.rc_arg_scratch = null;
+        if (entry_proc) |proc_id| try self.beginEntrypointWrapperDebugInfo(symbol_name, proc_id);
 
         const entry = wip.block(0, "entry") catch return error.OutOfMemory;
         wip.cursor = .{ .block = entry };
@@ -3348,6 +3466,7 @@ pub const MonoLlvmCodeGen = struct {
         defer wip.deinit();
         self.wip = &wip;
         self.rc_arg_scratch = null;
+        try self.beginEntrypointWrapperDebugInfo(symbol_name, entry_proc);
 
         const entry = wip.block(0, "entry") catch return error.OutOfMemory;
         wip.cursor = .{ .block = entry };
@@ -3571,8 +3690,24 @@ pub const MonoLlvmCodeGen = struct {
     /// block's length for every use of the frame register in that block.
     fn allocFrameSlots(self: *MonoLlvmCodeGen, proc: LirProcSpec) Error!void {
         self.frame_runs.clearRetainingCapacity();
+        self.frame_callable_locals.clearRetainingCapacity();
         self.frame_slots = .none;
         const frame_locals = self.store.getLocalSpan(proc.frame_locals);
+        for (0..frame_locals.len) |i| {
+            const local = GuardedList.at(frame_locals, i);
+            const dyn = self.localDyn(local) orelse continue;
+            if (dyn.storage != .frame_callable) continue;
+            try self.frame_callable_locals.append(self.allocator, local);
+            const local_slot = &self.local_slots[@backingInt(local)];
+            if (local_slot.allocated) continue;
+            local_slot.* = .{
+                .ptr = try self.allocEntryBlockSlot(.i8, self.targetWordSize(), self.targetPointerAlignment(), "frame_callable"),
+                .layout_idx = self.store.getLocal(local).layout_idx,
+                .size = self.targetWordSize(),
+                .alignment = self.targetPointerAlignment(),
+                .allocated = true,
+            };
+        }
         var count: u32 = 0;
         for (0..frame_locals.len) |i| {
             const local = GuardedList.at(frame_locals, i);
@@ -3994,20 +4129,31 @@ pub const MonoLlvmCodeGen = struct {
         callees: std.ArrayList(LirProcSpecId) = .empty,
     };
 
-    /// The inlining attributes of a generated procedure. Diagnostics builds
-    /// keep every procedure out of line so crash frames name it. A speed
-    /// build inlines the procedures `computeInlineEverywhere` selects
-    /// everywhere and hints the rest. A size build adds neither: with every
-    /// function in the module marked `minsize` (`builder.zig` marks the
-    /// whole module before optimization), LLVM's size cost model decides
-    /// each call on the callee's expanded size alone.
+    /// What LLVM optimizes a module's functions for.
+    pub const Optimization = enum {
+        /// LLVM runs no optimization passes. No function carries an inlining
+        /// attribute, so every procedure's code is generated exactly once.
+        none,
+        /// Every function carries LLVM's `optsize` and `minsize`
+        /// (`builder.zig` marks the whole module before optimization), no
+        /// `inlinehint`, and no shape-based `alwaysinline`, so LLVM's size
+        /// cost model decides each call on the callee's expanded size alone.
+        size,
+        /// The procedures `computeInlineEverywhere` selects are inlined
+        /// everywhere and the rest carry `inlinehint`.
+        speed,
+    };
+
+    /// The inlining attributes of a generated procedure, which
+    /// `optimization` decides. Diagnostics builds keep every procedure out
+    /// of line so crash frames name it.
     fn addInliningAttrs(self: *MonoLlvmCodeGen, attrs_wip: *LlvmBuilder.FunctionAttributes.Wip, proc_id: LirProcSpecId) Error!void {
         const builder = self.builder orelse return error.CompilationFailed;
         if (self.enable_default_platform_diagnostics) {
             try attrs_wip.addFnAttr(.@"noinline", builder);
         } else if (self.inlineEverywhere(proc_id)) {
             try attrs_wip.addFnAttr(.alwaysinline, builder);
-        } else if (!self.optimize_for_size) {
+        } else if (self.optimization == .speed) {
             try attrs_wip.addFnAttr(.inlinehint, builder);
         }
     }
@@ -4021,8 +4167,9 @@ pub const MonoLlvmCodeGen = struct {
     /// wrapper (no loop, few statements of its own) and a leaf (moderate
     /// size, no calls). Larger bodies remain ordinary calls, so LLVM can
     /// simplify them before deciding whether to duplicate them into their
-    /// callers. That is a speed policy; a size build selects nothing and
-    /// leaves every decision to LLVM's size cost model.
+    /// callers. That is a speed policy: a size build selects nothing and
+    /// leaves every decision to LLVM's size cost model, and an unoptimized
+    /// build selects nothing because it inlines nothing.
     ///
     /// A leaf is judged by the body it has once its always-inline callees
     /// are expanded into it, which is the body LLVM emits: it calls nothing
@@ -4036,7 +4183,7 @@ pub const MonoLlvmCodeGen = struct {
     fn computeInlineEverywhere(self: *MonoLlvmCodeGen, procs: []const LirProcSpec, entrypoints: []const Entrypoint) Error!void {
         self.inline_everywhere.clearRetainingCapacity();
         try self.inline_everywhere.appendNTimes(self.allocator, false, procs.len);
-        if (self.optimize_for_size) return;
+        if (self.optimization != .speed) return;
         const shapes = try self.allocator.alloc(InlineShape, procs.len);
         defer {
             for (shapes) |*shape| shape.callees.deinit(self.allocator);
@@ -4332,11 +4479,13 @@ pub const MonoLlvmCodeGen = struct {
             try self.stmt_visit_marks.resize(self.allocator, count);
             @memset(self.stmt_visit_marks.items[old_len..], 0);
         }
-        if (self.stmt_visit_epoch == std.math.maxInt(u32)) {
+        const next_epoch, const overflowed = @addWithOverflow(self.stmt_visit_epoch, 1);
+        if (overflowed != 0) {
             @memset(self.stmt_visit_marks.items, 0);
-            self.stmt_visit_epoch = 0;
+            self.stmt_visit_epoch = 1;
+        } else {
+            self.stmt_visit_epoch = next_epoch;
         }
-        self.stmt_visit_epoch += 1;
     }
 
     /// Mark `stmt_id` visited in the current walk; false if it already was.
@@ -4393,28 +4542,42 @@ pub const MonoLlvmCodeGen = struct {
     fn setStmtDebugLocation(self: *MonoLlvmCodeGen, stmt_id: CFStmtId) Error!void {
         const wip = self.wip orelse return;
         if (wip.strip) return;
-        if (self.current_subprogram.unwrap() == null) return;
+        const current_subprogram = self.current_subprogram.unwrap() orelse return;
         const loc = self.store.stmtLoc(stmt_id);
         const inline_scope = self.store.stmtInlineScope(stmt_id);
-        const scope = if (inline_scope == lir.LIR.InlineScopeId.none)
-            self.current_subprogram
+        const scope, const scope_file = if (inline_scope == lir.LIR.InlineScopeId.none)
+            .{ current_subprogram, self.current_debug_file }
         else
-            (try self.debugInlineSubprogram(inline_scope)).toOptional();
+            .{ try self.debugInlineSubprogram(inline_scope), self.store.inlineScope(inline_scope).source_loc.file };
         const inlined_at = if (inline_scope == lir.LIR.InlineScopeId.none)
             LlvmBuilder.Metadata.Optional.none
         else
             (try self.debugInlineCallsite(inline_scope)).toOptional();
         // ARC-inserted statements get line 0 so they do not affect stepping;
         // see `OriginKind.isArcInserted`.
-        const has_compatible_location = loc.hasLocation() and
-            !self.store.stmtOriginKind(stmt_id).isArcInserted() and
-            (inline_scope != lir.LIR.InlineScopeId.none or loc.file == self.current_debug_file);
+        const has_location = loc.hasLocation() and
+            !self.store.stmtOriginKind(stmt_id).isArcInserted();
         wip.debug_location = .{ .location = .{
-            .line = if (has_compatible_location) loc.line else 0,
-            .column = if (has_compatible_location) loc.column else 0,
-            .scope = scope,
+            .line = if (has_location) loc.line else 0,
+            .column = if (has_location) loc.column else 0,
+            .scope = (if (has_location) try self.debugScopeInFile(scope, scope_file, loc.file) else scope).toOptional(),
             .inlined_at = inlined_at,
         } };
+    }
+
+    /// The scope for code from source `file` inside `scope`, whose own file is
+    /// `scope_file`. A DWARF line row takes its file from its scope, so code
+    /// from another file (e.g. a compiler-generated callee's body, which
+    /// carries its call site's location, or a procedure with no location of
+    /// its own) goes in a lexical block that names its file.
+    fn debugScopeInFile(self: *MonoLlvmCodeGen, scope: LlvmBuilder.Metadata, scope_file: collections.OptionalU32, file: collections.OptionalU32) Error!LlvmBuilder.Metadata {
+        if (file == scope_file or file == .none) return scope;
+        const key: DebugFileScope = .{ .scope = scope, .file = file };
+        if (self.debug_file_scopes.get(key)) |existing| return existing;
+        const builder = self.builder orelse return error.CompilationFailed;
+        const block = builder.debugLexicalBlock(scope, try self.debugFileFor(builder, file), 0, 0) catch return error.OutOfMemory;
+        try self.debug_file_scopes.put(key, block);
+        return block;
     }
 
     fn debugInlineSubprogram(self: *MonoLlvmCodeGen, id: lir.LIR.InlineScopeId) Error!LlvmBuilder.Metadata {
@@ -4460,17 +4623,17 @@ pub const MonoLlvmCodeGen = struct {
         if (self.debug_inline_callsites.get(@backingInt(root))) |existing| return existing;
         const builder = self.builder orelse return error.CompilationFailed;
 
-        const Pending = struct { id: lir.LIR.InlineScopeId, parent_scope: LlvmBuilder.Metadata };
+        const Pending = struct { id: lir.LIR.InlineScopeId, parent_scope: LlvmBuilder.Metadata, parent_file: collections.OptionalU32 };
         var chain: std.ArrayList(Pending) = .empty;
         defer chain.deinit(self.allocator);
         var id = root;
         while (true) {
             const scope = self.store.inlineScope(id);
-            const parent_scope = if (scope.parent == lir.LIR.InlineScopeId.none)
-                self.current_subprogram.unwrap().?
+            const parent_scope, const parent_file = if (scope.parent == lir.LIR.InlineScopeId.none)
+                .{ self.current_subprogram.unwrap().?, self.current_debug_file }
             else
-                try self.debugInlineSubprogram(scope.parent);
-            try chain.append(self.allocator, .{ .id = id, .parent_scope = parent_scope });
+                .{ try self.debugInlineSubprogram(scope.parent), self.store.inlineScope(scope.parent).source_loc.file };
+            try chain.append(self.allocator, .{ .id = id, .parent_scope = parent_scope, .parent_file = parent_file });
             if (scope.parent == lir.LIR.InlineScopeId.none) break;
             if (self.debug_inline_callsites.contains(@backingInt(scope.parent))) break;
             id = scope.parent;
@@ -4486,7 +4649,7 @@ pub const MonoLlvmCodeGen = struct {
             callsite = builder.debugLocation(
                 if (scope.call_site.hasLocation()) scope.call_site.line else 0,
                 if (scope.call_site.hasLocation()) scope.call_site.column else 0,
-                pending.parent_scope,
+                try self.debugScopeInFile(pending.parent_scope, pending.parent_file, scope.call_site.file),
                 parent_callsite,
             ) catch return error.OutOfMemory;
             try self.debug_inline_callsites.put(@backingInt(pending.id), callsite);
@@ -4515,6 +4678,18 @@ pub const MonoLlvmCodeGen = struct {
             },
             .assign_ref => |assign| {
                 try self.emitAssignRef(assign.target, assign.op);
+                // Release the slot a stamped field take left
+                // (`LIR.RefExtra.releases_recursion_box`).
+                if (self.store.stmtRowOrDefault(assign.extra).releases_recursion_box) {
+                    const ptr_ty = try self.ptrType();
+                    const desc = try self.wordValue(self.localDyn(assign.op.source).?.desc);
+                    const bytes = try self.bytesAddress(assign.op.source);
+                    switch (assign.op.kind) {
+                        .field => _ = try self.callBoxyRuntime("roc_desc_field_release_box", .void, &.{ ptr_ty, ptr_ty, .i32 }, &.{ desc, bytes, try self.intValue(.i32, assign.op.index) }),
+                        .tag_payload_struct => _ = try self.callBoxyRuntime("roc_desc_tag_payload_release_box", .void, &.{ ptr_ty, ptr_ty }, &.{ desc, bytes }),
+                        .local, .discriminant, .tag_payload, .list_reinterpret, .nominal => unreachable, // ARC stamps only field and whole-payload takes
+                    }
+                }
                 try work.append(wa, .{ .node = assign.next });
             },
             .assign_literal => |assign| {
@@ -4550,12 +4725,13 @@ pub const MonoLlvmCodeGen = struct {
                 try self.emitPackedErasedFn(
                     assign_stmt.target,
                     assign.proc,
-                    assign.capture,
-                    assign.capture_layout,
+                    assign.capture.get(),
+                    assign.capture_layout.get(),
                     assign.on_drop,
                     assign.on_copy,
-                    assign.reuse,
+                    assign.reuse.get(),
                     assign.reuse_unique,
+                    assign.frame,
                 );
                 try work.append(wa, .{ .node = assign_stmt.next });
             },
@@ -4676,6 +4852,9 @@ pub const MonoLlvmCodeGen = struct {
         if (op.kind == .field and self.localDyn(op.source) != null) {
             return self.emitDyn(target, .{ .field_addr = .{ .base = op.source, .desc = self.localDyn(op.source).?.desc, .field_index = .{ .immediate = op.index } } });
         }
+        if (op.kind == .tag_payload_struct and self.localDyn(op.source) != null) {
+            return self.emitDyn(target, .{ .tag_payload_addr = .{ .base = op.source, .desc = self.localDyn(op.source).?.desc, .payload_index = 0 } });
+        }
         if (op.kind == .local and self.localDyn(target) != null) {
             return self.emitDyn(target, .{ .copy = .{ .src = op.source, .desc = self.localDyn(target).?.desc } });
         }
@@ -4785,9 +4964,11 @@ pub const MonoLlvmCodeGen = struct {
         return self.inline_everywhere.items.len > @backingInt(proc_id) and self.inline_everywhere.items[@backingInt(proc_id)];
     }
 
-    /// The local addresses passed to out-of-line procedures and explicit RC
-    /// helpers. Procedure calls follow the fast ABI; RC calls follow the same
-    /// scratch-versus-local rule as emission. No ownership is inferred here.
+    /// The local addresses passed to out-of-line procedures, explicit RC
+    /// helpers, and low-level operations. Procedure calls follow the fast
+    /// ABI; RC calls follow the same scratch-versus-local rule as emission;
+    /// low-level operations follow `ValuePlan.lowLevelAccess`. No ownership
+    /// is inferred here.
     const AddressedCallLocals = struct {
         codegen: *MonoLlvmCodeGen,
 
@@ -4795,6 +4976,21 @@ pub const MonoLlvmCodeGen = struct {
 
         pub fn storageRoot(self: AddressedCallLocals, local: LocalId) LocalId {
             return self.codegen.value_plan.storageRoot(local);
+        }
+
+        pub fn ownerDefinition(self: AddressedCallLocals, local: LocalId) lir.StackPlan.AliasDefinition {
+            return self.codegen.value_plan.ownerDefinition(local);
+        }
+
+        pub fn isDeferredCapture(self: AddressedCallLocals, local: LocalId) bool {
+            return self.codegen.value_plan.isDeferredCapture(local);
+        }
+
+        fn appendLowLevelOperand(self: AddressedCallLocals, local: LocalId, access: ValuePlan.Access, out: *std.ArrayList(LocalId)) AppendError!void {
+            const codegen = self.codegen;
+            if (access != .address or codegen.isSsaLocal(local) or codegen.localDyn(local) != null) return;
+            if (codegen.layoutByteSize(codegen.localLayout(local)) == 0) return;
+            try out.append(codegen.allocator, local);
         }
 
         pub fn appendAddressed(self: AddressedCallLocals, stmt: lir.LIR.CFStmt, out: *std.ArrayList(LocalId)) AppendError!void {
@@ -4807,7 +5003,17 @@ pub const MonoLlvmCodeGen = struct {
                     return;
                 },
                 .assign_call => {},
-                .init_uninitialized, .assign_ref, .assign_literal, .assign_call_erased, .assign_packed_erased_fn, .assign_low_level, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .set_local, .debug, .expect, .expect_err, .dyn, .runtime_error, .comptime_exhaustiveness_failed, .switch_stmt, .switch_initialized_payload, .str_match, .str_match_set, .join, .jump, .ret, .crash => return,
+                // A builtin reads and writes the operands it takes by address
+                // only during its own statement.
+                .assign_low_level => |assign| {
+                    if (codegen.store.stmtRowOrDefault(assign.extra).dyn_elem_desc) return;
+                    const access = ValuePlan.lowLevelAccess(assign.op);
+                    try self.appendLowLevelOperand(assign.target, access.target(), out);
+                    const args = codegen.store.getLocalSpan(assign.args);
+                    for (0..args.len) |i| try self.appendLowLevelOperand(GuardedList.at(args, i), access.arg(i), out);
+                    return;
+                },
+                .init_uninitialized, .assign_ref, .assign_literal, .assign_call_erased, .assign_packed_erased_fn, .assign_list, .assign_struct, .assign_tag, .store_struct, .store_tag, .set_local, .debug, .expect, .expect_err, .dyn, .runtime_error, .comptime_exhaustiveness_failed, .switch_stmt, .switch_initialized_payload, .str_match, .str_match_set, .join, .jump, .ret, .crash => return,
             }
             const call = stmt.assign_call;
             if (codegen.store.stmtRowOrDefault(call.extra).replaces_frame) return;
@@ -4834,6 +5040,16 @@ pub const MonoLlvmCodeGen = struct {
             }
         }
     };
+
+    /// Whether the storage of `a` and `b` overlaps.
+    fn sharesBytes(self: *MonoLlvmCodeGen, a: LocalId, b: LocalId) bool {
+        const plan = &self.value_plan;
+        if (plan.storageRoot(a) != plan.storageRoot(b)) return false;
+        const a_start = plan.storageOffset(a);
+        const b_start = plan.storageOffset(b);
+        return a_start < b_start + self.sizeAlignOf(self.localLayout(b)).size and
+            b_start < a_start + self.sizeAlignOf(self.localLayout(a)).size;
+    }
 
     fn emitSlotLifetimeMarkers(self: *MonoLlvmCodeGen, stmt_id: CFStmtId) Error!void {
         const markers = self.slot_lifetimes.at(stmt_id);
@@ -4933,10 +5149,10 @@ pub const MonoLlvmCodeGen = struct {
         // A dynamic target receives the callee's result at its own storage.
         const target_storage = if (self.localDyn(target) != null) try self.dynAddress(target) else null;
         if (sig.lowered.ret == .indirect) {
-            // The `sret` pointer is `noalias`: no argument may name its slot.
+            // The `sret` pointer is `noalias`: no argument may name its bytes.
             if (builtin.mode == .debug) {
                 for (0..arg_locals.len) |i| {
-                    if (self.value_plan.storageRoot(GuardedList.at(arg_locals, i)) == self.value_plan.storageRoot(target)) invariant("LLVM codegen invariant violated: call target {d} is also one of its arguments", .{@backingInt(target)});
+                    if (self.sharesBytes(GuardedList.at(arg_locals, i), target)) invariant("LLVM codegen invariant violated: call target {d} is also one of its arguments", .{@backingInt(target)});
                 }
             }
             try param_types.append(self.allocator, ptr_ty);
@@ -5213,6 +5429,7 @@ pub const MonoLlvmCodeGen = struct {
         on_copy: lir.LIR.ErasedCallableOnDrop,
         reuse: ?LocalId,
         reuse_unique: bool,
+        frame: bool,
     ) Error!void {
         try self.prepareLocalWrite(target);
         if (capture) |capture_local| try self.materializeLocalIfDeferred(capture_local);
@@ -5270,7 +5487,26 @@ pub const MonoLlvmCodeGen = struct {
             );
         } else blk: {
             const payload_size: u64 = builtins.erased_callable.payloadSizeFor(self.targetWordSize(), capture_size);
-            const fresh_ptr = try self.callBuiltin(
+            const fresh_ptr = if (frame) frame_blk: {
+                // The callable lives in an entry-block slot of this
+                // statement's own, whose refcount word is the frame marker.
+                const prefix: u32 = builtins.erased_callable.payload_alignment;
+                const storage = try self.allocEntryBlockSlot(
+                    .i8,
+                    @intCast(prefix + payload_size),
+                    LlvmBuilder.Alignment.fromByteUnits(builtins.erased_callable.payload_alignment),
+                    "frame_callable",
+                );
+                const word = self.targetWordSize();
+                const wip = self.wip orelse return error.CompilationFailed;
+                _ = wip.store(
+                    .normal,
+                    builder.intValue(self.ptrSizedIntType(), builtins.utils.targetRefcountFrame(word)) catch return error.OutOfMemory,
+                    try self.offsetPtr(storage, prefix - word),
+                    LlvmBuilder.Alignment.fromByteUnits(word),
+                ) catch return error.OutOfMemory;
+                break :frame_blk try self.offsetPtr(storage, prefix);
+            } else try self.callBuiltin(
                 .allocate_with_refcount,
                 ptr_ty,
                 &.{ self.ptrSizedIntType(), .i32, .i1 },
@@ -5308,7 +5544,7 @@ pub const MonoLlvmCodeGen = struct {
             return;
         }
         if (abi.elem_size == 0) {
-            try self.storeListFields(target_ptr, builder.nullValue(try self.ptrType()) catch return error.OutOfMemory, elem_locals.len, 0);
+            try self.storeListFields(target_ptr, builder.nullValue(try self.ptrType()) catch return error.OutOfMemory, elem_locals.len, RocList.encodeCapacityForWidth(elem_locals.len));
             return;
         }
         try self.callBuiltinVoid(
@@ -5347,8 +5583,10 @@ pub const MonoLlvmCodeGen = struct {
             const field_size = self.layoutDataSize(field_layout);
             if (field_size == 0) continue;
             const offset = self.layouts().getStructFieldOffsetByOriginalIndex(base_layout.getStruct().idx, @intCast(i));
-            const dst = try self.offsetPtr(storage.ptr, offset);
-            try self.storeLocalToMemory(dst, field_local, field_size, self.alignmentForLayout(field_layout));
+            if (!self.definedInPlace(field_local, target, offset)) {
+                const dst = try self.offsetPtr(storage.ptr, offset);
+                try self.storeLocalToMemory(dst, field_local, field_size, self.alignmentForLayout(field_layout));
+            }
             written[written_len] = .{ .start = offset, .end = offset + field_size };
             written_len += 1;
         }
@@ -5365,7 +5603,9 @@ pub const MonoLlvmCodeGen = struct {
             const payload_layout = self.tagPayloadLayout(storage.layout_idx, discriminant);
             const payload_size = self.layoutByteSize(payload_layout);
             if (payload_size > 0) {
-                try self.storeLocalToMemory(storage.ptr, payload_local, payload_size, self.alignmentForLayout(payload_layout));
+                if (!self.definedInPlace(payload_local, target, 0)) {
+                    try self.storeLocalToMemory(storage.ptr, payload_local, payload_size, self.alignmentForLayout(payload_layout));
+                }
                 written[written_len] = .{ .start = 0, .end = payload_size };
                 written_len += 1;
             }
@@ -5383,6 +5623,18 @@ pub const MonoLlvmCodeGen = struct {
         try self.zeroUnwritten(storage, written[0..written_len]);
     }
 
+    /// Whether the value plan defined `operand` in place at `offset` in the
+    /// storage of the construction `target` (`ValuePlan.Place.part`), so its
+    /// bytes are already there. The bytes of its layout's padding are not
+    /// part of its value, and the construction zeroes them like any gap.
+    fn definedInPlace(self: *const MonoLlvmCodeGen, operand: LocalId, target: LocalId, offset: u32) bool {
+        const part = switch (self.value_plan.place(operand)) {
+            .part => |part| part,
+            .slot, .parameter, .view => return false,
+        };
+        return part.source == self.value_plan.storageRoot(target) and part.offset == self.value_plan.storageOffset(target) + offset;
+    }
+
     /// A byte range `[start, end)` of an aggregate a constructor writes.
     const ByteRange = struct { start: u32, end: u32 };
 
@@ -5397,6 +5649,7 @@ pub const MonoLlvmCodeGen = struct {
     /// iteration that nothing reads (design.md "LLVM Value Representation").
     fn zeroUnwritten(self: *MonoLlvmCodeGen, storage: AggregateStorage, written: []ByteRange) Error!void {
         const size = storage.size;
+        const storage_alignment: u32 = @intCast(self.alignmentForLayout(storage.layout_idx).toByteUnits() orelse 1);
         std.mem.sortUnstable(ByteRange, written, {}, struct {
             fn lessThan(_: void, a: ByteRange, b: ByteRange) bool {
                 return a.start < b.start;
@@ -5407,10 +5660,32 @@ pub const MonoLlvmCodeGen = struct {
             if (builtin.mode == .debug and (range.start < cursor or range.end > size)) {
                 invariant("LLVM codegen invariant violated: aggregate write [{d}, {d}) overlaps another or leaves its {d}-byte storage", .{ range.start, range.end, size });
             }
-            if (range.start > cursor) try self.zeroBytes(try self.offsetPtr(storage.ptr, cursor), range.start - cursor);
+            if (range.start > cursor) try self.zeroGap(storage.ptr, cursor, range.start - cursor, storage_alignment);
             cursor = range.end;
         }
-        if (size > cursor) try self.zeroBytes(try self.offsetPtr(storage.ptr, cursor), size - cursor);
+        if (size > cursor) try self.zeroGap(storage.ptr, cursor, size - cursor, storage_alignment);
+    }
+
+    /// Zero `len` bytes at `start` in aggregate storage aligned to
+    /// `storage_alignment`. A gap shorter than that alignment is padding
+    /// (between fields, or after a discriminant), and is zeroed by aligned
+    /// integer stores, at most one per power of two below the alignment. A
+    /// constructed aggregate is often copied whole right after (into a list
+    /// element, a box, or a parent), and LLVM's MemCpyOpt rewrites a
+    /// `memset` followed by a copy of the bytes around it by updating its
+    /// memory SSA, which costs time proportional to the block for every such
+    /// pair. A longer gap is a short variant's unused payload bytes, which a
+    /// `memset` zeroes.
+    fn zeroGap(self: *MonoLlvmCodeGen, base: LlvmBuilder.Value, start: u32, len: u32, storage_alignment: u32) Error!void {
+        if (len >= storage_alignment) return self.zeroBytes(try self.offsetPtr(base, start), len);
+        var at = start;
+        const end = start + len;
+        while (at < end) {
+            var width: u32 = 1;
+            while (width * 2 <= end - at and at % (width * 2) == 0) width *= 2;
+            try self.storeRawInt(base, at, intTypeForBytes(@intCast(width)), 0, width);
+            at += width;
+        }
     }
 
     fn emitStoreStruct(self: *MonoLlvmCodeGen, dest: LocalId, struct_layout: layout.Idx, fields: LocalSpan) Error!void {
@@ -5502,25 +5777,6 @@ pub const MonoLlvmCodeGen = struct {
             try self.materializeLocalSpanIfDeferred(arg_locals);
         }
         switch (op) {
-            .boxed_sequence_pack => {
-                const ptr_ty = try self.ptrType();
-                const record = GuardedList.at(arg_locals, 0);
-                const offset = GuardedList.at(arg_locals, 1);
-                const result = try self.callBuiltin(.boxed_sequence_pack, ptr_ty, &.{ ptr_ty, self.ptrSizedIntType(), self.ptrSizedIntType() }, &.{
-                    self.slot(record).ptr,
-                    try self.intValue(self.ptrSizedIntType(), self.layoutByteSize(self.localLayout(record))),
-                    try self.coerceScalar(try self.loadLocalScalar(offset, .u32), self.ptrSizedIntType(), false),
-                });
-                try self.storePointer(self.slot(target).ptr, result);
-            },
-            .boxed_sequence_unpack => {
-                const ptr_ty = try self.ptrType();
-                try self.callBuiltinVoid(.boxed_sequence_unpack, &.{ ptr_ty, ptr_ty, self.ptrSizedIntType() }, &.{
-                    self.slot(target).ptr,
-                    try self.loadPointer(self.slot(GuardedList.at(arg_locals, 0)).ptr),
-                    try self.intValue(self.ptrSizedIntType(), self.layoutByteSize(self.localLayout(target))),
-                });
-            },
             .num_plus, .num_minus, .num_times => unreachable, // LIR lowering commits these to typed operations through CheckedArithmetic.lowerOp
             .list_prefetched => unreachable, // LIR lowering splits this into an alias and `list_prefetch`
             .bool_not => {
@@ -5627,6 +5883,12 @@ pub const MonoLlvmCodeGen = struct {
             .num_negate, .num_negate_checked => try self.emitNumericNegate(target, op, GuardedList.at(arg_locals, 0)),
             .num_abs, .num_abs_checked => try self.emitNumericAbs(target, op, GuardedList.at(arg_locals, 0)),
             .num_abs_diff => try self.emitNumericAbsDiff(target, arg_locals),
+            .dec_mul_saturated => {
+                const lhs = try self.loadLocalScalar(GuardedList.at(arg_locals, 0), .dec);
+                const rhs = try self.loadLocalScalar(GuardedList.at(arg_locals, 1), .dec);
+                const result = try self.callI128BinaryBuiltin(LowLevelBuiltins.decBinaryArith(op), lhs, rhs);
+                try self.storeLocalScalar(target, .dec, result);
+            },
             .num_pow => if (self.localLayout(target) == .dec)
                 try self.emitDecPow(target, arg_locals)
             else
@@ -5660,7 +5922,7 @@ pub const MonoLlvmCodeGen = struct {
             .list_slack_unique => try self.emitListSlackUnique(target, arg_locals),
             .list_owned_unique => try self.emitListOwnedUnique(target, arg_locals, unique_args),
             .list_prepend => try self.emitListPrepend(target, arg_locals, unique_args),
-            .list_sublist, .list_sublist_borrowed, .list_take_first, .list_take_last, .list_clear => try self.emitListSublist(target, op, arg_locals, unique_args),
+            .list_sublist, .list_sublist_borrowed, .list_clear => try self.emitListSublist(target, op, arg_locals, unique_args),
             .list_drop_at => try self.emitListDropAt(target, arg_locals, unique_args),
             .list_swap => try self.emitListSwap(target, arg_locals, unique_args),
             .list_set => try self.emitListSet(target, arg_locals, unique_args),
@@ -5794,7 +6056,8 @@ pub const MonoLlvmCodeGen = struct {
             .box_unbox => unreachable, // ARC normalizes consuming Box.unbox into box_unbox_borrowed plus explicit payload incref and box decref
             .box_unbox_borrowed => try self.emitBoxUnbox(target, GuardedList.at(arg_locals, 0)),
             .box_prepare_update => try self.emitBoxPrepareUpdate(target, GuardedList.at(arg_locals, 0), unique_args),
-            .erased_capture_load => try self.emitErasedCaptureLoad(target, GuardedList.at(arg_locals, 0)),
+            .erased_capture_load => unreachable, // ARC normalizes a consuming capture load into the borrowed load plus explicit RC statements
+            .erased_capture_load_borrowed => try self.emitErasedCaptureLoad(target, GuardedList.at(arg_locals, 0)),
             .ptr_alloca => try self.emitPtrAlloca(target),
             .box_alloc_zeroed => try self.emitBoxAllocZeroed(target),
             .ptr_store => try self.emitPtrStore(GuardedList.at(arg_locals, 0), GuardedList.at(arg_locals, 1)),
@@ -8231,37 +8494,35 @@ pub const MonoLlvmCodeGen = struct {
         const bodies_start = work.items.len;
         try work.append(wa, .{ .str_match_body = .{ .block = final_miss_block, .stmt = str_match_set.on_miss } });
 
+        var segment = std.ArrayList(u32).empty;
+        defer segment.deinit(self.allocator);
+
         var index: usize = 0;
         while (index < arms.len) {
-            const arm = GuardedList.at(arms, index);
-            const prefix = self.store.getStringLiteral(arm.prefix);
-            if (prefix.len == 0) {
-                const next_miss_block = if (index + 1 == arms.len)
-                    final_miss_block
-                else
-                    wip.block(0, "str_match_set_next") catch return error.OutOfMemory;
-                try work.append(wa, .{ .str_match_body = try self.emitStrMatchArmTest(str_match_set.source, source, arm, next_miss_block) });
-                if (index + 1 < arms.len) {
-                    wip.cursor = .{ .block = next_miss_block };
-                }
-                index += 1;
-                continue;
+            var exact_end = index;
+            while (exact_end < arms.len and self.strMatchArmIsExact(GuardedList.at(arms, exact_end))) {
+                exact_end += 1;
             }
-
-            var segment_end = index + 1;
-            while (segment_end < arms.len and self.store.getStringLiteral(GuardedList.at(arms, segment_end).prefix).len > 0) {
-                segment_end += 1;
+            var prefixed_end = index;
+            while (prefixed_end < arms.len and self.store.getStringLiteral(GuardedList.at(arms, prefixed_end).prefix).len > 0) {
+                prefixed_end += 1;
             }
+            // An arm that is neither exact nor prefixed is a segment of its own.
+            const segment_end = @max(exact_end, prefixed_end, index + 1);
 
             const segment_miss_block = if (segment_end == arms.len)
                 final_miss_block
             else
                 wip.block(0, "str_match_set_next") catch return error.OutOfMemory;
 
-            if (self.strMatchSetDistinctFirstByteCount(arms, index, segment_end) > 1) {
+            // Exact arms alone dispatch on the source's length, so only a
+            // segment with other prefixed arms dispatches on its first byte.
+            if (exact_end < segment_end and self.strMatchSetDistinctFirstByteCount(arms, index, segment_end) > 1) {
                 try self.emitStrMatchSetFirstByteDispatch(str_match_set.source, source, arms, index, segment_end, segment_miss_block, wa, work);
             } else {
-                try self.emitStrMatchSetLinearRange(str_match_set.source, source, arms, index, segment_end, segment_miss_block, wa, work);
+                segment.clearRetainingCapacity();
+                for (index..segment_end) |arm_index| try segment.append(self.allocator, @intCast(arm_index));
+                try self.emitStrMatchArmsInOrder(str_match_set.source, source, arms, segment.items, segment_miss_block, wa, work);
             }
 
             if (segment_end < arms.len) {
@@ -8274,6 +8535,11 @@ pub const MonoLlvmCodeGen = struct {
         // emitted.
         const mark = self.valueMark();
         for (work.items[bodies_start..]) |*item| item.str_match_body.mark = mark;
+    }
+
+    /// Whether `arm` matches exactly one string, its prefix.
+    fn strMatchArmIsExact(self: *MonoLlvmCodeGen, arm: anytype) bool {
+        return arm.end == .exact and self.store.getStrMatchSteps(arm.steps).len == 0;
     }
 
     fn strMatchSetDistinctFirstByteCount(self: *MonoLlvmCodeGen, arms: anytype, start: usize, end: usize) usize {
@@ -8292,29 +8558,43 @@ pub const MonoLlvmCodeGen = struct {
         return count;
     }
 
-    fn emitStrMatchSetLinearRange(
+    /// Try the arms `arm_indices` names, in that order, from the cursor;
+    /// `miss_block` is where a source none of them matches continues. Each
+    /// maximal run of exact arms is decided by one dispatch
+    /// (`emitStrMatchExactRun`), and every other arm by its own test.
+    fn emitStrMatchArmsInOrder(
         self: *MonoLlvmCodeGen,
         source_local: LocalId,
         source: StrMatchSource,
         arms: anytype,
-        start: usize,
-        end: usize,
+        arm_indices: []const u32,
         miss_block: LlvmBuilder.Function.Block.Index,
         wa: Allocator,
         work: *std.ArrayList(StmtWork),
     ) Error!void {
         const wip = self.wip orelse return error.CompilationFailed;
 
-        for (start..end) |index| {
-            const arm = GuardedList.at(arms, index);
-            const next_miss_block = if (index + 1 == end)
+        var start: usize = 0;
+        while (start < arm_indices.len) {
+            var exact_end = start;
+            while (exact_end < arm_indices.len and self.strMatchArmIsExact(GuardedList.at(arms, arm_indices[exact_end]))) {
+                exact_end += 1;
+            }
+            const end = @max(exact_end, start + 1);
+            const next_miss_block = if (end == arm_indices.len)
                 miss_block
             else
                 wip.block(0, "str_match_set_next") catch return error.OutOfMemory;
-            try work.append(wa, .{ .str_match_body = try self.emitStrMatchArmTest(source_local, source, arm, next_miss_block) });
-            if (index + 1 < end) {
+            if (exact_end > start) {
+                try self.emitStrMatchExactRun(source, arms, arm_indices[start..end], next_miss_block, wa, work);
+            } else {
+                const arm = GuardedList.at(arms, arm_indices[start]);
+                try work.append(wa, .{ .str_match_body = try self.emitStrMatchArmTest(source_local, source, arm, next_miss_block) });
+            }
+            if (end < arm_indices.len) {
                 wip.cursor = .{ .block = next_miss_block };
             }
+            start = end;
         }
     }
 
@@ -8360,30 +8640,181 @@ pub const MonoLlvmCodeGen = struct {
         }
         switch_inst.finish(wip);
 
+        var bucket = std.ArrayList(u32).empty;
+        defer bucket.deinit(self.allocator);
         for (bucket_bytes.items) |byte| {
             const bucket_block = bucket_blocks[byte] orelse return error.CompilationFailed;
             wip.cursor = .{ .block = bucket_block };
-            var remaining_in_bucket: usize = 0;
+            bucket.clearRetainingCapacity();
             for (start..end) |i| {
                 const arm = GuardedList.at(arms, i);
-                if (self.store.getStringLiteral(arm.prefix)[0] == byte) remaining_in_bucket += 1;
+                if (self.store.getStringLiteral(arm.prefix)[0] == byte) try bucket.append(self.allocator, @intCast(i));
+            }
+            try self.emitStrMatchArmsInOrder(source_local, source, arms, bucket.items, miss_block, wa, work);
+        }
+    }
+
+    /// One arm of an exact run while the run is dispatched. `key` is what
+    /// the current dispatch tells the arms apart by: the literal's length
+    /// first, then its bytes a chunk at a time.
+    const StrMatchExactEntry = struct {
+        key: u64,
+        /// The arm's position in the run, which is its place in arm order.
+        position: u32,
+
+        fn lessThan(_: void, a: StrMatchExactEntry, b: StrMatchExactEntry) bool {
+            if (a.key != b.key) return a.key < b.key;
+            return a.position < b.position;
+        }
+    };
+
+    /// The arms of one exact run that agree on everything dispatched so far:
+    /// `entries[start..end]`, whose literals have one length and the same
+    /// first `covered` bytes, tested from `block`.
+    const StrMatchExactGroup = struct {
+        block: LlvmBuilder.Function.Block.Index,
+        start: u32,
+        end: u32,
+        covered: u32,
+    };
+
+    /// Decide a run of exact arms, each of which matches only its own
+    /// literal, from the cursor; `miss_block` is where a source equal to none
+    /// of the literals continues. The source's length selects the literals
+    /// of that length, and its bytes then select among those a chunk at a
+    /// time, so a source is compared with one literal however many arms the
+    /// run has. Arms with equal literals keep arm order: the first matches.
+    fn emitStrMatchExactRun(
+        self: *MonoLlvmCodeGen,
+        source: StrMatchSource,
+        arms: anytype,
+        arm_indices: []const u32,
+        miss_block: LlvmBuilder.Function.Block.Index,
+        wa: Allocator,
+        work: *std.ArrayList(StmtWork),
+    ) Error!void {
+        const wip = self.wip orelse return error.CompilationFailed;
+
+        const literals = try self.allocator.alloc([]const u8, arm_indices.len);
+        defer self.allocator.free(literals);
+        const match_blocks = try self.allocator.alloc(LlvmBuilder.Function.Block.Index, arm_indices.len);
+        defer self.allocator.free(match_blocks);
+        const entries = try self.allocator.alloc(StrMatchExactEntry, arm_indices.len);
+        defer self.allocator.free(entries);
+        for (arm_indices, literals, match_blocks, entries, 0..) |arm_index, *literal, *match_block, *entry, position| {
+            const arm = GuardedList.at(arms, arm_index);
+            literal.* = self.store.getStringLiteral(arm.prefix);
+            match_block.* = wip.block(0, "str_match_success") catch return error.OutOfMemory;
+            try work.append(wa, .{ .str_match_body = .{ .block = match_block.*, .stmt = arm.on_match } });
+            entry.* = .{ .key = literal.len, .position = @intCast(position) };
+        }
+
+        var groups = std.ArrayList(StrMatchExactGroup).empty;
+        defer groups.deinit(self.allocator);
+        var targets = std.ArrayList(LlvmBuilder.Function.Block.Index).empty;
+        defer targets.deinit(self.allocator);
+
+        try self.emitStrMatchExactDispatch(source.len, entries, 0, 0, literals, match_blocks, miss_block, &groups, &targets);
+
+        while (groups.pop()) |group| {
+            wip.cursor = .{ .block = group.block };
+            const group_entries = entries[group.start..group.end];
+            const literal = literals[group_entries[0].position];
+
+            if (group_entries.len == 1) {
+                const rest_ptr = try self.offsetPtr(source.bytes, group.covered);
+                const mismatch = (try self.emitStrMatchLiteralMismatch(rest_ptr, literal[group.covered..])) orelse
+                    unreachable; // a group is pushed only while bytes of its literals remain undecided
+                _ = wip.brCond(mismatch, miss_block, match_blocks[group_entries[0].position], .none) catch return error.OutOfMemory;
+                continue;
             }
 
-            var emitted_in_bucket: usize = 0;
-            for (start..end) |i| {
-                const arm = GuardedList.at(arms, i);
-                if (self.store.getStringLiteral(arm.prefix)[0] != byte) continue;
-                emitted_in_bucket += 1;
-                const next_miss_block = if (emitted_in_bucket == remaining_in_bucket)
-                    miss_block
-                else
-                    wip.block(0, "str_match_set_next") catch return error.OutOfMemory;
-                try work.append(wa, .{ .str_match_body = try self.emitStrMatchArmTest(source_local, source, arm, next_miss_block) });
-                if (emitted_in_bucket < remaining_in_bucket) {
-                    wip.cursor = .{ .block = next_miss_block };
-                }
+            const chunk = strMatchExactChunk(literal.len, group.covered);
+            for (group_entries) |*entry| {
+                entry.key = @intCast(littleEndianInt(literals[entry.position][chunk.offset..][0..chunk.width]));
             }
+            const chunk_ptr = try self.offsetPtr(source.bytes, chunk.offset);
+            const chunk_value = wip.load(.normal, intTypeForBytes(chunk.width), chunk_ptr, LlvmBuilder.Alignment.fromByteUnits(1), "") catch return error.OutOfMemory;
+            try self.emitStrMatchExactDispatch(chunk_value, group_entries, group.start, chunk.offset + chunk.width, literals, match_blocks, miss_block, &groups, &targets);
         }
+    }
+
+    /// The bytes one dispatch of an exact run reads from a source whose
+    /// length is `len` and whose first `covered` bytes are already decided:
+    /// `width` bytes at `offset`, which is `covered` unless fewer than
+    /// `width` bytes remain, where the chunk ends at the source's end and
+    /// re-reads decided bytes.
+    fn strMatchExactChunk(len: usize, covered: u32) struct { offset: u32, width: u8 } {
+        std.debug.assert(covered < len);
+        const width: u8 = if (len >= 8) 8 else if (len >= 4) 4 else if (len >= 2) 2 else 1;
+        const remaining = len - covered;
+        return .{
+            .offset = if (remaining >= width) covered else @intCast(len - width),
+            .width = width,
+        };
+    }
+
+    /// Branch from the cursor on `value`, which tells `entries` apart once
+    /// their keys are the values it takes for their literals. Entries with
+    /// one key continue together: at the first one's match block when
+    /// `covered` bytes are its whole literal, and otherwise as a group
+    /// pushed onto `groups`. A value that is no entry's key goes to
+    /// `miss_block`. `first` is the index of `entries[0]` in the run's
+    /// entries, and `targets` is scratch.
+    fn emitStrMatchExactDispatch(
+        self: *MonoLlvmCodeGen,
+        value: LlvmBuilder.Value,
+        entries: []StrMatchExactEntry,
+        first: u32,
+        covered: u32,
+        literals: []const []const u8,
+        match_blocks: []const LlvmBuilder.Function.Block.Index,
+        miss_block: LlvmBuilder.Function.Block.Index,
+        groups: *std.ArrayList(StrMatchExactGroup),
+        targets: *std.ArrayList(LlvmBuilder.Function.Block.Index),
+    ) Error!void {
+        const builder, const wip = try self.builderAndWip();
+        const value_ty = value.typeOfWip(wip);
+
+        std.mem.sortUnstable(StrMatchExactEntry, entries, {}, StrMatchExactEntry.lessThan);
+
+        targets.clearRetainingCapacity();
+        var start: usize = 0;
+        while (start < entries.len) {
+            var end = start + 1;
+            while (end < entries.len and entries[end].key == entries[start].key) end += 1;
+            const position = entries[start].position;
+            if (literals[position].len == covered) {
+                try targets.append(self.allocator, match_blocks[position]);
+            } else {
+                const block = wip.block(0, "str_match_set_bytes") catch return error.OutOfMemory;
+                try targets.append(self.allocator, block);
+                try groups.append(self.allocator, .{
+                    .block = block,
+                    .start = first + @as(u32, @intCast(start)),
+                    .end = first + @as(u32, @intCast(end)),
+                    .covered = covered,
+                });
+            }
+            start = end;
+        }
+
+        if (targets.items.len == 1) {
+            const key = builder.intValue(value_ty, entries[0].key) catch return error.OutOfMemory;
+            const matches = wip.icmp(.eq, value, key, "") catch return error.OutOfMemory;
+            _ = wip.brCond(matches, targets.items[0], miss_block, .none) catch return error.OutOfMemory;
+            return;
+        }
+
+        var switch_inst = wip.@"switch"(value, miss_block, @intCast(targets.items.len), .none) catch return error.OutOfMemory;
+        var target_index: usize = 0;
+        start = 0;
+        while (start < entries.len) : (target_index += 1) {
+            const key = entries[start].key;
+            switch_inst.addCase(builder.intConst(value_ty, key) catch return error.OutOfMemory, targets.items[target_index], wip) catch return error.OutOfMemory;
+            while (start < entries.len and entries[start].key == key) start += 1;
+        }
+        switch_inst.finish(wip);
     }
 
     fn emitStrMatchArmTest(
@@ -8540,11 +8971,27 @@ pub const MonoLlvmCodeGen = struct {
         const small_mask = wip.bin(.@"and", raw_len, builder.intValue(usize_ty, small_bit) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
         const is_small = wip.icmp(.ne, small_mask, builder.intValue(usize_ty, 0) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
 
+        return self.rocStrLenFromWord(str_ptr, raw_len, is_small);
+    }
+
+    /// The length of the RocStr at `str_ptr` whose length word is `raw_len`:
+    /// the small length in its last byte when `is_small`, otherwise the word
+    /// with the small-string bit cleared. That bit is already clear whenever
+    /// the heap arm is taken (it is the word's top bit, so the mask is every
+    /// bit below it), so clearing it changes no value; it states in
+    /// the arm itself that the bit is zero. Otherwise LLVM learns that only
+    /// from the select's condition, and before using it InstCombine proves
+    /// the loaded word is not undef by walking the dominator chain to the
+    /// function entry, once per checked arithmetic operation the length
+    /// reaches, which is quadratic in a long function of such operations.
+    fn rocStrLenFromWord(self: *MonoLlvmCodeGen, str_ptr: LlvmBuilder.Value, raw_len: LlvmBuilder.Value, is_small: LlvmBuilder.Value) Error!LlvmBuilder.Value {
+        const builder, const wip = try self.builderAndWip();
+        const usize_ty = self.ptrSizedIntType();
         const small_len_byte = wip.load(.normal, .i8, try self.offsetPtr(str_ptr, self.rocStrFlagByteOffset()), LlvmBuilder.Alignment.fromByteUnits(1), "") catch return error.OutOfMemory;
         const small_len_masked = wip.bin(.@"and", small_len_byte, builder.intValue(.i8, RocStr.small_str_len_mask) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
         const small_len = try self.coerceScalar(small_len_masked, usize_ty, false);
-
-        return wip.select(.normal, is_small, small_len, raw_len, "") catch return error.OutOfMemory;
+        const heap_len = wip.bin(.@"and", raw_len, builder.intValue(usize_ty, self.rocStrSmallBit() - 1) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
+        return wip.select(.normal, is_small, small_len, heap_len, "") catch return error.OutOfMemory;
     }
 
     fn emitStrMatchFailIf(self: *MonoLlvmCodeGen, cond: LlvmBuilder.Value, fail_block: LlvmBuilder.Function.Block.Index) Error!void {
@@ -8576,7 +9023,19 @@ pub const MonoLlvmCodeGen = struct {
         literal: []const u8,
         fail_block: LlvmBuilder.Function.Block.Index,
     ) Error!void {
-        if (literal.len == 0) return;
+        if (try self.emitStrMatchLiteralMismatch(ptr, literal)) |mismatch| {
+            try self.emitStrMatchFailIf(mismatch, fail_block);
+        }
+    }
+
+    /// Whether the `literal.len` bytes at `ptr` differ from `literal`, or
+    /// null for an empty literal, which no bytes differ from.
+    fn emitStrMatchLiteralMismatch(
+        self: *MonoLlvmCodeGen,
+        ptr: LlvmBuilder.Value,
+        literal: []const u8,
+    ) Error!?LlvmBuilder.Value {
+        if (literal.len == 0) return null;
 
         var mismatch: ?LlvmBuilder.Value = null;
         var offset: usize = 0;
@@ -8607,9 +9066,7 @@ pub const MonoLlvmCodeGen = struct {
             }
         }
 
-        if (mismatch) |value| {
-            try self.emitStrMatchFailIf(value, fail_block);
-        }
+        return mismatch;
     }
 
     fn emitStrMatchAccumulateLiteralMismatch(
@@ -8832,8 +9289,8 @@ pub const MonoLlvmCodeGen = struct {
         if (delimiter.len == 0) return;
         const builder, const wip = try self.builderAndWip();
         const usize_ty = self.ptrSizedIntType();
-        const width = self.strMatchScanWidth();
         const delimiter_len = builder.intValue(usize_ty, delimiter.len) catch return error.OutOfMemory;
+        const width = self.strMatchScanWidth();
         try self.emitStrMatchFailIf(wip.icmp(.ult, len, delimiter_len, "") catch return error.OutOfMemory, miss_block);
         const limit = wip.bin(.sub, len, delimiter_len, "") catch return error.OutOfMemory;
 
@@ -8877,11 +9334,36 @@ pub const MonoLlvmCodeGen = struct {
         tail_cursor_phi.finish(&.{ initial_cursor, next_word_cursor, next_tail_cursor }, &.{ initial_tail_pred, word_tail_pred, tail_after_probe_block }, wip);
 
         wip.cursor = .{ .block = found_block };
+        if (delimiter.len > builtins.delimiter.max_inline_len) {
+            // Keep the target-width first-byte probe on the common path.
+            // After its first candidate the shared search guarantees linear
+            // work even when many candidate prefixes overlap.
+            const plan = builtins.delimiter.Plan.init(delimiter);
+            const ptr = try self.ptrType();
+            const pos = try self.callBuiltin(.str_find_delimiter, usize_ty, &.{ ptr, usize_ty, usize_ty, ptr, usize_ty, usize_ty, usize_ty }, &.{
+                bytes,
+                len,
+                try self.loadUsize(cursor_ptr),
+                try self.staticBytes(delimiter),
+                delimiter_len,
+                builder.intValue(usize_ty, plan.cut) catch return error.OutOfMemory,
+                builder.intValue(usize_ty, plan.period) catch return error.OutOfMemory,
+            });
+            try self.emitStrMatchFailIf(wip.icmp(.eq, pos, len, "") catch return error.OutOfMemory, miss_block);
+            return self.storeUsize(cursor_ptr, pos);
+        }
         if (delimiter.len > 1) {
+            const retry_block = wip.block(0, "str_match_scan_retry") catch return error.OutOfMemory;
             const found_cursor = try self.loadUsize(cursor_ptr);
             const found_candidate = try self.offsetPtrValue(bytes, found_cursor);
             const tail_ptr = try self.offsetPtrValue(found_candidate, builder.intValue(usize_ty, 1) catch return error.OutOfMemory);
-            try self.emitStrMatchCompareLiteral(tail_ptr, delimiter[1..], miss_block);
+            try self.emitStrMatchCompareLiteral(tail_ptr, delimiter[1..], retry_block);
+            const matched = wip.cursor;
+            wip.cursor = .{ .block = retry_block };
+            const next = wip.bin(.add, found_cursor, builder.intValue(usize_ty, 1) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
+            try self.storeUsize(cursor_ptr, next);
+            _ = wip.br(decide_block) catch return error.OutOfMemory;
+            wip.cursor = matched;
         }
     }
 
@@ -9077,9 +9559,7 @@ pub const MonoLlvmCodeGen = struct {
         var capture = self.deferredStrCapture(local) orelse return error.CompilationFailed;
         if (count == 0) return;
         if (capture.pending_rc_count != 0 and capture.pending_rc_atomicity != atomicity) return error.CompilationFailed;
-        const total: u64 = @as(u64, capture.pending_rc_count) + count;
-        if (total > std.math.maxInt(u32)) return error.OutOfMemory;
-        capture.pending_rc_count = @intCast(total);
+        capture.pending_rc_count = std.math.add(u32, capture.pending_rc_count, count) catch return error.OutOfMemory;
         capture.pending_rc_atomicity = atomicity;
         self.deferred_str_captures.putAssumeCapacity(local, capture);
     }
@@ -9404,10 +9884,10 @@ pub const MonoLlvmCodeGen = struct {
             scope.source_identity.writeSymbolName(&symbol_name)
         else
             self.store.getString(scope.source_name);
-        const file = if (loc.file == SourceLoc.no_file or loc.file >= self.store.sourceFileCount())
+        const file = if (loc.file.get()) |file_index| (if (file_index >= self.store.sourceFileCount())
             ""
         else
-            self.store.sourceFileName(loc.file);
+            self.store.sourceFileName(file_index)) else "";
 
         return builder.structConst(frame_ty, &.{
             (try self.staticBytes(name)).toConst().?,
@@ -9482,15 +9962,29 @@ pub const MonoLlvmCodeGen = struct {
             _ = wip.store(.normal, value.toValue(), out, self.targetPointerAlignment()) catch return error.OutOfMemory;
             return;
         }
-        try self.callBuiltinVoid(
-            .str_from_literal,
-            &.{ try self.ptrType(), try self.ptrType(), self.ptrSizedIntType() },
-            &.{
-                out,
-                try self.staticBytes(bytes),
-                builder.intValue(self.ptrSizedIntType(), bytes.len) catch return error.OutOfMemory,
-            },
+        // A longer literal reads its backing in the image, behind a static
+        // refcount word, as a slice of that backing when it is only part of it.
+        const backing_bytes = self.store.getStringLiteralBacking(literal);
+        const whole_backing = literal.offset == 0 and @as(usize, literal.len) == backing_bytes.len;
+        const backing_ptr = try self.staticRefcountedBytes(literal.backing);
+        const bytes_ptr = try self.offsetPtrValue(
+            backing_ptr,
+            builder.intValue(self.ptrSizedIntType(), literal.offset) catch return error.OutOfMemory,
         );
+        try self.storePointer(out, bytes_ptr);
+        try self.storeUsize(
+            try self.offsetPtr(out, self.rocStrLenOffset()),
+            builder.intValue(self.ptrSizedIntType(), bytes.len) catch return error.OutOfMemory,
+        );
+        const capacity_ptr = try self.offsetPtr(out, self.rocStrCapacityOffset());
+        if (whole_backing) {
+            try self.storeUsize(capacity_ptr, builder.intValue(self.ptrSizedIntType(), @as(u64, bytes.len) << RocStr.capacity_shift) catch return error.OutOfMemory);
+        } else {
+            const wip = self.wip orelse return error.CompilationFailed;
+            const backing_int = wip.cast(.ptrtoint, backing_ptr, self.ptrSizedIntType(), "") catch return error.OutOfMemory;
+            const alloc_ptr = wip.bin(.add, backing_int, builder.intValue(self.ptrSizedIntType(), SEAMLESS_SLICE_TAG) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
+            try self.storeUsize(capacity_ptr, alloc_ptr);
+        }
     }
 
     fn emitStaticDataLiteral(self: *MonoLlvmCodeGen, out: LocalSlot, id: lir.LIR.StaticDataId) Error!void {
@@ -9917,6 +10411,14 @@ pub const MonoLlvmCodeGen = struct {
 
     fn emitStrIsEq(self: *MonoLlvmCodeGen, target: LocalId, args: anytype) Error!void {
         const wip = self.wip orelse return error.CompilationFailed;
+        inline for (.{ 1, 0 }) |literal_arg| {
+            if (self.value_plan.strLiteral(GuardedList.at(args, literal_arg))) |literal| {
+                const bytes = self.store.getStringLiteral(literal);
+                if (bytes.len <= max_inline_literal_eq_bytes) {
+                    return self.emitStrIsEqLiteral(target, GuardedList.at(args, 1 - literal_arg), bytes);
+                }
+            }
+        }
         const lhs = try self.emitStrByteSliceForLocal(GuardedList.at(args, 0));
         const rhs = try self.emitStrByteSliceForLocal(GuardedList.at(args, 1));
         const true_block = wip.block(0, "str_eq_true") catch return error.OutOfMemory;
@@ -9934,6 +10436,43 @@ pub const MonoLlvmCodeGen = struct {
 
         wip.cursor = .{ .block = compare_block };
         try self.emitByteSlicesEqualBranch(lhs.bytes, rhs.bytes, lhs.len, true_block, false_block);
+        try self.emitStrBoolJoin(target, true_block, false_block, after_block);
+    }
+
+    /// Whether the string in `local` equals `literal`: its length is the
+    /// literal's and its bytes are the literal's, compared a chunk at a time
+    /// against constants.
+    fn emitStrIsEqLiteral(self: *MonoLlvmCodeGen, target: LocalId, local: LocalId, literal: []const u8) Error!void {
+        const builder, const wip = try self.builderAndWip();
+        const source: StrByteSlice = if (self.deferredStrCapture(local) != null)
+            try self.emitStrByteSliceForLocal(local)
+        else selected: {
+            // Both representations' fields are readable whichever one the
+            // string has, so the bytes and length are selected, not branched to.
+            const str_ptr = self.slot(local).ptr;
+            const raw_len = try self.loadUsize(try self.offsetPtr(str_ptr, self.rocStrLenOffset()));
+            const is_small = try self.emitRocStrLenIsSmall(raw_len);
+            const heap_bytes = try self.loadPointer(str_ptr);
+            break :selected .{
+                .bytes = wip.select(.normal, is_small, str_ptr, heap_bytes, "") catch return error.OutOfMemory,
+                .len = try self.rocStrLenFromWord(str_ptr, raw_len, is_small),
+            };
+        };
+        const true_block = wip.block(0, "str_eq_true") catch return error.OutOfMemory;
+        const false_block = wip.block(0, "str_eq_false") catch return error.OutOfMemory;
+        const after_block = wip.block(0, "str_eq_after") catch return error.OutOfMemory;
+        const literal_len = builder.intValue(self.ptrSizedIntType(), literal.len) catch return error.OutOfMemory;
+        const same_len = wip.icmp(.eq, source.len, literal_len, "") catch return error.OutOfMemory;
+        if (literal.len == 0) {
+            _ = wip.brCond(same_len, true_block, false_block, .none) catch return error.OutOfMemory;
+        } else {
+            const compare_block = wip.block(0, "str_eq_compare") catch return error.OutOfMemory;
+            _ = wip.brCond(same_len, compare_block, false_block, .none) catch return error.OutOfMemory;
+            wip.cursor = .{ .block = compare_block };
+            const mismatch = (try self.emitStrMatchLiteralMismatch(source.bytes, literal)) orelse
+                unreachable; // the literal has at least one byte in this branch
+            _ = wip.brCond(mismatch, false_block, true_block, .none) catch return error.OutOfMemory;
+        }
         try self.emitStrBoolJoin(target, true_block, false_block, after_block);
     }
 
@@ -10131,16 +10670,7 @@ pub const MonoLlvmCodeGen = struct {
 
         const raw_len = try self.loadUsize(try self.offsetPtr(str_ptr, self.rocStrLenOffset()));
         const is_small = try self.emitRocStrLenIsSmall(raw_len);
-        const last_byte = wip.load(
-            .normal,
-            .i8,
-            try self.offsetPtr(str_ptr, self.rocStrFlagByteOffset()),
-            LlvmBuilder.Alignment.fromByteUnits(1),
-            "",
-        ) catch return error.OutOfMemory;
-        const small_len_byte = wip.bin(.@"and", last_byte, builder.intValue(.i8, RocStr.small_str_len_mask) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
-        const small_len = try self.coerceScalar(small_len_byte, usize_ty, false);
-        const runtime_len = wip.select(.normal, is_small, small_len, raw_len, "") catch return error.OutOfMemory;
+        const runtime_len = try self.rocStrLenFromWord(str_ptr, raw_len, is_small);
 
         const heap_ptr = try self.loadPointer(str_ptr);
         const data_ptr = wip.select(.normal, is_small, str_ptr, heap_ptr, "") catch return error.OutOfMemory;
@@ -10223,16 +10753,7 @@ pub const MonoLlvmCodeGen = struct {
 
         const raw_len = try self.loadUsize(try self.offsetPtr(str_ptr, self.rocStrLenOffset()));
         const is_small = try self.emitRocStrLenIsSmall(raw_len);
-        const last_byte = wip.load(
-            .normal,
-            .i8,
-            try self.offsetPtr(str_ptr, self.rocStrFlagByteOffset()),
-            LlvmBuilder.Alignment.fromByteUnits(1),
-            "",
-        ) catch return error.OutOfMemory;
-        const small_len_byte = wip.bin(.@"and", last_byte, builder.intValue(.i8, RocStr.small_str_len_mask) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
-        const small_len = try self.coerceScalar(small_len_byte, usize_ty, false);
-        const runtime_len = wip.select(.normal, is_small, small_len, raw_len, "") catch return error.OutOfMemory;
+        const runtime_len = try self.rocStrLenFromWord(str_ptr, raw_len, is_small);
 
         const heap_ptr = try self.loadPointer(str_ptr);
         const data_ptr = wip.select(.normal, is_small, str_ptr, heap_ptr, "") catch return error.OutOfMemory;
@@ -10583,7 +11104,14 @@ pub const MonoLlvmCodeGen = struct {
         const count: u32 = @intCast(args.len);
         const str_size: u32 = 3 * self.targetWordSize();
         const alignment = LlvmBuilder.Alignment.fromByteUnits(self.targetWordSize());
-        const array = try self.allocEntryBlockSlot(.i8, count * str_size, alignment, "parts");
+        if (builtin.mode == .debug and count > self.value_plan.max_str_parts) {
+            invariant("LLVM codegen invariant violated: a concatenation of {d} parts exceeds the planned {d}", .{ count, self.value_plan.max_str_parts });
+        }
+        const array = self.str_parts_slot orelse blk: {
+            const slot_ptr = try self.allocEntryBlockSlot(.i8, self.value_plan.max_str_parts * str_size, alignment, "parts");
+            self.str_parts_slot = slot_ptr;
+            break :blk slot_ptr;
+        };
         for (0..count) |i| {
             const arg = GuardedList.at(args, i);
             try self.materializeLocalIfDeferred(arg);
@@ -11165,18 +11693,14 @@ pub const MonoLlvmCodeGen = struct {
     fn emitListWithCapacity(self: *MonoLlvmCodeGen, target: LocalId, args: anytype) Error!void {
         const builder = self.builder orelse return error.CompilationFailed;
         const abi = self.layouts().builtinListAbi(self.localLayout(target));
-        // Reserving room for zero-sized elements needs no memory, and every
-        // other zero-sized branch in this backend represents such a list as a
-        // null pointer with zero capacity. Going to the builtin here would
-        // hand back a refcounted zero-byte allocation instead, which those
-        // branches then drop on the floor.
+        // Reserving room for zero-sized elements needs no memory: the list
+        // holds no allocation and its capacity alone records the reservation.
+        // Going to the builtin here would hand back a refcounted zero-byte
+        // allocation instead.
         if (abi.elem_size == 0) {
-            const out_ptr = self.slot(target).ptr;
+            const requested = try self.coerceScalar(try self.loadLocalScalar(GuardedList.at(args, 0), self.localLayout(GuardedList.at(args, 0))), .i64, false);
             const zero = builder.intValue(self.ptrSizedIntType(), 0) catch return error.OutOfMemory;
-            try self.storePointer(out_ptr, builder.nullValue(try self.ptrType()) catch return error.OutOfMemory);
-            try self.storeListLen(out_ptr, zero);
-            try self.storeListCapacity(out_ptr, zero);
-            return;
+            return self.storeZstListWithCapacity(target, zero, try self.boundZstCapacity(requested));
         }
         const cap = try self.coerceScalar(try self.loadLocalScalar(GuardedList.at(args, 0), self.localLayout(GuardedList.at(args, 0))), .i64, false);
         try self.callBuiltinVoid(LowLevelBuiltins.listOp(.list_with_capacity), &.{ try self.ptrType(), .i64, .i32, self.ptrSizedIntType(), .i1 }, &.{
@@ -11208,24 +11732,13 @@ pub const MonoLlvmCodeGen = struct {
         const abi = self.layouts().builtinListAbi(self.localLayout(GuardedList.at(args, 0)));
         // A zero-sized element has no bytes to copy, so appending one only
         // bumps the length. Handled here for the same reason emitListConcat
-        // handles it here: there is no data pointer to walk. The pointer and
-        // capacity still travel across, so this stays correct for a list that
-        // does hold an allocation rather than depending on the zero-sized
-        // representation being unallocated.
+        // handles it here: there is no data pointer to walk.
         if (abi.elem_size == 0) {
             const builder, const wip = try self.builderAndWip();
-            const src_ptr = self.slot(GuardedList.at(args, 0)).ptr;
-            const out_ptr = self.slot(target).ptr;
-            const len = try self.loadUsize(try self.offsetPtr(src_ptr, self.rocListLenOffset()));
+            const len = try self.loadUsize(try self.offsetPtr(self.slot(GuardedList.at(args, 0)).ptr, self.rocListLenOffset()));
             const one = builder.intValue(self.ptrSizedIntType(), 1) catch return error.OutOfMemory;
             const new_len = wip.bin(.add, len, one, "") catch return error.OutOfMemory;
-            // listAppendUnsafe hands the incoming list's allocation to its
-            // result, so carry the pointer and capacity across rather than
-            // dropping them, which would leak whatever the source owned.
-            try self.storePointer(out_ptr, try self.loadPointer(src_ptr));
-            try self.storeListLen(out_ptr, new_len);
-            try self.storeListCapacity(out_ptr, try self.loadUsize(try self.offsetPtr(src_ptr, self.rocListCapacityOffset())));
-            return;
+            return self.storeZstListKeeping(target, GuardedList.at(args, 0), new_len);
         }
         // The caller has discharged every check: the list uniquely owns an
         // allocation with a spare slot. The append is then a copy of the
@@ -11255,7 +11768,7 @@ pub const MonoLlvmCodeGen = struct {
         if (abi.elem_size == 0) {
             const lhs_len = try self.loadUsize(try self.offsetPtr(self.slot(lhs_local).ptr, self.rocListLenOffset()));
             const rhs_len = try self.loadUsize(try self.offsetPtr(self.slot(rhs_local).ptr, self.rocListLenOffset()));
-            return self.storeZstList(target, (self.wip orelse return error.CompilationFailed).bin(.add, lhs_len, rhs_len, "") catch return error.OutOfMemory);
+            return self.storeZstListKeeping(target, lhs_local, (self.wip orelse return error.CompilationFailed).bin(.add, lhs_len, rhs_len, "") catch return error.OutOfMemory);
         }
         var call_args = try self.rocListArgs1(lhs_local);
         defer call_args.deinit(self.allocator);
@@ -11283,7 +11796,7 @@ pub const MonoLlvmCodeGen = struct {
             // Zero-width elements: only the length grows.
             const count = try self.coerceScalar(try self.loadLocalScalar(GuardedList.at(args, 2), self.localLayout(GuardedList.at(args, 2))), self.ptrSizedIntType(), false);
             const len = try self.loadUsize(try self.offsetPtr(self.slot(GuardedList.at(args, 0)).ptr, self.rocListLenOffset()));
-            return self.storeZstList(target, (self.wip orelse return error.CompilationFailed).bin(.add, len, count, "") catch return error.OutOfMemory);
+            return self.storeZstListKeeping(target, GuardedList.at(args, 0), (self.wip orelse return error.CompilationFailed).bin(.add, len, count, "") catch return error.OutOfMemory);
         }
         var call_args = try self.rocListArgs1(GuardedList.at(args, 0));
         defer call_args.deinit(self.allocator);
@@ -11324,7 +11837,7 @@ pub const MonoLlvmCodeGen = struct {
             // Zero-width elements: only the length grows.
             const count = try self.coerceScalar(try self.loadLocalScalar(GuardedList.at(args, 2), self.localLayout(GuardedList.at(args, 2))), self.ptrSizedIntType(), false);
             const len = try self.loadUsize(try self.offsetPtr(self.slot(GuardedList.at(args, 0)).ptr, self.rocListLenOffset()));
-            return self.storeZstList(target, (self.wip orelse return error.CompilationFailed).bin(.add, len, count, "") catch return error.OutOfMemory);
+            return self.storeZstListKeeping(target, GuardedList.at(args, 0), (self.wip orelse return error.CompilationFailed).bin(.add, len, count, "") catch return error.OutOfMemory);
         }
         var call_args = try self.rocListArgs1(GuardedList.at(args, 0));
         defer call_args.deinit(self.allocator);
@@ -11446,7 +11959,7 @@ pub const MonoLlvmCodeGen = struct {
             // Zero-width elements: only the length grows.
             const count = try self.coerceScalar(try self.loadLocalScalar(GuardedList.at(args, 3), self.localLayout(GuardedList.at(args, 3))), self.ptrSizedIntType(), false);
             const len = try self.loadUsize(try self.offsetPtr(self.slot(GuardedList.at(args, 0)).ptr, self.rocListLenOffset()));
-            return self.storeZstList(target, (self.wip orelse return error.CompilationFailed).bin(.add, len, count, "") catch return error.OutOfMemory);
+            return self.storeZstListKeeping(target, GuardedList.at(args, 0), (self.wip orelse return error.CompilationFailed).bin(.add, len, count, "") catch return error.OutOfMemory);
         }
         var call_args = try self.rocListArgs1(GuardedList.at(args, 0));
         defer call_args.deinit(self.allocator);
@@ -11467,15 +11980,51 @@ pub const MonoLlvmCodeGen = struct {
         try self.callBuiltinVoid(LowLevelBuiltins.listOp(.list_append_sublist), call_args.types.items, call_args.values.items);
     }
 
-    /// Store the canonical value for a list of zero-width elements into
-    /// `target`: such a list owns no allocation, so its data pointer is null
-    /// and its stored capacity is zero, and it carries nothing but `len`.
+    /// Store a list of `len` zero-sized items and no spare capacity. A list
+    /// of zero-sized items holds no allocation, so its data pointer is null
+    /// and its capacity is a count alone.
     fn storeZstList(self: *MonoLlvmCodeGen, target: LocalId, len: LlvmBuilder.Value) Error!void {
-        const builder = self.builder orelse return error.CompilationFailed;
+        return self.storeZstListWithCapacity(target, len, len);
+    }
+
+    /// Store a list of `len` zero-sized items whose capacity is `count`, or
+    /// `len` when that is larger. `count` never exceeds the most a capacity
+    /// word encodes.
+    fn storeZstListWithCapacity(self: *MonoLlvmCodeGen, target: LocalId, len: LlvmBuilder.Value, count: LlvmBuilder.Value) Error!void {
+        const builder, const wip = try self.builderAndWip();
         const out_ptr = self.slot(target).ptr;
+        const shorter = wip.icmp(.ult, count, len, "") catch return error.OutOfMemory;
+        const capacity = wip.select(.normal, shorter, len, count, "") catch return error.OutOfMemory;
+        const shift = builder.intValue(self.ptrSizedIntType(), RocList.capacity_shift) catch return error.OutOfMemory;
+        const encoded = wip.bin(.shl, capacity, shift, "") catch return error.OutOfMemory;
         try self.storePointer(out_ptr, builder.nullValue(try self.ptrType()) catch return error.OutOfMemory);
         try self.storeListLen(out_ptr, len);
-        try self.storeListCapacity(out_ptr, builder.intValue(self.ptrSizedIntType(), 0) catch return error.OutOfMemory);
+        try self.storeListCapacity(out_ptr, encoded);
+    }
+
+    /// The capacity the list of zero-sized items in `list_local` records.
+    fn loadZstListCapacity(self: *MonoLlvmCodeGen, list_local: LocalId) Error!LlvmBuilder.Value {
+        const builder, const wip = try self.builderAndWip();
+        const encoded = try self.loadUsize(try self.offsetPtr(self.slot(list_local).ptr, self.rocListCapacityOffset()));
+        const shift = builder.intValue(self.ptrSizedIntType(), RocList.capacity_shift) catch return error.OutOfMemory;
+        return wip.bin(.lshr, encoded, shift, "") catch return error.OutOfMemory;
+    }
+
+    /// Store the list of `len` zero-sized items an operation makes of
+    /// `source` in place, which keeps the capacity `source` has.
+    fn storeZstListKeeping(self: *MonoLlvmCodeGen, target: LocalId, source: LocalId, len: LlvmBuilder.Value) Error!void {
+        return self.storeZstListWithCapacity(target, len, try self.loadZstListCapacity(source));
+    }
+
+    /// `count`, a `U64` number of zero-sized items, as a target word bounded
+    /// by the most a capacity word encodes.
+    fn boundZstCapacity(self: *MonoLlvmCodeGen, count: LlvmBuilder.Value) Error!LlvmBuilder.Value {
+        const builder, const wip = try self.builderAndWip();
+        const most: u64 = (@as(u64, 1) << @intCast(self.target.ptrBitWidth() - RocList.capacity_shift)) - 1;
+        const most_value = builder.intValue(.i64, most) catch return error.OutOfMemory;
+        const over = wip.icmp(.ugt, count, most_value, "") catch return error.OutOfMemory;
+        const bounded = wip.select(.normal, over, most_value, count, "") catch return error.OutOfMemory;
+        return self.coerceScalar(bounded, self.ptrSizedIntType(), false);
     }
 
     fn emitListPrepend(self: *MonoLlvmCodeGen, target: LocalId, args: anytype, unique_args: u64) Error!void {
@@ -11488,7 +12037,7 @@ pub const MonoLlvmCodeGen = struct {
             const len = try self.loadUsize(try self.offsetPtr(self.slot(list_local).ptr, self.rocListLenOffset()));
             const one = builder.intValue(self.ptrSizedIntType(), 1) catch return error.OutOfMemory;
             const grown = (self.wip orelse return error.CompilationFailed).bin(.add, len, one, "") catch return error.OutOfMemory;
-            return self.storeZstList(target, grown);
+            return self.storeZstListKeeping(target, list_local, grown);
         }
         var call_args = try self.rocListArgs1(list_local);
         defer call_args.deinit(self.allocator);
@@ -11507,15 +12056,7 @@ pub const MonoLlvmCodeGen = struct {
         const abi = self.layouts().builtinListAbi(self.localLayout(list_local));
         const len = try self.loadUsize(try self.offsetPtr(self.slot(list_local).ptr, self.rocListLenOffset()));
         const zero = builder.intValue(self.ptrSizedIntType(), 0) catch return error.OutOfMemory;
-        const slice = if (op == .list_take_first)
-            ListSlice{ .start = zero, .len = try self.loadIntegerLocalAsUsize(GuardedList.at(args, 1)) }
-        else if (op == .list_take_last) blk: {
-            const count = try self.loadIntegerLocalAsUsize(GuardedList.at(args, 1));
-            const takes_all = (self.wip orelse return error.CompilationFailed).icmp(.uge, count, len, "") catch return error.OutOfMemory;
-            const suffix_start = (self.wip orelse return error.CompilationFailed).bin(.sub, len, count, "") catch return error.OutOfMemory;
-            const safe_start = (self.wip orelse return error.CompilationFailed).select(.normal, takes_all, zero, suffix_start, "") catch return error.OutOfMemory;
-            break :blk ListSlice{ .start = safe_start, .len = count };
-        } else if (op == .list_sublist or op == .list_sublist_borrowed)
+        const slice = if (op == .list_sublist or op == .list_sublist_borrowed)
             try self.loadSublistStartLen(GuardedList.at(args, 1))
         else if (op == .list_clear)
             ListSlice{ .start = zero, .len = zero }
@@ -11531,6 +12072,9 @@ pub const MonoLlvmCodeGen = struct {
             const avail = wip.select(.normal, past_end, zero, remaining, "") catch return error.OutOfMemory;
             const wants_more = wip.icmp(.ugt, slice.len, avail, "") catch return error.OutOfMemory;
             const kept = wip.select(.normal, wants_more, avail, slice.len, "") catch return error.OutOfMemory;
+            // Clearing empties the list in place, so it keeps its capacity;
+            // a window of the list has no spare capacity.
+            if (op == .list_clear) return self.storeZstListKeeping(target, GuardedList.at(args, 0), kept);
             return self.storeZstList(target, kept);
         }
 
@@ -11546,8 +12090,11 @@ pub const MonoLlvmCodeGen = struct {
         } else {
             try call_args.append(self.allocator, .i32, builder.intValue(.i32, abi.elem_alignment) catch return error.OutOfMemory);
             try call_args.append(self.allocator, self.ptrSizedIntType(), builder.intValue(self.ptrSizedIntType(), abi.elem_size) catch return error.OutOfMemory);
-            try call_args.append(self.allocator, .i64, try self.coerceScalar(slice.start, .i64, false));
-            try call_args.append(self.allocator, .i64, try self.coerceScalar(slice.len, .i64, false));
+            // `list_clear` has its own builtin, which takes no window.
+            if (op != .list_clear) {
+                try call_args.append(self.allocator, .i64, try self.coerceScalar(slice.start, .i64, false));
+                try call_args.append(self.allocator, .i64, try self.coerceScalar(slice.len, .i64, false));
+            }
             try self.appendListElementRcArgs(&call_args, abi, false, true);
             try self.appendUpdateModeArg(&call_args, unique_args);
             try self.callBuiltinVoid(LowLevelBuiltins.listOp(op), call_args.types.items, call_args.values.items);
@@ -11611,7 +12158,7 @@ pub const MonoLlvmCodeGen = struct {
             const out_of_bounds = wip.icmp(.uge, index, len, "") catch return error.OutOfMemory;
             const shortened = wip.bin(.sub, len, one, "") catch return error.OutOfMemory;
             const kept = wip.select(.normal, out_of_bounds, len, shortened, "") catch return error.OutOfMemory;
-            return self.storeZstList(target, kept);
+            return self.storeZstListKeeping(target, list_local, kept);
         }
         var call_args = try self.rocListArgs1(list_local);
         defer call_args.deinit(self.allocator);
@@ -11731,18 +12278,24 @@ pub const MonoLlvmCodeGen = struct {
     /// the list has to grow.
     fn emitListReserve(self: *MonoLlvmCodeGen, target: LocalId, comptime builtin_fn: BuiltinSymbol, args: anytype, unique_args: u64) Error!void {
         const abi = self.layouts().builtinListAbi(self.localLayout(GuardedList.at(args, 0)));
-        // A list of zero-sized elements owns no allocation, so it carries a
-        // length and nothing else and a reserve cannot change anything
-        // observable. Passing it to the builtin instead goes through capacity
-        // bookkeeping that a zero-width element makes degenerate, which loses
-        // the length, so copy the list across here.
+        // A list of zero-sized elements owns no allocation, so a reservation
+        // allocates nothing and the capacity alone records it: room for
+        // `spare` more items, or the capacity the list already has when that
+        // is larger. Passing it to the builtin instead would hand back a
+        // refcounted zero-byte allocation.
         if (abi.elem_size == 0) {
-            const src_ptr = self.slot(GuardedList.at(args, 0)).ptr;
-            const out_ptr = self.slot(target).ptr;
-            try self.storePointer(out_ptr, try self.loadPointer(src_ptr));
-            try self.storeListLen(out_ptr, try self.loadUsize(try self.offsetPtr(src_ptr, self.rocListLenOffset())));
-            try self.storeListCapacity(out_ptr, try self.loadUsize(try self.offsetPtr(src_ptr, self.rocListCapacityOffset())));
-            return;
+            const zst_builder, const zst_wip = try self.builderAndWip();
+            const list_local = GuardedList.at(args, 0);
+            const len = try self.loadUsize(try self.offsetPtr(self.slot(list_local).ptr, self.rocListLenOffset()));
+            const len_u64 = try self.coerceScalar(len, .i64, false);
+            const spare = try self.coerceScalar(try self.loadLocalScalar(GuardedList.at(args, 1), self.localLayout(GuardedList.at(args, 1))), .i64, false);
+            const sum = zst_wip.bin(.add, len_u64, spare, "") catch return error.OutOfMemory;
+            const wrapped = zst_wip.icmp(.ult, sum, len_u64, "") catch return error.OutOfMemory;
+            const all_ones = zst_builder.intValue(.i64, std.math.maxInt(u64)) catch return error.OutOfMemory;
+            const wanted = try self.boundZstCapacity(zst_wip.select(.normal, wrapped, all_ones, sum, "") catch return error.OutOfMemory);
+            const held = try self.loadZstListCapacity(list_local);
+            const smaller = zst_wip.icmp(.ult, wanted, held, "") catch return error.OutOfMemory;
+            return self.storeZstListWithCapacity(target, len, zst_wip.select(.normal, smaller, held, wanted, "") catch return error.OutOfMemory);
         }
 
         const builder, const wip = try self.builderAndWip();
@@ -11803,7 +12356,9 @@ pub const MonoLlvmCodeGen = struct {
             const alloc_ptr = wip.cast(.inttoptr, alloc_int, try self.ptrType(), "") catch return error.OutOfMemory;
             const rc_offset = builtins.utils.targetRefcountOffset(self.targetWordSize());
             const rc_ptr = try self.offsetPtrValue(alloc_ptr, builder.intValue(usize_ty, rc_offset) catch return error.OutOfMemory);
-            const rc = try self.loadUsize(rc_ptr);
+            // Atomic like the builtins' uniqueness read: another thread
+            // holding a reference may be decrementing this count.
+            const rc = wip.loadAtomic(.normal, usize_ty, rc_ptr, .system, .monotonic, self.targetPointerAlignment(), "") catch return error.OutOfMemory;
             const rc_is_one = wip.icmp(.eq, rc, one, "") catch return error.OutOfMemory;
             _ = wip.brCond(rc_is_one, fast_block, slow_block, .then_likely) catch return error.OutOfMemory;
         }
@@ -12211,7 +12766,24 @@ pub const MonoLlvmCodeGen = struct {
         for (self.frame_runs.items) |run| {
             total = try self.callBoxyRuntime("roc_desc_frame_run_size", usize_ty, &.{ ptr_ty, .i32, usize_ty }, &.{ try self.wordValue(run.desc), try self.intValue(.i32, run.count), total });
         }
+        // Each frame callable's storage: 16-byte aligned, its data pointer
+        // after the 16-byte prefix ending in its refcount word, then the
+        // header and the capture record its descriptor sizes.
+        const callable_offsets = try self.allocator.alloc(LlvmBuilder.Value, self.frame_callable_locals.items.len);
+        defer self.allocator.free(callable_offsets);
+        const prefix: u32 = builtins.erased_callable.payload_alignment;
+        for (self.frame_callable_locals.items, callable_offsets) |local, *offset_value| {
+            const aligned = wip.bin(.@"and", wip.bin(.add, total, try self.intValue(usize_ty, prefix - 1), "") catch return error.OutOfMemory, try self.intValue(usize_ty, -@as(i64, prefix)), "") catch return error.OutOfMemory;
+            offset_value.* = wip.bin(.add, aligned, try self.intValue(usize_ty, prefix), "") catch return error.OutOfMemory;
+            const record_size = try self.loadDescField(try self.wordValue(self.localDyn(local).?.desc), desc_size_offset);
+            const header_end = wip.bin(.add, offset_value.*, try self.intValue(usize_ty, builtins.erased_callable.captureOffset(word)), "") catch return error.OutOfMemory;
+            total = wip.bin(.add, header_end, record_size, "") catch return error.OutOfMemory;
+        }
         const region = wip.alloca(.normal, .i8, total, LlvmBuilder.Alignment.fromByteUnits(collections.max_roc_alignment.toByteUnits()), .default, "dyn_region") catch return error.OutOfMemory;
+        for (self.frame_callable_locals.items, callable_offsets) |local, offset_value| {
+            const address = wip.gep(.inbounds, .i8, region, &.{offset_value}, "") catch return error.OutOfMemory;
+            try self.storePointer(self.slot(local).ptr, address);
+        }
         var offset = try self.intValue(usize_ty, 0);
         for (self.frame_runs.items) |run| {
             offset = try self.callBoxyRuntime("roc_desc_frame_place_run", usize_ty, &.{ ptr_ty, .i32, ptr_ty, usize_ty, ptr_ty }, &.{
@@ -12437,6 +13009,14 @@ pub const MonoLlvmCodeGen = struct {
                         try self.nullPtr(),
                         try self.nullPtr(),
                     }));
+                } else if (c.frame) |frame| {
+                    try self.bindWord(target, try self.callBoxyRuntime("roc_desc_closure_frame", ptr_ty, &.{ ptr_ty, ptr_ty, ptr_ty, ptr_ty, ptr_ty }, &.{
+                        worker.toValue(builder),
+                        try self.bytesAddress(c.capture),
+                        try self.dynAddress(frame),
+                        try self.nullPtr(),
+                        try self.nullPtr(),
+                    }));
                 } else {
                     try self.bindWord(target, try self.callBoxyRuntime("roc_desc_closure", ptr_ty, &.{ ptr_ty, ptr_ty, ptr_ty, ptr_ty, ptr_ty }, &.{
                         worker.toValue(builder),
@@ -12460,7 +13040,7 @@ pub const MonoLlvmCodeGen = struct {
     /// emits maps to.
     fn boxyListOp(op: lir.LowLevel) ?BoxyListOp {
         return switch (op) {
-            .boxed_sequence_pack, .boxed_sequence_unpack => null,
+            .dec_mul_saturated => null,
             .list_capacity => .capacity,
             .list_slack_unique => .slack_unique,
             .list_owned_unique => .owned_unique,
@@ -12489,10 +13069,8 @@ pub const MonoLlvmCodeGen = struct {
             .list_reserve_for_append => .reserve_for_append,
             .list_clear => .clear,
             .list_release_excess_capacity => .release_excess_capacity,
-            .list_take_first => .take_first,
-            .list_take_last => .take_last,
             .list_reverse => .reverse,
-            .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_len, .list_prefetched, .list_prefetch, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_map_prepare_reuse, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => null,
+            .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_len, .list_prefetched, .list_prefetch, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_map_prepare_reuse, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .erased_capture_load_borrowed, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => null,
         };
     }
 
@@ -12508,7 +13086,7 @@ pub const MonoLlvmCodeGen = struct {
         const list_size = RocList.word_count * self.targetWordSize();
 
         switch (op) {
-            .boxed_sequence_pack, .boxed_sequence_unpack => unreachable, // sequence operations never carry list element descriptors
+            .dec_mul_saturated => {},
             .list_prefetch => return,
             .list_len => {
                 const len = try self.loadUsize(try self.offsetPtr(try self.bytesAddress(GuardedList.at(all_args, 0)), self.rocListLenOffset()));
@@ -12519,7 +13097,7 @@ pub const MonoLlvmCodeGen = struct {
                 const src = try self.bytesAddress(GuardedList.at(all_args, 0));
                 return self.copyBytes(try self.targetAddress(target), src, list_size, self.targetPointerAlignment());
             },
-            .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_capacity, .list_get_unsafe, .list_prefetched, .list_append_unsafe, .list_concat, .list_append_range_within, .list_copy_range_within, .list_append_range_within_unsafe, .list_append_sublist, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_slack_unique, .list_owned_unique, .list_set_in_place_unsafe, .list_with_capacity, .list_drop_at, .list_sublist, .list_sublist_borrowed, .list_set, .list_replace_unsafe, .list_swap, .list_prepend, .list_take_first, .list_take_last, .list_reverse, .list_reserve, .list_reserve_for_append, .list_release_excess_capacity, .list_clear, .list_map_can_reuse, .list_map_cast_unsafe, .list_map_extract_unsafe, .list_move_out_unsafe, .list_map_write_unsafe, .list_item_size_at_most, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => {},
+            .str_is_eq, .str_is_eq_static_small, .str_static_small_word_eq, .str_static_small_word_caseless_eq, .str_concat, .str_append, .str_contains, .str_trim, .str_trim_start, .str_trim_end, .str_caseless_ascii_equals, .str_with_ascii_lowercased, .str_with_ascii_uppercased, .str_starts_with, .str_ends_with, .str_repeat, .str_drop_prefix, .str_drop_prefix_caseless_ascii, .str_drop_suffix, .str_split_first, .str_split_last, .str_count_utf8_bytes, .str_get_utf8_byte_unsafe, .str_substring_unsafe, .str_with_capacity, .str_reserve, .str_release_excess_capacity, .str_to_utf8, .str_from_utf8_lossy, .str_from_utf8_validated, .str_from_utf16_le_short, .str_from_utf16_be_short, .str_from_utf32_le_short, .str_from_utf32_be_short, .str_from_utf8, .str_split_on, .str_join_with, .str_from_parts, .str_inspect, .u8_to_str, .i8_to_str, .u16_to_str, .i16_to_str, .u32_to_str, .i32_to_str, .u64_to_str, .i64_to_str, .u128_to_str, .i128_to_str, .dec_to_str, .f32_to_str, .f64_to_str, .list_capacity, .list_get_unsafe, .list_prefetched, .list_append_unsafe, .list_concat, .list_append_range_within, .list_copy_range_within, .list_append_range_within_unsafe, .list_append_sublist, .list_append_le_bytes, .list_append_le_bytes_unsafe, .list_slack_unique, .list_owned_unique, .list_set_in_place_unsafe, .list_with_capacity, .list_drop_at, .list_sublist, .list_sublist_borrowed, .list_set, .list_replace_unsafe, .list_swap, .list_prepend, .list_reverse, .list_reserve, .list_reserve_for_append, .list_release_excess_capacity, .list_clear, .list_map_can_reuse, .list_map_cast_unsafe, .list_map_extract_unsafe, .list_move_out_unsafe, .list_map_write_unsafe, .list_item_size_at_most, .bool_not, .bool_likely, .dict_pseudo_seed, .hasher_finish, .hasher_write_bool, .hasher_write_u8, .hasher_write_u16, .hasher_write_u32, .hasher_write_u64, .hasher_write_u128, .hasher_write_i8, .hasher_write_i16, .hasher_write_i32, .hasher_write_i64, .hasher_write_i128, .hasher_write_f32, .hasher_write_f64, .hasher_write_dec, .hasher_write_bytes, .hasher_write_str, .crypto_sha256_hash_bytes, .crypto_sha256_hasher_empty, .crypto_sha256_hasher_write, .crypto_sha256_hasher_finish, .crypto_blake3_hash_bytes, .crypto_blake3_hasher_empty, .crypto_blake3_hasher_write, .crypto_blake3_hasher_finish, .num_is_eq, .num_is_gt, .num_is_gte, .num_is_lt, .num_is_lte, .num_negate, .num_abs, .num_abs_diff, .num_plus, .num_minus, .num_times, .num_int_add_wrap, .num_int_add_crash_on_overflow, .num_int_add_overflows, .num_int_add_proven_cannot_overflow, .num_int_sub_wrap, .num_int_sub_crash_on_overflow, .num_int_sub_overflows, .num_int_sub_proven_cannot_overflow, .num_int_mul_wrap, .num_int_mul_crash_on_overflow, .num_int_mul_overflows, .num_int_mul_proven_cannot_overflow, .num_float_add, .num_float_sub, .num_float_mul, .dec_mul, .num_div_by, .num_div_by_checked, .num_div_trunc_by, .num_div_trunc_by_checked, .num_rem_by, .num_rem_by_checked, .num_mod_by, .num_mod_by_checked, .num_negate_checked, .num_abs_checked, .num_pow, .num_atan2, .num_sqrt, .num_sin, .num_cos, .num_tan, .num_asin, .num_acos, .num_atan, .num_floor, .num_ceiling, .f32_to_bits, .f32_from_bits, .f64_to_bits, .f64_from_bits, .num_shift_left_by, .num_shift_right_by, .num_shift_right_zf_by, .num_bitwise_and, .num_bitwise_or, .num_bitwise_xor, .num_bitwise_not, .num_count_one_bits, .num_count_leading_zero_bits, .num_count_trailing_zero_bits, .num_from_le_bytes_unchecked, .simd_load_16_unchecked, .simd_store_16_unchecked, .simd_append_16, .simd_splat, .simd_get_lane_unchecked, .simd_with_lane_unchecked, .simd_to_u128_bits, .simd_from_u128_bits, .simd_add_wrap, .simd_sub_wrap, .simd_add_sat, .simd_sub_sat, .simd_neg_wrap, .simd_abs_wrap, .simd_min, .simd_max, .simd_abs_diff, .simd_avg_rounded, .simd_mul_wrap, .simd_mul_high, .simd_mul_q15_sat, .simd_mul_wide_lo, .simd_mul_wide_hi, .simd_dot_pairs, .simd_dot_pairs_sat, .simd_sad, .simd_and, .simd_or, .simd_xor, .simd_not, .simd_bit_select, .simd_eq_lanes, .simd_gt_lanes, .simd_gte_lanes, .simd_bitmask, .simd_shl_wrap, .simd_shr_wrap, .simd_shr_zf_wrap, .simd_shr_rounded, .simd_interleave_lo, .simd_interleave_hi, .simd_even_lanes, .simd_odd_lanes, .simd_reverse_lanes, .simd_table_lookup, .simd_concat_shift_bytes, .simd_widen_lo, .simd_widen_hi, .simd_pairwise_add_widen, .simd_narrow_wrap, .simd_narrow_sat, .simd_sum_lanes, .simd_sum_lanes_wrap, .simd_clmul_lo, .simd_clmul_hi, .u8_from_str, .i8_from_str, .u16_from_str, .i16_from_str, .u32_from_str, .i32_from_str, .u64_from_str, .i64_from_str, .u128_from_str, .i128_from_str, .dec_from_str, .dec_to_attos, .dec_from_attos, .f32_from_str, .f64_from_str, .u8_from_str_prefix, .u8_from_utf8_prefix, .i8_from_str_prefix, .i8_from_utf8_prefix, .u16_from_str_prefix, .u16_from_utf8_prefix, .i16_from_str_prefix, .i16_from_utf8_prefix, .u32_from_str_prefix, .u32_from_utf8_prefix, .i32_from_str_prefix, .i32_from_utf8_prefix, .u64_from_str_prefix, .u64_from_utf8_prefix, .i64_from_str_prefix, .i64_from_utf8_prefix, .u128_from_str_prefix, .u128_from_utf8_prefix, .i128_from_str_prefix, .i128_from_utf8_prefix, .dec_from_str_prefix, .dec_from_utf8_prefix, .f32_from_str_prefix, .f32_from_utf8_prefix, .f64_from_str_prefix, .f64_from_utf8_prefix, .u8_to_i8_wrap, .u8_to_i8_try, .u8_to_i16, .u8_to_i32, .u8_to_i64, .u8_to_i128, .u8_to_u16, .u8_to_u32, .u8_to_u64, .u8_to_u128, .u8_to_f32, .u8_to_f64, .u8_to_dec, .i8_to_i16, .i8_to_i32, .i8_to_i64, .i8_to_i128, .i8_to_u8_wrap, .i8_to_u8_try, .i8_to_u16_wrap, .i8_to_u16_try, .i8_to_u32_wrap, .i8_to_u32_try, .i8_to_u64_wrap, .i8_to_u64_try, .i8_to_u128_wrap, .i8_to_u128_try, .i8_to_f32, .i8_to_f64, .i8_to_dec, .u16_to_i8_wrap, .u16_to_i8_try, .u16_to_i16_wrap, .u16_to_i16_try, .u16_to_i32, .u16_to_i64, .u16_to_i128, .u16_to_u8_wrap, .u16_to_u8_try, .u16_to_u32, .u16_to_u64, .u16_to_u128, .u16_to_f32, .u16_to_f64, .u16_to_dec, .i16_to_i8_wrap, .i16_to_i8_try, .i16_to_i32, .i16_to_i64, .i16_to_i128, .i16_to_u8_wrap, .i16_to_u8_try, .i16_to_u16_wrap, .i16_to_u16_try, .i16_to_u32_wrap, .i16_to_u32_try, .i16_to_u64_wrap, .i16_to_u64_try, .i16_to_u128_wrap, .i16_to_u128_try, .i16_to_f32, .i16_to_f64, .i16_to_dec, .u32_to_i8_wrap, .u32_to_i8_try, .u32_to_i16_wrap, .u32_to_i16_try, .u32_to_i32_wrap, .u32_to_i32_try, .u32_to_i64, .u32_to_i128, .u32_to_u8_wrap, .u32_to_u8_try, .u32_to_u16_wrap, .u32_to_u16_try, .u32_to_u64, .u32_to_u128, .u32_to_f32, .u32_to_f64, .u32_to_dec, .i32_to_i8_wrap, .i32_to_i8_try, .i32_to_i16_wrap, .i32_to_i16_try, .i32_to_i64, .i32_to_i128, .i32_to_u8_wrap, .i32_to_u8_try, .i32_to_u16_wrap, .i32_to_u16_try, .i32_to_u32_wrap, .i32_to_u32_try, .i32_to_u64_wrap, .i32_to_u64_try, .i32_to_u128_wrap, .i32_to_u128_try, .i32_to_f32, .i32_to_f64, .i32_to_dec, .u64_to_i8_wrap, .u64_to_i8_try, .u64_to_i16_wrap, .u64_to_i16_try, .u64_to_i32_wrap, .u64_to_i32_try, .u64_to_i64_wrap, .u64_to_i64_try, .u64_to_i128, .u64_to_u8_wrap, .u64_to_u8_try, .u64_to_u16_wrap, .u64_to_u16_try, .u64_to_u32_wrap, .u64_to_u32_try, .u64_to_u128, .u64_to_f32, .u64_to_f64, .u64_to_dec, .i64_to_i8_wrap, .i64_to_i8_try, .i64_to_i16_wrap, .i64_to_i16_try, .i64_to_i32_wrap, .i64_to_i32_try, .i64_to_i128, .i64_to_u8_wrap, .i64_to_u8_try, .i64_to_u16_wrap, .i64_to_u16_try, .i64_to_u32_wrap, .i64_to_u32_try, .i64_to_u64_wrap, .i64_to_u64_try, .i64_to_u128_wrap, .i64_to_u128_try, .i64_to_f32, .i64_to_f64, .i64_to_dec, .u128_to_i8_wrap, .u128_to_i8_try, .u128_to_i16_wrap, .u128_to_i16_try, .u128_to_i32_wrap, .u128_to_i32_try, .u128_to_i64_wrap, .u128_to_i64_try, .u128_to_i128_wrap, .u128_to_i128_try, .u128_to_u8_wrap, .u128_to_u8_try, .u128_to_u16_wrap, .u128_to_u16_try, .u128_to_u32_wrap, .u128_to_u32_try, .u128_to_u64_wrap, .u128_to_u64_try, .u128_to_f32, .u128_to_f64, .u128_to_dec_try_unsafe, .i128_to_i8_wrap, .i128_to_i8_try, .i128_to_i16_wrap, .i128_to_i16_try, .i128_to_i32_wrap, .i128_to_i32_try, .i128_to_i64_wrap, .i128_to_i64_try, .i128_to_u8_wrap, .i128_to_u8_try, .i128_to_u16_wrap, .i128_to_u16_try, .i128_to_u32_wrap, .i128_to_u32_try, .i128_to_u64_wrap, .i128_to_u64_try, .i128_to_u128_wrap, .i128_to_u128_try, .i128_to_f32, .i128_to_f64, .i128_to_dec_try_unsafe, .f32_to_i8_trunc, .f32_to_i8_try_unsafe, .f32_to_i16_trunc, .f32_to_i16_try_unsafe, .f32_to_i32_trunc, .f32_to_i32_try_unsafe, .f32_to_i64_trunc, .f32_to_i64_try_unsafe, .f32_to_i128_trunc, .f32_to_i128_try_unsafe, .f32_to_u8_trunc, .f32_to_u8_try_unsafe, .f32_to_u16_trunc, .f32_to_u16_try_unsafe, .f32_to_u32_trunc, .f32_to_u32_try_unsafe, .f32_to_u64_trunc, .f32_to_u64_try_unsafe, .f32_to_u128_trunc, .f32_to_u128_try_unsafe, .f32_to_f64, .f64_to_i8_trunc, .f64_to_i8_try_unsafe, .f64_to_i16_trunc, .f64_to_i16_try_unsafe, .f64_to_i32_trunc, .f64_to_i32_try_unsafe, .f64_to_i64_trunc, .f64_to_i64_try_unsafe, .f64_to_i128_trunc, .f64_to_i128_try_unsafe, .f64_to_u8_trunc, .f64_to_u8_try_unsafe, .f64_to_u16_trunc, .f64_to_u16_try_unsafe, .f64_to_u32_trunc, .f64_to_u32_try_unsafe, .f64_to_u64_trunc, .f64_to_u64_try_unsafe, .f64_to_u128_trunc, .f64_to_u128_try_unsafe, .f64_to_f32_wrap, .f64_to_f32_try_unsafe, .dec_to_i8_trunc, .dec_to_i8_try_unsafe, .dec_to_i16_trunc, .dec_to_i16_try_unsafe, .dec_to_i32_trunc, .dec_to_i32_try_unsafe, .dec_to_i64_trunc, .dec_to_i64_try_unsafe, .dec_to_i128_trunc, .dec_to_u8_trunc, .dec_to_u8_try_unsafe, .dec_to_u16_trunc, .dec_to_u16_try_unsafe, .dec_to_u32_trunc, .dec_to_u32_try_unsafe, .dec_to_u64_trunc, .dec_to_u64_try_unsafe, .dec_to_u128_trunc, .dec_to_u128_try_unsafe, .dec_to_f32_wrap, .dec_to_f32_try_unsafe, .dec_to_f64, .box_box, .box_unbox, .box_unbox_borrowed, .box_prepare_update, .erased_capture_load, .erased_capture_load_borrowed, .ptr_alloca, .box_alloc_zeroed, .ptr_store, .ptr_load, .ptr_cast, .compare, .crash => {},
         }
         const list_op = boxyListOp(op) orelse llvmInvariantFmt("low-level {s} has no element-descriptor form", .{@tagName(op)});
         if (list_op == .map_can_reuse and !extra.interchangeable.get(self.layouts().targetUsize())) {
@@ -12541,7 +13119,7 @@ pub const MonoLlvmCodeGen = struct {
         const Operands = struct { list: ?u32 = 0, list2: ?u32 = null, element: ?u32 = null, n: [3]?u32 = .{ null, null, null } };
         const operands: Operands = switch (list_op) {
             .capacity, .slack_unique, .owned_unique, .map_can_reuse, .map_cast_unsafe, .clear, .release_excess_capacity, .reverse => .{},
-            .get_unsafe, .map_extract_unsafe, .item_size_at_most, .drop_at, .reserve, .reserve_for_append, .take_first, .take_last => .{ .n = .{ 1, null, null } },
+            .get_unsafe, .map_extract_unsafe, .item_size_at_most, .drop_at, .reserve, .reserve_for_append => .{ .n = .{ 1, null, null } },
             .append_unsafe, .prepend => .{ .element = 1 },
             .concat => .{ .list2 = 1 },
             .append_range_within, .append_range_within_unsafe, .swap => .{ .n = .{ 1, 2, null } },
@@ -12698,6 +13276,7 @@ pub const MonoLlvmCodeGen = struct {
                 .free,
                 => self.clearDeferredStrCapture(local),
                 .host_drop => llvmInvariantFmt("RC statement used a host-shaped drop adapter", .{}),
+                .decref_queued => llvmInvariantFmt("RC statement used a queued drop helper", .{}),
             }
             return;
         }
@@ -12730,10 +13309,10 @@ pub const MonoLlvmCodeGen = struct {
         try self.emitRcHelperCall(helper_key, atomicity, rc_ptr, count_value);
     }
 
-    /// Backend cache key for one generated RC helper. `HelperKey.encode` packs
-    /// the op into bits 32..33, so the atomicity bit goes above it.
+    /// Backend cache key for one generated RC helper. `HelperKey.encode` uses
+    /// its low `encoded_bits` bits, so the atomicity bit goes above them.
     fn rcHelperCacheKey(helper_key: layout.RcHelperKey, atomicity: RcAtomicity) u64 {
-        return helper_key.encode() | (@as(u64, @backingInt(atomicity)) << 34);
+        return helper_key.encode() | (@as(u64, @backingInt(atomicity)) << layout.RcHelperKey.encoded_bits);
     }
 
     fn staticDataRequiresRcHelper(
@@ -12760,7 +13339,7 @@ pub const MonoLlvmCodeGen = struct {
         const roles = layout.rc_helper.abiParams(op);
         for (roles, 0..) |role, i| {
             buf[i] = switch (role) {
-                .value_ptr, .ops_ptr => ptr_ty,
+                .value_ptr, .ops_ptr, .drop_queue => ptr_ty,
                 .count => self.ptrSizedIntType(),
             };
         }
@@ -12808,7 +13387,7 @@ pub const MonoLlvmCodeGen = struct {
         try self.addGeneratedFunctionStackProbeAttrs(&attrs);
         switch (helper_key.op) {
             .incref => {},
-            .decref, .free, .host_drop => {
+            .decref, .free, .host_drop, .decref_queued => {
                 // Drop/free helpers include the recursive teardown code for a layout.
                 // Keeping them out of line prevents LLVM from cloning large cleanup
                 // trees into hot callers such as generated parsers. This does not
@@ -12858,6 +13437,7 @@ pub const MonoLlvmCodeGen = struct {
 
         const outer_wip = self.wip;
         const outer_rc_scratch = self.rc_arg_scratch;
+        const outer_rc_queue = self.rc_queue_arg;
         const outer_ret = self.ret_ptr_arg;
         const outer_args = self.args_ptr_arg;
         const outer_capture = self.capture_ptr_arg;
@@ -12867,6 +13447,7 @@ pub const MonoLlvmCodeGen = struct {
         defer {
             self.wip = outer_wip;
             self.rc_arg_scratch = outer_rc_scratch;
+            self.rc_queue_arg = outer_rc_queue;
             self.ret_ptr_arg = outer_ret;
             self.args_ptr_arg = outer_args;
             self.capture_ptr_arg = outer_capture;
@@ -12879,6 +13460,7 @@ pub const MonoLlvmCodeGen = struct {
         defer wip.deinit();
         self.wip = &wip;
         self.rc_arg_scratch = null;
+        self.rc_queue_arg = if (helper_key.op == .decref_queued) wip.arg(1) else null;
         self.ret_ptr_arg = null;
         self.args_ptr_arg = null;
         self.capture_ptr_arg = null;
@@ -12899,8 +13481,9 @@ pub const MonoLlvmCodeGen = struct {
         const count_value: ?LlvmBuilder.Value = switch (helper_key.op) {
             .incref => wip.arg(1),
             // A `host_drop` adapter's second argument is the published on-drop
-            // ABI's ops slot, which the generated body ignores.
-            .decref, .free, .host_drop => null,
+            // ABI's ops slot, which the generated body ignores, and a
+            // `decref_queued` helper's is its drop queue (`rc_queue_arg`).
+            .decref, .free, .host_drop, .decref_queued => null,
         };
         const is_null = wip.icmp(.eq, value_ptr, builder.nullValue(try self.ptrType()) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
         _ = wip.brCond(is_null, done, body, .else_likely) catch return error.OutOfMemory;
@@ -12935,6 +13518,10 @@ pub const MonoLlvmCodeGen = struct {
             .box_incref => try self.emitRcHelperBoxIncref(value_ptr, count_value.?, atomicity),
             .box_decref => |box_plan| try self.emitRcHelperBoxDrop(box_plan, value_ptr, atomicity, LowLevelBuiltins.rcHelper(.box_decref, tableAtomicity(atomicity))),
             .box_free => |box_plan| try self.emitRcHelperBoxDrop(box_plan, value_ptr, atomicity, LowLevelBuiltins.rcHelper(.box_free, .atomic)),
+            .list_decref_queued => |list_plan| try self.emitRcHelperQueuedListDrop(list_plan, value_ptr, atomicity, queuedDropMode(atomicity)),
+            .list_free_queued => |list_plan| try self.emitRcHelperQueuedListDrop(list_plan, value_ptr, atomicity, .free),
+            .box_decref_queued => |box_plan| try self.emitRcHelperQueuedBoxDrop(box_plan, value_ptr, atomicity, queuedDropMode(atomicity)),
+            .box_free_queued => |box_plan| try self.emitRcHelperQueuedBoxDrop(box_plan, value_ptr, atomicity, .free),
             .erased_callable_incref => try self.emitRcHelperErasedCallableIncref(value_ptr, count_value.?, atomicity),
             .erased_callable_decref => try self.emitRcHelperErasedCallableDrop(value_ptr, LowLevelBuiltins.rcHelper(.erased_callable_decref, tableAtomicity(atomicity))),
             .erased_callable_free => try self.emitRcHelperErasedCallableDrop(value_ptr, LowLevelBuiltins.rcHelper(.erased_callable_free, .atomic)),
@@ -12952,8 +13539,63 @@ pub const MonoLlvmCodeGen = struct {
         switch (helper_key.op) {
             .incref => _ = try self.callFunctionIndex(func, &.{ value_ptr, count_value.? }, false),
             .decref, .free => _ = try self.callFunctionIndex(func, &.{value_ptr}, false),
+            .decref_queued => _ = try self.callFunctionIndex(func, &.{ value_ptr, try self.rcQueueValue() }, false),
             .host_drop => llvmInvariantFmt("RC statement used a host-shaped drop adapter", .{}),
         }
+    }
+
+    /// The queue a helper passes to a `decref_queued` child or a queued
+    /// teardown: the one it received, or null in a helper that received none.
+    fn rcQueueValue(self: *MonoLlvmCodeGen) Error!LlvmBuilder.Value {
+        if (self.rc_queue_arg) |queue| return queue;
+        const builder = self.builder orelse return error.CompilationFailed;
+        return builder.nullValue(try self.ptrType()) catch return error.OutOfMemory;
+    }
+
+    fn queuedDropMode(atomicity: RcAtomicity) builtins.utils.DropMode {
+        return switch (atomicity) {
+            .atomic => .decref_atomic,
+            .single_thread => .decref_single_thread,
+        };
+    }
+
+    /// Drop a list on a cycle of its type through the queued teardown
+    /// builtin (`builtins.utils.DropQueue`). The builtin takes the list by
+    /// address, which is the helper's value pointer.
+    fn emitRcHelperQueuedListDrop(self: *MonoLlvmCodeGen, list_plan: layout.RcQueuedListPlan, value_ptr: LlvmBuilder.Value, atomicity: RcAtomicity, mode: builtins.utils.DropMode) Error!void {
+        const builder = self.builder orelse return error.CompilationFailed;
+        const child_fn = try self.declareRefcountedRcHelper(list_plan.child, atomicity);
+        try self.callBuiltinVoid(
+            .list_drop_queued,
+            &.{ try self.ptrType(), .i32, self.ptrSizedIntType(), try self.ptrType(), try self.ptrType(), .i32 },
+            &.{
+                value_ptr,
+                builder.intValue(.i32, list_plan.elem_alignment) catch return error.OutOfMemory,
+                builder.intValue(self.ptrSizedIntType(), list_plan.elem_width) catch return error.OutOfMemory,
+                child_fn.toValue(builder),
+                try self.rcQueueValue(),
+                builder.intValue(.i32, @backingInt(mode)) catch return error.OutOfMemory,
+            },
+        );
+    }
+
+    /// Drop a box on a cycle of its type through the queued teardown
+    /// builtin (`builtins.utils.DropQueue`).
+    fn emitRcHelperQueuedBoxDrop(self: *MonoLlvmCodeGen, box_plan: layout.RcQueuedBoxPlan, value_ptr: LlvmBuilder.Value, atomicity: RcAtomicity, mode: builtins.utils.DropMode) Error!void {
+        const builder = self.builder orelse return error.CompilationFailed;
+        const payload_ptr = try self.loadPointer(value_ptr);
+        const child_fn = try self.declareRefcountedRcHelper(box_plan.child, atomicity);
+        try self.callBuiltinVoid(
+            .box_drop_queued,
+            &.{ try self.ptrType(), .i32, try self.ptrType(), try self.ptrType(), .i32 },
+            &.{
+                payload_ptr,
+                builder.intValue(.i32, box_plan.elem_alignment) catch return error.OutOfMemory,
+                child_fn.toValue(builder),
+                try self.rcQueueValue(),
+                builder.intValue(.i32, @backingInt(mode)) catch return error.OutOfMemory,
+            },
+        );
     }
 
     fn loadStrDataPtrForRc(self: *MonoLlvmCodeGen, value_ptr: LlvmBuilder.Value) Error!LlvmBuilder.Value {
@@ -13090,9 +13732,6 @@ pub const MonoLlvmCodeGen = struct {
 
     fn emitRcHelperErasedCallableIncref(self: *MonoLlvmCodeGen, value_ptr: LlvmBuilder.Value, count_value: LlvmBuilder.Value, atomicity: RcAtomicity) Error!void {
         const payload_ptr = try self.loadPointer(value_ptr);
-        // An erased-callable incref is a plain data-pointer incref on the
-        // payload allocation, so the single-thread mode uses the data-pointer
-        // entry directly.
         try self.callBuiltinVoid(
             LowLevelBuiltins.rcHelper(.erased_callable_incref, tableAtomicity(atomicity)),
             &.{ try self.ptrType(), self.ptrSizedIntType() },
@@ -13458,11 +14097,12 @@ pub const MonoLlvmCodeGen = struct {
         if (wip.strip) return;
         const scope = self.current_subprogram.unwrap() orelse return;
         // The variable belongs to the physical procedure, so its location
-        // does too, whatever inline scope the defining statement is in.
+        // does too, whatever inline scope or other file's block the defining
+        // statement is in.
         const previous_debug_location = wip.debug_location;
         defer wip.debug_location = previous_debug_location;
         const line = switch (previous_debug_location) {
-            .location => |location| if (location.inlined_at.unwrap() == null) location.line else self.current_proc_line,
+            .location => |location| if (location.inlined_at.unwrap() == null and location.scope == scope.toOptional()) location.line else self.current_proc_line,
             .no_location => self.current_proc_line,
         };
         wip.debug_location = .{ .location = .{
@@ -15550,6 +16190,65 @@ test "standalone LLVM modules define cyclic frozen data and procedure pointers" 
     }
 }
 
+test "issue 12943: debug info names a procedure by its source name on every platform" {
+    const allocator = std.testing.allocator;
+    var store = lir.LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, .u64);
+    defer layouts.deinit();
+    const result = try store.addLocal(.{ .layout_idx = .u64 });
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = result } }, .test_fixture);
+    const body = try store.addCFStmt(.{ .assign_literal = .{
+        .target = result,
+        .value = .{ .i64_literal = .{ .value = 42, .layout_idx = .u64 } },
+        .next = ret,
+    } }, .test_fixture);
+    const named = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .identity = lir.LIR.ProcIdentity.forTest(0),
+        .args = .empty(),
+        .body = .some(body),
+        .ret_layout = .u64,
+        .frame_locals = try store.addLocalSpan(&.{result}),
+    }, .none);
+    try store.setProcDebugName(named, "App.answer");
+    const generated = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .identity = lir.LIR.ProcIdentity.forTest(1),
+        .args = .empty(),
+        .body = .some(body),
+        .ret_layout = .u64,
+        .frame_locals = try store.addLocalSpan(&.{result}),
+    }, .none);
+    const target = try std.zig.system.resolveTargetQuery(std.testing.io, .{ .cpu_arch = .x86_64, .os_tag = .linux });
+    // A real platform's object: no default-platform runtime or diagnostics.
+    var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, target);
+    defer codegen.deinit();
+    codegen.layout_store = &layouts;
+    codegen.emit_debug_info = true;
+    var builder = try codegen.createBuilder("issue_12943");
+    defer builder.deinit();
+    codegen.builder = &builder;
+    defer codegen.builder = null;
+    try codegen.buildEntrypointModule(&builder, "issue_12943", &.{});
+    var ir: std.Io.Writer.Allocating = .init(allocator);
+    defer ir.deinit();
+    try builder.print(&ir.writer);
+
+    var named_symbol: [lir.ProcIdentity.symbol_name_len]u8 = undefined;
+    _ = store.getProcSpec(named).identity.writeSymbolName(&named_symbol);
+    var generated_symbol: [lir.ProcIdentity.symbol_name_len]u8 = undefined;
+    _ = store.getProcSpec(generated).identity.writeSymbolName(&generated_symbol);
+    var expected: std.Io.Writer.Allocating = .init(allocator);
+    defer expected.deinit();
+    try expected.writer.print("name: \"App.answer\", linkageName: \"{s}\"", .{named_symbol});
+    try std.testing.expect(std.mem.find(u8, ir.written(), expected.written()) != null);
+    // A procedure with no source name is shown by its symbol.
+    expected.clearRetainingCapacity();
+    try expected.writer.print("name: \"{s}\", linkageName: \"{s}\"", .{ generated_symbol, generated_symbol });
+    try std.testing.expect(std.mem.find(u8, ir.written(), expected.written()) != null);
+}
+
 test "frozen relocation offsets are bounded before host indexing for either target width" {
     const allocator = std.testing.allocator;
     inline for (.{ std.Target.Cpu.Arch.wasm32, std.Target.Cpu.Arch.aarch64 }) |arch| {
@@ -15646,6 +16345,172 @@ fn printedFunction(ir: []const u8, name: []const u8) ?[]const u8 {
         start = line_end;
     }
     return null;
+}
+
+test "issue 13146: debug locations name the file of their statement" {
+    const gpa = std.testing.allocator;
+    var store = lir.LirStore.init(gpa);
+    defer store.deinit();
+    var layouts = try layout.Store.init(gpa, .u64);
+    defer layouts.deinit();
+    try store.setSourceFiles(&.{
+        .{ .name = "main", .qualified_name = "main", .module_identity = @splat(0) },
+        .{ .name = "Platform", .qualified_name = "pf.Platform", .module_identity = @splat(1) },
+    });
+    // An inlined callee with no location of its own (a compiler-generated
+    // wrapper), whose code carries its call site's location.
+    const generated_scope = try store.addInlineScope(.{
+        .source_identity = lir.LIR.ProcIdentity.forTest(2),
+        .copies_site_code = false,
+        .source_name = .none,
+        .source_loc = .none,
+        .call_site = .{ .file = .some(0), .line = 4, .column = 5 },
+        .parent = .none,
+    });
+    // An inlined callee from another module.
+    const platform_scope = try store.addInlineScope(.{
+        .source_identity = lir.LIR.ProcIdentity.forTest(3),
+        .copies_site_code = false,
+        .source_name = .none,
+        .source_loc = .{ .file = .some(1), .line = 40, .column = 1 },
+        .call_site = .{ .file = .some(0), .line = 5, .column = 5 },
+        .parent = .none,
+    });
+    const origin = struct {
+        fn at(file: u32, line: u32, scope: lir.LIR.InlineScopeId) lir.LIR.StmtOrigin {
+            return .{ .loc = .{ .file = .some(file), .line = line, .column = 2 }, .region = Base.Region.zero(), .inline_scope = scope, .kind = .source };
+        }
+    }.at;
+    const a = try store.addLocal(.{ .layout_idx = .i64 });
+    const b = try store.addLocal(.{ .layout_idx = .i64 });
+    const s1 = try store.addLocal(.{ .layout_idx = .i64 });
+    const s2 = try store.addLocal(.{ .layout_idx = .i64 });
+    const s3 = try store.addLocal(.{ .layout_idx = .i64 });
+    var body = try store.addCFStmt(.{ .ret = .{ .value = s3 } }, origin(0, 6, .none));
+    body = try store.addLowLevelStmt(s3, .num_int_add_wrap, &.{ s2, b }, body, origin(1, 9, .none));
+    body = try store.addLowLevelStmt(s2, .num_int_add_wrap, &.{ s1, a }, body, origin(1, 41, platform_scope));
+    body = try store.addLowLevelStmt(s1, .num_int_add_wrap, &.{ a, b }, body, origin(0, 7, generated_scope));
+    const proc = try store.addProcSpec(.{
+        .name = .fromRaw(1),
+        .identity = lir.LIR.ProcIdentity.forTest(1),
+        .args = try store.addLocalSpan(&.{ a, b }),
+        .frame_locals = try store.addLocalSpan(&.{ s1, s2, s3 }),
+        .body = .some(body),
+        .ret_layout = .i64,
+    }, .{ .file = .some(0), .line = 3, .column = 1 });
+
+    const target = try std.zig.system.resolveTargetQuery(std.testing.io, .{ .cpu_arch = .x86_64, .os_tag = .linux });
+    var codegen = MonoLlvmCodeGen.initForLinkedObject(gpa, &store, target);
+    defer codegen.deinit();
+    codegen.layout_store = &layouts;
+    codegen.emit_debug_info = true;
+    var ir: std.Io.Writer.Allocating = .init(gpa);
+    defer ir.deinit();
+    try codegen.printEntrypointModule("issue_13146", &.{.{
+        .symbol_name = "roc_main",
+        .proc = proc,
+        .arg_layouts = &.{ .i64, .i64 },
+        .ret_layout = .i64,
+    }}, &ir.writer);
+
+    // Statement lines (7, 41, 9, 6) and call-site lines (4, 5).
+    const expected = [_]struct { line: u32, file: []const u8 }{
+        .{ .line = 7, .file = "main" },
+        .{ .line = 4, .file = "main" },
+        .{ .line = 41, .file = "Platform" },
+        .{ .line = 5, .file = "main" },
+        .{ .line = 9, .file = "Platform" },
+        .{ .line = 6, .file = "main" },
+    };
+    for (expected) |entry| {
+        const file = printedDebugLocationFile(ir.written(), entry.line) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(entry.file, file);
+    }
+}
+
+/// The file of the scope of the first printed `DILocation` on `line`.
+fn printedDebugLocationFile(ir: []const u8, line: u32) ?[]const u8 {
+    var needle_buf: [40]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "!DILocation(line: {d},", .{line}) catch return null;
+    const location = ir[(std.mem.find(u8, ir, needle) orelse return null)..];
+    const scope = printedMetadataDef(ir, printedMetadataRef(location, "scope: ") orelse return null) orelse return null;
+    const file = printedMetadataDef(ir, printedMetadataRef(scope, "file: ") orelse return null) orelse return null;
+    const key = "filename: \"";
+    const name = file[(std.mem.find(u8, file, key) orelse return null) + key.len ..];
+    return name[0 .. std.mem.findScalar(u8, name, '"') orelse return null];
+}
+
+/// The `!N` reference that follows `key` on the first line of `text`.
+fn printedMetadataRef(text: []const u8, key: []const u8) ?[]const u8 {
+    const line = text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
+    const start = (std.mem.find(u8, line, key) orelse return null) + key.len;
+    var end = start + 1;
+    while (end < line.len and std.ascii.isDigit(line[end])) end += 1;
+    return line[start..end];
+}
+
+/// The printed definition line of metadata node `id` (`!N`).
+fn printedMetadataDef(ir: []const u8, id: []const u8) ?[]const u8 {
+    var needle_buf: [24]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "\n{s} = ", .{id}) catch return null;
+    const def = ir[(std.mem.find(u8, ir, needle) orelse return null) + 1 ..];
+    return def[0 .. std.mem.findScalar(u8, def, '\n') orelse def.len];
+}
+
+test "issue 13125: generated functions that call procs have debug subprograms" {
+    // Wrappers and adapters around a proc need a subprogram, or LLVM drops the
+    // locations of the proc code it inlines into them; the verifier then also
+    // requires a location on each of their calls.
+    const gpa = std.testing.allocator;
+    var store = lir.LirStore.init(gpa);
+    defer store.deinit();
+    var layouts = try layout.Store.init(gpa, .u64);
+    defer layouts.deinit();
+    try store.setSourceFiles(&.{.{ .name = "main", .qualified_name = "main", .module_identity = @splat(0) }});
+    const arg = try store.addLocal(.{ .layout_idx = .i64 });
+    const args = try store.addLocalSpan(&.{arg});
+    const body = try store.addCFStmt(.{ .ret = .{ .value = arg } }, .test_fixture);
+    const proc = try store.addProcSpec(.{
+        .name = lir.LIR.Symbol.fromRaw(0),
+        .identity = lir.LIR.ProcIdentity.forTest(1),
+        .args = args,
+        .frame_locals = args,
+        .body = .some(body),
+        .ret_layout = .i64,
+    }, .{ .file = .some(0), .line = 3, .column = 1 });
+    var symbol_buf: [lir.LIR.ProcIdentity.symbol_name_len]u8 = undefined;
+    const adapter_name = store.getProcSpec(proc).identity.writeSymbolName(&symbol_buf);
+
+    const target = try std.zig.system.resolveTargetQuery(std.testing.io, .{ .cpu_arch = .x86_64, .os_tag = .linux });
+    inline for (.{ MonoLlvmCodeGen.ProgramKind.platform, MonoLlvmCodeGen.ProgramKind.in_process }) |program_kind| {
+        var codegen = MonoLlvmCodeGen.initForLinkedObject(gpa, &store, target);
+        defer codegen.deinit();
+        codegen.layout_store = &layouts;
+        codegen.program_kind = program_kind;
+        codegen.emit_debug_info = true;
+        var ir: std.Io.Writer.Allocating = .init(gpa);
+        defer ir.deinit();
+        try codegen.printEntrypointModule("issue_13125", &.{.{
+            .symbol_name = "roc_main",
+            .proc = proc,
+            .arg_layouts = &.{.i64},
+            .ret_layout = .i64,
+        }}, &ir.writer);
+
+        for ([_][]const u8{ "roc_main", adapter_name }) |name| {
+            const function = printedFunction(ir.written(), name) orelse return error.TestUnexpectedResult;
+            var lines = std.mem.splitScalar(u8, function, '\n');
+            const define_line = lines.first();
+            try std.testing.expect(std.mem.find(u8, define_line, " !dbg !") != null);
+            var calls: usize = 0;
+            while (lines.next()) |line| {
+                if (std.mem.find(u8, line, "call ") == null) continue;
+                calls += 1;
+                try std.testing.expect(std.mem.find(u8, line, ", !dbg !") != null);
+            }
+            try std.testing.expect(calls > 0);
+        }
+    }
 }
 
 test "issue 12505: addressed Bool alias materializes its SSA source" {
@@ -15866,9 +16731,13 @@ test "aggregate constructors write each byte of their slot once" {
     try builder.print(&ir.writer);
     const function = printedFunction(ir.written(), "roc_proc_0.fast") orelse return error.TestUnexpectedResult;
     // Each constructor zeroes only the 7 bytes its fields, payload, and
-    // discriminant leave unwritten, never its whole slot.
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, function, "call void @llvm.memset"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, function, "i8 0, i64 7, i1 false)"));
+    // discriminant leave unwritten, never its whole slot. That padding is
+    // shorter than the aggregate's alignment, so aligned 1-, 2-, and 4-byte
+    // stores zero it.
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, function, "call void @llvm.memset"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, function, "store i8 0, ptr"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, function, "store i16 0, ptr"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, function, "store i32 0, ptr"));
 }
 
 test "issue 12819: large join parameter reads share storage" {
@@ -16327,6 +17196,15 @@ test "a looping helper whose only callees are inlined everywhere is a leaf" {
     codegen.program_kind = .in_process;
     try codegen.computeInlineEverywhere(store.getProcSpecs(), &entrypoints);
     try std.testing.expect(codegen.inlineEverywhere(over_leaf));
+
+    // Only a speed build selects anything.
+    for ([_]MonoLlvmCodeGen.Optimization{ .none, .size }) |optimization| {
+        codegen.optimization = optimization;
+        try codegen.computeInlineEverywhere(store.getProcSpecs(), &.{});
+        for (0..store.getProcSpecs().len) |proc_index| {
+            try std.testing.expect(!codegen.inlineEverywhere(@fromBackingInt(@intCast(proc_index))));
+        }
+    }
 }
 
 test "wasm C-ABI classification follows the target's SIMD support" {

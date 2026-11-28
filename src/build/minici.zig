@@ -25,7 +25,7 @@ const failure_log_head_bytes: usize = 12 * 1024;
 const failure_log_tail_bytes: usize = 4 * 1024;
 
 /// Installed by `build-ci`. See `restampBuildCache`.
-const restamp_exe = "zig-out/bin/restamp-zig-cache" ++ builtin.target.exeFileExt();
+pub const restamp_exe = "zig-out/bin/restamp-zig-cache" ++ builtin.target.exeFileExt();
 const restamp_log = logs_dir ++ "/restamp-zig-cache.txt";
 
 /// Exit status when every phase passed but the cache-reuse canary did not (see
@@ -42,20 +42,23 @@ const JobKind = enum {
 /// Which hosts a MiniCI job has to run on for its signal to be complete. CI
 /// runs MiniCI as several lanes (see `Lane`), and each lane selects jobs by
 /// placement, so every job's placement is stated here rather than inferred.
+/// Windows runs every job whatever its placement (see `Lane.all`).
 const Placement = enum {
     /// Reads only tracked source files and builds nothing beyond its own small
-    /// host check tool, so its result is the same on every host. It runs once,
-    /// in the `source` lane, which does not need `build-ci`.
+    /// host check tool, so its result is meant to be the same on every host.
+    /// On Linux it runs in the `source` lane, which does not need `build-ci`.
     source,
     /// Needs `build-ci` outputs, but its result does not depend on the host
-    /// OS or architecture, so it runs only in the primary (Linux x86_64) lane.
+    /// OS or architecture, so on Linux and macOS it runs only in the primary
+    /// (Linux x86_64) lane.
     primary_host,
     /// Exercises host-specific behavior (linking, codegen, paths, process
     /// handling, ...), so it runs on every host.
     every_host,
 };
 
-const Job = struct {
+/// One `zig build` step MiniCI runs, and how it runs it.
+pub const Job = struct {
     name: []const u8,
     kind: JobKind = .single,
     args: []const []const u8 = &.{},
@@ -78,26 +81,33 @@ const Job = struct {
 
 /// A group of CI jobs that together run each MiniCI job exactly once per host
 /// (see `shards` and the "MiniCI shards cover" tests).
-const Lane = enum {
+pub const Lane = enum {
     /// Source-only checks. Runs once, on Linux, before anything is built.
     source,
     /// The Linux x86_64 lane: every job that needs `build-ci` outputs.
     primary,
-    /// The macOS and Windows lanes: only the jobs whose result can differ by
-    /// host. Source and primary-host jobs already ran on Linux.
+    /// The macOS lanes and the nightly lanes on hosts pull-request CI never
+    /// uses: only the jobs whose result can differ by host. Source and
+    /// primary-host jobs already ran on Linux.
     secondary,
+    /// The pull-request Windows lanes: every job. Windows paths, shells and
+    /// tools differ enough that host-independent jobs have failed there alone
+    /// (the Zig lints compared `\`-separated paths with `/`-separated ones), so
+    /// Windows CI runs everything `zig build minici` runs on a Windows machine.
+    all,
 
     fn runs(self: Lane, placement: Placement) bool {
         return switch (self) {
             .source => placement == .source,
             .primary => placement == .primary_host or placement == .every_host,
             .secondary => placement == .every_host,
+            .all => true,
         };
     }
 
     /// The source lane runs only source checks, and those build their own
     /// small host tools, so running `build-ci` first would be pure waste.
-    fn needsBuildCi(self: Lane) bool {
+    pub fn needsBuildCi(self: Lane) bool {
         return self != .source;
     }
 
@@ -109,13 +119,35 @@ const Lane = enum {
     }
 };
 
-/// The host family a CI shard runs on. Used only to prove shard coverage.
-const Host = enum { linux, macos, windows };
+/// The CI runner a shard runs on, and with it the build artifact the shard
+/// restores: every shard of a host reuses one `build-ci` from that host. Used
+/// to prove shard coverage and to say which CI file runs which shards.
+pub const Host = enum {
+    /// Pull-request CI's runners: ubuntu-24.04, macos-15 and windows-2025.
+    linux,
+    macos,
+    windows,
+    /// The nightly runners pull-request CI never uses: ubuntu-24.04-arm,
+    /// macos-15-intel and windows-2022.
+    linux_arm,
+    macos_intel,
+    windows_2022,
+
+    /// The lane whose jobs this host's shards run between them, each exactly
+    /// once. Linux gets there through the `source` and `primary` lanes
+    /// together.
+    fn coverage(self: Host) Lane {
+        return switch (self) {
+            .linux, .windows => .all,
+            .macos, .linux_arm, .macos_intel, .windows_2022 => .secondary,
+        };
+    }
+};
 
 /// One CI job's slice of MiniCI: the jobs in `selection` that `lane` runs.
-/// `.github/workflows/ci_manager.yml` names every shard exactly once through
-/// its `minici_shard:` matrix keys, and `--minici-verify-workflows` checks that.
-const Shard = struct {
+/// The CI files in `workflows` name every shard exactly once through their
+/// `minici_shard:` matrix keys, and `--minici-verify-workflows` checks that.
+pub const Shard = struct {
     name: []const u8,
     host: Host,
     lane: Lane,
@@ -127,11 +159,11 @@ const Shard = struct {
 /// and two backends, which alone takes most of a 120-minute job on the slowest
 /// host, so it is the last job in `jobs` and each host runs it as a shard of
 /// its own. The
-/// "MiniCI shards cover" tests prove that, for each host, the shards run every
-/// job exactly once: the `source` shard and the Linux shards together run every
-/// job, and each of the macOS and Windows shard sets runs every `every_host`
-/// job.
-const shards = [_]Shard{
+/// "MiniCI shards cover" test proves that, for each host, the shards run every
+/// job of the host's `coverage` lane exactly once. The nightly hosts split the
+/// secondary lane like macOS, and each of their shards takes at most about
+/// two and a half hours on its runner.
+pub const shards = [_]Shard{
     .{ .name = "source", .host = .linux, .lane = .source },
     .{ .name = "linux-core", .host = .linux, .lane = .primary, .selection = .{ .before = "run-test-eval" } },
     .{ .name = "linux-eval", .host = .linux, .lane = .primary, .selection = .{ .from = "run-test-eval", .to = "run-test-eval" } },
@@ -142,15 +174,28 @@ const shards = [_]Shard{
     .{ .name = "macos-eval", .host = .macos, .lane = .secondary, .selection = .{ .from = "run-test-eval", .to = "run-test-eval" } },
     .{ .name = "macos-harness", .host = .macos, .lane = .secondary, .selection = .{ .after = "run-test-eval", .before = strategy_differential_job } },
     .{ .name = "macos-strategy", .host = .macos, .lane = .secondary, .selection = .{ .from = strategy_differential_job } },
-    .{ .name = "windows-core", .host = .windows, .lane = .secondary, .selection = .{ .to = last_module_test_job } },
-    .{ .name = "windows-zig", .host = .windows, .lane = .secondary, .selection = .{ .after = last_module_test_job, .before = "run-test-eval" } },
-    .{ .name = "windows-eval", .host = .windows, .lane = .secondary, .selection = .{ .from = "run-test-eval", .to = "run-test-eval" } },
-    .{ .name = "windows-simd", .host = .windows, .lane = .secondary, .selection = .{ .from = "run-test-simd-differential", .to = "run-test-eval-host-effects" } },
-    .{ .name = "windows-harness", .host = .windows, .lane = .secondary, .selection = .{ .after = "run-test-eval-host-effects", .before = strategy_differential_job } },
-    .{ .name = "windows-strategy", .host = .windows, .lane = .secondary, .selection = .{ .from = strategy_differential_job } },
+    .{ .name = "windows-core", .host = .windows, .lane = .all, .selection = .{ .to = last_module_test_job } },
+    .{ .name = "windows-zig", .host = .windows, .lane = .all, .selection = .{ .after = last_module_test_job, .before = "run-test-eval" } },
+    .{ .name = "windows-eval", .host = .windows, .lane = .all, .selection = .{ .from = "run-test-eval", .to = "run-test-eval" } },
+    .{ .name = "windows-simd", .host = .windows, .lane = .all, .selection = .{ .from = "run-test-simd-differential", .to = "run-test-eval-host-effects" } },
+    .{ .name = "windows-harness", .host = .windows, .lane = .all, .selection = .{ .after = "run-test-eval-host-effects", .before = strategy_differential_job } },
+    .{ .name = "windows-strategy", .host = .windows, .lane = .all, .selection = .{ .from = strategy_differential_job } },
+    .{ .name = "linux-arm-core", .host = .linux_arm, .lane = .secondary, .selection = .{ .before = "run-test-eval" } },
+    .{ .name = "linux-arm-eval", .host = .linux_arm, .lane = .secondary, .selection = .{ .from = "run-test-eval", .to = "run-test-eval" } },
+    .{ .name = "linux-arm-harness", .host = .linux_arm, .lane = .secondary, .selection = .{ .after = "run-test-eval", .before = strategy_differential_job } },
+    .{ .name = "linux-arm-strategy", .host = .linux_arm, .lane = .secondary, .selection = .{ .from = strategy_differential_job } },
+    .{ .name = "macos-intel-core", .host = .macos_intel, .lane = .secondary, .selection = .{ .before = "run-test-eval" } },
+    .{ .name = "macos-intel-eval", .host = .macos_intel, .lane = .secondary, .selection = .{ .from = "run-test-eval", .to = "run-test-eval" } },
+    .{ .name = "macos-intel-harness", .host = .macos_intel, .lane = .secondary, .selection = .{ .after = "run-test-eval", .before = strategy_differential_job } },
+    .{ .name = "macos-intel-strategy", .host = .macos_intel, .lane = .secondary, .selection = .{ .from = strategy_differential_job } },
+    .{ .name = "windows-2022-core", .host = .windows_2022, .lane = .secondary, .selection = .{ .before = "run-test-eval" } },
+    .{ .name = "windows-2022-eval", .host = .windows_2022, .lane = .secondary, .selection = .{ .from = "run-test-eval", .to = "run-test-eval" } },
+    .{ .name = "windows-2022-harness", .host = .windows_2022, .lane = .secondary, .selection = .{ .after = "run-test-eval", .before = strategy_differential_job } },
+    .{ .name = "windows-2022-strategy", .host = .windows_2022, .lane = .secondary, .selection = .{ .from = strategy_differential_job } },
 };
 
-fn shardByName(name: []const u8) ?Shard {
+/// The shard in `shards` named `name`, or null when none is.
+pub fn shardByName(name: []const u8) ?Shard {
     for (shards) |shard| {
         if (std.mem.eql(u8, shard.name, name)) return shard;
     }
@@ -233,6 +278,9 @@ const last_module_test_job = module_test_jobs[module_test_jobs.len - 1].name;
 /// The job every host runs as its own shard (see `shards`).
 const strategy_differential_job = "run-test-strategy-differential";
 
+/// The only host the Linux x86-64 codegen checks run on.
+const host_is_linux_x86_64 = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
+
 const jobs = [_]Job{
     // `build.zig` keeps build work behind `build-ci`, and MiniCI checks it: a
     // job that runs a compile step it does not list in `expected_compiles`
@@ -260,12 +308,28 @@ const jobs = [_]Job{
     .{ .name = "run-check-builtin-format", .placement = .primary_host },
     .{ .name = "run-check-glue-abi" },
     // These three scripts verify properties of emitted code with Linux-only
-    // tools and exit at once on any other host, where running them cost a
-    // `zig build` start-up each for nothing.
-    .{ .name = "run-check-simd-codegen", .placement = .primary_host },
-    .{ .name = "run-check-baseline-codegen", .placement = .primary_host },
-    .{ .name = "run-check-match-extension-codegen" },
-    .{ .name = "run-check-str-eq-same-allocation", .placement = .primary_host },
+    // tools and exit at once on any other host, so other hosts skip them
+    // rather than pay a `zig build` start-up each for nothing.
+    .{
+        .name = "run-check-simd-codegen",
+        .placement = .primary_host,
+        .skip_reason = if (host_is_linux_x86_64) null else "needs a Linux x86-64 host (see ci/check_simd_codegen.sh)\n",
+    },
+    .{
+        .name = "run-check-baseline-codegen",
+        .placement = .primary_host,
+        .skip_reason = if (host_is_linux_x86_64) null else "needs a Linux x86-64 host (see ci/check_baseline_codegen.sh)\n",
+    },
+    // Builds the fixture for named targets, so the counts it pins are the same
+    // from every host. Its x64musl count disassembles with the host's
+    // objdump, which on an AArch64 Linux host is binutils built for AArch64
+    // alone.
+    .{ .name = "run-check-match-extension-codegen", .placement = .primary_host },
+    .{
+        .name = "run-check-str-eq-same-allocation",
+        .placement = .primary_host,
+        .skip_reason = if (builtin.os.tag == .linux) null else "needs Valgrind on a Linux host (see ci/check_str_eq_same_allocation.sh)\n",
+    },
     .{ .name = "run-check-snapshots" },
     // Builds its own ReleaseSafe shim: the archive it checks is the one a
     // release ships, and everything `build-ci` builds is Debug.
@@ -276,6 +340,14 @@ const jobs = [_]Job{
     },
     .{ .name = "run-check-test-asset-coverage", .placement = .source },
 } ++ module_test_jobs ++ zig_test_suite_jobs ++ [_]Job{
+    // ThreadSanitizer checks the refcount orderings against the memory model
+    // rather than the host CPU. Zig ships its runtime for Linux and macOS
+    // only, where build.zig builds the test; elsewhere the step just fails.
+    .{
+        .name = "run-test-builtins-tsan",
+        .placement = .primary_host,
+        .skip_reason = if (builtin.os.tag == .linux or builtin.os.tag == .macos) null else "Zig has no ThreadSanitizer runtime for this host\n",
+    },
     .{
         .name = "run-test-eval",
         .kind = .harness,
@@ -293,6 +365,9 @@ const jobs = [_]Job{
     // The modules these load are WebAssembly, so one host is enough.
     .{ .name = "run-test-repl-wasm", .placement = .primary_host },
     .{ .name = "run-test-echo-wasm", .placement = .primary_host },
+    // The native echo driver reads the host filesystem for every path outside
+    // its virtual tree, so it runs on every host.
+    .{ .name = "run-test-echo-native" },
     // www.roc-lang.org refuses an echo.wasm over Cloudflare's 25 MiB asset
     // limit; this catches growth before the website's nightly bump does.
     .{ .name = "run-check-echo-wasm-size", .placement = .primary_host },
@@ -302,6 +377,10 @@ const jobs = [_]Job{
     .{ .name = "run-test-cli-platforms-boxy", .kind = .harness },
     .{ .name = "run-test-serialization-sizes" },
     .{ .name = "run-test-builtin-bake-reproducible" },
+    // Builds its own ReleaseSafe verifier: the table is built by a Debug
+    // tool, so an optimized verifier is what checks that the compiler emits
+    // the same unit however it was built.
+    .{ .name = "run-test-builtin-unit", .build_args = &.{"-Doptimize=ReleaseSafe"} },
     .{ .name = "run-test-downstream-package" },
     .{ .name = "run-test-wasm-static-lib" },
     .{ .name = "run-test-dylib" },
@@ -325,7 +404,7 @@ fn printSelectionUsage() void {
         \\  --minici-before <job> execute MiniCI run jobs before this job
         \\  --minici-only <job>   execute exactly one MiniCI run job
         \\  --minici-shard <name> execute one CI shard (see `shards` in src/build/minici.zig)
-        \\  --minici-lane <lane>  execute every job one lane runs (source, primary, or secondary)
+        \\  --minici-lane <lane>  execute every job one lane runs (source, primary, secondary, or all)
         \\  --minici-skip-build   assume `build-ci` already ran and run selected jobs only
         \\  --minici-build-runner-image <image>
         \\                        the runner image `build-ci` ran on (needs --minici-skip-build); the
@@ -895,8 +974,8 @@ const CacheReuseFailure = union(enum) {
 /// expected to be there just the same. Only a lane that needs no `build-ci`
 /// has phases that build their own tools.
 fn buildCiPrecedesPhases(parsed_args: ParsedArgs) bool {
-    const shard = parsed_args.shard orelse return true;
-    return shard.lane.needsBuildCi();
+    const lane = parsed_args.lane orelse return true;
+    return lane.needsBuildCi();
 }
 
 /// Whether a phase that compiles what `build-ci` builds fails the cache-reuse
@@ -1726,6 +1805,25 @@ fn skipCommand(
     };
 }
 
+/// `zig build` options every MiniCI command passes, `build-ci` included, so
+/// the jobs reuse what `build-ci` built. `.github/workflows/ci_manager.yml`
+/// runs `build-ci` with exactly these options.
+///
+/// The Debug `roc` the harness jobs run embeds the Builtin module's Boxy unit,
+/// as every non-Debug compiler does (design.md "Embedded Units").
+const minici_build_args = [_][]const u8{"-Dembed-builtin-unit=true"};
+
+/// The `zig build` options of every MiniCI command, in the order MiniCI passes
+/// them, followed by `build_args`. These are the options that select a build
+/// configuration: Zig caches a configuration by exactly these options in
+/// exactly this order (`--summary` and `-j` are not among them), so a shard's
+/// artifact carries the configurations they name (see
+/// src/build/minici_pack.zig). CI runs `zig build minici` itself with these
+/// options and no `build_args`.
+pub fn configurationArgs(allocator: std.mem.Allocator, build_args: []const []const u8) ![]const []const u8 {
+    return std.mem.concat(allocator, []const u8, &.{ &.{ "--color", "off" }, &minici_build_args, build_args });
+}
+
 fn buildCommand(
     allocator: std.mem.Allocator,
     zig_exe: []const u8,
@@ -1741,14 +1839,10 @@ fn buildCommand(
     try argv.append(allocator, step);
     try argv.append(allocator, "--summary");
     try argv.append(allocator, "all");
-    try argv.append(allocator, "--color");
-    try argv.append(allocator, "off");
     if (max_jobs) |jobs_count| {
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "-j{d}", .{jobs_count}));
     }
-    for (build_args) |arg| {
-        try argv.append(allocator, arg);
-    }
+    try argv.appendSlice(allocator, try configurationArgs(allocator, build_args));
     if (stats_path != null or run_args.len != 0) {
         try argv.append(allocator, "--");
     }
@@ -2338,15 +2432,17 @@ fn runPhaseJobs(env: *const std.process.Environ.Map) ?usize {
     return if (builtin.os.tag == .windows) 2 else null;
 }
 
-/// How a CI file runs MiniCI.
+/// How a CI file runs MiniCI. No CI file runs a whole lane: every CI host
+/// builds once and splits its lane across shards.
 const WorkflowRuns = union(enum) {
-    /// Names every shard in `shards` exactly once through `minici_shard:`
-    /// matrix keys, which together with the "MiniCI shards cover" tests means
-    /// it runs every MiniCI job on every host it belongs on.
-    every_shard,
-    /// Runs one lane in full through exactly one `--minici-lane` invocation
-    /// and names no shard.
-    lane: Lane,
+    /// Names every shard of these hosts exactly once through `minici_shard:`
+    /// matrix keys, and no other shard, which together with the "MiniCI shards
+    /// cover" test means it runs every MiniCI job its hosts are meant to run.
+    shards_of: []const Host,
+    /// Names no shard. The file builds or runs what the sharded files share,
+    /// so it is checked for MiniCI jobs run by hand and for `build-ci` built
+    /// without MiniCI's options.
+    no_shards,
 };
 
 const Workflow = struct {
@@ -2359,13 +2455,18 @@ const Workflow = struct {
 /// running its part of MiniCI, or runs a MiniCI job by hand beside it, fails
 /// the change that does it.
 const workflows = [_]Workflow{
-    .{ .path = ".github/workflows/ci_manager.yml", .runs = .every_shard },
+    .{ .path = ".github/workflows/ci_manager.yml", .runs = .{ .shards_of = &.{ .linux, .macos, .windows } } },
     // The nightly legs on hosts pull-request CI never uses. Every job whose
     // result can differ by host runs there, so a job added to `jobs` runs on
     // those hosts with no workflow edit.
-    .{ .path = ".github/workflows/ci_zig.yml", .runs = .{ .lane = .secondary } },
-    // The Nix dev shell leg that `.github/workflows/ci_zig_nix.yml` runs.
-    .{ .path = "ci/zig_nix_ci.sh", .runs = .{ .lane = .secondary } },
+    .{ .path = ".github/workflows/ci_zig.yml", .runs = .{ .shards_of = &.{ .linux_arm, .macos_intel, .windows_2022 } } },
+    // The build and shard steps both sharded files run.
+    .{ .path = ".github/actions/minici-build/action.yml", .runs = .no_shards },
+    .{ .path = ".github/actions/minici-shard/action.yml", .runs = .no_shards },
+    // The Nix dev shell leg that `.github/workflows/ci_zig_nix.yml` runs. It
+    // builds what MiniCI runs inside the dev shell; the tests themselves run
+    // in the shards above.
+    .{ .path = "ci/zig_nix_ci.sh", .runs = .no_shards },
 };
 
 const workflow_shard_key = "minici_shard:";
@@ -2395,16 +2496,78 @@ fn handRunJob(command: []const u8) ?[]const u8 {
     return job;
 }
 
+/// The first of `minici_build_args` that a `zig build` command line running
+/// `build-ci` leaves out, or null when it passes them all or does not run
+/// `build-ci`. `command` is the text after `zig build`.
+fn missingBuildCiArg(command: []const u8) ?[]const u8 {
+    var runs_build_ci = false;
+    var tokens = std.mem.tokenizeAny(u8, command, " \t");
+    while (tokens.next()) |token| {
+        if (std.mem.eql(u8, token, "--")) break;
+        if (std.mem.eql(u8, token, "build-ci")) runs_build_ci = true;
+    }
+    if (!runs_build_ci) return null;
+    for (minici_build_args) |arg| {
+        var passed = false;
+        tokens = std.mem.tokenizeAny(u8, command, " \t");
+        while (tokens.next()) |token| {
+            if (std.mem.eql(u8, token, "--")) break;
+            if (std.mem.eql(u8, token, arg)) passed = true;
+        }
+        if (!passed) return arg;
+    }
+    return null;
+}
+
+/// Whether a `zig build` command line runs the `minici` step from a shard
+/// artifact (`--minici-skip-build`) with options other than exactly
+/// `configurationArgs` with no build arguments, in that order. A shard's
+/// artifact carries that configuration and no other (see
+/// src/build/minici_pack.zig). A `minici` command without
+/// `--minici-skip-build` builds what it needs itself, so it restores no
+/// artifact. `command` is the text after `zig build`.
+fn runsMiniciWithOtherOptions(command: []const u8) bool {
+    var options: [8][]const u8 = undefined;
+    var count: usize = 0;
+    var too_many_options = false;
+    var runs_minici = false;
+    var skips_build = false;
+    var after_separator = false;
+    var tokens = std.mem.tokenizeAny(u8, command, " \t");
+    while (tokens.next()) |token| {
+        if (after_separator) {
+            if (std.mem.eql(u8, token, "--minici-skip-build")) skips_build = true;
+        } else if (std.mem.eql(u8, token, "--")) {
+            after_separator = true;
+        } else if (std.mem.eql(u8, token, "minici")) {
+            runs_minici = true;
+        } else if (count < options.len) {
+            options[count] = token;
+            count += 1;
+        } else {
+            too_many_options = true;
+        }
+    }
+    if (!runs_minici or !skips_build) return false;
+    if (too_many_options) return true;
+    const expected = [_][]const u8{ "--color", "off" } ++ minici_build_args;
+    if (count != expected.len) return true;
+    for (expected, options[0..count]) |want, got| {
+        if (!std.mem.eql(u8, want, got)) return true;
+    }
+    return false;
+}
+
 /// Returns one message per way `text` departs from running MiniCI as `runs`
-/// says: a shard named wrongly (see `WorkflowRuns`), a lane invocation missing,
-/// repeated or naming the wrong lane, or a `zig build` command that runs a
-/// MiniCI job by hand. Comment lines are skipped. An empty result means the
-/// file runs MiniCI exactly as declared.
+/// says: a shard named wrongly (see `WorkflowRuns`), a whole lane run, a `zig
+/// build` command that runs a MiniCI job by hand, or one that runs `build-ci`
+/// without the options MiniCI builds with (`minici_build_args`). Comment lines
+/// are skipped. An empty result means the file runs MiniCI exactly as
+/// declared.
 fn workflowProblems(allocator: std.mem.Allocator, text: []const u8, runs: WorkflowRuns) ![]const []const u8 {
     var problems = std.ArrayList([]const u8).empty;
     errdefer problems.deinit(allocator);
     var shard_counts = @as([shards.len]usize, @splat(0));
-    var lane_count: usize = 0;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
@@ -2429,22 +2592,11 @@ fn workflowProblems(allocator: std.mem.Allocator, text: []const u8, runs: Workfl
         while (std.mem.find(u8, rest, workflow_lane_option)) |start| {
             rest = rest[start + workflow_lane_option.len ..];
             const value = workflowLaneValue(rest) orelse continue;
-            switch (runs) {
-                .every_shard => try problems.append(allocator, try std.fmt.allocPrint(
-                    allocator,
-                    "runs MiniCI lane `{s}`, but this file runs MiniCI through its shards",
-                    .{value},
-                )),
-                .lane => |lane| if (std.mem.eql(u8, value, @tagName(lane))) {
-                    lane_count += 1;
-                } else {
-                    try problems.append(allocator, try std.fmt.allocPrint(
-                        allocator,
-                        "runs MiniCI lane `{s}` (expected `{s}`)",
-                        .{ value, @tagName(lane) },
-                    ));
-                },
-            }
+            try problems.append(allocator, try std.fmt.allocPrint(
+                allocator,
+                "runs MiniCI lane `{s}` in full; CI runs MiniCI through shards",
+                .{value},
+            ));
         }
 
         rest = line;
@@ -2458,35 +2610,47 @@ fn workflowProblems(allocator: std.mem.Allocator, text: []const u8, runs: Workfl
                     .{job},
                 ));
             }
+            if (missingBuildCiArg(rest[0..command_end])) |arg| {
+                try problems.append(allocator, try std.fmt.allocPrint(
+                    allocator,
+                    "runs `build-ci` without `{s}`, which every MiniCI command passes",
+                    .{arg},
+                ));
+            }
+            if (runsMiniciWithOtherOptions(rest[0..command_end])) {
+                try problems.append(allocator, try std.fmt.allocPrint(
+                    allocator,
+                    "runs `zig build minici` with options other than `{s}`, so it misses the configuration its shard artifact carries",
+                    .{try std.mem.join(allocator, " ", try configurationArgs(allocator, &.{}))},
+                ));
+            }
         }
     }
 
-    switch (runs) {
-        .every_shard => for (shards, shard_counts) |shard, count| {
-            if (count == 1) continue;
-            try problems.append(allocator, try std.fmt.allocPrint(
-                allocator,
-                "MiniCI shard `{s}` is named {d} times (expected exactly once)",
-                .{ shard.name, count },
-            ));
-        },
-        .lane => |lane| {
-            for (shards, shard_counts) |shard, count| {
-                if (count == 0) continue;
-                try problems.append(allocator, try std.fmt.allocPrint(
-                    allocator,
-                    "names MiniCI shard `{s}`, but this file runs the `{s}` lane in full",
-                    .{ shard.name, @tagName(lane) },
-                ));
-            }
-            if (lane_count != 1) try problems.append(allocator, try std.fmt.allocPrint(
-                allocator,
-                "runs MiniCI with `{s} {s}` {d} times (expected exactly once)",
-                .{ workflow_lane_option, @tagName(lane), lane_count },
-            ));
-        },
+    for (shards, shard_counts) |shard, count| {
+        const expected: usize = switch (runs) {
+            .shards_of => |hosts| @intFromBool(containsHost(hosts, shard.host)),
+            .no_shards => 0,
+        };
+        if (count == expected) continue;
+        try problems.append(allocator, if (expected == 0) try std.fmt.allocPrint(
+            allocator,
+            "names MiniCI shard `{s}`, which runs on {s}, a host this file does not run",
+            .{ shard.name, @tagName(shard.host) },
+        ) else try std.fmt.allocPrint(
+            allocator,
+            "MiniCI shard `{s}` is named {d} times (expected exactly once)",
+            .{ shard.name, count },
+        ));
     }
     return problems.toOwnedSlice(allocator);
+}
+
+fn containsHost(hosts: []const Host, host: Host) bool {
+    for (hosts) |candidate| {
+        if (candidate == host) return true;
+    }
+    return false;
 }
 
 fn verifyWorkflows(allocator: std.mem.Allocator, io: std.Io) !void {
@@ -2504,11 +2668,32 @@ fn verifyWorkflows(allocator: std.mem.Allocator, io: std.Io) !void {
             continue;
         }
         switch (workflow.runs) {
-            .every_shard => std.debug.print("MiniCI: `{s}` runs each of the {d} MiniCI shards exactly once\n", .{ workflow.path, shards.len }),
-            .lane => |lane| std.debug.print("MiniCI: `{s}` runs the MiniCI `{s}` lane exactly once\n", .{ workflow.path, @tagName(lane) }),
+            .shards_of => |hosts| std.debug.print("MiniCI: `{s}` runs each MiniCI shard of its {d} hosts exactly once\n", .{ workflow.path, hosts.len }),
+            .no_shards => std.debug.print("MiniCI: `{s}` names no MiniCI shard and runs no MiniCI job by hand\n", .{workflow.path}),
         }
     }
     if (failed) std.process.exit(1);
+}
+
+/// Why a run with this selection and lane does not run `jobs[job_index]`, or
+/// null when it runs it.
+fn jobSkipReason(allocator: std.mem.Allocator, job_index: usize, selected_jobs: ResolvedSelection, lane: ?Lane) !?[]const u8 {
+    const job = jobs[job_index];
+    if (!selected_jobs.includes(job_index)) return "excluded by MiniCI selection\n";
+    if (lane) |l| if (!l.runs(job.placement)) {
+        return try std.fmt.allocPrint(allocator, "not run in the {s} lane ({s} job)\n", .{ @tagName(l), @tagName(job.placement) });
+    };
+    return job.skip_reason;
+}
+
+/// The jobs `zig build minici -- --minici-shard <shard>` runs on this host.
+pub fn shardJobs(allocator: std.mem.Allocator, shard: Shard) ![]const Job {
+    const selected_jobs = try resolveSelection(shard.selection);
+    var list = std.ArrayList(Job).empty;
+    for (jobs, 0..) |job, job_index| {
+        if (try jobSkipReason(allocator, job_index, selected_jobs, shard.lane) == null) try list.append(allocator, job);
+    }
+    return list.toOwnedSlice(allocator);
 }
 
 /// Entry point: build the CI artifacts, then run each selected `run-*` job in order,
@@ -2551,6 +2736,9 @@ pub fn main(init: std.process.Init) !void {
     std.Io.Dir.cwd().deleteTree(io, out_dir) catch {};
     try std.Io.Dir.cwd().createDirPath(io, raw_dir);
     try std.Io.Dir.cwd().createDirPath(io, logs_dir);
+    // Harness jobs run in their prepared fixture trees, so they are given the
+    // stats destination as an absolute path.
+    const raw_dir_absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, raw_dir, allocator);
 
     std.debug.print("=== MINICI ORCHESTRATOR ===\n", .{});
     const build_jobs = memoryAwareBuildJobs(io, allocator, init.environ_map);
@@ -2602,19 +2790,14 @@ pub fn main(init: std.process.Init) !void {
     for (jobs, 0..) |job, job_index| {
         const log_path = try std.fmt.allocPrint(allocator, "{s}/{s}.txt", .{ logs_dir, job.name });
         const stats_path: ?[]const u8 = if (job.kind == .harness)
-            try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ raw_dir, job.name })
+            try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ raw_dir_absolute, job.name })
         else
             null;
         const job_build_args = try std.mem.concat(allocator, []const u8, &.{ build_args, job.build_args });
         const argv = try buildCommand(allocator, zig_exe, job_build_args, job.name, runPhaseJobs(init.environ_map), stats_path, job.args);
         const progress = Progress{ .current = job_index + 2, .total = total_phases };
         printRunStart(progress, job.name);
-        const skip_reason: ?[]const u8 = if (!selected_jobs.includes(job_index))
-            "excluded by MiniCI selection\n"
-        else if (lane != null and !lane.?.runs(job.placement))
-            try std.fmt.allocPrint(allocator, "not run in the {s} lane ({s} job)\n", .{ @tagName(lane.?), @tagName(job.placement) })
-        else
-            job.skip_reason;
+        const skip_reason = try jobSkipReason(allocator, job_index, selected_jobs, lane);
         var result = if (skip_reason) |reason|
             try skipCommand(io, argv, log_path, reason, run_started_ns)
         else
@@ -2664,6 +2847,30 @@ pub fn main(init: std.process.Init) !void {
 
 test "the suite inventory's own tests run with MiniCI's" {
     std.testing.refAllDecls(zig_test_suites);
+}
+
+test "the shard artifact selection's tests run with MiniCI's" {
+    std.testing.refAllDecls(@import("cache_closure.zig"));
+}
+
+test "CI runs `zig build minici` in the configuration shard artifacts carry" {
+    try std.testing.expect(!runsMiniciWithOtherOptions("minici --color off -Dembed-builtin-unit=true -- --minici-skip-build"));
+    try std.testing.expect(runsMiniciWithOtherOptions("minici -- --minici-skip-build"));
+    try std.testing.expect(runsMiniciWithOtherOptions("minici -Dembed-builtin-unit=true --color off -- --minici-skip-build"));
+    try std.testing.expect(!runsMiniciWithOtherOptions("build-ci -Dembed-builtin-unit=true"));
+    // These build what they need themselves and restore no shard artifact.
+    try std.testing.expect(!runsMiniciWithOtherOptions("minici -- --minici-shard source"));
+    try std.testing.expect(!runsMiniciWithOtherOptions("minici -- --minici-verify-workflows"));
+}
+
+test "configurationArgs puts the shared options before a job's own" {
+    const args = try configurationArgs(std.testing.allocator, &.{"-Doptimize=ReleaseSafe"});
+    defer std.testing.allocator.free(args);
+    try std.testing.expectEqual(@as(usize, 3 + minici_build_args.len), args.len);
+    try std.testing.expectEqualStrings("--color", args[0]);
+    try std.testing.expectEqualStrings("off", args[1]);
+    try std.testing.expectEqualStrings(minici_build_args[0], args[2]);
+    try std.testing.expectEqualStrings("-Doptimize=ReleaseSafe", args[args.len - 1]);
 }
 
 test "writeProgressPrefix aligns current phase to total width" {
@@ -2831,40 +3038,33 @@ test "resolveSelection supports exhaustive adjacent MiniCI shards" {
     try std.testing.expect(last.includes(harness_boundary));
 }
 
-/// How many of `host`'s shards run job `job_index`. The `source` shard runs on
-/// Linux, but its jobs are host-independent, so it counts for every host.
+/// How many of `host`'s shards run job `job_index`.
 fn shardRunsForHost(host: Host, job_index: usize) !usize {
     var count: usize = 0;
     for (shards) |shard| {
-        if (shard.host != host and shard.lane != .source) continue;
+        if (shard.host != host) continue;
         const selected = try resolveSelection(shard.selection);
         if (selected.includes(job_index) and shard.lane.runs(jobs[job_index].placement)) count += 1;
     }
     return count;
 }
 
-test "MiniCI shards cover every job exactly once on Linux" {
-    for (jobs, 0..) |job, i| {
-        const count = try shardRunsForHost(.linux, i);
-        if (count != 1) std.debug.print("job `{s}` runs {d} times on Linux\n", .{ job.name, count });
-        try std.testing.expectEqual(@as(usize, 1), count);
-    }
-}
-
-test "MiniCI shards cover every host-specific job exactly once on macOS and Windows" {
-    for ([_]Host{ .macos, .windows }) |host| {
+test "MiniCI shards cover every job of each host's lane exactly once" {
+    for (std.enums.values(Host)) |host| {
         for (jobs, 0..) |job, i| {
-            const expected: usize = switch (job.placement) {
-                // Source jobs run once, in the source lane, for every host.
-                .source => 1,
-                // Primary-host jobs run only on Linux.
-                .primary_host => 0,
-                .every_host => 1,
-            };
+            // The secondary hosts rely on Linux for source and primary-host jobs.
+            const expected: usize = @intFromBool(host.coverage().runs(job.placement));
             const count = try shardRunsForHost(host, i);
             if (count != expected) std.debug.print("job `{s}` runs {d} times on {s}\n", .{ job.name, count, @tagName(host) });
             try std.testing.expectEqual(expected, count);
         }
+    }
+}
+
+test "MiniCI host coverage puts every job on Linux and Windows" {
+    for (std.enums.values(Placement)) |placement| {
+        try std.testing.expect(Host.linux.coverage().runs(placement));
+        try std.testing.expect(Host.windows.coverage().runs(placement));
     }
 }
 
@@ -2916,8 +3116,11 @@ test "parseMiniArgs rejects unknown shards and shards combined with ranges" {
     );
 }
 
+const pr_hosts = [_]Host{ .linux, .macos, .windows };
+const nightly_hosts = [_]Host{ .linux_arm, .macos_intel, .windows_2022 };
+
 fn expectWorkflowProblems(text: []const u8, expected: usize) !void {
-    try expectWorkflowProblemsFor(text, .every_shard, expected);
+    try expectWorkflowProblemsFor(text, .{ .shards_of = &pr_hosts }, expected);
 }
 
 fn expectWorkflowProblemsFor(text: []const u8, runs: WorkflowRuns, expected: usize) !void {
@@ -2930,104 +3133,127 @@ fn expectWorkflowProblemsFor(text: []const u8, runs: WorkflowRuns, expected: usi
     try std.testing.expectEqual(expected, problems.len);
 }
 
-test "workflowProblems accepts a workflow naming every shard once" {
+/// One `minici_shard:` line per shard of `hosts`.
+fn appendShardLines(text: *std.ArrayList(u8), hosts: []const Host) !void {
+    for (shards) |shard| {
+        if (!containsHost(hosts, shard.host)) continue;
+        const line = try std.fmt.allocPrint(std.testing.allocator, "minici_shard: {s}\n", .{shard.name});
+        defer std.testing.allocator.free(line);
+        try text.appendSlice(std.testing.allocator, line);
+    }
+}
+
+fn hostShardCount(hosts: []const Host) usize {
+    var count: usize = 0;
+    for (shards) |shard| count += @intFromBool(containsHost(hosts, shard.host));
+    return count;
+}
+
+test "workflowProblems accepts a workflow naming every shard of its hosts once" {
     var text = std.ArrayList(u8).empty;
     defer text.deinit(std.testing.allocator);
-    for (shards, 0..) |shard, i| {
+    var i: usize = 0;
+    for (shards) |shard| {
+        if (!containsHost(&pr_hosts, shard.host)) continue;
         // Exercise the list-item, quoted and trailing-comment spellings.
         const line = switch (i % 3) {
             0 => try std.fmt.allocPrint(std.testing.allocator, "          - minici_shard: {s}\n", .{shard.name}),
             1 => try std.fmt.allocPrint(std.testing.allocator, "            minici_shard: '{s}'\n", .{shard.name}),
             else => try std.fmt.allocPrint(std.testing.allocator, "            minici_shard: \"{s}\" # note\n", .{shard.name}),
         };
+        i += 1;
         defer std.testing.allocator.free(line);
         try text.appendSlice(std.testing.allocator, line);
     }
     try expectWorkflowProblems(text.items, 0);
+
+    text.clearRetainingCapacity();
+    try appendShardLines(&text, &nightly_hosts);
+    try expectWorkflowProblemsFor(text.items, .{ .shards_of = &nightly_hosts }, 0);
 }
 
-test "workflowProblems reports missing, duplicate and unknown shards" {
+test "workflowProblems reports missing, duplicate, unknown and other hosts' shards" {
     // Every shard missing.
-    try expectWorkflowProblems("jobs: {}\n", shards.len);
+    try expectWorkflowProblems("jobs: {}\n", hostShardCount(&pr_hosts));
 
     var text = std.ArrayList(u8).empty;
     defer text.deinit(std.testing.allocator);
-    for (shards) |shard| {
-        const line = try std.fmt.allocPrint(std.testing.allocator, "minici_shard: {s}\n", .{shard.name});
-        defer std.testing.allocator.free(line);
-        try text.appendSlice(std.testing.allocator, line);
-    }
+    try appendShardLines(&text, &pr_hosts);
     try text.appendSlice(std.testing.allocator, "minici_shard: linux-core\nminici_shard: ubuntu-full\n");
     // One duplicate plus one unknown name.
     try expectWorkflowProblems(text.items, 2);
 
+    // A shard of a host another file runs.
+    try text.appendSlice(std.testing.allocator, "minici_shard: linux-arm-eval\n");
+    try expectWorkflowProblems(text.items, 3);
+
     // A sharded workflow runs no whole lane and no MiniCI job by hand.
     try text.appendSlice(std.testing.allocator, "run: zig build minici -- --minici-lane secondary\nrun: zig build run-test-cli\n");
-    try expectWorkflowProblems(text.items, 4);
+    try expectWorkflowProblems(text.items, 5);
 }
 
-test "workflowProblems accepts a nightly file that runs its lane once" {
-    const nightly: WorkflowRuns = .{ .lane = .secondary };
+test "workflowProblems requires build-ci to pass MiniCI's build options" {
+    var text = std.ArrayList(u8).empty;
+    defer text.deinit(std.testing.allocator);
+    try appendShardLines(&text, &pr_hosts);
+    const shard_lines = text.items.len;
+
+    try text.appendSlice(std.testing.allocator, "  command: zig build build-ci");
+    for (minici_build_args) |arg| {
+        try text.append(std.testing.allocator, ' ');
+        try text.appendSlice(std.testing.allocator, arg);
+    }
+    try text.appendSlice(std.testing.allocator, "\n  run: zig build build-test-eval-runner\n");
+    try expectWorkflowProblems(text.items, 0);
+
+    text.shrinkRetainingCapacity(shard_lines);
+    try text.appendSlice(std.testing.allocator, "  command: zig build build-ci\n");
+    try expectWorkflowProblems(text.items, 1);
+}
+
+test "workflowProblems accepts a file that names no shard and runs no job by hand" {
     try expectWorkflowProblemsFor(
-        \\      # Not `--minici-lane primary`: comment lines are not commands.
-        \\      - name: Run MiniCI
-        \\        run: zig build minici -- --minici-lane secondary
+        \\      # Not `--minici-lane primary` or `minici_shard: linux-core`: comment lines are not commands.
+        \\      - name: Build MiniCI binaries
+        \\        command: zig build ${{ inputs.jobs }} build-ci -Dembed-builtin-unit=true
+        \\      - run: zig build minici --color off -Dembed-builtin-unit=true -- --minici-skip-build --minici-shard "$MINICI_SHARD"
         \\      # Configurations MiniCI does not run, and steps that are not MiniCI jobs.
         \\      - run: zig build run-check-snapshots ${{ matrix.target_flag }} -- --debug
         \\      - run: zig build run-test-cli -Doptimize=ReleaseFast
         \\      - run: zig build run-test-zig && zig build build-test-eval-runner
-    , nightly, 0);
-    try expectWorkflowProblemsFor("zig build minici \"$@\" -- --minici-lane=secondary\n", nightly, 0);
+    , .no_shards, 0);
+    try expectWorkflowProblemsFor("zig build build-ci -Dembed-builtin-unit=true \"$@\"\n", .no_shards, 0);
 }
 
-test "workflowProblems reports a nightly file that drifts from its lane" {
-    const nightly: WorkflowRuns = .{ .lane = .secondary };
-    // The lane is not run at all.
-    try expectWorkflowProblemsFor("run: zig build run-test-zig\n", nightly, 1);
-    // The lane is run twice.
-    try expectWorkflowProblemsFor(
-        \\run: zig build minici -- --minici-lane secondary
-        \\run: zig build minici -- --minici-lane secondary
-    , nightly, 1);
-    // The wrong lane, which also leaves the declared one unrun.
-    try expectWorkflowProblemsFor("run: zig build minici -- --minici-lane primary\n", nightly, 2);
-    // A shard key, and MiniCI jobs run by hand beside the lane.
+test "workflowProblems reports a file without shards that runs MiniCI itself" {
+    // A whole lane.
+    try expectWorkflowProblemsFor("run: zig build minici -- --minici-lane secondary\n", .no_shards, 1);
+    // A shard restoring its artifact in a configuration the artifact does not carry.
+    try expectWorkflowProblemsFor("run: zig build minici -- --minici-skip-build --minici-shard \"$MINICI_SHARD\"\n", .no_shards, 1);
+    // A shard key, MiniCI jobs run by hand, and `build-ci` without MiniCI's options.
     try expectWorkflowProblemsFor(
         \\- minici_shard: macos-core
-        \\run: zig build minici -- --minici-lane secondary
         \\run: zig build run-test-cli ${{ matrix.target_flag }}
         \\run: zig build run-check-snapshots; zig build run-test-wasm-static-lib
-    , nightly, 4);
+        \\run: zig build build-ci
+    , .no_shards, 5);
 }
 
-test "MiniCI's nightly lanes run exactly the jobs whose result can differ by host" {
-    // Every `.lane` file in `workflows` runs its lane once over every job, so
-    // this is what each nightly leg runs: every `every_host` job, once. The
-    // `source` and `primary_host` jobs it leaves out run on every pull request
-    // (see the "MiniCI shards cover" tests).
-    for (workflows) |workflow| {
-        const lane = switch (workflow.runs) {
-            .every_shard => continue,
-            .lane => |lane| lane,
-        };
-        try std.testing.expectEqual(Lane.secondary, lane);
-        for (jobs) |job| {
-            const runs = lane.runs(job.placement);
-            if (runs != (job.placement == .every_host)) std.debug.print("job `{s}` is wrongly selected by the {s} lane\n", .{ job.name, @tagName(lane) });
-            try std.testing.expectEqual(job.placement == .every_host, runs);
-        }
-    }
-}
-
-test "MiniCI's CI file table names each file once and one file runs the shards" {
-    var sharded: usize = 0;
+test "MiniCI's CI file table names each file once and runs each host's shards in one file" {
     for (workflows, 0..) |workflow, i| {
-        if (workflow.runs == .every_shard) sharded += 1;
         for (workflows[i + 1 ..]) |other| {
             try std.testing.expect(!std.mem.eql(u8, workflow.path, other.path));
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), sharded);
+    for (std.enums.values(Host)) |host| {
+        var files: usize = 0;
+        for (workflows) |workflow| switch (workflow.runs) {
+            .shards_of => |hosts| files += @intFromBool(containsHost(hosts, host)),
+            .no_shards => {},
+        };
+        if (files != 1) std.debug.print("host `{s}` has its shards run by {d} CI files\n", .{ @tagName(host), files });
+        try std.testing.expectEqual(@as(usize, 1), files);
+    }
 }
 
 test "parseMiniArgs selects a whole lane" {
@@ -3725,6 +3951,8 @@ test "cache reuse is enforced whenever build-ci precedes the phases" {
         // The source lane has no `build-ci`: its checks build their own tools.
         .{ .args = &.{ "minici", "zig", "--minici-shard", "source" }, .enforced = false },
         .{ .args = &.{ "minici", "zig", "--minici-skip-build", "--minici-shard", "source" }, .enforced = false },
+        .{ .args = &.{ "minici", "zig", "--minici-lane", "source" }, .enforced = false },
+        .{ .args = &.{ "minici", "zig", "--minici-lane", "all" }, .enforced = true },
     };
     for (cases) |case| {
         const parsed = try parseMiniArgs(std.testing.allocator, case.args);
@@ -3906,14 +4134,16 @@ test "appendCacheReuseSummary keeps a job's own configuration out of the reuse t
 test "only a job with build options of its own is exempt from the cache-reuse canary" {
     // Every job listed here compiles a configuration `build-ci` does not build.
     // Adding one is a decision to compile in a shard, so it is made here.
+    const exempt = [_][]const u8{ "run-check-machine-code-shim-archive", "run-test-builtin-unit" };
     var with_build_args: usize = 0;
     for (jobs) |job| {
         if (job.build_args.len == 0) continue;
-        with_build_args += 1;
-        try std.testing.expectEqualStrings("run-check-machine-code-shim-archive", job.name);
+        try std.testing.expect(with_build_args < exempt.len);
+        try std.testing.expectEqualStrings(exempt[with_build_args], job.name);
         try std.testing.expectEqual(@as(usize, 0), job.expected_compiles.len);
+        with_build_args += 1;
     }
-    try std.testing.expectEqual(@as(usize, 1), with_build_args);
+    try std.testing.expectEqual(exempt.len, with_build_args);
 }
 
 test "appendCacheReuseSummary names each phase that did not reuse its cache" {

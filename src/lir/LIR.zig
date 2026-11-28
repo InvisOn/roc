@@ -46,12 +46,6 @@ pub const Symbol = packed struct(u64) {
     pub fn hash(self: Symbol) u64 {
         return self.id;
     }
-
-    pub const none: Symbol = .{ .id = std.math.maxInt(u64) };
-
-    pub fn isNone(self: Symbol) bool {
-        return self.id == none.id;
-    }
 };
 
 /// Content identity of a lowered procedure: a digest of everything that
@@ -121,6 +115,34 @@ pub const ProcIdentity = extern struct {
         }
     };
 
+    /// Identity of the ownership variant of this procedure that a demand
+    /// selects (design.md "Mode Specialization"): its parameter modes
+    /// (`borrowed_params`, bit i set for a borrowed position i), its return
+    /// mode (`ret_mode`, 0 borrowed and 1 owned), the positions it seeds
+    /// born-unique, and then each of its outcome rows, through
+    /// `OwnershipVariantBuilder.outcome`.
+    pub fn ownershipVariant(self: ProcIdentity, borrowed_params: u16, ret_mode: u8, unique_params: u16) OwnershipVariantBuilder {
+        var key = self.deriving("arc-variant");
+        key.update(std.mem.asBytes(&std.mem.nativeToLittle(u16, borrowed_params)));
+        key.update(&[_]u8{ret_mode});
+        key.update(std.mem.asBytes(&std.mem.nativeToLittle(u16, unique_params)));
+        return .{ .key = key };
+    }
+
+    pub const OwnershipVariantBuilder = struct {
+        key: DerivedBuilder,
+
+        /// Add one outcome row, in discriminant order.
+        pub fn outcome(self: *OwnershipVariantBuilder, discriminant: u32, restituted_params: u16) void {
+            self.key.update(std.mem.asBytes(&std.mem.nativeToLittle(u32, discriminant)));
+            self.key.update(std.mem.asBytes(&std.mem.nativeToLittle(u16, restituted_params)));
+        }
+
+        pub fn finish(self: *OwnershipVariantBuilder) ProcIdentity {
+            return self.key.finish();
+        }
+    };
+
     /// Identity of a procedure that exists only within one program and is
     /// never an object-cache entry. `raw` is the program-local symbol.
     pub fn programLocal(role: []const u8, raw: u64) ProcIdentity {
@@ -155,22 +177,20 @@ pub const CFStmtId = enum(u32) {
 };
 
 /// Identifier of one virtual source frame introduced by inlining, or `none`.
-/// A frame's id is its row in `LirStore.inline_scopes` plus one, so a zeroed
-/// column holds `none`.
+/// A frame's id is its row in `LirStore.inline_scopes` as a
+/// `collections.OptionalU32`, so a zeroed column holds `none`.
 pub const InlineScopeId = enum(u32) {
     none = 0,
     _,
 
     /// The id of the frame at `inline_scopes` row `row_index`.
     pub fn fromRow(row_index: u32) InlineScopeId {
-        std.debug.assert(row_index < std.math.maxInt(u32));
-        return @fromBackingInt(row_index + 1);
+        return @fromBackingInt(@backingInt(collections.OptionalU32.some(row_index)));
     }
 
     /// The `inline_scopes` row of a frame.
     pub fn row(self: InlineScopeId) u32 {
-        std.debug.assert(self != .none);
-        return @backingInt(self) - 1;
+        return @as(collections.OptionalU32, @fromBackingInt(@backingInt(self))).get().?;
     }
 };
 
@@ -257,9 +277,6 @@ pub const OriginKind = union(enum(u8)) {
     loop_append_promote,
     /// `tag_case_fusion`: fused join and redirected producer edges.
     tag_case_fusion,
-    /// `forwarding_join_inline`: statement produced when inlining a forwarding
-    /// join body.
-    forwarding_join_inline,
     /// `comptime_value_guards`: failure guard wrapped around a compile-time
     /// value use.
     comptime_value_guard,
@@ -280,7 +297,7 @@ pub const OriginKind = union(enum(u8)) {
     pub fn isArcInserted(self: OriginKind) bool {
         return switch (self) {
             .arc_incref, .arc_decref, .arc_dismantle => true,
-            .source, .lowering_glue, .derived, .scaffold, .join_scalarize, .box_reuse, .return_slot, .str_append_fuse, .loop_append_promote, .tag_case_fusion, .forwarding_join_inline, .comptime_value_guard, .trmc, .range_prove => false,
+            .source, .lowering_glue, .derived, .scaffold, .join_scalarize, .box_reuse, .return_slot, .str_append_fuse, .loop_append_promote, .tag_case_fusion, .comptime_value_guard, .trmc, .range_prove => false,
         };
     }
 
@@ -304,7 +321,7 @@ pub const OriginKind = union(enum(u8)) {
         return switch (self) {
             .arc_incref, .arc_decref => |rc| .{ .tag = std.meta.activeTag(self), .reason = @backingInt(rc.reason), .subject_local = @backingInt(rc.subject_local) },
             .arc_dismantle => |glue| .{ .tag = .arc_dismantle, .subject_local = @backingInt(glue.subject_local) },
-            .source, .lowering_glue, .derived, .scaffold, .join_scalarize, .box_reuse, .return_slot, .str_append_fuse, .loop_append_promote, .tag_case_fusion, .forwarding_join_inline, .comptime_value_guard, .trmc, .range_prove => .{ .tag = std.meta.activeTag(self) },
+            .source, .lowering_glue, .derived, .scaffold, .join_scalarize, .box_reuse, .return_slot, .str_append_fuse, .loop_append_promote, .tag_case_fusion, .comptime_value_guard, .trmc, .range_prove => .{ .tag = std.meta.activeTag(self) },
         };
     }
 };
@@ -325,7 +342,7 @@ pub const StoredOriginKind = extern struct {
             .arc_incref => .{ .arc_incref = .{ .subject_local = @fromBackingInt(self.subject_local), .reason = @fromBackingInt(self.reason) } },
             .arc_decref => .{ .arc_decref = .{ .subject_local = @fromBackingInt(self.subject_local), .reason = @fromBackingInt(self.reason) } },
             .arc_dismantle => .{ .arc_dismantle = .{ .subject_local = @fromBackingInt(self.subject_local) } },
-            inline .source, .lowering_glue, .derived, .scaffold, .join_scalarize, .box_reuse, .return_slot, .str_append_fuse, .loop_append_promote, .tag_case_fusion, .forwarding_join_inline, .comptime_value_guard, .trmc, .range_prove => |tag| tag,
+            inline .source, .lowering_glue, .derived, .scaffold, .join_scalarize, .box_reuse, .return_slot, .str_append_fuse, .loop_append_promote, .tag_case_fusion, .comptime_value_guard, .trmc, .range_prove => |tag| tag,
         };
     }
 };
@@ -347,7 +364,8 @@ pub const RcReason = enum(u8) {
     /// signature (`RcSig` param mode owned) demands ownership of an argument
     /// that stays live after the call.
     owned_param_demand,
-    /// `ArcPlanStep.pre_retain` of the closure when `reuse_closure` is false.
+    /// `ArcPlanStep.pre_retain` of the closure of a deferred erased call that
+    /// does not transfer it: the pending call's own reference.
     closure_call_capture,
     /// `ArcPlanStep.pre_retain` of a reuse source that must survive
     /// (`preserve_reuse_source` / `transfer.preserve_reuse`).
@@ -359,9 +377,10 @@ pub const RcReason = enum(u8) {
     low_level_arg_effect,
     /// `LowLevel.RcEffect.retain_result` without `skip_result_retain`.
     low_level_result_effect,
-    /// `box_unbox` normalization to `box_unbox_borrowed`: the payload retain
-    /// paired with the `consumed_box` release of the outer box.
-    box_unbox_normalize,
+    /// Dead-lender read normalization (`box_unbox` to `box_unbox_borrowed`,
+    /// `erased_capture_load` to `erased_capture_load_borrowed`): the result
+    /// retain paired with the `consumed_lender` release of the allocation.
+    dead_lender_normalize,
     /// `transfer_mask`/`transfer_positions` complement: an element stored into
     /// a newly built list, struct, or tag while still owned elsewhere.
     stored_in_aggregate,
@@ -384,11 +403,13 @@ pub const RcReason = enum(u8) {
     /// `ArcPlanStep.pre_release_extra` (`releaseTailCallerFrame`): owned state
     /// of a frame that a tail call replaces.
     tail_call_frame,
-    /// Closure released after a call that did not reuse it (`reuse_closure`
-    /// false).
-    closure_after_call,
-    /// Boxed value released after a consuming unbox.
-    consumed_box,
+    /// `ArcPlanStep.pre_release_extra` (`wholeMoveResidual`): the fields of a
+    /// retained aggregate that nothing reads after the call it is moved into.
+    moved_aggregate_dead_fields,
+    /// The allocation a consuming dead-lender read takes its result out of:
+    /// the box of a consuming unbox, the reuse argument of a consuming
+    /// capture load.
+    consumed_lender,
     /// `ArcPlanTerminal.stop.releases`: owned state minus the switch
     /// summary's common keep set.
     switch_branch_balance,
@@ -552,6 +573,11 @@ pub const ProductShape = struct {
     slots: U32Span,
     /// One descriptor per field, in the same order as `layouts`.
     descriptors: LocalSpan,
+    /// One word per field, nonzero where the field's stored slot is a
+    /// recursion box in some instantiation: a take of such a field moves its
+    /// value out of the slot and releases the box (`RefExtra`). Empty when
+    /// no field's slot can be boxed.
+    boxable: U32Span = .empty(),
 };
 
 /// What a `dynamic` local's value is (design.md "Dynamic Values In LIR"):
@@ -582,6 +608,14 @@ pub const DynStorage = enum(u32) {
     /// The procedure's own result storage (`LirProcSpec.dyn_result`): the
     /// caller passes its address after the explicit arguments.
     result,
+    /// Frame storage for an erased callable whose capture record `desc`
+    /// describes (design.md "Frame Callables"), placed by `frame_alloc`
+    /// in the dynamic frame region beside the `frame` locals: 16 bytes
+    /// ending in the callable's refcount word, then the erased-callable
+    /// header and the capture, at 16-byte alignment. The local is the
+    /// callable's data pointer; only a `DynOp.closure` naming it as its
+    /// `frame` writes there.
+    frame_callable,
 };
 
 /// Span into flat local-id storage.
@@ -723,7 +757,13 @@ pub fn strMatchStep(source: []const u8, cursor: usize, delimiter: []const u8, ta
         };
     }
 
-    const found = strMatchDelimiter(source, cursor, delimiter) orelse return null;
+    const search = @import("builtins").delimiter;
+    const found = if (delimiter.len <= search.max_inline_len)
+        std.mem.findPos(u8, source, cursor, delimiter) orelse return null
+    else blk: {
+        const pos = search.Plan.init(delimiter).find(source, cursor, delimiter);
+        break :blk if (pos != source.len) pos else return null;
+    };
     return .{
         .capture_start = cursor,
         .capture_end = found,
@@ -737,16 +777,6 @@ pub fn strMatchEndMatches(source_len: usize, cursor: usize, end: StrPatternEnd) 
         .exact => cursor == source_len,
         .tail => cursor <= source_len,
     };
-}
-
-fn strMatchDelimiter(source: []const u8, cursor: usize, delimiter: []const u8) ?usize {
-    if (delimiter.len == 0) return cursor;
-    if (delimiter.len > source.len - cursor) return null;
-
-    const candidate = std.mem.findScalarPos(u8, source, cursor, delimiter[0]) orelse return null;
-    if (delimiter.len > source.len - candidate) return null;
-    if (!std.mem.eql(u8, source[candidate..][0..delimiter.len], delimiter)) return null;
-    return candidate;
 }
 
 /// Span into flat string-match-step storage.
@@ -938,6 +968,47 @@ pub const JoinPointSpan = extern struct {
     }
 };
 
+/// A run of consecutive rows of one store column.
+pub const RowRange = extern struct {
+    start: u32 = 0,
+    len: u32 = 0,
+
+    /// The position of row `id` within this range, if the range holds it.
+    pub inline fn offsetOf(self: RowRange, id: u32) ?u32 {
+        const offset = id -% self.start;
+        return if (offset < self.len) offset else null;
+    }
+};
+
+/// The rows one appended run of a procedure's body occupies in each column a
+/// procedure rewrite can write (design.md "Statement Storage"). Lowering
+/// appends a body as one chunk, and each committed rewrite of the procedure
+/// appends one more.
+pub const BodyChunk = extern struct {
+    cf_stmts: RowRange = .{},
+    cf_switch_branches: RowRange = .{},
+    str_match_arms: RowRange = .{},
+    join_points: RowRange = .{},
+
+    /// Whether the chunk holds no row at all.
+    pub fn isEmpty(self: BodyChunk) bool {
+        return self.cf_stmts.len == 0 and self.cf_switch_branches.len == 0 and
+            self.str_match_arms.len == 0 and self.join_points.len == 0;
+    }
+};
+
+/// A procedure's body chunks, in the order they were appended: a span of the
+/// store's chunk list.
+pub const BodyChunkSpan = extern struct {
+    start: u32,
+    len: u32,
+
+    /// Returns an empty chunk span.
+    pub fn empty() BodyChunkSpan {
+        return .{ .start = 0, .len = 0 };
+    }
+};
+
 /// Explicit ARC meaning of a `set_local` write. ARC insertion consumes this
 /// directly; it must not derive the meaning from control-flow shape.
 /// How an RC statement's count update must be performed. `atomic` is always
@@ -981,15 +1052,17 @@ pub const ProcAbi = enum {
     /// procedure has at most one explicit argument, the packed argument
     /// record itself (a closed struct, or a `param` dynamic local whose
     /// address is the `args` pointer), its capture pointer in
-    /// `erased_capture_arg`, and its result written to the `ret` pointer (a
-    /// `dyn_result` local when the result is dynamic). It takes no reuse
-    /// input and writes no `out_desc`.
+    /// `erased_capture_arg`, its reuse input in `erased_reuse_arg`, and its
+    /// result written to the `ret` pointer (a `dyn_result` local when the
+    /// result is dynamic). It writes no `out_desc`.
     erased_record,
 };
 
 /// The unit a procedure is emitted with (design.md "Mode Specialization",
 /// emission units). A direct call demands an ownership variant of its callee
-/// only when the two procedures share a unit; a call across units adapts to
+/// only when the two procedures share a unit, except the outcome-restitution
+/// variant a callee's object publishes (`LirProcSpec.rc_outcomes`), which a
+/// call from any unit may demand; otherwise a call across units adapts to
 /// the callee's solved base signature as a call to an object-cache procedure
 /// does. The specialized lowering puts every procedure in `program`; `.boxy`
 /// gives a module's own workers that module's unit and every worker that is
@@ -1062,6 +1135,12 @@ pub const TailCalls = struct {
     /// The statement the loop begins at, when it is not the body's first:
     /// the statements before it run once per call.
     entry: collections.OptionalId(CFStmtId) = .none,
+    /// The locals the loop carries, one per argument of a self call, when
+    /// they are not the procedure's own arguments: a `.boxy` procedure
+    /// carries a dynamic parameter that its self calls change in a frame
+    /// local its entry copies the parameter into (design.md "Tail Return
+    /// Continuations"). Empty when the loop carries the arguments.
+    params: LocalSpan = .empty(),
 };
 
 /// An optional `TailCalls` at its own size.
@@ -1132,14 +1211,12 @@ pub fn StmtRowId(comptime T: type) type {
 
         /// The id of position `index` of the row's column.
         pub fn fromPosition(index: u32) Self {
-            std.debug.assert(index < std.math.maxInt(u32));
-            return @fromBackingInt(index + 1);
+            return @fromBackingInt(@backingInt(collections.OptionalU32.some(index)));
         }
 
         /// The position of a row in its column.
         pub fn position(self: Self) u32 {
-            std.debug.assert(self != .none);
-            return @backingInt(self) - 1;
+            return @as(collections.OptionalU32, @fromBackingInt(@backingInt(self))).get().?;
         }
     };
 }
@@ -1180,6 +1257,17 @@ pub const RefExtra = struct {
     /// this exact path state; evaluators must not inspect those stale
     /// field bytes as live values.
     residual_shell_absent_fields: U32Span = .empty(),
+    /// Set by lowering on a `tag_payload_struct` read of a dynamic tag union
+    /// whose payload slot is a recursion box in some instantiation: the
+    /// counterpart of `ProductShape.boxable` for a tag's only payload.
+    payload_boxable: bool = false,
+    /// Set by ARC on a take out of a dynamic value whose slot can be a
+    /// recursion box: a field its product shape marks `boxable`, or a
+    /// `payload_boxable` tag payload. The read moves the value into the
+    /// target's own storage, and the slot it leaves is released with the
+    /// source's descriptor: a slot that is a recursion box gives up its
+    /// allocation, and any other slot holds nothing further.
+    releases_recursion_box: bool = false,
 };
 
 /// The fields of `CFStmt.assign_low_level` that only particular operations
@@ -1206,7 +1294,7 @@ pub const LowLevelExtra = struct {
     /// Committed output element layout for `list_map_can_reuse`. Consumers
     /// with different storage representations use this explicit fact rather
     /// than reconstructing the transform function return type.
-    map_output_elem: ?layout.Idx = null,
+    map_output_elem: collections.OptionalId(layout.Idx) = .none,
     /// Set on a list operation a `.boxy` generic body emits: its last
     /// argument is the `opaque_ptr` descriptor of the list's elements, which
     /// supplies the element width, alignment, and reference counting the
@@ -1246,17 +1334,20 @@ pub const RcHelperRef = union(enum) {
 /// ARC; no backend tail-call inference is required.
 pub const TailCallLink = enum(u32) {
     /// The call is not a self-tail site.
-    none = std.math.maxInt(u32),
+    none = 0,
     /// The call is the last self-tail site of its chain.
-    last = std.math.maxInt(u32) - 1,
+    last = 1,
     /// The call is a self-tail site; the value is the next site's
-    /// `CFStmtId`.
+    /// `CFStmtId` plus `first_next`.
     _,
+
+    const first_next: u32 = 2;
 
     /// The link of a self-tail site whose chain continues at `next`.
     pub fn site(next_site: ?CFStmtId) TailCallLink {
         const id = next_site orelse return .last;
-        return @fromBackingInt(@backingInt(id));
+        std.debug.assert(@backingInt(id) < max_cf_stmt_count);
+        return @fromBackingInt(@backingInt(id) + first_next);
     }
 
     pub fn isSite(self: TailCallLink) bool {
@@ -1267,12 +1358,12 @@ pub const TailCallLink = enum(u32) {
     pub fn next(self: TailCallLink) ?CFStmtId {
         std.debug.assert(self != .none);
         if (self == .last) return null;
-        return @fromBackingInt(@backingInt(self));
+        return @fromBackingInt(@backingInt(self) - first_next);
     }
 };
 
-/// The largest statement count, leaving the top two `CFStmtId` values for
-/// `TailCallLink`'s tags.
+/// The largest statement count, so every `CFStmtId` plus
+/// `TailCallLink.first_next` fits a `TailCallLink`.
 pub const max_cf_stmt_count: u32 = std.math.maxInt(u32) - 1;
 
 /// The fields of a `LiteralValue.static_data` read set only for a
@@ -1315,19 +1406,26 @@ pub const ErasedCallData = struct {
     closure: LocalId,
     args: LocalSpan,
     arg_plan: ErasedCallArgsPlanId,
-    /// Consume the allocation denoted by `closure` as the destination for
-    /// an erased-callable result.
-    /// The erased callee may repack it when the returned capture payload has
-    /// the same committed size and alignment; otherwise it releases the
-    /// consumed allocation and returns a fresh one. At the machine ABI this
-    /// passes the callable data pointer as the nullable fifth argument.
+    /// Set by ARC emission, never by lowering: the call transfers one owned
+    /// unit of the allocation denoted by `closure` to the callee, because
+    /// that unit dies at the call (design.md "Destination-Passing Results
+    /// and Allocation Reuse"). The callee reads its captures out of the
+    /// transferred allocation, may repack it as an erased-callable result,
+    /// and otherwise releases it. At the machine ABI this passes the callable
+    /// data pointer as the nullable fifth argument. Without it the call
+    /// borrows `closure` and passes null.
     reuse_closure: bool = false,
-    /// Ownership source consumed by `reuse_closure`. This may be an outer
+    /// The local whose ownership unit a transfer moves. This may be an outer
     /// transparent nominal/tag wrapper of `closure`; both must denote the
     /// same erased-callable allocation, while this local carries its owned
     /// unit. Debug certification proves that allocation identity through
-    /// the exact representation-transparent producer chain.
-    reuse_source: ?LocalId = null,
+    /// the exact representation-transparent producer chain. Absent names
+    /// `closure` itself.
+    reuse_source: collections.OptionalId(LocalId) = .none,
+    /// The call's result holds exactly one erased-callable slot, so the
+    /// callee can repack a transferred allocation as its result. Such a call
+    /// is solved as demanding its closure's unit.
+    result_reuse: bool = false,
     /// Set by ARC emission on an erased call whose value the procedure
     /// returns: the call is left pending instead of made. The pending call owns the
     /// reference to `closure` this statement was given, and whoever runs
@@ -1343,13 +1441,13 @@ pub const ErasedCallData = struct {
 /// stored out of line (see `StmtRowId`).
 pub const PackedErasedFnData = struct {
     proc: LirProcSpecId,
-    capture: ?LocalId,
-    capture_layout: ?layout.Idx,
+    capture: collections.OptionalId(LocalId),
+    capture_layout: collections.OptionalId(layout.Idx),
     on_drop: ErasedCallableOnDrop,
     /// Explicit retain callback for copying the inline capture.
     on_copy: ErasedCallableOnDrop = .none,
     /// Frozen callbacks see the runtime prefix too, without a hot-reload adapter.
-    frozen_capture_layout: ?layout.Idx = null,
+    frozen_capture_layout: collections.OptionalId(layout.Idx) = .none,
     /// Optional local containing a consumed erased callable allocation to
     /// repack. The local itself is present statically, but its runtime value
     /// may be null when an ABI caller declined to transfer ownership.
@@ -1359,8 +1457,15 @@ pub const PackedErasedFnData = struct {
     /// consumed allocation is uniquely owned at the statement. Otherwise,
     /// consumers must runtime-check uniqueness and take the fresh allocate
     /// path when the old allocation is shared.
-    reuse: ?LocalId = null,
+    reuse: collections.OptionalId(LocalId) = .none,
     reuse_unique: bool = false,
+    /// Set after ARC on a packing whose callable never outlives the frame
+    /// building it (design.md "Frame Callables"): the callable lives in
+    /// storage the procedure reserves for this statement, with the frame
+    /// marker as its reference count, so retains and releases of it do
+    /// nothing. Its capture record stays with the `capture` local, which
+    /// releases it where the callable dies. A frame packing has no `reuse`.
+    frame: bool = false,
 };
 
 /// The byte offset of word `index` of a type table whose words are
@@ -1427,6 +1532,9 @@ pub const DynOp = union(enum) {
     /// Payload `payload_index` of the active tag in `base`, selected by its
     /// stored discriminant. The producer has established that this tag holds
     /// the target's payload type (a matched arm or a known constructor).
+    /// The only payload of a tag whose payload can hold refcounted data is
+    /// read by `assign_ref` `tag_payload_struct` instead, an
+    /// ownership-complete projection (design.md "Resources Over Layouts").
     tag_payload_addr: struct { base: LocalId, desc: LocalId, payload_index: u32 },
     /// Build the record or tuple `desc` describes from `fields`, given in
     /// semantic index order.
@@ -1435,7 +1543,9 @@ pub const DynOp = union(enum) {
     /// `base_desc` describes, by the update plan `plan` (an `opaque_ptr`
     /// local; `boxy_runtime.desc.update_value_flag`): each field the plan
     /// gives a value takes that one of `values`, and every other field the
-    /// base's field the plan names. `base` and `values` are consumed.
+    /// base's field the plan names. The operation consumes the base before
+    /// it returns and moves the replacements into the result. Supply their
+    /// ownership before entry: a replacement may borrow from the base.
     record_update: struct { base: LocalId, base_desc: LocalId, desc: LocalId, plan: LocalId, values: LocalSpan },
     /// Build the variant whose discriminant is `discriminant` of the tag
     /// union `desc` describes from `payloads`.
@@ -1472,18 +1582,21 @@ pub const DynOp = union(enum) {
     call_erased: struct {
         closure: LocalId,
         args: ?LocalId,
-        /// The call transfers one ownership unit of `closure`'s allocation
-        /// to the callee through the erased ABI's reuse channel, which
-        /// consumes it: an owned erased call (design.md "Destination-Passing
-        /// Results and Allocation Reuse"). Boxy lowering sets it when the
-        /// call's result type holds one erased-callable slot; ARC moves the
-        /// unit when `closure` dies at the call and retains it otherwise. A
-        /// deferred owned call's pending record transfers the unit when the
-        /// call is driven.
+        /// Set by ARC emission, never by lowering: the call transfers one
+        /// ownership unit of `closure`'s allocation to the callee through the
+        /// erased ABI's reuse channel, because that unit dies at the call
+        /// (design.md "Destination-Passing Results and Allocation Reuse").
+        /// A deferred transferring call's pending record transfers the unit
+        /// when the call is driven.
         reuse_closure: bool = false,
-        /// The local whose ownership unit `reuse_closure` transfers, which
-        /// denotes `closure`'s allocation (`lir/erased_owner.zig`).
-        reuse_source: ?LocalId = null,
+        /// The local whose ownership unit a transfer moves, which denotes
+        /// `closure`'s allocation (`lir/erased_owner.zig`). Absent names
+        /// `closure` itself.
+        reuse_source: collections.OptionalId(LocalId) = .none,
+        /// The call's result holds exactly one erased-callable slot, so the
+        /// callee can repack a transferred allocation as its result. Such a
+        /// call is solved as demanding its closure's unit.
+        result_reuse: bool = false,
         /// Set by ARC emission on a call whose value the procedure returns:
         /// the call is left pending instead of made, owning one reference to
         /// `closure` and the argument record (design.md "Deferred Erased
@@ -1503,7 +1616,13 @@ pub const DynOp = union(enum) {
     /// ARC proved it) and the record fits its capacity; otherwise the
     /// callable is a fresh allocation and `reuse` is released. Its runtime
     /// value may be null, which transfers nothing.
-    closure: struct { proc: LirProcSpecId, capture: LocalId, reuse: ?LocalId = null, reuse_unique: bool = false },
+    ///
+    /// Set after ARC on a closure whose callable never outlives its frame
+    /// (design.md "Frame Callables"): `frame` is a `frame_callable` local,
+    /// the callable is built in its storage with the frame marker as its
+    /// reference count, and its capture record stays with `capture`, which
+    /// releases it where the callable dies. Such a closure has no `reuse`.
+    closure: struct { proc: LirProcSpecId, capture: LocalId, reuse: ?LocalId = null, reuse_unique: bool = false, frame: ?LocalId = null },
     /// A `view` dynamic target over the bytes at `address` (an `opaque_ptr`
     /// local), which the target's descriptor describes; it borrows from
     /// whatever owns those bytes: `owner`, the local holding an ownership
@@ -1780,7 +1899,10 @@ pub const ComptimeValueRef = struct {
 
 /// What it means for generated code to fail at one statement, beyond
 /// crashing there. Every identity but a literal producer's stays meaningful in
-/// every compilation of the program (`LirStore.failureMeaning`).
+/// every compilation of the program (`LirStore.failureMeaning`): a module is
+/// named by the identity its lowering gives it
+/// (`LirStore.lowering_module_identities`), which a program's table reads back
+/// as a checked key (`Program.Result.meaningByCheckedKey`).
 pub const FailureMeaning = union(enum) {
     /// Code checking rejected and already reported.
     checked_error,
@@ -1802,10 +1924,10 @@ pub const FailureMeaning = union(enum) {
     },
 };
 
-/// Return whether an erased call's reuse flag and consumed ownership source
-/// describe the same optional reuse operation.
-pub fn erasedCallReuseFieldsMatch(assign: anytype) bool {
-    return assign.reuse_closure == (assign.reuse_source != null);
+/// The local whose ownership unit an erased call transfers when its closure
+/// dies at the call: the explicit reuse source, or the closure itself.
+pub fn erasedCallOwner(assign: anytype) LocalId {
+    return assign.reuse_source.get() orelse assign.closure;
 }
 
 /// What a procedure body contains, recorded by whoever emitted its statements.
@@ -1819,7 +1941,7 @@ pub fn erasedCallReuseFieldsMatch(assign: anytype) bool {
 /// introduces a shape into a body it rewrites sets that shape's flag itself.
 /// Debug builds verify the superset property by also running each pass on
 /// the procedures its shapes excluded.
-pub const ProcShapes = packed struct(u16) {
+pub const ProcShapes = packed struct(u32) {
     /// A direct call to the procedure itself, in any position.
     self_call: bool = false,
     /// A loop: a join reached again by a back edge, whether lowered from a
@@ -1856,10 +1978,17 @@ pub const ProcShapes = packed struct(u16) {
     /// A checked integer division or remainder, whose divisor a value-range
     /// proof can show nonzero.
     checked_division: bool = false,
-    _padding: u1 = 0,
+    /// A local assigned a string literal.
+    str_literal: bool = false,
+    /// An erased call, whose reuse source is resolved once every rewrite
+    /// before ARC has run.
+    erased_call: bool = false,
+    /// A function value packing, which may be built in its frame.
+    erased_pack: bool = false,
+    reserved: u14 = 0,
 
     pub fn merged(self: ProcShapes, other: ProcShapes) ProcShapes {
-        return @bitCast(@as(u16, @bitCast(self)) | @as(u16, @bitCast(other)));
+        return @bitCast(@as(u32, @bitCast(self)) | @as(u32, @bitCast(other)));
     }
 };
 
@@ -1874,10 +2003,6 @@ pub const LirProcSpec = struct {
     /// and emission policy; equal revisions across separate lowers prove nothing.
     native_code_revision: u64 = 0,
     args: LocalSpan,
-    /// Producer-authored provenance for a function normalized from an
-    /// iterator pipeline. Dev-only structural fusion consumes this bit; it
-    /// must never infer the scope from symbols or LIR body shape.
-    iterator_fusion_scope: bool = false,
     /// Hidden erased-callable ownership input. Every erased-callable ABI proc
     /// records its final argument here, regardless of whether its result can
     /// reuse the allocation. Its local has erased-callable layout so ARC always
@@ -1892,6 +2017,9 @@ pub const LirProcSpec = struct {
     frame_locals: LocalSpan = LocalSpan.empty(),
     join_points: JoinPointSpan = JoinPointSpan.empty(),
     body: collections.OptionalId(CFStmtId) = .none,
+    /// Where the body's rows lie, from lowering until the procedure-local
+    /// rewrites finish (`LirStore.procBodyChunks`); empty otherwise.
+    body_chunks: BodyChunkSpan = BodyChunkSpan.empty(),
     ret_layout: layout.Idx,
     /// Hidden capture-pointer parameter for an erased callable procedure.
     erased_capture_arg: collections.OptionalId(LocalId) = .none,
@@ -1937,6 +2065,13 @@ pub const LirProcSpec = struct {
     /// A procedure this object defines for other objects of the link: its
     /// symbol has global binding and it is a root of reachability and ARC.
     exported: bool = false,
+    /// Set by `.boxy` lowering on a worker another module's object may call:
+    /// an exported worker of a module unit, or a program's worker of the
+    /// kinds a module unit exports. A call from any emission unit may demand
+    /// its outcome-restitution variant (design.md "Outcome-Conditioned
+    /// Argument Restitution", published outcome variants), and an exported
+    /// one's object always emits and exports that variant.
+    outcome_publisher: bool = false,
     /// Exact self-tail sites produced by LIR construction, consumed by TRMC/TCE.
     tail_calls: OptionalTailCalls = .none,
     /// Set by the tail-drive pass on an erased-callable procedure with an
@@ -1960,6 +2095,12 @@ pub const LirProcSpec = struct {
     /// being replaced, so a backend that passes arguments that way gives
     /// every member of a group one storage contract for them.
     tail_group: collections.OptionalId(TailGroupId) = .none,
+    /// Whether this procedure takes a tail carry (`takesTailCarry`). ARC sets
+    /// it on every Roc-ABI member of a `tail_group` with a dynamic parameter,
+    /// since a frame-replacing call can enter exactly those; a body-less
+    /// `external` proc gets the value its object published, because the
+    /// group is a fact of bodies only the defining unit holds.
+    tail_carry: bool = false,
     /// What the body contains, for pass admission.
     shapes: ProcShapes = .{},
     /// Explicit native-stack probing requirement for this proc.
@@ -1982,9 +2123,31 @@ pub const LirProcSpec = struct {
     rc_ret_unique: bool = false,
     rc_ret_unique_fields: u64 = 0,
     rc_ret_conditions: U32Span = U32Span.empty(),
+    /// The outcome table of the outcome-restitution variant this procedure's
+    /// object publishes (design.md "Outcome-Conditioned Argument
+    /// Restitution", emission units), as one discriminant word and one
+    /// restituted-parameter mask word per row, sorted by discriminant; empty
+    /// when it publishes none. ARC sets it on a published exported worker,
+    /// whose object always emits that variant, and a body-less `external`
+    /// proc gets it back from the export record, so a call in any unit may
+    /// demand the variant (`ProcIdentity.ownershipVariant` names it).
+    rc_outcomes: U32Span = U32Span.empty(),
+    /// Bit `i` set: parameter `i` is a function value this procedure never
+    /// lets outlive its call (design.md "Frame Callables"), so a caller may
+    /// pass it a callable built in the caller's own frame. Solved after ARC
+    /// for a procedure with a body (`FrameCallables.solveParams`); a
+    /// body-less `external` proc gets the mask its object published.
+    nonescaping_fn_params: u64 = 0,
+    /// Bit `i` set: some call may hand parameter `i`'s callable over to
+    /// its callee through the erased ABI's reuse channel, whose body then
+    /// finds the captures unshared when the callable dies there. A caller
+    /// keeps a callable whose captures hold reference-counted data on the
+    /// heap for such a parameter, so a capture the body updates is still
+    /// updated in place. Solved and published with `nonescaping_fn_params`.
+    capture_reuse_fn_params: u64 = 0,
 
     comptime {
-        std.debug.assert(@sizeOf(LirProcSpec) == 216);
+        std.debug.assert(@sizeOf(LirProcSpec) == 256);
     }
 
     /// The body ARC analyzes and places reference counts in. A static
@@ -2001,6 +2164,15 @@ pub const LirProcSpec = struct {
     /// calls, and an erased-callable one reads the cell from its invocation.
     pub fn takesPendingCell(self: LirProcSpec) bool {
         return self.abi == .roc and self.may_leave_pending;
+    }
+
+    /// Whether this procedure takes a tail carry: a hidden parameter after
+    /// its arguments and dynamic result holding the storage a frame-replacing
+    /// call moved its dynamic arguments into, because their bytes lived in
+    /// the frame it replaced. The procedure releases its carry when it
+    /// returns or replaces its own frame. Every other caller passes none.
+    pub fn takesTailCarry(self: LirProcSpec) bool {
+        return self.abi == .roc and self.tail_carry;
     }
 };
 

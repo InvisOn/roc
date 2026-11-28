@@ -101,7 +101,7 @@ test "nominal views exhaustive boundary returns actual blockers only and permits
     var shared = Reader.SharedDependencies.init(testing.allocator, &f.store);
     defer shared.deinit();
     var finality = FinalityFixture{ .final = true };
-    var cache = exhaustive.NominalOpenCache.initShared(testing.allocator, .{ .graphs = &shared, .owner = &finality, .isFinal = FinalityFixture.isFinal });
+    var cache = exhaustive.NominalOpenCache.initShared(testing.allocator, .{ .graphs = &shared, .owner = &finality, .isFinal = FinalityFixture.isFinal }, null);
     defer cache.deinit();
     const idents = try builtinIdents(&f, &cache);
     const before = f.store.len();
@@ -109,12 +109,12 @@ test "nominal views exhaustive boundary returns actual blockers only and permits
     defer arena.deinit();
     var blockers: std.ArrayList(Var) = .empty;
     defer blockers.deinit(testing.allocator);
-    try exhaustive.collectAbsentCtorPayloadBlockersForConstructedTags(
+    try exhaustive.collectAlternativePayloadBlockers(
         arena.allocator(),
         &f.store,
         idents,
-        root,
-        &.{ok},
+        &.{root},
+        &.{},
         &blockers,
     );
     try testing.expectEqualSlices(Var, &.{actual_b}, blockers.items);
@@ -124,12 +124,12 @@ test "nominal views exhaustive boundary returns actual blockers only and permits
     // this mutation. A new query sees the closed argument, not stale views.
     try f.store.setVarContent(actual_b, .{ .structure = .empty_tag_union });
     blockers.clearRetainingCapacity();
-    try exhaustive.collectAbsentCtorPayloadBlockersForConstructedTags(
+    try exhaustive.collectAlternativePayloadBlockers(
         arena.allocator(),
         &f.store,
         idents,
-        root,
-        &.{ok},
+        &.{root},
+        &.{},
         &blockers,
     );
     try testing.expectEqual(@as(usize, 0), blockers.items.len);
@@ -178,16 +178,16 @@ test "nominal views share a final declaration's dependency graph across reads" {
                 .graphs = &shared,
                 .owner = &finality,
                 .isFinal = FinalityFixture.isFinal,
-            });
+            }, null);
             defer cache.deinit();
             const idents = try builtinIdents(&f, &cache);
             blockers.clearRetainingCapacity();
-            try exhaustive.collectAbsentCtorPayloadBlockersForConstructedTags(
+            try exhaustive.collectAlternativePayloadBlockers(
                 arena.allocator(),
                 &f.store,
                 idents,
-                root,
-                &.{ok},
+                &.{root},
+                &.{},
                 &blockers,
             );
             try testing.expectEqualSlices(Var, &.{actual_b}, blockers.items);
@@ -333,12 +333,14 @@ test "nominal views preserve scoped actuals aliases and owned unknowns without s
     const inner_app = try f.application(inner, &.{associated_a});
     const inner_var = try f.store.freshFromContent(.{ .structure = .{ .nominal_type = inner_app } });
     const alias_backing = try f.tuple(&.{outer_a});
-    const alias = try f.store.freshFromContent(.{ .alias = .{
-        .ident = .{ .ident_idx = try f.ident("Alias") },
-        .vars = .{ .nonempty = try f.store.appendVars(&.{ alias_backing, outer_a, unknown }) },
-        .source_arg_count = 1,
-        .origin_module = fixture_module,
-    } });
+    const alias = try f.store.freshFromContent(try f.store.mkAliasWithPackedSourceDecl(
+        .{ .ident_idx = try f.ident("Alias") },
+        alias_backing,
+        &.{ outer_a, unknown },
+        1,
+        fixture_module,
+        .none,
+    ));
     const outer = try f.declaration("Outer", &.{outer_a}, try f.tuple(&.{ inner_var, outer_a, unknown, alias }));
     const app = try f.application(outer, &.{actual_a});
     const before = f.store.len();
@@ -557,12 +559,14 @@ test "nominal views blocker dependency proof includes hidden alias arguments and
     const a = try f.rigid("a");
     const actual = try f.store.fresh();
     const unit = try f.store.freshFromContent(.{ .structure = .empty_record });
-    const alias = try f.store.freshFromContent(.{ .alias = .{
-        .ident = .{ .ident_idx = try f.ident("Hidden") },
-        .vars = .{ .nonempty = try f.store.appendVars(&.{ unit, a }) },
-        .source_arg_count = 0,
-        .origin_module = fixture_module,
-    } });
+    const alias = try f.store.freshFromContent(try f.store.mkAliasWithPackedSourceDecl(
+        .{ .ident_idx = try f.ident("Hidden") },
+        unit,
+        &.{a},
+        0,
+        fixture_module,
+        .none,
+    ));
     const presence = try f.store.freshFromContent(.{ .structure = .{ .record = .{
         .fields = try f.store.appendRecordFields(&.{.{ .name = try f.ident("field"), .presence = .unknown(a, unit) }}),
         .ext = unit,
@@ -574,4 +578,41 @@ test "nominal views blocker dependency proof includes hidden alias arguments and
     defer reader.deinit();
     const children = try tupleChildren(&reader, (try reader.openNominalBacking(app)).?);
     for (children) |child| try testing.expect(try reader.hasSourceDependencies(child));
+}
+
+test "nominal views answer the opening of a root's application once" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.rigid("a");
+    const actual = try f.store.fresh();
+    const nominal = try f.declaration("Wrapper", &.{a}, try f.tuple(&.{a}));
+    const app = try f.application(nominal, &.{actual});
+    const holder = try f.store.freshFromContent(.{ .structure = .{ .nominal_type = app } });
+    const other_holder = try f.store.freshFromContent(.{ .structure = .{ .nominal_type = app } });
+    var reader = Reader.init(testing.allocator, &f.store);
+    defer reader.deinit();
+    const opened = (try reader.openNominalBackingOf(holder, app)).?;
+    try testing.expectEqual(actual, (try tupleChildren(&reader, opened))[0]);
+    // The remembered answer, a fresh opening and another root that holds the
+    // same application all name one view.
+    try testing.expectEqual(opened, (try reader.openNominalBackingOf(holder, app)).?);
+    try testing.expectEqual(opened, (try reader.openNominalBacking(app)).?);
+    try testing.expectEqual(opened, (try reader.openNominalBackingOf(other_holder, app)).?);
+}
+
+test "nominal views open every application of an argument-less declaration to one view" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const backing = try f.tuple(&.{try f.store.freshFromContent(.{ .structure = .empty_record })});
+    const nominal = try f.declaration("Plain", &.{}, backing);
+    const first = try f.application(nominal, &.{});
+    const second = try f.application(nominal, &.{});
+    var reader = Reader.init(testing.allocator, &f.store);
+    defer reader.deinit();
+    const opened = (try reader.openNominalBacking(first)).?;
+    try testing.expectEqual(@as(usize, 1), (try tupleChildren(&reader, opened)).len);
+    // The remembered answer and a separately built application of the same
+    // declaration name one view.
+    try testing.expectEqual(opened, (try reader.openNominalBacking(first)).?);
+    try testing.expectEqual(opened, (try reader.openNominalBacking(second)).?);
 }

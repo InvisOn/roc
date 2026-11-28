@@ -26,10 +26,16 @@ pub const CheckingWork = struct {
     fresh_check_ns: u64 = 0,
     /// Checked-artifact publication; the coordinator subtracts local CTFE.
     publication_ns: u64 = 0,
+    /// Each publication step's time, recorded only under detailed timing.
+    publication_steps: CheckedArtifact.PublicationTiming = .{},
 
     pub fn add(self: *CheckingWork, other: CheckingWork) void {
         inline for (@typeInfo(CheckingWork).@"struct".field_names) |field| {
-            @field(self, field) += @field(other, field);
+            if (comptime std.mem.eql(u8, field, "publication_steps")) {
+                self.publication_steps.add(other.publication_steps);
+            } else {
+                @field(self, field) += @field(other, field);
+            }
         }
     }
 };
@@ -161,13 +167,16 @@ pub const PublishError = CheckedArtifact.CompileTimeFinalizer.Error;
 /// Errors that can occur while type-checking a module.
 pub const TypeCheckModuleError = Allocator.Error || PublishError || error{Internal};
 
-/// Build CTFE finalization options from the package compiler context.
+/// Build CTFE finalization options from the package compiler context, for a
+/// compilation whose compile-time roots `strategy`'s evaluator completes.
 pub fn compileTimeFinalizationOptions(
     max_threads: usize,
     roc_ctx: *CoreCtx,
     timing: ?*eval.CompileTimeFinalization.Timing,
+    strategy: base.SpecializationStrategy,
 ) eval.CompileTimeFinalization.Options {
     return .{
+        .strategy = strategy,
         .max_threads = max_threads,
         .std_io = roc_ctx.std_io,
         .timing = timing,
@@ -237,6 +246,7 @@ pub const PlatformRequirementsCheckOutput = struct {
 
 /// Public `ArtifactPublicationInputs` declaration.
 pub const ArtifactPublicationInputs = struct {
+    builtin_artifact: CheckedArtifact.BuiltinArtifact,
     available_artifacts: []const CheckedArtifact.ImportedModuleView = &.{},
     relation_artifacts: []const CheckedArtifact.ImportedModuleView = &.{},
     platform_requirement_context: ?CheckedArtifact.PlatformRequirementContextKey = null,
@@ -245,11 +255,13 @@ pub const ArtifactPublicationInputs = struct {
     problem_store: ?*check.problem.Store = null,
     /// Waits on the published module's key slots.
     io: std.Io,
-    ctfe_options: eval.CompileTimeFinalization.Options = .{},
+    ctfe_options: eval.CompileTimeFinalization.Options,
     evaluation_phase: @FieldType(CheckedArtifact.PublishInputs, "evaluation_phase") = .immediate,
     /// How this module's compile-time roots were established. Part of the
     /// checked-artifact cache identity. See `Can.Validation`.
     validation: Can.Validation = .checking,
+    /// Receives each publication step's time under detailed timing.
+    timing: ?*CheckedArtifact.PublicationTiming = null,
 };
 
 fn importedArtifactsCoverImportedEnvs(
@@ -314,7 +326,7 @@ fn appendCheckOwnerEnvPublicDependencies(
     seen_public_dependencies: *std.AutoHashMap(CheckedArtifact.CheckedModuleDigest, void),
     view: CheckedArtifact.ImportedModuleView,
 ) Allocator.Error!void {
-    for (view.public_api_dependencies.type_owner_artifacts) |dependency_key| {
+    for (view.public_api_dependencies.type_owner_artifacts.items()) |dependency_key| {
         const entry = try seen_public_dependencies.getOrPut(dependency_key);
         if (entry.found_existing) continue;
         entry.value_ptr.* = {};
@@ -429,7 +441,6 @@ pub fn canonicalizeAndTypeCheckModule(
         env,
         imported_envs,
         module_envs_out,
-        &env.store.regions,
         module_builtin_ctx,
     );
     checker.fixupTypeWriter();
@@ -526,6 +537,7 @@ pub fn typeCheckModule(
     artifact_alloc: Allocator,
     env: *ModuleEnv,
     builtin_module_env: *const ModuleEnv,
+    builtin_artifact: CheckedArtifact.ModuleId,
     imported_envs: []const *ModuleEnv,
     imported_artifacts: []const CheckedArtifact.PublishImportArtifact,
     available_artifacts: []const CheckedArtifact.ImportedModuleView,
@@ -538,6 +550,7 @@ pub fn typeCheckModule(
     deferred_imports: can.ImportResolution.Imports,
     missing_public_types: []const []const u8,
     typing_context: ?*checked_cache_entry.Context,
+    detailed_publication_timing: bool,
 ) TypeCheckModuleError!TypeCheckOutput {
     const builtin_indices = compiled_builtins.builtinIndices(can.CIR);
 
@@ -580,7 +593,6 @@ pub fn typeCheckModule(
         imported_envs,
         owner_envs,
         &module_envs_map,
-        &env.store.regions,
         module_builtin_ctx,
     );
     checker.platform_requirements = platform_requirements;
@@ -595,7 +607,7 @@ pub fn typeCheckModule(
     var work: CheckingWork = .{};
     if (restored) |metadata| {
         try metadata.install(&checker, &typing_context.?.scope);
-        env.types.seal();
+        try env.types.seal();
         work.typing_hits += 1;
     } else {
         const timer = CheckingTimer.start(io);
@@ -623,6 +635,7 @@ pub fn typeCheckModule(
         imported_envs,
         imported_artifacts,
         .{
+            .builtin_artifact = .{ .imported = builtin_artifact },
             .platform_requirement_context = platform_requirement_context,
             .platform_app_relation = null,
             .explicit_roots = explicit_roots,
@@ -632,6 +645,7 @@ pub fn typeCheckModule(
             .ctfe_options = ctfe_options,
             .evaluation_phase = .post_frontend,
             .validation = validation,
+            .timing = if (detailed_publication_timing) &work.publication_steps else null,
         },
     );
     errdefer checked_artifact.deinit(artifact_alloc);
@@ -677,8 +691,10 @@ pub fn publishCheckedArtifactFromCheckedModuleWithStorage(
     imported_artifacts: []const CheckedArtifact.PublishImportArtifact,
     publication: ArtifactPublicationInputs,
 ) PublishError!CheckedArtifact.CheckedModuleArtifact {
+    var clock = CheckedArtifact.PublicationClock.start(publication.io, publication.timing);
     var typed = try CheckedModules.initForRootModule(gpa, env, imported_envs);
     defer typed.modules.deinit();
+    clock.lap(.typed_modules);
     return publishFromPrebuiltModules(gpa, &typed.modules, typed.module_idx, module_env_storage, imported_artifacts, publication);
 }
 
@@ -701,6 +717,7 @@ pub fn publishFromPrebuiltModules(
         module_idx,
         .{
             .module_env_storage = module_env_storage,
+            .builtin_artifact = publication.builtin_artifact,
             .io = publication.io,
             .imports = imported_artifacts,
             .available_artifacts = publication.available_artifacts,
@@ -712,6 +729,7 @@ pub fn publishFromPrebuiltModules(
             .evaluation_phase = publication.evaluation_phase,
             .problem_store = publication.problem_store,
             .validation = publication.validation,
+            .timing = publication.timing,
         },
     );
 }

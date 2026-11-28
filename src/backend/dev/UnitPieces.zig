@@ -24,7 +24,7 @@ const Allocator = std.mem.Allocator;
 
 const magic = "RUPC";
 /// Format version; bump whenever the encoding or its contents change.
-pub const format_version: u32 = 4;
+pub const format_version: u32 = 8;
 
 /// One source file the pieces' lines name, in the order the set indexes them.
 pub const SourceFile = struct {
@@ -56,11 +56,16 @@ pub const Pieces = struct {
     /// under the content names the unit's code names them by: the roots of
     /// the unit's static data, which no excerpt need reference.
     exported_data: []const CodeExcerpt.DataItem,
+    /// The payload owners `exported_data` shares bytes with, and the keeper
+    /// of the static data exports the pieces were compiled from, each
+    /// retained once.
+    data_owners: []const *CodeExcerpt.DataOwner = &.{},
     helper_aliases: []const HelperAlias,
 
     pub fn deinit(self: *Pieces) void {
         self.set.deinit();
         if (self.graph) |*graph| graph.deinit();
+        CodeExcerpt.releaseOwners(self.data_owners);
         self.arena.deinit();
         self.* = undefined;
     }
@@ -147,13 +152,13 @@ pub fn encode(allocator: Allocator, pieces: *const Pieces) Allocator.Error![]u8 
             try writer.byte(formByte(ref.form));
             try writer.word(ref.target);
             try writer.word(ref.delta);
-            try writer.word(ref.veneer.get() orelse std.math.maxInt(u32));
+            try writer.word(@backingInt(ref.veneer));
         }
         try writer.word(@intCast(excerpt.symbolic_refs.len));
         for (excerpt.symbolic_refs) |ref| {
             try writer.word(ref.site);
             try writer.byte(formByte(ref.form));
-            try writer.word(ref.veneer orelse std.math.maxInt(u32));
+            try writer.word(@backingInt(collections.OptionalU32.of(ref.veneer)));
             switch (ref.binding) {
                 .unresolved => try writer.byte(0),
                 .absent => try writer.byte(1),
@@ -174,6 +179,7 @@ pub fn encode(allocator: Allocator, pieces: *const Pieces) Allocator.Error![]u8 
             }
         }
         try writeLoc(&writer, excerpt.loc);
+        try writer.str(excerpt.name);
         try writer.word(@intCast(excerpt.lines.len));
         for (excerpt.lines) |line| {
             try writer.word(line.offset);
@@ -237,8 +243,10 @@ pub fn decode(allocator: Allocator, bytes: []const u8) ReadError!Pieces {
     const sa = set_arena.allocator();
     const set_files = try sa.alloc([32]u8, source_files.len);
     for (source_files, set_files) |file, *identity| identity.* = file.identity;
-    const table = try readData(a, &reader);
-    var graph = try CodeExcerpt.PreparedData.init(allocator, &.{}, &.{}, table);
+    // The graph copies the table into its own storage, so the table only
+    // views the encoded bytes.
+    const table = try readData(a, &reader, .viewed);
+    var graph = try CodeExcerpt.PreparedData.init(allocator, &.{}, &.{}, .copy, table);
     errdefer graph.deinit();
     const excerpt_count = try reader.word();
     const excerpts = try sa.alloc(CodeExcerpt.Excerpt, excerpt_count);
@@ -272,7 +280,7 @@ pub fn decode(allocator: Allocator, bytes: []const u8) ReadError!Pieces {
                 .form = try readForm(&reader),
                 .target = try reader.word(),
                 .delta = try reader.word(),
-                .veneer = .of(optionalWord(try reader.word())),
+                .veneer = optionalWord(try reader.word()),
             };
             if (ref.target >= excerpt_count) return error.MalformedPieces;
         }
@@ -280,7 +288,7 @@ pub fn decode(allocator: Allocator, bytes: []const u8) ReadError!Pieces {
         for (symbolic_refs) |*ref| {
             const site = try reader.word();
             const form = try readForm(&reader);
-            const veneer = optionalWord(try reader.word());
+            const veneer = optionalWord(try reader.word()).get();
             const binding: @FieldType(CodeExcerpt.SymbolicReference, "binding") = switch (try reader.byte()) {
                 0 => .unresolved,
                 1 => .absent,
@@ -299,6 +307,7 @@ pub fn decode(allocator: Allocator, bytes: []const u8) ReadError!Pieces {
             ref.* = .{ .site = site, .form = form, .veneer = veneer, .binding = binding, .target = target };
         }
         const loc = try readLoc(&reader, source_files.len);
+        const source_name = try sa.dupe(u8, try reader.str());
         const lines = try sa.alloc(CodeExcerpt.LineEntry, try reader.word());
         for (lines) |*line| {
             line.* = .{
@@ -347,9 +356,10 @@ pub fn decode(allocator: Allocator, bytes: []const u8) ReadError!Pieces {
             .data = &.{},
             .data_graph = if (roots.len == 0) null else .{ .graph = graph.graph, .roots = roots },
             .loc = loc,
+            .name = source_name,
         };
     }
-    const exported_data = try readData(a, &reader);
+    const exported_data = try readData(a, &reader, .owned);
     const helper_aliases = try a.alloc(HelperAlias, try reader.word());
     for (helper_aliases) |*alias| {
         alias.* = .{ .helper = try a.dupe(u8, try reader.str()), .alias = try a.dupe(u8, try reader.str()) };
@@ -384,19 +394,20 @@ fn readForm(reader: *Reader) ReadError!CodeExcerpt.Form {
     };
 }
 
-fn optionalWord(value: u32) ?u32 {
-    return if (value == std.math.maxInt(u32)) null else value;
+/// A word the writer stored as `collections.OptionalU32`: zero for absence.
+fn optionalWord(value: u32) collections.OptionalU32 {
+    return @fromBackingInt(value);
 }
 
 fn writeLoc(writer: *Writer, loc: base.SourceLoc) Allocator.Error!void {
-    try writer.word(loc.file);
+    try writer.word(@backingInt(loc.file));
     try writer.word(loc.line);
     try writer.word(loc.column);
 }
 
 fn readLoc(reader: *Reader, file_count: usize) ReadError!base.SourceLoc {
-    const loc: base.SourceLoc = .{ .file = try reader.word(), .line = try reader.word(), .column = try reader.word() };
-    if (loc.hasLocation() and loc.file >= file_count) return error.MalformedPieces;
+    const loc: base.SourceLoc = .{ .file = @fromBackingInt(try reader.word()), .line = try reader.word(), .column = try reader.word() };
+    if (loc.hasLocation() and loc.fileIndex() >= file_count) return error.MalformedPieces;
     return loc;
 }
 
@@ -472,6 +483,7 @@ fn writeData(writer: *Writer, data: []const CodeExcerpt.DataItem) Allocator.Erro
         try writer.word(item.alignment);
         try writer.word(item.symbol_offset);
         try writer.byte(@intFromBool(item.program_local_name));
+        try writer.byte(@intFromBool(item.pool_image));
         try writer.word(@intCast(item.relocations.len));
         for (item.relocations) |relocation| {
             try writer.word(relocation.offset);
@@ -483,14 +495,24 @@ fn writeData(writer: *Writer, data: []const CodeExcerpt.DataItem) Allocator.Erro
     }
 }
 
-fn readData(a: Allocator, reader: *Reader) ReadError![]CodeExcerpt.DataItem {
+/// How `readData` holds what an item's slices name.
+const DataText = enum {
+    /// Copied into the reader's allocator.
+    owned,
+    /// Viewed in the bytes being read, for a caller that copies the items
+    /// before those bytes go away.
+    viewed,
+};
+
+fn readData(a: Allocator, reader: *Reader, text: DataText) ReadError![]CodeExcerpt.DataItem {
     const data = try a.alloc(CodeExcerpt.DataItem, try reader.word());
     for (data) |*item| {
-        const name = try a.dupe(u8, try reader.str());
-        const item_bytes = try a.dupe(u8, try reader.str());
+        const name = try readText(a, reader, text);
+        const item_bytes = try readText(a, reader, text);
         const alignment = try reader.word();
         const symbol_offset = try reader.word();
         const program_local_name = try reader.flag();
+        const pool_image = try reader.flag();
         const relocations = try a.alloc(CodeExcerpt.DataRelocation, try reader.word());
         for (relocations) |*relocation| {
             const offset = try reader.word();
@@ -499,7 +521,7 @@ fn readData(a: Allocator, reader: *Reader) ReadError![]CodeExcerpt.DataItem {
             const external = try reader.flag();
             relocation.* = .{
                 .offset = offset,
-                .name = try a.dupe(u8, try reader.str()),
+                .name = try readText(a, reader, text),
                 .addend = addend,
                 .function = function,
                 .external = external,
@@ -511,10 +533,19 @@ fn readData(a: Allocator, reader: *Reader) ReadError![]CodeExcerpt.DataItem {
             .alignment = alignment,
             .symbol_offset = symbol_offset,
             .program_local_name = program_local_name,
+            .pool_image = pool_image,
             .relocations = relocations,
         };
     }
     return data;
+}
+
+fn readText(a: Allocator, reader: *Reader, text: DataText) ReadError![]const u8 {
+    const viewed = try reader.str();
+    return switch (text) {
+        .owned => try a.dupe(u8, viewed),
+        .viewed => viewed,
+    };
 }
 
 const Writer = struct {
@@ -589,11 +620,12 @@ test "pieces round-trip through their encoding" {
         .frame = .{ .prologue_size = 4, .stack_alloc = 16, .frame_size = 32, .callee_saved_mask = 3, .epilogue_offset = 2, .uses_frame_pointer = true },
         .refs = try sa.dupe(CodeExcerpt.Reference, &.{.{ .site = 0, .form = .call, .target = 1, .delta = 0, .veneer = .none }}),
         .symbolic_refs = try sa.dupe(CodeExcerpt.SymbolicReference, &.{.{ .site = 2, .form = .addr, .target = .{ .rc_helper = try sa.dupe(u8, "roc__helper") } }}),
-        .lines = try sa.dupe(CodeExcerpt.LineEntry, &.{.{ .offset = 0, .loc = .{ .file = 0, .line = 3, .column = 1 }, .region = base.Region.from_raw_offsets(5, 9) }}),
+        .lines = try sa.dupe(CodeExcerpt.LineEntry, &.{.{ .offset = 0, .loc = .{ .file = .some(0), .line = 3, .column = 1 }, .region = base.Region.from_raw_offsets(5, 9) }}),
         .failure_sites = try sa.dupe(CodeExcerpt.FailureSite, &.{.{ .offset = 4, .meaning = .checked_error }}),
         .relocations = try sa.dupe(CodeExcerpt.NamedRelocation, &.{.{ .offset = 0, .name = try sa.dupe(u8, "roc_alloc"), .scope = .shared, .kind = .{ .function = .aarch64_call26 } }}),
         .data = try sa.dupe(CodeExcerpt.DataItem, &.{.{ .name = try sa.dupe(u8, "roc__hcafe"), .bytes = try sa.dupe(u8, "constant"), .alignment = 8, .symbol_offset = 0 }}),
-        .loc = .{ .file = 0, .line = 2, .column = 0 },
+        .loc = .{ .file = .some(0), .line = 2, .column = 0 },
+        .name = "Main.answer",
     };
     excerpts[1] = .{
         .kind = .{ .entrypoint = try sa.dupe(u8, "roc__main") },
@@ -627,6 +659,7 @@ test "pieces round-trip through their encoding" {
     try std.testing.expectEqualSlices(u8, bytes, again);
     try std.testing.expectEqual(@as(usize, 2), decoded.set.excerpts.len);
     try std.testing.expectEqualStrings("roc__main", decoded.set.excerpts[1].kind.entrypoint);
+    try std.testing.expectEqualStrings("Main.answer", decoded.set.excerpts[0].name);
     try std.testing.expectEqual(@as(u32, 16), decoded.erased_capture_prefix);
     try std.testing.expectEqualStrings("Main.roc", decoded.source_files[0].name);
     try std.testing.expectEqualStrings("roc_answer", decoded.exported_data[0].name);

@@ -127,6 +127,16 @@ pub fn roc_desc_field_addr(desc: *const TypeDesc, base: ?[*]u8, field_index: u32
     return compiled.fieldAddr(desc, valuePtr(base), field_index, ops());
 }
 
+/// The C-ABI form of `compiled.fieldReleaseBox`.
+pub fn roc_desc_field_release_box(desc: *const TypeDesc, base: ?[*]u8, field_index: u32) callconv(.c) void {
+    compiled.fieldReleaseBox(desc, valuePtr(base), field_index, ops());
+}
+
+/// The C-ABI form of `compiled.tagPayloadReleaseBox`.
+pub fn roc_desc_tag_payload_release_box(desc: *const TypeDesc, base: ?[*]u8) callconv(.c) void {
+    compiled.tagPayloadReleaseBox(desc, valuePtr(base), ops());
+}
+
 /// The C-ABI form of `compiled.listElemAddr`.
 pub fn roc_desc_list_item_addr(elem: *const TypeDesc, list: *const RocList, index: u64) callconv(.c) [*]u8 {
     return compiled.listElemAddr(elem, list, index);
@@ -252,6 +262,27 @@ pub fn roc_desc_closure_reuse(
     const fresh = roc_desc_closure(callable_fn, record, hot_reload_code_ref, hot_reload_drop, hot_reload_copy);
     erased.decref(old, ops());
     return fresh;
+}
+
+/// `roc_desc_closure` built in the frame storage whose data pointer is
+/// `data` instead of an allocation (design.md "Frame Callables"): the
+/// refcount word before `data` becomes `utils.REFCOUNT_FRAME`, so retains
+/// and releases of the callable do nothing, and the record's references
+/// stay with the record, which the procedure releases where the callable
+/// dies. With a hot-reload drop, the capture is preceded by the hot-reload
+/// header, with no code reference: the callable never outlives the frame
+/// that built it, whose code image the hot-reload entry holds.
+pub fn roc_desc_closure_frame(
+    callable_fn: builtins.erased_callable.CallableFnPtr,
+    record: [*]const u8,
+    data: [*]u8,
+    hot_reload_drop: ?builtins.erased_callable.OnDropFn,
+    hot_reload_copy: ?builtins.rc_callback_abi.RcIncrefFn,
+) callconv(.c) [*]u8 {
+    const record_desc = captureRecordDesc(record);
+    @as(*isize, @ptrCast(@alignCast(data - @sizeOf(usize)))).* = builtins.utils.REFCOUNT_FRAME;
+    writeClosure(data, callable_fn, record, record_desc, record_desc.size, null, hot_reload_drop, hot_reload_copy);
+    return data;
 }
 
 fn captureRecordDesc(record: [*]const u8) *const TypeDesc {

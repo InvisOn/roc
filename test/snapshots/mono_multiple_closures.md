@@ -103,7 +103,7 @@ EndOfFile,
 						(e-lambda
 							(args
 								(p-assign (ident "a")))
-							(e-dispatch-call (method "plus") (constraint-fn-var 250)
+							(e-dispatch-call (method "plus") (constraint-fn-var 245)
 								(receiver
 									(e-lookup-local
 										(p-assign (ident "a"))))
@@ -118,27 +118,27 @@ EndOfFile,
 						(e-lambda
 							(args
 								(p-assign (ident "b")))
-							(e-dispatch-call (method "plus") (constraint-fn-var 252)
+							(e-dispatch-call (method "plus") (constraint-fn-var 246)
 								(receiver
 									(e-lookup-local
 										(p-assign (ident "b"))))
 								(args
 									(e-lookup-local
 										(p-assign (ident "y"))))))))
-				(e-dispatch-call (method "plus") (constraint-fn-var 276)
+				(e-dispatch-call (method "plus") (constraint-fn-var 249)
 					(receiver
-						(e-call (constraint-fn-var 264)
+						(e-call (constraint-fn-var 247)
 							(e-lookup-local
 								(p-assign (ident "add_x")))
 							(e-num (value "5"))))
 					(args
-						(e-call (constraint-fn-var 275)
+						(e-call (constraint-fn-var 248)
 							(e-lookup-local
 								(p-assign (ident "add_y")))
 							(e-num (value "5"))))))))
 	(d-let
 		(p-assign (ident "result"))
-		(e-call (constraint-fn-var 308)
+		(e-call (constraint-fn-var 261)
 			(e-lookup-local
 				(p-assign (ident "func")))
 			(e-num (value "10"))
@@ -148,9 +148,9 @@ EndOfFile,
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "c, d -> e where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)]), c.plus : c, d -> c, e.from_numeral : Numeral -> Try(e, [InvalidNumeral(Str)]), e.plus : e, c -> e]"))
+		(patt (type "c, c -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)]), c.plus : c, c -> c]"))
 		(patt (type "Dec")))
 	(expressions
-		(expr (type "c, d -> e where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)]), c.plus : c, d -> c, e.from_numeral : Numeral -> Try(e, [InvalidNumeral(Str)]), e.plus : e, c -> e]"))
+		(expr (type "c, c -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)]), c.plus : c, c -> c]"))
 		(expr (type "Dec"))))
 ~~~

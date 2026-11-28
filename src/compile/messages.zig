@@ -116,7 +116,7 @@ pub const ParseTask = struct {
     package_root: []const u8,
     /// Compiler role for this source module
     module_role: ModuleEnv.ModuleRole,
-    /// Dependency depth from root
+    /// Dependency depth from root, or `ModuleState.unreached_depth`
     depth: u32,
     /// Post-canonicalization validation this module receives. A
     /// canonicalization input, so the parse task's cache probe keys on it.
@@ -143,7 +143,7 @@ pub const CanonicalizeTask = struct {
     /// Source-relative base directory this module's `import "path" as name`
     /// file imports resolve against.
     source_dir: []const u8,
-    /// Dependency depth
+    /// Dependency depth, or `ModuleState.unreached_depth`
     depth: u32,
     /// Module environment borrowed from the coordinator
     module_env: *ModuleEnv,
@@ -266,14 +266,43 @@ pub const ParsedResult = struct {
     is_entry_module: bool,
     /// The canonicalized-module cache key this module's source missed on.
     canonicalized_cache_key: [32]u8,
+    /// Whether a `cached_parse` result already delivered this parse's reports
+    /// and imports: the cache entry's parse-stage record was read, but its
+    /// environment could not be loaded. The record and this parse come from
+    /// the same source bytes, so they are the same, and the coordinator takes
+    /// them from the earlier result alone.
+    parse_outputs_delivered: bool = false,
+};
+
+/// The parse stage of a canonicalized-module cache hit: the reports and
+/// discovered imports the entry's parse-stage record holds. The parse task
+/// delivers it as soon as the record is read, before it relocates the
+/// environment, so the coordinator registers the module's imports (and
+/// schedules their parses) while the environment is still loading. The
+/// coordinator handles it exactly like the reports and imports of a parse
+/// result, and the task's own result follows it: a `canonicalized_cached`
+/// result, or a `parsed` result with `parse_outputs_delivered` set when the
+/// environment could not be loaded and the module was parsed after all.
+pub const CachedParseResult = struct {
+    /// Package this module belongs to
+    package_name: []const u8,
+    /// Module identifier
+    module_id: ModuleId,
+    /// Module name
+    module_name: []const u8,
+    /// Discovered local imports (within the same package)
+    discovered_local_imports: std.ArrayList(DiscoveredLocalImport),
+    /// Discovered external imports (cross-package qualified imports)
+    discovered_external_imports: std.ArrayList(DiscoveredExternalImport),
+    /// The reports the parse stage produced, rendered from the entry's
+    /// recorded tokenizer and parser diagnostics, then its rejected imports.
+    reports: std.ArrayList(Report),
 };
 
 /// Result of a canonicalized-module cache hit: the parse task loaded this
 /// module's canonicalization output instead of parsing and canonicalizing it.
-///
-/// It carries everything the coordinator would otherwise receive from a parse
-/// result followed by a canonicalized result, in that order, because the
-/// coordinator handles it as exactly those two steps back to back.
+/// Its `cached_parse` result came first; this one carries what a
+/// canonicalized result would.
 pub const CanonicalizedCachedResult = struct {
     /// Declared, readable header pin; validation version is a build input.
     has_source_version_pin: bool = false,
@@ -289,13 +318,6 @@ pub const CanonicalizedCachedResult = struct {
     source_file_state: ?watch_inputs.State,
     /// The canonicalized module environment loaded from the cache (ownership returned)
     module_env: *ModuleEnv,
-    /// Discovered local imports (within the same package)
-    discovered_local_imports: std.ArrayList(DiscoveredLocalImport),
-    /// Discovered external imports (cross-package qualified imports)
-    discovered_external_imports: std.ArrayList(DiscoveredExternalImport),
-    /// The reports the parse stage produced, rendered from the entry's
-    /// recorded tokenizer and parser diagnostics.
-    parse_reports: std.ArrayList(Report),
     /// The reports canonicalization produced, rendered from the loaded
     /// environment's own diagnostics.
     canonicalize_reports: std.ArrayList(Report),
@@ -435,6 +457,9 @@ pub const WorkerOom = struct {
 pub const WorkerResult = union(enum) {
     /// Module was successfully parsed
     parsed: ParsedResult,
+    /// The parse stage of a canonicalized-module cache hit, delivered before
+    /// the task's own result
+    cached_parse: CachedParseResult,
     /// Module was successfully canonicalized
     canonicalized: CanonicalizedResult,
     /// Module's canonicalization output was loaded from the canonicalized cache
@@ -445,6 +470,11 @@ pub const WorkerResult = union(enum) {
     operation_failed: WorkerOperationFailure,
     /// A worker stage ran out of memory
     worker_oom: WorkerOom,
+    /// Something the frontend loop reacts to happened outside a task's
+    /// result: a task of the module-object scheduler's session finished, or
+    /// a worker ran out of memory (`Coordinator.worker_oom`). It carries
+    /// nothing.
+    wake,
 
     /// Release a result that shutdown prevented the coordinator from accepting.
     /// Parsed environments have no coordinator owner yet; later stages borrow
@@ -460,7 +490,7 @@ pub const WorkerResult = union(enum) {
                 var storage: CheckedArtifact.ModuleEnvStorage = .{ .checked_source = r.module_env };
                 storage.deinit();
             },
-            .canonicalized, .type_checked, .operation_failed, .worker_oom => {},
+            .cached_parse, .canonicalized, .type_checked, .operation_failed, .worker_oom, .wake => {},
         }
         self.deinit(gpa);
     }
@@ -468,7 +498,7 @@ pub const WorkerResult = union(enum) {
     /// Free any owned memory in the result
     pub fn deinit(self: *WorkerResult, gpa: Allocator) void {
         switch (self.*) {
-            inline .parsed, .canonicalized => |*r| {
+            inline .parsed, .cached_parse, .canonicalized => |*r| {
                 for (r.discovered_local_imports.items) |imp| {
                     gpa.free(imp.import_name);
                     switch (imp.target) {
@@ -488,23 +518,6 @@ pub const WorkerResult = union(enum) {
                 r.reports.deinit(gpa);
             },
             .canonicalized_cached => |*r| {
-                for (r.discovered_local_imports.items) |imp| {
-                    gpa.free(imp.import_name);
-                    switch (imp.target) {
-                        .resolved => |resolved| {
-                            gpa.free(resolved.module_name);
-                            gpa.free(resolved.path);
-                        },
-                        .rejected => {},
-                    }
-                }
-                r.discovered_local_imports.deinit(gpa);
-                for (r.discovered_external_imports.items) |imp| {
-                    gpa.free(imp.import_name);
-                }
-                r.discovered_external_imports.deinit(gpa);
-                for (r.parse_reports.items) |*rep| rep.deinit();
-                r.parse_reports.deinit(gpa);
                 for (r.canonicalize_reports.items) |*rep| rep.deinit();
                 r.canonicalize_reports.deinit(gpa);
             },
@@ -516,6 +529,7 @@ pub const WorkerResult = union(enum) {
             },
             .operation_failed => {},
             .worker_oom => {},
+            .wake => {},
         }
     }
 };

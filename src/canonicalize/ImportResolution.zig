@@ -120,7 +120,7 @@ pub fn resolveDeferredFileImports(
 
     var index: u32 = 0;
     while (index < env.deferred_import_refs.len()) : (index += 1) {
-        const entry = env.deferred_import_refs.items.items[index];
+        const entry = env.deferred_import_refs.items()[index];
         if (entry.kind != .file_import) continue;
         try resolver.resolveFileImport(entry, file_imports);
     }
@@ -153,7 +153,7 @@ pub fn resolveDeferredImports(
 
     var index: u32 = 0;
     while (index < env.deferred_import_refs.len()) : (index += 1) {
-        const entry = env.deferred_import_refs.items.items[index];
+        const entry = env.deferred_import_refs.items()[index];
         if (entry.kind == .file_import) {
             std.debug.assert(env.fileDependencySettled(@fromBackingInt(@intCast(entry.file_dependency_idx))));
             continue;
@@ -164,12 +164,6 @@ pub fn resolveDeferredImports(
     // Diagnostics the drain recorded belong to the module's reported set, so
     // they reach reporting exactly like the ones canonicalization recorded.
     try env.publishScratchDiagnosticsFrom(unpublished_before);
-}
-
-fn sha256Bytes(bytes: []const u8) [32]u8 {
-    var digest: [32]u8 = undefined;
-    base.Sha256.hash(bytes, &digest, .{});
-    return digest;
 }
 
 /// The name an import's exposed declarations carry as their prefix.
@@ -260,7 +254,7 @@ const Resolver = struct {
                     }
                 }
                 for (self.outcomes, 0..) |*outcome, idx| {
-                    outcome.* = by_name.get(env.common.strings.get(env.imports.imports.items.items[idx]));
+                    outcome.* = by_name.get(env.common.strings.get(env.imports.imports.items()[idx]));
                 }
             },
             .resolved_store => |envs| {
@@ -318,7 +312,7 @@ const Resolver = struct {
             // The compiler's own baked `Builtin` module is part of the
             // compiler, not a module this one depends on, so it takes no
             // entry here.
-            const import_name = self.env.common.strings.get(self.env.imports.imports.items.items[idx]);
+            const import_name = self.env.common.strings.get(self.env.imports.imports.items()[idx]);
             if (CIR.Import.isCompilerBuiltinImportName(import_name)) continue;
             const outcome = self.outcomeFor(import_idx) orelse continue;
             const available = switch (outcome) {
@@ -332,20 +326,6 @@ const Resolver = struct {
         }
     }
 
-    // Name assembly.
-
-    fn scratchQualified(
-        self: *Resolver,
-        prefix: []const u8,
-        suffix: []const u8,
-    ) std.mem.Allocator.Error![]const u8 {
-        self.scratch.clearRetainingCapacity();
-        try self.scratch.appendSlice(self.env.gpa, prefix);
-        try self.scratch.append(self.env.gpa, '.');
-        try self.scratch.appendSlice(self.env.gpa, suffix);
-        return self.scratch.items;
-    }
-
     // Lookups inside one module.
 
     fn exposedTarget(
@@ -354,23 +334,7 @@ const Resolver = struct {
         prefix: Prefix,
         path: []const u8,
     ) std.mem.Allocator.Error!?collections.ExposedItemTarget {
-        if (prefix.text) |text| {
-            const qualified = try self.scratchQualified(text, path);
-            if (other.common.findIdent(qualified)) |ident| {
-                if (other.getExposedTargetById(ident)) |target| return target;
-            }
-            if (prefix.exclusive) return null;
-        }
-        {
-            const qualified = try self.scratchQualified(other.module_name, path);
-            if (other.common.findIdent(qualified)) |ident| {
-                if (other.getExposedTargetById(ident)) |target| return target;
-            }
-        }
-        if (other.common.findIdent(path)) |ident| {
-            if (other.getExposedTargetById(ident)) |target| return target;
-        }
-        return null;
+        return lookupExposed(self.env.gpa, &self.scratch, other, prefix, path);
     }
 
     fn exposedTypeNode(
@@ -393,65 +357,13 @@ const Resolver = struct {
         return target.valueDefNode();
     }
 
-    /// Find a type declaration by the header name it carries in its own
-    /// module, which covers declarations a module does not expose by name but
-    /// which a public selection still reaches.
-    fn typeDeclNodeByHeader(
-        self: *Resolver,
-        other: *const ModuleEnv,
-        prefix: Prefix,
-        path: []const u8,
-    ) std.mem.Allocator.Error!?u32 {
-        const qualified_ident = blk: {
-            if (prefix.text) |text| {
-                const qualified = try self.scratchQualified(text, path);
-                if (other.common.findIdent(qualified)) |ident| break :blk ident;
-                if (prefix.exclusive) return null;
-            }
-            {
-                const qualified = try self.scratchQualified(other.module_name, path);
-                if (other.common.findIdent(qualified)) |ident| break :blk ident;
-            }
-            break :blk other.common.findIdent(path) orelse return null;
-        };
-
-        for (other.store.sliceStatements(other.all_statements)) |stmt_idx| {
-            const header_idx = switch (other.store.getStatement(stmt_idx)) {
-                inline .s_nominal_decl, .s_alias_decl, .s_where_alias_decl => |decl| decl.header,
-                .s_decl,
-                .s_var,
-                .s_var_uninitialized,
-                .s_reassign,
-                .s_crash,
-                .s_dbg,
-                .s_expr,
-                .s_expect,
-                .s_for,
-                .s_while,
-                .s_infinite_loop,
-                .s_breakable_loop,
-                .s_break,
-                .s_return,
-                .s_import,
-                .s_type_anno,
-                .s_type_var_alias,
-                .s_runtime_error,
-                => continue,
-            };
-            if (other.store.getTypeHeader(header_idx).name.eql(qualified_ident)) {
-                return @backingInt(stmt_idx);
-            }
-        }
-        return null;
-    }
-
     /// The declaration an exposed alias names, when the alias's annotation is
     /// a plain type reference. This is how a re-exported type
     /// (`Files : Resource.Files`) reaches the module it was declared in.
     fn followAlias(self: *const Resolver, other: *const ModuleEnv, node_idx: u32) ?DeclRef {
         const stmt_idx: Statement.Idx = @fromBackingInt(@intCast(node_idx));
-        const alias = switch (other.store.getStatement(stmt_idx)) {
-            .s_alias_decl => |decl| decl,
+        const alias = switch (other.store.statementKind(stmt_idx)) {
+            .s_alias_decl => other.store.statementView(stmt_idx).s_alias_decl.decode(),
             .s_nominal_decl,
             .s_where_alias_decl,
             .s_decl,
@@ -474,9 +386,9 @@ const Resolver = struct {
             .s_runtime_error,
             => return null,
         };
-        const anno_base = switch (other.store.getTypeAnno(alias.anno)) {
-            .lookup => |lookup| lookup.base,
-            .apply => |apply| apply.base,
+        const anno_base = switch (other.store.typeAnnoKind(alias.anno)) {
+            .lookup => other.store.typeAnnoView(alias.anno).lookup.get(.base),
+            .apply => other.store.typeAnnoView(alias.anno).apply.get(.base),
             .rigid_var,
             .rigid_var_lookup,
             .underscore,
@@ -518,9 +430,6 @@ const Resolver = struct {
         if (try self.exposedTypeNode(other, prefix, path)) |node_idx| {
             return DeclRef{ .env = other, .node_idx = node_idx };
         }
-        if (try self.typeDeclNodeByHeader(other, prefix, path)) |node_idx| {
-            return DeclRef{ .env = other, .node_idx = node_idx };
-        }
         if (depth == 0) return null;
 
         // Longest exposed prefix first: `A.B.C` prefers an `A.B` that exists
@@ -529,8 +438,7 @@ const Resolver = struct {
         while (split) |dot| : (split = lastDot(path[0..dot])) {
             const head = path[0..dot];
             const rest = path[dot + 1 ..];
-            const head_node = (try self.exposedTypeNode(other, prefix, head)) orelse
-                (try self.typeDeclNodeByHeader(other, prefix, head)) orelse continue;
+            const head_node = (try self.exposedTypeNode(other, prefix, head)) orelse continue;
             const alias_target = self.followAlias(other, head_node) orelse continue;
             // The alias names one declaration, so the walk continues inside
             // that declaration and nothing else in its module.
@@ -569,7 +477,7 @@ const Resolver = struct {
             const head = path[0..dot];
             const item_text = path[dot + 1 ..];
             if (try self.exposedTypeNode(other, prefix, head)) |type_node_idx| {
-                if (other.store.getStatement(@fromBackingInt(@intCast(type_node_idx))) == .s_alias_decl) {
+                if (other.store.statementKind(@fromBackingInt(@intCast(type_node_idx))) == .s_alias_decl) {
                     return ValueTarget{ .associated = .{
                         .type_node_idx = type_node_idx,
                         .type_ident = try self.env.insertIdent(Ident.for_text(head)),
@@ -738,7 +646,7 @@ const Resolver = struct {
                     } }, self.env.store.getExprRegion(expr_idx));
                     try self.env.store.resolveDeferredExprToNominalExternal(
                         expr_idx,
-                        import_idx,
+                        .{ .import = import_idx },
                         node_idx,
                         tag_expr,
                         .tag,
@@ -771,15 +679,39 @@ const Resolver = struct {
         if ((try self.resolveTypePath(available.module_env, prefix, tag_path, max_alias_depth)) != null) return false;
 
         const tag_dot = lastDot(tag_path);
-        const owner_node = if (tag_dot) |dot| owner: {
+        const owner_env: *const ModuleEnv, const owner_node = if (tag_dot) |dot| owner: {
             const decl = (try self.resolveTypePath(available.module_env, prefix, tag_path[0..dot], max_alias_depth)) orelse
                 return false;
-            // A nominal construction names its type through the import it
-            // was written with.
-            if (decl.env != available.module_env) return false;
-            break :owner decl.node_idx;
-        } else (try self.importMainTypeNode(available)) orelse return false;
-        if (available.module_env.store.getStatement(@fromBackingInt(@intCast(owner_node))) != .s_nominal_decl) return false;
+            break :owner .{ decl.env, decl.node_idx };
+        } else .{ available.module_env, (try self.importMainTypeNode(available)) orelse return false };
+        switch (owner_env.store.statementKind(@fromBackingInt(@intCast(owner_node)))) {
+            // An alias names the nominal type checking resolves it to.
+            .s_nominal_decl, .s_alias_decl => {},
+            .s_decl,
+            .s_var,
+            .s_var_uninitialized,
+            .s_reassign,
+            .s_crash,
+            .s_dbg,
+            .s_expr,
+            .s_expect,
+            .s_for,
+            .s_while,
+            .s_infinite_loop,
+            .s_breakable_loop,
+            .s_break,
+            .s_return,
+            .s_import,
+            .s_where_alias_decl,
+            .s_type_anno,
+            .s_type_var_alias,
+            .s_runtime_error,
+            => return false,
+        }
+        const owner_module: CIR.Expr.NominalExternalModule = if (owner_env == available.module_env)
+            .{ .import = entryImport(entry) }
+        else
+            .{ .identity = (try self.identityFor(owner_env)) orelse return false };
 
         const tag_text = if (tag_dot) |dot| tag_path[dot + 1 ..] else tag_path;
         const tag_name = try self.env.insertIdent(Ident.for_text(tag_text));
@@ -795,12 +727,10 @@ const Resolver = struct {
             .name = tag_name,
             .args = .{ .span = base.DataSpan.empty() },
         } }, receiver_region);
-        const import_idx = entryImport(entry);
-
         if (access_expr == node_expr) {
             // `Alias.Path.U.v` is not called, so it reads the field `v`.
             const receiver = try self.env.addExpr(CIR.Expr{ .e_nominal_external = .{
-                .module_idx = import_idx,
+                .module = owner_module,
                 .target_node_idx = owner_node,
                 .backing_expr = tag_expr,
                 .backing_type = .tag,
@@ -817,7 +747,7 @@ const Resolver = struct {
             self.env.store.resolveDeferredExprToFieldAccess(node_expr, receiver, segments);
         } else {
             // The callee becomes the receiver of a method call.
-            try self.env.store.resolveDeferredExprToNominalExternal(node_expr, import_idx, owner_node, tag_expr, .tag);
+            try self.env.store.resolveDeferredExprToNominalExternal(node_expr, owner_module, owner_node, tag_expr, .tag);
             self.env.store.setRegionAt(@fromBackingInt(@intCast(@backingInt(node_expr))), receiver_region);
             try self.env.store.replaceCallWithMethodCall(access_expr, node_expr, member, member_region);
         }
@@ -879,16 +809,22 @@ const Resolver = struct {
                 }
             },
             .expr_nominal, .pattern_nominal => {
-                // A nominal construction names the declaration through the
-                // import it was written with, so a declaration reached only by
-                // following an alias out of that module is not one this
-                // position can name.
-                if (!in_import) return self.failEntry(entry, entry.not_found_failure);
-                switch (decl_env.store.getStatement(@fromBackingInt(@intCast(decl_node_idx)))) {
-                    .s_nominal_decl => try self.rewriteNominal(entry, import_idx, decl_node_idx),
-                    // A construction names a nominal type; an alias is a
-                    // different kind of declaration, not a missing one.
-                    .s_alias_decl, .s_where_alias_decl => try self.failEntry(entry, .type_alias_but_needed_nominal),
+                switch (decl_env.store.statementKind(@fromBackingInt(@intCast(decl_node_idx)))) {
+                    // A construction through an alias names the nominal type
+                    // checking resolves the alias to (design.md "Nominal
+                    // Construction Through Aliases"). A declaration reached by
+                    // following an alias out of the import is named by its
+                    // module's content identity.
+                    .s_nominal_decl, .s_alias_decl => {
+                        const module: CIR.Expr.NominalExternalModule = if (in_import)
+                            .{ .import = import_idx }
+                        else
+                            .{ .identity = (try self.identityFor(decl_env)) orelse
+                                return self.failEntry(entry, entry.not_found_failure) };
+                        try self.rewriteNominal(entry, module, decl_node_idx);
+                    },
+                    // A where alias names no type a construction can build.
+                    .s_where_alias_decl => try self.failEntry(entry, .type_alias_but_needed_nominal),
                     .s_decl,
                     .s_var,
                     .s_var_uninitialized,
@@ -923,18 +859,18 @@ const Resolver = struct {
     fn rewriteNominal(
         self: *Resolver,
         entry: DeferredImportRef,
-        import_idx: CIR.Import.Idx,
+        module: CIR.Expr.NominalExternalModule,
         node_idx: u32,
     ) std.mem.Allocator.Error!void {
         switch (entry.kind) {
             .expr_nominal => {
                 const expr_idx: CIR.Expr.Idx = @fromBackingInt(@intCast(entry.node_idx));
-                const deferred = self.env.store.getExpr(expr_idx).e_deferred_import_ref;
+                const deferred = self.env.store.exprView(expr_idx).e_deferred_import_ref.decode();
                 const backing = deferred.backing orelse
                     return self.failEntry(entry, entry.not_found_failure);
                 try self.env.store.resolveDeferredExprToNominalExternal(
                     expr_idx,
-                    import_idx,
+                    module,
                     node_idx,
                     backing.expr,
                     backing.ty,
@@ -942,10 +878,10 @@ const Resolver = struct {
             },
             .pattern_nominal => {
                 const pattern_idx: CIR.Pattern.Idx = @fromBackingInt(@intCast(entry.node_idx));
-                const deferred = self.env.store.getPattern(pattern_idx).deferred_import_ref;
+                const deferred = self.env.store.patternView(pattern_idx).deferred_import_ref.decode();
                 try self.env.store.resolveDeferredPatternToNominalExternal(
                     pattern_idx,
-                    import_idx,
+                    module,
                     node_idx,
                     deferred.backing_pattern,
                     deferred.backing_type,
@@ -1018,7 +954,9 @@ const Resolver = struct {
             },
         };
         defer self.env.gpa.free(file_contents);
-        self.env.setFileDependencyContentHash(dependency_idx, sha256Bytes(file_contents));
+        // The file's one digest: the checked-module key and watch mode both
+        // read it from the dependency record.
+        self.env.setFileDependencyContentHash(dependency_idx, base.SourceDigest.of(file_contents).bytes);
 
         if (entry.has(DeferredImportRef.Flags.file_import_is_bytes)) {
             const literal = try self.env.insertString(file_contents);
@@ -1061,7 +999,7 @@ const Resolver = struct {
         prefix: Prefix,
         path_text: []const u8,
     ) std.mem.Allocator.Error!void {
-        const hosted = &self.env.hosted_entries.items.items[entry.node_idx];
+        const hosted = &self.env.hosted_entries.items()[entry.node_idx];
         const target_node_idx = (try self.exposedValueNode(available.module_env, prefix, path_text)) orelse {
             hosted.target_status = .missing_value;
             return;
@@ -1156,7 +1094,7 @@ const Resolver = struct {
     fn failMissingModule(self: *Resolver, entry: DeferredImportRef) std.mem.Allocator.Error!void {
         switch (entry.kind) {
             .hosted_entry => {
-                self.env.hosted_entries.items.items[entry.node_idx].target_status = .missing_module;
+                self.env.hosted_entries.items()[entry.node_idx].target_status = .missing_module;
             },
             // The import statement owns the diagnostic for a name that denotes
             // no module, so its exposed items do not restate it.
@@ -1264,8 +1202,8 @@ const Resolver = struct {
 /// public declaration, or null when the import names the whole module.
 fn selectedPrefix(other: *const ModuleEnv, selected: ?Statement.Idx) ?[]const u8 {
     const stmt_idx = selected orelse return null;
-    const header_idx = switch (other.store.getStatement(stmt_idx)) {
-        inline .s_alias_decl, .s_nominal_decl, .s_where_alias_decl => |decl| decl.header,
+    const header_idx = switch (other.store.statementKind(stmt_idx)) {
+        inline .s_alias_decl, .s_nominal_decl, .s_where_alias_decl => |kind| @field(other.store.statementView(stmt_idx), @tagName(kind)).get(.header),
         .s_decl,
         .s_var,
         .s_var_uninitialized,
@@ -1294,8 +1232,30 @@ fn declPrefix(other: *const ModuleEnv, node_idx: u32) ?[]const u8 {
     return selectedPrefix(other, @fromBackingInt(@intCast(node_idx)));
 }
 
-/// The name an import's exposed declarations carry as their prefix: the
-/// declaration a package header makes public, or a type module's main type.
+/// Resolve a source-local platform header slot against its checked module's
+/// normal exposed-value namespace, without checking the platform body.
+pub fn hostedTarget(gpa: std.mem.Allocator, scratch: *std.ArrayList(u8), env: *const ModuleEnv, path: []const u8) std.mem.Allocator.Error!?u32 {
+    const target = try lookupExposed(gpa, scratch, env, .{}, path) orelse return null;
+    return target.valueDefNode();
+}
+
+fn lookupExposed(gpa: std.mem.Allocator, scratch: *std.ArrayList(u8), other: *const ModuleEnv, prefix: Prefix, path: []const u8) std.mem.Allocator.Error!?collections.ExposedItemTarget {
+    for ([_]?[]const u8{ prefix.text, other.module_name }, 0..) |maybe, index| {
+        const text = maybe orelse continue;
+        scratch.clearRetainingCapacity();
+        try scratch.appendSlice(gpa, text);
+        try scratch.append(gpa, '.');
+        try scratch.appendSlice(gpa, path);
+        if (other.common.findIdent(scratch.items)) |ident| {
+            if (other.getExposedTargetById(ident)) |target| return target;
+        }
+        if (index == 0 and prefix.exclusive) return null;
+    }
+    const ident = other.common.findIdent(path) orelse return null;
+    return other.getExposedTargetById(ident);
+}
+
+/// The declaration selected by the import, or a type module's main type.
 fn importPrefix(available: ResolvedImport.Available) Prefix {
     if (selectedPrefix(available.module_env, available.selected_type_decl)) |prefix| {
         // A header that made a declaration nested inside another one public

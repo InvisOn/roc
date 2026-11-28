@@ -38,7 +38,7 @@ test "issue 11175: a numeral parameter pattern typed as a nominal reports rather
     defer gpa.free(cwd);
     const module_path = try tmp_dir.dir.realPathFileAlloc(io, "Pt.roc", gpa);
     defer gpa.free(module_path);
-    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build_env.deinit();
     try build_env.build(module_path);
 
@@ -75,7 +75,7 @@ fn expectPublishedPatterns(body: []const u8, expected_error: ?[]const u8) Patter
     defer gpa.free(cwd);
     const path = try tmp.dir.realPathFileAlloc(io, "Repro.roc", gpa);
     defer gpa.free(path);
-    var build = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build.deinit();
     try build.build(path);
     const reports = try build.drainReports();
@@ -98,7 +98,7 @@ fn expectPublishedPatterns(body: []const u8, expected_error: ?[]const u8) Patter
     const bodies = artifact.bodies();
     try bodies.demandIndex();
     const store = &artifact.moduleEnvConst().store;
-    for (0..bodies.nodeCount()) |i| {
+    for (check.CheckedBodies.first_node..bodies.nodeCount()) |i| {
         if (bodies.index().nodeKind(@intCast(i)) != .expr) continue;
         const expr: check.CheckedBodies.ExprId = @fromBackingInt(@intCast(i));
         const region = store.getExprRegion(expr);
@@ -236,7 +236,7 @@ test "issue 11175: importers can consume rejected and independent destructure ex
     defer gpa.free(cwd);
     const path = try tmp.dir.realPathFileAlloc(io, "Consumer.roc", gpa);
     defer gpa.free(path);
-    var build = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build.deinit();
     try build.build(path);
     try std.testing.expect(build.findModuleByPath(path).?.semanticData().?.checked_artifact != null);

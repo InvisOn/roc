@@ -91,24 +91,58 @@ pub const inline_list_slow_arms_test = TestSpec{
     .description = "Inline list fast paths and their builtin slow arms leave the same bytes",
 };
 
+/// Regression test for https://github.com/roc-lang/roc/issues/13026: a helper
+/// whose loop precedes the only read of a known tag gives the same results
+/// and effects in the same order whether the loop is inline or factored out.
+pub const issue_13026_shared_prefix_test = TestSpec{
+    .roc_file = "test/fx/issue_13026_shared_prefix.roc",
+    .io_spec = "0<abcde|1>combined start 5|1>combined loop 28249|1>combined start 6|1>combined loop 599797|1>combined start 7|1>combined loop 7|1>factored start 5|1>factored loop 28249|1>factored start 6|1>factored loop 599797|1>factored start 7|1>factored loop 7|1>628059 628059",
+    .description = "Regression test: a shared tag-independent prefix keeps results and effect order",
+};
+
 /// All fx platform tests that can be run with --test mode IO specs.
 /// These tests work with cross-compilation because they only test
 /// the compiled binary's IO behavior, not build-time features.
 pub const io_spec_tests = [_]TestSpec{
     .{
-        .roc_file = "test/fx/host_constant_boxed_sequence.roc",
+        .roc_file = "test/fx/callable_iterator_result_host_round_trip.roc",
+        .io_spec = "1>boxed function: 12 12|1>boxed unannotated function: 23 24|1>boxed function returning an adapter: 34 45|1>boxed function capturing an iterator: 12 6|1>boxed function taking an iterator: 23 7|1>boxed function consuming an iterator: 23 8|1>boxed function returning a record: 143 153|1>boxed function returning a tag: 12 7|1>boxed function returning a function: 12 12|1>boxed function returning nested iterators: 1203 0|1>boxed function returning a stream: 12 12|1>functions in a boxed record: 13 13|1>function in a boxed tag: 12 4|1>held function joins a local one: 12 9|1>held nominal function joins a local one: 12 9|1>boxed functions in a boxed list: 1204 0|1>local box: 12 52|1>unboxed function joins a local one: 12 8|1>two boxes join: 12 8|1>local box returning a chain: 39 39|1>local box returning a function: 12 12|1>local box taking an iterator: 23 34|1>local box returning a stream: 12 12|1>list of functions: 1204 0|1>list pattern of functions: 12 4|1>mapped list of functions: 1223 0|1>iterator of functions: 1203 0|1>function through a generic: 12 12|1>record of a function through a generic: 123 123|1>tuple of a function through a generic: 123 123|1>tag of a function through a generic: 12 5|1>nominal of a function through a generic: 12 12|1>function taking a function: 12 12|1>function default: 12 9|1>iterator of functions mapped to results: 1203 0|1>iterator of functions filtered: 12 0|1>iterator of functions folded: 1203 1203|1>iterator of iterators mapped: 1203 0|1>iterator of records mapped: 1203 0",
+        .description = "Functions and iterator items whose types hold produced iterators cross boxes, containers, generics, adapters and the host, then run",
+    },
+    .{
+        .roc_file = "test/fx/control_flow_iterator_join_host_round_trip.roc",
+        .io_spec = "1>match held first: 34 34 9 9|1>match produced first: 34 34 9 9|1>match as loop iterable: 34 34 9 9|1>match guard: 34 6 9 9|1>match tuple: 34 9 34 9|1>match try payload: 7 7 8 8|1>try default: 7 7 9 9|1>if held first: 34 9 34 9|1>if produced first: 34 9 34 9|1>nested held inside: 34 7 8 7|1>nested produced inside: 34 8 7 34|1>three tiers: 34 89 9 89|1>statement block branch: 34 6 9 9|1>adapter over join: 23 23 8 8|1>concat of joins: 734 78 98 98|1>join in list: 34 9 9 9|1>join in record: 341 92 92 92|1>reassigned in branch: 341 92 92 92|1>early return held: 34 34 9 9|1>early return produced: 34 9 7 9|1>early return two produced: 34 89 9 89|1>early return top level: 34 9 9 9|1>stream join: 12 9 34 9|1>nominal match: 12 9 12 9|1>nominal nested: 12 7 12 7|1>nominal early return: 12 9 12 9|1>nominal list items: 1209 0 1209 0|1>nominal across functions: 12 9 12 9",
+        .description = "Control-flow joins and early returns of a host-held public iterator, bare or inside a nominal, with a produced one iterate both sides",
+    },
+    .{
+        .roc_file = "test/fx/record_literal_iterator_field_host_round_trip.roc",
+        .io_spec = "1>list literal: 123|1>adapter chain: 34|1>bound record: 45|1>bound list: 67|1>through a function: 89|1>two fields: 12 tagged|1>nested: 34 2|1>tag payload: 56|1>list of records: 1204|1>stream: 78|1>custom: 123|1>long chain: 199|1>nested iterators: 1203",
+        .description = "Record literals with unpinned field kinds keep their iterator fields through a hosted Box(a) round trip",
+    },
+    .{
+        .roc_file = "test/fx/issue_12953_host_held_state.roc",
+        .io_spec = "1>a label long enough to live on the heap rather than inline: 35",
+        .description = "A boxed app state whose fields hold functions survives a host round trip (issue #12953)",
+    },
+    .{
+        .roc_file = "test/fx/host_constant_boxed_iter_stream.roc",
         .io_spec = "1>[1, 2, 3]|1>[4, 5]|1>[93]|1>[93]",
         .description = "Constant boxed iterators and streams survive storage and host round trips (issue #12887)",
     },
     .{
-        .roc_file = "test/fx/host_release_boxed_sequence.roc",
+        .roc_file = "test/fx/host_release_boxed_iter_stream.roc",
         .io_spec = "0<abcdefghijklmnopqrstuvwxyz0123456789|1>drops primitive=2 nested_record=0 nested_str=0 recursive_tree=0 tree_child_boxes=0 boxed_capture=0 transition_outer=0 transition_inner=0 transition_nonnull=0",
         .description = "Host release destroys boxed iterator and stream captures exactly once (issue #12887)",
     },
     .{
-        .roc_file = "test/fx/host_boxed_sequence_boundary.roc",
+        .roc_file = "test/fx/host_boxed_iter_stream_boundary.roc",
         .io_spec = "0<abcdefghijklmnopqrstuvwxyz0123456789|1>iter 36 36|1>stream 36 36",
         .description = "Boxed iterators and streams retain captured state across a shared host round trip (issue #12887)",
+    },
+    .{
+        .roc_file = "test/fx/boxy_boxable_field_take.roc",
+        .io_spec = "0<seed|1>unique: seed tag 2|1>shared: seed kept tag 1 seed kept tag 2|1>items only: 2|1>tag only: seed taken tag|1>nested: seed inner/1 1|1>payload: 3 0|1>plain: seed plain 2",
+        .description = "Generic functions move fields and tag payloads out of slots that are recursion boxes, releasing the boxes",
     },
     .{
         .roc_file = "test/fx/var_reassign_in_nested_block_expr.roc",
@@ -807,9 +841,24 @@ pub const io_spec_tests = [_]TestSpec{
         .description = "Regression test for #12438: a list passed through cursor records into helper calls is not decremented more often than it is owned",
     },
     .{
+        .roc_file = "test/fx/issue_12945_field_names_iter_leak.roc",
+        .io_spec = "1>walked 9",
+        .description = "Regression test for #12945: iterating a derived record parser's field names releases or reuses each step's erased callable",
+    },
+    .{
+        .roc_file = "test/fx/issue_13217_cbor_value_drop.roc",
+        .io_spec = "0<a string long enough to own its buffer|1>a string long enough to own its buffer|1>a string long enough to own its buffer",
+        .description = "Regression test for #13217: extracting a recursive value from a generic intermediate result releases its stored box",
+    },
+    .{
         .roc_file = "test/fx/issue_12692_handle_shape.roc",
         .io_spec = "1>method call: closed|1>qualified call: closed|1>recursive helper: closed|1>wrapper call: closed",
         .description = "Regression test for #12692: a record argument returned to its caller on a switched result outcome keeps the field its callee passed to a hosted call",
+    },
+    .{
+        .roc_file = "test/fx/where_method_try_question_hosted_wrapper.roc",
+        .io_spec = "1>twice: ok 14|1>forward: ok 7|1>broken twice: closed|1>broken forward: closed",
+        .description = "Issue #11286: a where-method served by a Roc method that rebuilds a hosted error has its Try error row composed into a wider one with `?`",
     },
     .{
         .roc_file = "test/fx/issue_12746_single_field_handle.roc",

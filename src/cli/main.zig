@@ -85,6 +85,7 @@ pub const std_options_debug_threaded_io: *std.Io.Threaded = &debug_threaded_io_i
 const build_options = @import("build_options");
 const shim_symbols = @import("builtins").shim_symbols;
 const Sha256Rounds = @import("builtins").sha256.Rounds;
+const Utf8Kernel = @import("builtins").utf8.Kernel;
 const base = @import("base");
 const collections = @import("collections");
 const dev_diagnostics = base.dev_diagnostics;
@@ -151,6 +152,13 @@ const watch_mod = if (builtin.target.cpu.arch == .wasm32) struct {
 } else @import("watch");
 
 const cli_args = @import("cli_args.zig");
+const lowering_policy = @import("lowering_policy.zig");
+const PlatformEntrypointArtifact = lowering_policy.PlatformEntrypointArtifact;
+const CheckedLirRoots = lowering_policy.CheckedLirRoots;
+const checkedRuntimeLoweringConfig = lowering_policy.checkedRuntimeLoweringConfig;
+const postCheckInlineModeForOpt = lowering_policy.postCheckInlineModeForOpt;
+const specConstrCloneInliningForOpt = lowering_policy.specConstrCloneInliningForOpt;
+const inlineExpectModeForOpt = lowering_policy.inlineExpectModeForOpt;
 const default_app = @import("default_app.zig");
 const install_store = @import("install.zig");
 const host_symbols = @import("host_symbols.zig");
@@ -203,6 +211,7 @@ comptime {
         std.testing.refAllDecls(@import("ReplLine.zig"));
         std.testing.refAllDecls(@import("ReplSession.zig"));
         std.testing.refAllDecls(@import("macho/DyldExportStrip.zig"));
+        std.testing.refAllDecls(@import("macho/DwarfSplice.zig"));
     }
 }
 const linker = @import("linker.zig");
@@ -259,9 +268,10 @@ const CliBuildEnvOptions = struct {
     source_dir_override: ?[]const u8 = null,
     post_check_publication_mode: compile.build.PostCheckPublicationMode = .executable_artifacts,
     runtime_lowering: ?compile.build.RuntimeLoweringConfig = null,
-    /// The strategy whose compile-time evaluator completes every module's
-    /// compile-time roots, part of each checked module's cache identity.
-    specialization_strategy: base.SpecializationStrategy = .lss,
+    /// The command's compile-time and runtime strategy
+    /// (`Coordinator.specialization_strategy`). Commands without a runtime
+    /// consumer default to `.boxy` but may explicitly select `.lss`.
+    specialization_strategy: base.SpecializationStrategy,
     /// The bundle URL a URL/installed root came from; becomes the root's
     /// package identity in place of the extracted path.
     root_source_url: ?[]const u8 = null,
@@ -284,7 +294,7 @@ fn initCliBuildEnv(ctx: *CliCtx, opts: CliBuildEnvOptions) InitCliBuildEnvError!
     // Arena-owned so the path outlives the returned BuildEnv, which borrows it.
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(ctx.io.std_io, ".", ctx.arena);
 
-    var build_env = try BuildEnv.init(ctx.gpa, mode, thread_count, roc_target.host_cpu.nativeTarget(), cwd, ctx.io.std_io);
+    var build_env = try BuildEnv.init(ctx.gpa, mode, thread_count, roc_target.host_cpu.nativeTarget(), cwd, ctx.io.std_io, opts.specialization_strategy);
     errdefer build_env.deinit();
 
     build_env.compiler_version = build_options.compiler_compatibility_id;
@@ -293,14 +303,8 @@ fn initCliBuildEnv(ctx: *CliCtx, opts: CliBuildEnvOptions) InitCliBuildEnvError!
     build_env.resolution_config = opts.resolution_config;
     build_env.setWatchInputTracking(opts.track_watch_inputs);
     build_env.setPostCheckPublicationMode(opts.post_check_publication_mode);
-    build_env.setSpecializationStrategy(opts.specialization_strategy);
-    const object_target = roc_target.host_cpu.nativeTarget();
-    build_env.boxy_object_lowering = .{
-        .target = object_target,
-        .config = checkedRuntimeLoweringConfig(.linked_output, .dev, .boxy, object_target, false).target,
-        .opt = @tagName(cli_args.OptLevel.dev),
-        .inline_expects = inlineExpectModeForOpt(.dev) == .run,
-    };
+    build_env.boxy_object_lowering = lowering_policy.compileTimeObjectLowering(inProcessUnitTarget());
+    build_env.boxy_object_lowering.?.embedded = embeddedBoxyUnits();
     if (opts.runtime_lowering) |config| build_env.setRuntimeLowering(config);
     if (opts.source_dir_override) |source_dir| {
         build_env.setRootSourceDirOverride(source_dir);
@@ -322,6 +326,20 @@ fn initCliBuildEnv(ctx: *CliCtx, opts: CliBuildEnvOptions) InitCliBuildEnvError!
     }
 
     return build_env;
+}
+
+/// The target of every unit whose code runs in the compiler's own process:
+/// compile-time evaluation's objects, `roc test`'s test units and a glue
+/// spec's units. It is the native target at the CPU level this machine
+/// executes, so a baseline machine never runs code compiled above its level,
+/// and the three share the units they have in common.
+fn inProcessUnitTarget() RocTarget {
+    return roc_target.host_cpu.nativeTarget();
+}
+
+test "units run in the compiler's process are compiled for the CPU level this machine executes" {
+    try std.testing.expectEqual(roc_target.host_cpu.level(), inProcessUnitTarget().cpuLevel());
+    try std.testing.expectEqual(inProcessUnitTarget(), lowering_policy.compileTimeObjectLowering(inProcessUnitTarget()).target);
 }
 
 const CacheManager = compile.CacheManager;
@@ -564,6 +582,19 @@ fn shimLibraryCacheFilename(ctx: *CliCtx, kind: ShimLibraryKind, target: RocTarg
         std.fmt.allocPrint(ctx.arena, "lib{s}_{s}_{s}.a", .{ stem, @tagName(target), digest_hex[0..] });
 }
 
+/// The Boxy unit entries the compiler's build linked into `roc`: the
+/// Builtin module's unit for the target `roc` runs on, built by
+/// src/build/builtin_unit.zig, or none (design.md "Embedded Units").
+fn embeddedBoxyUnits() compile.boxy_embedded_units.Units {
+    if (builtin.is_test) return .none;
+    const linked = struct {
+        extern const roc_embedded_boxy_units: u8 align(compile.boxy_embedded_units.alignment);
+        extern const roc_embedded_boxy_units_len: usize;
+    };
+    const table: [*]align(compile.boxy_embedded_units.alignment) const u8 = @ptrCast(&linked.roc_embedded_boxy_units);
+    return .{ .table = table[0..linked.roc_embedded_boxy_units_len] };
+}
+
 /// The link inputs embedded in `roc` for one target. Cross-compilation
 /// inputs live under `targets/<name>/` in the embedded assets; a target
 /// without its own builtins uses the native ones.
@@ -652,67 +683,63 @@ const EmbeddedTargetObjects = struct {
         return objects;
     }
 
-    /// A generic Linux target uses the native builtins, and its glibc twin's
-    /// default platform and support image: the image's builtins and Boxy
-    /// runtime are the twin's, compiled for the same architecture and
-    /// operating system and calling no libc, like the native ones.
-    fn linuxAlias(comptime glibc: EmbeddedTargetObjects) EmbeddedTargetObjects {
-        var objects = glibc;
-        objects.builtins_extern = native.builtins_extern;
-        objects.builtins_extern_digest = native.builtins_extern_digest;
-        objects.boxy_runtime = native.boxy_runtime;
-        objects.boxy_runtime_digest = native.boxy_runtime_digest;
+    /// A freestanding ELF target links the objects of the musl target with
+    /// its CPU contract, which are compiled for the same architecture and
+    /// operating system and call no libc, without a default platform.
+    fn elfAlias(comptime musl: EmbeddedTargetObjects) EmbeddedTargetObjects {
+        var objects = musl;
+        objects.default_runtime = null;
+        objects.default_platform = null;
+        objects.default_platform_link_digest = null;
+        objects.default_runtime_digest = null;
+        objects.default_compiler_rt = null;
+        objects.default_compiler_rt_digest = null;
+        objects.default_compiler_rt_link_digest = null;
         return objects;
     }
 
-    /// The embedded objects for `requested`.
-    ///
-    /// A `v1` target other than wasm32v1 uses its default twin's objects. The
-    /// cross-compile target queries in `build.zig` name no CPU model, so Zig
-    /// resolves them to the architecture baseline, which for x86-64 and
-    /// AArch64 is the v1 floor. Zig's wasm baseline includes extensions past
-    /// WebAssembly 1.0, so wasm32v1 has objects of its own, built for it.
+    /// The embedded objects for `requested`, compiled for its CPU contract
+    /// (`dev_object_targets` in build.zig). A generic Linux target links its
+    /// glibc twin's objects and a freestanding ELF target its musl twin's,
+    /// each of the same CPU level. The arm32 targets have no dev backend and
+    /// carry the native objects.
     fn forTarget(requested: RocTarget) EmbeddedTargetObjects {
-        if (requested == .wasm32v1) return comptime cross(.wasm32v1, .none);
-        return switch (requested.defaultCpuTarget()) {
+        return switch (requested) {
             inline .x64musl,
+            .x64v1musl,
             .arm64musl,
+            .arm64v1musl,
             .x64glibc,
+            .x64v1glibc,
             .arm64glibc,
+            .arm64v1glibc,
             .x64freebsd,
+            .x64v1freebsd,
             .x64netbsd,
+            .x64v1netbsd,
             => |target| comptime cross(target, .runtime_and_compiler_rt),
             inline .x64mac,
+            .x64v1mac,
             .arm64mac,
             .x64win,
-            .x64mingw,
-            .arm64win,
-            .arm64mingw,
-            .x64openbsd,
-            => |target| comptime cross(target, .runtime),
-            .wasm32 => comptime cross(.wasm32, .none),
-            .x64linux => comptime linuxAlias(cross(.x64glibc, .runtime_and_compiler_rt)),
-            .arm64linux => comptime linuxAlias(cross(.arm64glibc, .runtime_and_compiler_rt)),
-            .x64elf,
-            .x64v1mac,
             .x64v1win,
+            .x64mingw,
             .x64v1mingw,
-            .x64v1freebsd,
-            .x64v1openbsd,
-            .x64v1netbsd,
-            .x64v1musl,
-            .x64v1glibc,
-            .x64v1linux,
-            .x64v1elf,
+            .arm64win,
             .arm64v1win,
+            .arm64mingw,
             .arm64v1mingw,
-            .arm64v1linux,
-            .arm64v1musl,
-            .arm64v1glibc,
-            .arm32linux,
-            .arm32musl,
-            .wasm32v1,
-            => native,
+            .x64openbsd,
+            .x64v1openbsd,
+            => |target| comptime cross(target, .runtime),
+            inline .wasm32, .wasm32v1 => |target| comptime cross(target, .none),
+            .x64linux => comptime cross(.x64glibc, .runtime_and_compiler_rt),
+            .x64v1linux => comptime cross(.x64v1glibc, .runtime_and_compiler_rt),
+            .arm64linux => comptime cross(.arm64glibc, .runtime_and_compiler_rt),
+            .arm64v1linux => comptime cross(.arm64v1glibc, .runtime_and_compiler_rt),
+            .x64elf => comptime elfAlias(cross(.x64musl, .runtime_and_compiler_rt)),
+            .x64v1elf => comptime elfAlias(cross(.x64v1musl, .runtime_and_compiler_rt)),
+            .arm32linux, .arm32musl => native,
         };
     }
 
@@ -921,11 +948,8 @@ else
     2 * 1024 * 1024 * 1024 * 1024; // 2TB for 64-bit Linux
 
 fn configuredSharedMemorySize() usize {
-    if (comptime build_options.shared_memory_size > std.math.maxInt(usize)) {
+    return comptime std.math.cast(usize, build_options.shared_memory_size) orelse
         @compileError("-Dshared-memory-size does not fit in usize for this target");
-    }
-
-    return @intCast(build_options.shared_memory_size);
 }
 
 /// Floor for the retry loop in `createSharedMemory`. Set to the
@@ -1020,6 +1044,9 @@ var debug_allocator: std.heap.DebugAllocator(.{ .stack_trace_frames = build_opti
     .backing_allocator = std.heap.page_allocator,
 };
 
+/// In a Debug build, the wrapper over `debug_allocator` that makes stale borrows fail.
+var stale_borrow_allocator: if (base.StaleBorrowAllocator.available) base.StaleBorrowAllocator else void = undefined;
+
 fn renderValidationError(
     ctx: *CliCtx,
     result: platform_validation.ValidationResult,
@@ -1058,8 +1085,9 @@ pub fn main(init: std.process.Init) Allocator.Error!void {
     var gpa_tracy: tracy.TracyAllocator(null) = undefined;
     var gpa, const is_safe = gpa: {
         // Debug builds use the leak-checking debug allocator; -Ddebug-gpa forces it
-        // in release builds too (e.g. to leak-check a ReleaseSafe binary). Everything
-        // else uses the fast target allocator—see base.defaultGpa.
+        // in release builds too (e.g. to leak-check a ReleaseSafe binary). A Debug
+        // build also wraps it in base.StaleBorrowAllocator. Everything else uses
+        // the fast target allocator—see base.defaultGpa.
         const use_debug_allocator = builtin.os.tag != .freestanding and
             (builtin.mode == .debug or build_options.debug_gpa);
         if (use_debug_allocator) {
@@ -1070,12 +1098,17 @@ pub fn main(init: std.process.Init) Allocator.Error!void {
             if (builtin.link_libc and std.valgrind.runningOnValgrind() != 0) {
                 break :gpa .{ std.heap.c_allocator, false };
             }
+            if (base.StaleBorrowAllocator.available) {
+                stale_borrow_allocator = .init(debug_allocator.allocator(), .{});
+                break :gpa .{ stale_borrow_allocator.allocator(), true };
+            }
             break :gpa .{ debug_allocator.allocator(), true };
         }
         break :gpa .{ base.defaultGpa(), false };
     };
     defer restoreWindowsConsoleCodePage();
     defer if (is_safe) {
+        if (base.StaleBorrowAllocator.available) stale_borrow_allocator.flush();
         std.debug.assert(build_options.debugGpaOk(debug_allocator.deinit()));
     };
 
@@ -1188,6 +1221,7 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8, std_io: 
     // Create CLI context at the top level - this is passed to all command handlers
     var ctx = CliCtx.init(gpa, arena, &io, command);
     ctx.setNoColor(parsed.no_color);
+    ctx.replay_ansi = parsed_args.watchReplayAnsi();
     ctx.initIo(); // Must be called after ctx is at its final stack location
     defer ctx.deinit(); // deinit flushes I/O
 
@@ -1455,6 +1489,7 @@ fn generatePlatformHostShimFromLirData(
         .optimization = .speed,
         .target = target,
         .report_config = ctx.reportConfig(.stderr),
+        .memory_intrinsic_stores = .forCompile(.speed, std_target),
         .cpu = llvm_cpu,
         .features = llvm_features,
         .debug = debug, // Use the debug flag passed from caller
@@ -1627,7 +1662,7 @@ fn appendHostedCacheEntriesFromView(
     if (checkedModuleKeySeen(seen_keys.items, view.key.bytes)) return;
     try seen_keys.append(allocator, view.key.bytes);
 
-    for (view.hosted_procs.procs) |proc| {
+    for (view.hosted_procs.procs.items()) |proc| {
         try entries.append(allocator, .{
             .module_key = view.key.bytes,
             .order_key = proc.orderKey(view.hosted_procs),
@@ -1671,7 +1706,7 @@ fn applyHostedBindings(
     entries: *std.ArrayList(HostedCacheEntry),
     binding_view: HostedBindingView,
 ) Allocator.Error!void {
-    const bindings = binding_view.table.bindings;
+    const bindings = binding_view.table.bindings.items();
 
     var declared_by_target = std.AutoHashMap(HostedTargetKey, usize).init(allocator);
     defer declared_by_target.deinit();
@@ -1783,7 +1818,7 @@ fn updatePlatformAppRelationIdentity(
     // identity hashed alongside this.
     updateHashBytes(hasher, "platform-app-relations-v2");
 
-    const relations = root_artifact.platform_requirement_relations.relations;
+    const relations = root_artifact.platform_requirement_relations.relations.items();
     updateHashU32(hasher, @intCast(relations.len));
     for (relations) |relation| {
         updateHashU32(hasher, @backingInt(relation.declaration));
@@ -1791,7 +1826,7 @@ fn updatePlatformAppRelationIdentity(
         updateHashU32(hasher, @backingInt(relation.value_kind));
     }
 
-    const bindings = root_artifact.platform_required_bindings.bindings;
+    const bindings = root_artifact.platform_required_bindings.bindings.items();
     updateHashU32(hasher, @intCast(bindings.len));
     for (bindings) |binding| {
         updateHashU32(hasher, @backingInt(binding.declaration));
@@ -1800,7 +1835,7 @@ fn updatePlatformAppRelationIdentity(
         updateHashU32(hasher, @backingInt(std.meta.activeTag(binding.value_use)));
     }
 
-    const checked_error_requires = root_artifact.platform_required_bindings.checked_error_requires;
+    const checked_error_requires = root_artifact.platform_required_bindings.checked_error_requires.items();
     updateHashU32(hasher, @intCast(checked_error_requires.len));
     for (checked_error_requires) |requires_idx| updateHashU32(hasher, requires_idx);
 }
@@ -1832,7 +1867,7 @@ fn checkedInterpreterHostIdentity(
     updateHashBytes(&hasher, "roc-run-checked-host-interface-v3");
     updateHashU32(&hasher, @backingInt(target_usize));
 
-    const declarations_hash = try root_artifact.platform_required_declarations.identityHash(&root_artifact.canonical_names, root_artifact.typesView());
+    const declarations_hash = try root_artifact.platform_required_declarations.identityHash(&root_artifact.canonical_names, &root_artifact.typesView());
     hasher.update(&declarations_hash);
     updatePlatformAppRelationIdentity(&hasher, root_artifact);
     updateHostBoundaryIdentity(&hasher, root_metadata);
@@ -2643,7 +2678,7 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
         // shim is the run mechanism where the default platform runtime
         // exists (Linux native, or any cross-target run); elsewhere we use
         // the plain run-once path.
-        if (args.opt == .dev and currentRuntimeSpecializationStrategy(args.specialization_strategy) == .boxy) {
+        if (args.opt == .dev and currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt) == .boxy) {
             owned_staged.deinit(ctx.gpa);
             return rocRunBuildAndExec(ctx, args, arg0);
         }
@@ -2725,7 +2760,7 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
             .resolution_config = resolutionConfigFromLimits(args.resolve_limits),
             .enable_checked_cache = !args.no_cache,
             .reporter = &reporter,
-            .specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy),
+            .specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt),
         });
         defer build_env.deinit();
         try discoverRunDependencies(ctx, &build_env, args.path, args.path, &reporter);
@@ -2735,7 +2770,7 @@ fn rocRunSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, arg0: []const u8
         build_env.setTarget(selected.target);
         build_env.setValidateTargetFilesForSelectedTarget(true);
 
-        const specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy);
+        const specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt);
         switch (args.opt) {
             .dev => if (unitImageRunApplies(args.opt, args.no_cache, specialization_strategy, selected.target)) {
                 run_tables = RunUnitTables.init(ctx);
@@ -2914,19 +2949,25 @@ fn rocRunBuildAndExec(ctx: *CliCtx, args: cli_args.RunArgs, _: []const u8) CliMa
         .debug = false,
         .verbose = false,
         .no_cache = args.no_cache,
+        .timings = args.timings,
         .max_threads = args.max_threads,
         .wasm_memory = null,
         .wasm_stack_size = null,
         .require_executable_output = true,
         .require_host_runnable_output = true,
         .suppress_build_status = true,
+        .run_output = .{ .argv0 = args.path, .app_args = args.app_args },
         .resolve_limits = args.resolve_limits,
         .synthetic_default_platform = false,
         .source_dir_override = null,
         .root_source_url = args.root_source_url,
     });
-
-    const term = try runCompiledExecutable(ctx, build_result.output_path, args.path, args.app_args);
+    // The build has released its state; the program it started before
+    // doing so may still be running.
+    if (dev_diagnostics.isSet(.trace_run_order)) std.debug.print("run-order: released the build's state\n", .{});
+    var child = build_result.child orelse unreachable; // a successful build given `run_output` starts the program
+    defer child.restoreSigint();
+    const term = try waitCompiledExecutable(ctx, &child.process, build_result.output_path);
 
     releaseScratchDir(ctx, temp_dir);
     cleanup_temp_dir = false;
@@ -2948,8 +2989,16 @@ fn runCompiledExecutable(
     argv0: []const u8,
     app_args: []const []const u8,
 ) (CliError || error{OutOfMemory})!std.process.Child.Term {
-    var child = try spawnExecutableWithArgv0(ctx, exe_path, argv0, app_args);
+    var child = try ForegroundApp.spawn(ctx, exe_path, argv0, app_args);
+    defer child.restoreSigint();
+    return waitCompiledExecutable(ctx, &child.process, exe_path);
+}
 
+fn waitCompiledExecutable(
+    ctx: *CliCtx,
+    child: *std.process.Child,
+    exe_path: []const u8,
+) CliError!std.process.Child.Term {
     return child.wait(ctx.io.std_io) catch |err| {
         return ctx.fail(.{ .child_process_wait_failed = .{
             .command = exe_path,
@@ -2957,6 +3006,42 @@ fn runCompiledExecutable(
         } });
     };
 }
+
+/// The terminal sends SIGINT to both Roc and the app. Stay alive to reap the
+/// app without forwarding a second signal or changing the app's disposition.
+const ForegroundApp = struct {
+    process: std.process.Child,
+    previous: if (is_windows) void else ?std.posix.Sigaction,
+
+    fn catchSigint(_: std.posix.SIG) callconv(.c) void {}
+
+    fn spawn(ctx: *CliCtx, exe_path: []const u8, argv0: []const u8, app_args: []const []const u8) (CliError || Allocator.Error)!ForegroundApp {
+        var app: ForegroundApp = .{ .process = undefined, .previous = if (is_windows) {} else null };
+        if (comptime !is_windows) {
+            var previous: std.posix.Sigaction = undefined;
+            std.posix.sigaction(.INT, null, &previous);
+            // Keep an inherited SIG_IGN (e.g. a shell background job). Otherwise
+            // exec resets a caught handler to SIG_DFL in the new program.
+            if (previous.handler.handler != std.posix.SIG.IGN) {
+                std.posix.sigaction(.INT, &.{
+                    .handler = .{ .handler = &catchSigint },
+                    .mask = std.posix.sigemptyset(),
+                    .flags = std.posix.SA.RESTART,
+                }, null);
+                app.previous = previous;
+            }
+        }
+        errdefer app.restoreSigint();
+        app.process = try spawnExecutableWithArgv0(ctx, exe_path, argv0, app_args);
+        return app;
+    }
+
+    fn restoreSigint(self: *const ForegroundApp) void {
+        if (comptime !is_windows) {
+            if (self.previous) |previous| std.posix.sigaction(.INT, &previous, null);
+        }
+    }
+};
 
 fn spawnExecutableWithArgv0(
     ctx: *CliCtx,
@@ -3098,6 +3183,22 @@ fn finishRunTermination(
             std.process.exit(code);
         },
         .signal => |signal| {
+            if (comptime !is_windows) {
+                if (signal == .INT) {
+                    ctx.io.flush();
+                    // A parent using waitpid must see SIGINT, not exit(130).
+                    std.posix.sigaction(.INT, &.{
+                        .handler = .{ .handler = std.posix.SIG.DFL },
+                        .mask = std.posix.sigemptyset(),
+                        .flags = 0,
+                    }, null);
+                    var set = std.posix.sigemptyset();
+                    std.posix.sigaddset(&set, .INT);
+                    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &set, null);
+                    _ = std.c.raise(.INT);
+                    unreachable; // SIGINT is unblocked with its default action, so raise terminates the process before returning
+                }
+            }
             const sig_num = @backingInt(signal);
             std.log.debug("Child process {s} killed by signal: {}", .{ exe_path, sig_num });
             const result = platform_validation.targets_validator.ValidationResult{
@@ -3237,7 +3338,7 @@ fn rocRunDefaultApp(ctx: *CliCtx, args: cli_args.RunArgs, staged: *default_app.S
         SyntheticDefaultAppMapping.fromStaged(args.path, staged),
         args.max_threads,
         args.opt,
-        currentRuntimeSpecializationStrategy(args.specialization_strategy),
+        currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt),
         resolutionConfigFromLimits(args.resolve_limits),
         !args.no_cache,
         &reporter,
@@ -3332,7 +3433,7 @@ fn rocRunDefaultAppSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, staged
         SyntheticDefaultAppMapping.fromStaged(args.path, staged),
         args.max_threads,
         args.opt,
-        currentRuntimeSpecializationStrategy(args.specialization_strategy),
+        currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt),
         resolutionConfigFromLimits(args.resolve_limits),
         !args.no_cache,
         &reporter,
@@ -3698,16 +3799,12 @@ fn runWithPosixFdInheritance(
 
     std.log.debug("Spawning child process: {s} with {} app args", .{ exe_path, app_args.len });
     std.log.debug("Child process inherits current working directory", .{});
-    var child = try spawnExecutableWithArgv0(ctx, exe_path, source_path, app_args);
-    std.log.debug("Child process spawned successfully (PID: {})", .{child.id});
+    var child = try ForegroundApp.spawn(ctx, exe_path, source_path, app_args);
+    defer child.restoreSigint();
+    std.log.debug("Child process spawned successfully (PID: {})", .{child.process.id});
 
     // Wait for child to complete
-    const term = child.wait(ctx.io.std_io) catch |err| {
-        return ctx.fail(.{ .child_process_wait_failed = .{
-            .command = exe_path,
-            .err = err,
-        } });
-    };
+    const term = try waitCompiledExecutable(ctx, &child.process, exe_path);
 
     // Clean up temp files after child has exited.
     // We wait until after child exits because the child needs to read the coordination
@@ -3722,7 +3819,7 @@ fn runWithPosixFdInheritance(
 }
 
 const HotShimChild = struct {
-    child: std.process.Child,
+    app: ForegroundApp,
     thread: std.Thread,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     term: ?std.process.Child.Term = null,
@@ -3730,7 +3827,7 @@ const HotShimChild = struct {
     joined: bool = false,
 
     fn waitThread(self: *HotShimChild, io: std.Io) void {
-        self.term = self.child.wait(io) catch |err| {
+        self.term = self.app.process.wait(io) catch |err| {
             self.wait_error = err;
             self.done.store(true, .seq_cst);
             return;
@@ -3755,11 +3852,12 @@ const HotShimChild = struct {
     fn shutdown(self: *HotShimChild, ctx: *CliCtx) void {
         if (!self.joined) self.terminate();
         self.join();
+        self.app.restoreSigint();
         ctx.gpa.destroy(self);
     }
 
     fn terminate(self: *HotShimChild) void {
-        const pid = self.child.id orelse return;
+        const pid = self.app.process.id orelse return;
         switch (builtin.os.tag) {
             .windows => {
                 _ = std.os.windows.ntdll.NtTerminateProcess(pid, @fromBackingInt(@intCast(1)));
@@ -3818,16 +3916,15 @@ fn spawnHotShimChild(
     };
     try makeSharedMemoryHandleInheritable(ctx, shm_handle);
 
-    const child = try spawnExecutableWithArgv0(ctx, exe_path, source_path, app_args);
-
     const watched = try ctx.gpa.create(HotShimChild);
+    errdefer ctx.gpa.destroy(watched);
     watched.* = .{
-        .child = child,
+        .app = try ForegroundApp.spawn(ctx, exe_path, source_path, app_args),
         .thread = undefined,
     };
     watched.thread = std.Thread.spawn(.{}, HotShimChild.waitThread, .{ watched, ctx.io.std_io }) catch |err| {
-        watched.child.kill(ctx.io.std_io);
-        ctx.gpa.destroy(watched);
+        watched.app.process.kill(ctx.io.std_io);
+        watched.app.restoreSigint();
         return err;
     };
     return watched;
@@ -3953,7 +4050,7 @@ fn buildHotReloadChildArgv(
         &argv,
         &owned,
         "--specialization-strategy={s}",
-        .{@tagName(currentRuntimeSpecializationStrategy(args.specialization_strategy))},
+        .{@tagName(currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt))},
     );
     if (source_rewrite) |rewrite| {
         try appendOwnedArg(ctx.gpa, &argv, &owned, "--synthetic-source={s}", .{rewrite.source_path});
@@ -5338,6 +5435,9 @@ const CheckDiagnosticCounts = struct {
 const BuildResult = struct {
     output_path: []const u8,
     diagnostics: CheckDiagnosticCounts,
+    /// The published executable, started when the build was given
+    /// `run_output`; the caller waits for it.
+    child: ?ForegroundApp = null,
 };
 
 fn checkedArtifactForBuild(
@@ -5846,7 +5946,7 @@ fn rocInternalHotReloadDev(ctx: *CliCtx, raw_args: []const []const u8) CliMainEr
         break :blk null;
     };
 
-    if (source_rewrite == null and unitImageRunApplies(.dev, args.no_cache, currentRuntimeSpecializationStrategy(args.specialization_strategy), selected_target)) {
+    if (source_rewrite == null and unitImageRunApplies(.dev, args.no_cache, args.specialization_strategy, selected_target)) {
         return rebuildComposedRunImage(ctx, args, &shm, selected_target);
     }
 
@@ -5987,7 +6087,7 @@ fn writeDevRunImageToSharedMemory(
         );
         return error.UnsupportedTarget;
     } else {
-        const native_target = backend.HostLirCodeGen.roc_target;
+        const native_target = backend.LirCodeGenMod.host_lir_codegen_target;
         if (!devShimTargetCompatible(selected_target, native_target)) {
             return rejectRunTargetNotExecutable(ctx, selected_target);
         }
@@ -6374,20 +6474,6 @@ fn applySyntheticDefaultAppMapping(build_env: *BuildEnv, mapping: ?SyntheticDefa
     build_env.setStagedEntryUserPath(m.original_path);
 }
 
-const PlatformEntrypointArtifact = union(enum) {
-    /// Pointer-width-independent LIR consumed directly by the interpreter.
-    lir_image,
-    /// Target-specific machine code and readonly data consumed by the dev shim.
-    dev_run_image: DevRunImage,
-};
-
-/// A dev shim image's target, and whether the shim runs it under hot reload,
-/// which reserves a header at the start of every erased callable's capture.
-const DevRunImage = struct {
-    target: RocTarget,
-    hot_reload: bool,
-};
-
 fn lowerLirWithBuildEnv(
     ctx: *CliCtx,
     lir_allocator: Allocator,
@@ -6545,7 +6631,6 @@ fn lowerDiscoveredLir(
         opt,
         specialization_strategy,
         RocTarget.detectNative(),
-        false,
     );
     // The checked host identity covers each entrypoint's host boundary digest.
     runtime_lowering.target.host_boundary_digests = true;
@@ -6580,7 +6665,7 @@ fn lowerDiscoveredLir(
 
     if (reporter) |r| r.begin(loweringProgressLabel(specialization_strategy));
     var spec_timing = lir.CheckedPipeline.Timing.init(ctx.io.std_io);
-    if (reporter != null and reporter.?.always) spec_timing.enableDetailedMonotypeBody();
+    if (reporter != null and reporter.?.always) spec_timing.enableDetail();
     var lowered = try lowerCheckedSourceToLir(
         lir_allocator,
         ctx.gpa,
@@ -6591,7 +6676,6 @@ fn lowerDiscoveredLir(
         opt,
         specialization_strategy,
         RocTarget.detectNative(),
-        false,
         true,
         build_env.postCheckExecutor(),
         &spec_timing,
@@ -6724,6 +6808,9 @@ const RunUnits = struct {
     root_image: ?[]align(backend.dev.UnitImage.alignment.toByteUnits()) u8,
     /// The root program's LIR, when this run lowered it.
     root: ?lir.CheckedPipeline.LoweredProgram,
+    /// The images the units' pool imports name, in the run's build
+    /// environment's constant stores.
+    pool_source: BuildPoolSource,
 
     /// Release the images, once the run image holds their code.
     fn releaseCode(self: *RunUnits, gpa: Allocator) void {
@@ -6735,6 +6822,7 @@ const RunUnits = struct {
 
     fn deinit(self: *RunUnits, gpa: Allocator) void {
         self.releaseCode(gpa);
+        self.pool_source.deinit();
         if (self.root) |*program| program.deinit();
         self.root = null;
         compile.watch_inputs.deinit(gpa, self.watch_inputs);
@@ -6757,7 +6845,7 @@ fn lowerRunUnits(
     reporter: *progress.Reporter,
     hot_reload: bool,
 ) CliMainError!RunUnits {
-    var runtime_lowering = checkedRuntimeLoweringConfig(.{ .platform_entrypoints = .{ .dev_run_image = .{ .target = target, .hot_reload = hot_reload } } }, .dev, .boxy, target, false);
+    var runtime_lowering = checkedRuntimeLoweringConfig(.{ .platform_entrypoints = .{ .dev_run_image = .{ .target = target, .hot_reload = hot_reload } } }, .dev, .boxy, target);
     // The checked host identity covers each entrypoint's host boundary digest.
     runtime_lowering.target.host_boundary_digests = true;
     runtime_lowering.target.boxy_unit = tables.rootUnit();
@@ -6806,7 +6894,7 @@ fn lowerRunUnits(
     const cache_manager = build_env.cache_manager orelse base.invariant("roc run invariant violated: a run composed from unit images has no cache manager", .{});
     const root_key = try boxyObjectKey(ctx.gpa, &tables.digests, root_artifact, boxyUnitPlatform(root_artifact, library.?.platform), policy, target, library.?.paired_platforms, true);
 
-    const selected_roots = try lir.CheckedPipeline.selectPlatformEntrypointRoots(ctx.gpa, root_artifact.root_requests.runtime_requests);
+    const selected_roots = try lir.CheckedPipeline.selectPlatformEntrypointRoots(ctx.gpa, root_artifact.root_requests.runtime_requests.items());
     defer ctx.gpa.free(selected_roots);
     const entrypoint_names = try ctx.arena.alloc([]const u8, selected_roots.len);
     for (selected_roots, entrypoint_names) |root, *name| name.* = try ctx.arena.dupe(u8, nativeEntrypointSymbolName(root_artifact, root));
@@ -6865,9 +6953,12 @@ fn lowerRunUnits(
     updateHashBytes(&identity, "roc-run-unit-images-v1");
     identity.update(&interface_identity);
 
+    var pool_source = try BuildPoolSource.init(ctx.gpa, build_env);
+    errdefer pool_source.deinit();
     const owned_library = library.?;
     library = null;
     return .{
+        .pool_source = pool_source,
         .target = target,
         .hot_reload = hot_reload,
         .root_artifact = root_artifact,
@@ -6897,7 +6988,7 @@ fn lowerRunRoot(
 ) CliMainError!lir.CheckedPipeline.LoweredProgram {
     reporter.begin(loweringProgressLabel(.boxy));
     var spec_timing = lir.CheckedPipeline.Timing.init(ctx.io.std_io);
-    if (reporter.always) spec_timing.enableDetailedMonotypeBody();
+    if (reporter.always) spec_timing.enableDetail();
     const lowered = try lowerCheckedSourceToLir(
         ctx.gpa,
         ctx.gpa,
@@ -6908,7 +6999,6 @@ fn lowerRunRoot(
         .dev,
         .boxy,
         target,
-        false,
         true,
         build_env.postCheckExecutor(),
         &spec_timing,
@@ -6939,7 +7029,9 @@ fn buildRunRootImage(
         target,
         .{},
     );
-    defer compile.static_data_exports.deinitStaticData(ctx.gpa, static_data);
+    // The pieces take the static data (`compileToPieces`).
+    var static_data_owned = true;
+    defer if (static_data_owned) compile.static_data_exports.deinitStaticData(ctx.gpa, static_data);
     const entrypoints = try nativeBuildEntrypoints(ctx, root_artifact, lowered);
     defer ctx.gpa.free(entrypoints);
 
@@ -6950,6 +7042,7 @@ fn buildRunRootImage(
     object_compiler.post_check_executor = build_env.postCheckExecutor();
     object_compiler.erased_capture_prefix = lowered.lir_result.erased_capture_prefix;
     object_compiler.internal_entrypoints = true;
+    static_data_owned = false;
     var pieces = object_compiler.compileToPieces(
         &lowered.lir_result.store,
         &lowered.lir_result.layouts,
@@ -6986,7 +7079,7 @@ fn writeComposedRunImage(
     if (comptime !backend.host_lir_codegen_available) {
         unreachable; // `unitImageRunApplies` selects composed runs only on hosts whose units carry images
     } else {
-        if (!devShimTargetCompatible(units.target, backend.HostLirCodeGen.roc_target)) {
+        if (!devShimTargetCompatible(units.target, backend.LirCodeGenMod.host_lir_codegen_target)) {
             return rejectRunTargetNotExecutable(ctx, units.target);
         }
         reporter.begin("Run Image");
@@ -7022,6 +7115,7 @@ fn writeComposedRunImage(
             .host_symbols = try fast_dev_link.sortedUnion(ctx.arena, &.{ units.hosted_symbols, &host_symbols.runtime_symbols, sorted_shim_builtins, support_imports }),
             .shim_builtins = sorted_shim_builtins,
             .function_table_entry_size = if (target_arch == .aarch64) 8 else 12,
+            .pool = units.pool_source.source(),
         };
         var plan = run_image_link.plan(ctx.gpa, ctx.io.std_io, link_inputs) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -7114,6 +7208,9 @@ fn writeComposedRunImage(
             .{ .name = "Sites filled", .count = timing.sites_patched },
             .{ .name = "Host sites", .count = timing.host_sites },
             .{ .name = "Rebased words", .count = timing.rebases },
+            .{ .name = "Stored images named", .count = timing.pool_named },
+            .{ .name = "Stored images placed", .count = timing.pool_placed },
+            .{ .name = "Stored image bytes", .count = timing.pool_bytes },
         });
         return .{ .descriptor = descriptor, .descriptor_offset = descriptor_offset };
     }
@@ -7720,7 +7817,8 @@ fn discoverAndAddBundleInputs(
     // Create a BuildEnv to parse headers and discover modules via the
     // Coordinator. Bundling compiles the workspace to discover transitive
     // modules; it uses the checked-module cache like every other pipeline.
-    var build_env = try initCliBuildEnv(ctx, .{ .max_threads = 1 });
+    // A bundle has no runtime consumer.
+    var build_env = try initCliBuildEnv(ctx, .{ .max_threads = 1, .specialization_strategy = .boxy });
     defer build_env.deinit();
 
     // Run the build—the Coordinator discovers all transitive module dependencies
@@ -7774,7 +7872,7 @@ fn discoverAndAddBundleInputs(
                 // on both fresh builds and cache hits. Preserve their logical
                 // paths so extraction keeps each import relative to its module.
                 const env = mod_state.moduleEnv().?;
-                for (env.file_dependencies.items.items) |dep| {
+                for (env.file_dependencies.items()) |dep| {
                     const dep_path = try std.fs.path.resolve(ctx.arena, &.{
                         mod_state.canonicalSourceDir(),
                         env.fileDependencyRelativePath(dep),
@@ -8975,7 +9073,7 @@ fn preloadWasmObject(
     };
 }
 
-fn configuredWasmStackBytes(args: cli_args.BuildArgs, wasm: ?roc_target.WasmTargetConfig) usize {
+fn configuredWasmStackBytes(args: cli_args.BuildArgs, wasm: ?roc_target.WasmTargetConfig) u64 {
     if (args.wasm_stack_size) |bytes| return bytes;
     if (wasm) |config| {
         if (config.initial_stack_size) |bytes| return bytes;
@@ -8987,7 +9085,7 @@ fn configuredWasmStackBytes(args: cli_args.BuildArgs, wasm: ?roc_target.WasmTarg
 /// platform's targets config specifies one. Null lets the linker size memory
 /// from the data segments plus the stack, which is always sufficient for
 /// those regions. The host must grow memory for its heap independently.
-fn configuredWasmMinimumMemory(args: cli_args.BuildArgs, wasm: ?roc_target.WasmTargetConfig) ?usize {
+fn configuredWasmMinimumMemory(args: cli_args.BuildArgs, wasm: ?roc_target.WasmTargetConfig) ?u64 {
     if (args.wasm_memory) |bytes| return bytes;
     if (wasm) |config| {
         if (config.minimum_memory) |bytes| return bytes;
@@ -9188,6 +9286,11 @@ fn staticDataFunctionPointerTargets(ctx: *CliCtx, static_data_exports: []const b
     return names.toOwnedSlice(ctx.arena);
 }
 
+/// The problem reported for a wasm memory configuration `target`'s program does not fit.
+fn wasmMemoryLayoutProblem(target: []const u8, problem: wasm_link.MemoryProblem) cli_problem.CliProblem {
+    return .{ .wasm_memory_layout = .{ .what = @tagName(problem.what), .needed = problem.needed, .configured = problem.configured, .target = target } };
+}
+
 /// Links one relocatable wasm app object against the platform's wasm inputs
 /// into `final_output_path`.
 fn linkWasmOutput(
@@ -9204,18 +9307,33 @@ fn linkWasmOutput(
     const stack_size = configuredWasmStackBytes(args, link_inputs.wasm);
     const global_base = if (link_inputs.wasm) |wasm| wasm.global_base else null;
     const maximum_memory = if (link_inputs.wasm) |wasm| wasm.maximum_memory else null;
-    switch (linker.wasmStackLayout(global_base)) {
-        .stack_first => if (maximum_memory) |bytes| {
+    const initial_memory = configuredWasmMinimumMemory(args, link_inputs.wasm);
+    // The maximum the link declares, as `linker.link` passes it to wasm-ld.
+    const declared_maximum: ?u64 = switch (linker.wasmStackLayout(global_base)) {
+        .stack_first => maximum: {
             const limit = linker.stackFirstMaximumMemory(stack_size);
-            if (bytes > limit) return ctx.fail(.{ .wasm_maximum_memory_too_large = .{
-                .target = link_inputs.target_name,
-                .maximum_memory = bytes,
-                .limit = limit,
-                .stack_size = stack_size,
-            } });
+            if (maximum_memory) |bytes| {
+                if (bytes > limit) return ctx.fail(.{ .wasm_maximum_memory_too_large = .{
+                    .target = link_inputs.target_name,
+                    .maximum_memory = bytes,
+                    .limit = limit,
+                    .stack_size = stack_size,
+                } });
+            }
+            // The stack is the lowest region of memory, so memory holds at
+            // least the stack. wasm-ld reads a maximum of 0 as no maximum at
+            // all, so a maximum the stack does not fit under never reaches it.
+            const maximum = maximum_memory orelse limit;
+            if (maximum < stack_size) return ctx.fail(wasmMemoryLayoutProblem(link_inputs.target_name, .{
+                .what = .maximum_memory_too_small,
+                .needed = stack_size,
+                .configured = maximum,
+            }));
+            break :maximum maximum;
         },
-        .data_first => {},
-    }
+        .data_first => maximum_memory,
+    };
+    var memory_problem: ?linker.WasmMemoryProblem = null;
     const link_config = linker.LinkConfig{
         .target_format = .wasm,
         .target_abi = null,
@@ -9228,8 +9346,9 @@ fn linkWasmOutput(
         .extra_args = &.{},
         .can_exit_early = false,
         .disable_output = false,
-        .wasm_initial_memory = configuredWasmMinimumMemory(args, link_inputs.wasm),
+        .wasm_initial_memory = initial_memory,
         .wasm_maximum_memory = maximum_memory,
+        .wasm_memory_problem = &memory_problem,
         .wasm_stack_size = stack_size,
         .wasm_import_memory = if (link_inputs.wasm) |wasm| wasm.import_memory.importsMemory() else false,
         .wasm_zero_filled_memory = configuredWasmZeroFilledMemory(link_inputs.wasm),
@@ -9242,6 +9361,21 @@ fn linkWasmOutput(
         .scratch_dir = scratch_dir,
     };
     linker.link(ctx, link_config) catch |err| {
+        // wasm-ld finds a size too small only when that size was passed to it.
+        if (memory_problem) |problem| {
+            const configured: ?u64 = switch (problem.what) {
+                .initial_memory_too_small => initial_memory,
+                .maximum_memory_too_small => declared_maximum,
+            };
+            if (configured) |bytes| return ctx.fail(wasmMemoryLayoutProblem(link_inputs.target_name, .{
+                .what = switch (problem.what) {
+                    .initial_memory_too_small => .initial_memory_too_small,
+                    .maximum_memory_too_small => .maximum_memory_too_small,
+                },
+                .needed = problem.needed,
+                .configured = bytes,
+            }));
+        }
         return failLink(ctx, err, link_inputs.target_name);
     };
 }
@@ -9750,6 +9884,62 @@ test "LLVM builds link the SHA-256 rounds each target's CPU features select" {
     }
 }
 
+// https://github.com/roc-lang/roc/issues/13028
+// Only a size build for a WebAssembly target with bulk memory expands memory
+// intrinsics into at most one store; speed builds, native targets and
+// `wasm32v1`, which has no bulk memory, keep LLVM's own limits.
+test "LLVM builds limit memory intrinsic expansion only for size-optimized wasm with bulk memory" {
+    const expected = [_]struct { RocTarget, builder.OptimizationLevel, builder.MemoryIntrinsicStores }{
+        .{ .wasm32, .size, .single },
+        .{ .wasm32, .speed, .target_default },
+        .{ .wasm32v1, .size, .target_default },
+        .{ .wasm32v1, .speed, .target_default },
+        .{ .x64musl, .size, .target_default },
+        .{ .x64musl, .speed, .target_default },
+        .{ .arm64mac, .size, .target_default },
+        .{ .arm32musl, .size, .target_default },
+    };
+    for (expected) |entry| {
+        const std_target = try std.zig.system.resolveTargetQuery(std.Options.debug_io, entry[0].llvmTargetQuery());
+        try std.testing.expectEqual(entry[2], builder.MemoryIntrinsicStores.forCompile(entry[1], std_target));
+    }
+}
+
+// LLVM builds link the payload of this kernel, and each target's dev objects,
+// compiled for the same query (`dev_object_targets` in build.zig), carry it.
+test "LLVM builds and dev objects use the UTF-8 validation kernel each target's CPU features select" {
+    const expected = [_]struct { RocTarget, Utf8Kernel }{
+        // x86-64-v3 includes SSSE3; the psABI v1 level stops at SSE2.
+        .{ .x64musl, .x86_ssse3 },
+        .{ .x64glibc, .x86_ssse3 },
+        .{ .x64mac, .x86_ssse3 },
+        .{ .x64win, .x86_ssse3 },
+        .{ .x64v1musl, .dfa },
+        .{ .x64v1win, .dfa },
+        // NEON is part of Armv8.0-A, so both aarch64 levels have it.
+        .{ .arm64musl, .aarch64_neon },
+        .{ .arm64mac, .aarch64_neon },
+        .{ .arm64win, .aarch64_neon },
+        .{ .arm64v1musl, .aarch64_neon },
+        .{ .arm32musl, .dfa },
+        .{ .wasm32, .wasm_simd128 },
+        .{ .wasm32v1, .dfa },
+        .{ .x64linux, .x86_ssse3 },
+        .{ .x64v1linux, .dfa },
+        .{ .x64elf, .x86_ssse3 },
+        .{ .x64v1elf, .dfa },
+        .{ .x64v1mac, .dfa },
+        .{ .x64v1mingw, .dfa },
+        .{ .x64freebsd, .x86_ssse3 },
+        .{ .x64v1freebsd, .dfa },
+        .{ .arm64v1glibc, .aarch64_neon },
+    };
+    for (expected) |entry| {
+        const std_target = try std.zig.system.resolveTargetQuery(std.Options.debug_io, entry[0].llvmTargetQuery());
+        try std.testing.expectEqual(entry[1], Utf8Kernel.forCpu(std_target.cpu));
+    }
+}
+
 fn compileLlvmAppObject(
     ctx: *CliCtx,
     args: cli_args.BuildArgs,
@@ -9786,7 +9976,10 @@ fn compileLlvmAppObject(
         codegen.enable_default_platform_runtime = enable_default_platform_runtime;
         codegen.enable_default_platform_hosted_calls = enable_default_platform_hosted_calls;
         codegen.enable_default_platform_diagnostics = enable_default_platform_hosted_calls and emit_debug_info;
-        codegen.optimize_for_size = llvmOptimizationLevel(args.opt) == .size;
+        codegen.optimization = switch (llvmOptimizationLevel(args.opt)) {
+            .size => .size,
+            .speed => .speed,
+        };
         codegen.stack_checks = stack_checks;
         codegen.debug_producer = "roc " ++ @import("compiler_version").compiler_version;
         defer codegen.deinit();
@@ -9844,12 +10037,15 @@ fn compileLlvmAppObject(
         r.begin("LLVM Optimize + Emit");
     }
 
+    // The reporter prints the report when the build finishes.
+    var time_report: builder.TimeReport = .{ .allocator = ctx.arena };
     const compile_config = builder.CompileConfig{
         .input_path = bitcode_path,
         .output_path = object_path,
         .optimization = llvmOptimizationLevel(args.opt),
         .target = target,
         .report_config = ctx.reportConfig(.stderr),
+        .memory_intrinsic_stores = .forCompile(llvmOptimizationLevel(args.opt), std_target),
         .cpu = llvm_cpu,
         .features = llvm_features,
         .debug = args.debug,
@@ -9859,11 +10055,13 @@ fn compileLlvmAppObject(
             // through extern symbols, never through a RocOps parameter.
             .host_call_extern = true,
             .sha256_rounds = Sha256Rounds.forCpu(std_target.cpu),
+            .utf8_kernel = Utf8Kernel.forCpu(std_target.cpu),
             .stack_checked = stack_checks,
         },
         .pic = true,
         .no_target_libcalls = noTargetLibcallsForLlvmBuild(target),
         .private_runtime = true,
+        .time_report = if (reporter != null and args.timings) &time_report else null,
     };
 
     const success = try builder.compileBitcodeToObject(ctx.gpa, ctx.io.std_io, compile_config);
@@ -9871,6 +10069,7 @@ fn compileLlvmAppObject(
         std.log.err("LLVM object compilation failed for {s}", .{bitcode_path});
         return error.LLVMCompilationFailed;
     }
+    if (compile_config.time_report) |report| reporter.?.attachDetail(report.text);
 
     return .{
         .artifact_dir = artifact_dir,
@@ -10168,7 +10367,7 @@ fn initBuildCommandEnv(ctx: *CliCtx, args: cli_args.BuildArgs) InitCliBuildEnvEr
         .timings = args.timings,
         .resolution_config = resolutionConfigFromLimits(args.resolve_limits),
         .track_watch_inputs = args.watch_inputs_file != null,
-        .specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy),
+        .specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt),
         .source_dir_override = args.source_dir_override,
         .root_source_url = args.root_source_url,
     });
@@ -10257,7 +10456,17 @@ fn finishBuildCommand(
         renderSummaryHeaderLine(ctx.arena, ctx.io.stderr(), diag.errors, diag.warnings, args.synthetic_root_original_path orelse args.path, ctx.reportConfig(.stderr)) catch {};
         ctx.io.flush();
     }
-    return .{ .output_path = final_output_path, .diagnostics = diag };
+    // Every build path returns through here once its output is published and
+    // closed, while its state is still live. A build `roc` runs starts the
+    // program now, after the compiler's last write, so the program runs
+    // while the build's state is released (design.md "Runs Of A Built
+    // Executable").
+    const child: ?ForegroundApp = if (args.run_output) |run| child: {
+        ctx.io.flush();
+        if (dev_diagnostics.isSet(.trace_run_order)) std.debug.print("run-order: starting the program\n", .{});
+        break :child try ForegroundApp.spawn(ctx, final_output_path, run.argv0, run.app_args);
+    } else null;
+    return .{ .output_path = final_output_path, .diagnostics = diag, .child = child };
 }
 
 /// Lowers a checked `roc build` program to LIR, reporting the post-check
@@ -10265,6 +10474,34 @@ fn finishBuildCommand(
 /// The objects of every module of a `.boxy` build other than the root
 /// program's, materialized for linking, and the hosted symbols they
 /// reference.
+/// The constant pool's source for this build's unit images: the images
+/// every checked module of the build stores, by digest (design.md
+/// "Constant Pool").
+const BuildPoolSource = struct {
+    index: check.ConstStore.ImageIndex,
+
+    fn init(gpa: Allocator, build_env: *BuildEnv) Allocator.Error!BuildPoolSource {
+        var self: BuildPoolSource = .{ .index = .init(gpa) };
+        errdefer self.index.deinit();
+        try build_env.registerConstStores(&self.index);
+        return self;
+    }
+
+    fn deinit(self: *BuildPoolSource) void {
+        self.index.deinit();
+    }
+
+    fn source(self: *BuildPoolSource) backend.dev.UnitImage.PoolSource {
+        return .{ .context = self, .find = find };
+    }
+
+    fn find(context: *anyopaque, digest: [32]u8) error{OutOfMemory}!?backend.dev.UnitImage.PoolImage {
+        const self: *BuildPoolSource = @ptrCast(@alignCast(context));
+        const image = try self.index.find(digest) orelse return null;
+        return .{ .bytes = image.bytes, .pointers = image.pointers, .alignment = image.alignment };
+    }
+};
+
 const BoxyLibraryObjects = struct {
     /// Every library unit's pieces, in unit order; empty for a fast dev
     /// link, which reads `images` instead.
@@ -10295,8 +10532,10 @@ const BoxyLibraryObjects = struct {
     /// The checked keys of the modules the root unit lowers: the root, and
     /// every module with platform requirements.
     root_modules: []const [32]u8,
-    /// The template workers the checked program reaches, by module.
-    reach: compile.boxy_reach.Reach,
+    /// The template workers the checked program reaches, by module. Only
+    /// the composition of a program object from pieces reads it, so a
+    /// build collecting images has none.
+    reach: ?compile.boxy_reach.Reach,
 
     fn deinit(self: BoxyLibraryObjects, gpa: Allocator) void {
         for (self.owned_pieces) |pieces| {
@@ -10304,8 +10543,10 @@ const BoxyLibraryObjects = struct {
             gpa.destroy(pieces);
         }
         for (self.owned_images) |image| image.deinit(gpa);
-        var reach = self.reach;
-        reach.deinit();
+        if (self.reach) |owned| {
+            var reach = owned;
+            reach.deinit();
+        }
     }
 };
 
@@ -10356,10 +10597,12 @@ const BoxyUnitTests = struct {
 /// filing each object in the per-module Boxy object cache under the
 /// module's extended checked key and restoring the ones already there
 /// (design.md "Caching Under `.boxy`"). A module's unit starts once its
-/// imports' units are done, since its calls compile against their export
-/// interfaces, and units with no such wait run in parallel on the
-/// post-check executor. A module with platform requirements has no object
-/// of its own: the root unit lowers its workers at the app's types.
+/// dependencies' units are done (`Coordinator.unitDependencyKeys`: its
+/// imports, and every module its lowering sees outside its import closure),
+/// since its calls compile against their export interfaces, and units with
+/// no such wait run in parallel on the post-check executor. A module with
+/// platform requirements has no object of its own: the root unit lowers its
+/// workers at the app's types.
 fn buildBoxyLibraryObjects(
     ctx: *CliCtx,
     policy: BoxyUnitPolicy,
@@ -10390,12 +10633,14 @@ fn buildBoxyLibraryObjects(
     defer units.deinit(ctx.gpa);
     try units.append(ctx.gpa, &build_env.builtin_modules.checked_artifact);
     for (test_modules orelse visible) |artifact| {
-        if (artifact.platform_type_inputs.requirements.len != 0) continue;
+        if (artifact.platform_type_inputs.requirements.items().len != 0) continue;
         try units.append(ctx.gpa, artifact);
     }
-    // A module's body calls imports its root never sees, and a unit is keyed
-    // on its imports' exports, so every import has a unit in the link. The
-    // link drops the code nothing reaches.
+    // A module's body calls imports its root never sees, a unit is keyed
+    // on its imports' exports, and its calls compile against the exports of
+    // every module its lowering sees, so each of its dependencies has a
+    // unit in the link (`Coordinator.unitDependencyKeys`). The link drops
+    // the code nothing reaches.
     var seen_units = std.AutoHashMap([32]u8, void).init(ctx.gpa);
     defer seen_units.deinit();
     var distinct: usize = 0;
@@ -10408,17 +10653,21 @@ fn buildBoxyLibraryObjects(
     var next_unit: usize = 0;
     while (next_unit < units.items.len) : (next_unit += 1) {
         const importer = units.items[next_unit];
-        for (importer.direct_import_module_keys) |key| {
-            const imported = digests.artifacts.get(key.bytes) orelse continue;
-            if (imported.platform_type_inputs.requirements.len != 0) continue;
-            if ((try seen_units.getOrPut(key.bytes)).found_existing) continue;
+        const dependency_keys = try build_env.unitDependencyKeys(ctx.gpa, importer);
+        defer ctx.gpa.free(dependency_keys);
+        for (dependency_keys) |key| {
+            const imported = digests.artifacts.get(key) orelse continue;
+            if (imported.platform_type_inputs.requirements.items().len != 0) continue;
+            if ((try seen_units.getOrPut(key)).found_existing) continue;
             try units.append(ctx.gpa, imported);
         }
     }
     const platform = try boxyPlatformView(ctx, build_env, root_artifact, visible);
     // The checked program's reachability runs beside the units: the
     // composition resolves the procedures it names in parallel first
-    // (design.md "Unit Pieces And Whole-Program Dead Code").
+    // (design.md "Unit Pieces And Whole-Program Dead Code"). Only a
+    // composition from pieces reads it.
+    const want_reach = !want_images;
     const link_modules = try ctx.arena.alloc(*const Artifact, digests.artifacts.count());
     const link_names = try ctx.arena.alloc([32]u8, link_modules.len);
     {
@@ -10430,7 +10679,7 @@ fn buildBoxyLibraryObjects(
         }
     }
     var reach_task: BoxyReachTask = .{ .gpa = ctx.gpa, .root = root_artifact, .modules = .{ .artifacts = link_modules, .link_names = link_names } };
-    var reach_session: ?base.post_check_task_executor.Session = if (build_env.postCheckExecutor()) |executor| try executor.begin() else null;
+    var reach_session: ?base.post_check_task_executor.Session = if (!want_reach) null else if (build_env.postCheckExecutor()) |executor| try executor.begin() else null;
     defer if (reach_session) |*open| {
         while (open.outstanding != 0) _ = open.receive();
         open.end();
@@ -10440,7 +10689,9 @@ fn buildBoxyLibraryObjects(
         .done => |*reach| reach.deinit(),
         .pending, .failed => {},
     };
-    if (reach_session) |*open| try open.submit(.{ .id = 0, .context = &reach_task, .run = BoxyReachTask.run }) else reach_task.compute();
+    if (want_reach) {
+        if (reach_session) |*open| try open.submit(.{ .id = 0, .context = &reach_task, .run = BoxyReachTask.run }) else reach_task.compute();
+    }
     if (dev_diagnostics.isSet(.trace_boxy_work)) {
         std.debug.print("boxy-work: root {s} key {s} codegen {s} identity {s}\n", .{ root_artifact.canonical_names.moduleNameText(root_artifact.module_identity.module_name), &std.fmt.bytesToHex(root_artifact.key.bytes[0..8], .lower), &std.fmt.bytesToHex(root_artifact.codeGenerationKey().bytes[0..8], .lower), &std.fmt.bytesToHex(root_artifact.module_identity.stable_hash[0..8], .lower) });
         for (units.items) |artifact| std.debug.print("boxy-work: unit {s} key {s} codegen {s} identity {s}\n", .{ artifact.canonical_names.moduleNameText(artifact.module_identity.module_name), &std.fmt.bytesToHex(artifact.key.bytes[0..8], .lower), &std.fmt.bytesToHex(artifact.codeGenerationKey().bytes[0..8], .lower), &std.fmt.bytesToHex(artifact.module_identity.stable_hash[0..8], .lower) });
@@ -10450,7 +10701,8 @@ fn buildBoxyLibraryObjects(
     defer index_by_key.deinit();
     for (units.items, 0..) |artifact, index| try index_by_key.put(artifact.key.bytes, @intCast(index));
 
-    // Each unit's imports among the units, and the units importing it.
+    // Each unit's dependencies among the units, and the units depending on
+    // it.
     const remaining = try ctx.gpa.alloc(u32, units.items.len);
     defer ctx.gpa.free(remaining);
     @memset(remaining, 0);
@@ -10461,8 +10713,10 @@ fn buildBoxyLibraryObjects(
     }
     for (dependents) |*list| list.* = .empty;
     for (units.items, 0..) |artifact, index| {
-        for (artifact.direct_import_module_keys) |import_key| {
-            const imported = index_by_key.get(import_key.bytes) orelse continue;
+        const dependency_keys = try build_env.unitDependencyKeys(ctx.gpa, artifact);
+        defer ctx.gpa.free(dependency_keys);
+        for (dependency_keys) |dependency_key| {
+            const imported = index_by_key.get(dependency_key) orelse continue;
             remaining[index] += 1;
             try dependents[imported].append(ctx.gpa, @intCast(index));
         }
@@ -10471,7 +10725,9 @@ fn buildBoxyLibraryObjects(
     // The units run on the executor's lanes, so each phase of this timing
     // sums the units' work rather than measuring elapsed time.
     var unit_timing = lir.CheckedPipeline.Timing.init(ctx.io.std_io);
+    if (reporter.always) unit_timing.enableDetail();
     const phase_started_ns = std.Io.Timestamp.now(ctx.io.std_io, .awake).nanoseconds;
+    const detail_started_ns = lir.CheckedPipeline.Timing.startDetail(&unit_timing);
     const tasks = try ctx.gpa.alloc(BoxyUnitTask, units.items.len);
     defer {
         for (tasks) |*task| task.deinit(ctx.gpa);
@@ -10483,12 +10739,13 @@ fn buildBoxyLibraryObjects(
         if (policy.test_units and !unit_policy.test_units and dev_diagnostics.isSet(.trace_boxy_work)) {
             std.debug.print("boxy-work: ordinary unit serves tests for {s} (no expect nodes or test roots)\n", .{artifact.moduleEnvConst().module_name});
         }
+        const hosted_bindings = try build_env.coordinator.?.libraryHostedBindings(artifact, ctx.arena);
         task.* = .{
             .gpa = ctx.gpa,
             .io = ctx.io.std_io,
             .policy = unit_policy,
             .artifact = artifact,
-            .platform = boxyUnitPlatform(artifact, platform),
+            .hosted_bindings = hosted_bindings,
             .views = try build_env.collectImportedArtifactViews(ctx.gpa, artifact),
             .target = target,
             .interfaces = interfaces,
@@ -10498,6 +10755,7 @@ fn buildBoxyLibraryObjects(
             .timing = &unit_timing,
             .executor = build_env.postCheckExecutor(),
             .phase_started_ns = phase_started_ns,
+            .ready_ns = detail_started_ns,
             .want_pieces = !want_images,
         };
     }
@@ -10522,12 +10780,12 @@ fn buildBoxyLibraryObjects(
     var restored: u32 = 0;
     var built: u32 = 0;
     var done: usize = 0;
-    // A unit runs once its imports' units are done: its task keys it from
-    // what they recorded, then restores or builds it. A unit left to run
-    // holds back its importers. Lanes no unit is ready for hash the
-    // waiting units' own parts of their digests meanwhile, so a unit whose
-    // turn comes keys itself from what is already hashed; the digest tasks
-    // take ids past the units'.
+    // A unit runs once its dependencies' units are done: its task keys it
+    // from what its imports recorded, then restores or builds it. A unit
+    // left to run holds back its dependents. Lanes no unit is ready for
+    // hash the waiting units' own parts of their digests meanwhile, so a
+    // unit whose turn comes keys itself from what is already hashed; the
+    // digest tasks take ids past the units'.
     var ready: std.ArrayList(u32) = .empty;
     defer ready.deinit(ctx.gpa);
     for (remaining, 0..) |count, index| if (count == 0) try ready.append(ctx.gpa, @intCast(index));
@@ -10649,7 +10907,11 @@ fn buildBoxyLibraryObjects(
         }
         for (dependents[index].items) |dependent| {
             remaining[dependent] -= 1;
-            if (remaining[dependent] == 0) try ready.append(ctx.gpa, dependent);
+            if (remaining[dependent] == 0) {
+                tasks[dependent].ready_ns = lir.CheckedPipeline.Timing.startDetail(&unit_timing);
+                tasks[dependent].import_wait_ns = @intCast(@max(0, tasks[dependent].ready_ns - detail_started_ns));
+                try ready.append(ctx.gpa, dependent);
+            }
         }
     }
     // Digest tasks still out hashed for units that are done.
@@ -10658,13 +10920,13 @@ fn buildBoxyLibraryObjects(
     };
     if (reach_session) |*open| _ = open.receive();
     if (first_error) |err| return err;
-    const reach = switch (reach_task.outcome) {
+    const reach: ?compile.boxy_reach.Reach = if (want_reach) switch (reach_task.outcome) {
         .done => |reach| reach,
         .failed => |err| return err,
         .pending => base.invariant("roc build invariant violated: the checked reachability task completed without an outcome", .{}),
-    };
+    } else null;
     reach_taken = true;
-    if (dev_diagnostics.isSet(.trace_boxy_work)) std.debug.print("boxy-work: the checked program reaches {d} template workers in {d} modules\n", .{ reach.identities.len, reach.modules.count() });
+    if (dev_diagnostics.isSet(.trace_boxy_work)) if (reach) |known| std.debug.print("boxy-work: the checked program reaches {d} template workers in {d} modules\n", .{ known.identities.len, known.modules.count() });
     // The summary counts cache work; a build without a cache does none.
     if (!policy.no_cache) switch (compile.boxy_unit.imageKind(target)) {
         .native, .none => build_env.recordBoxyObjects(restored, built),
@@ -10684,7 +10946,7 @@ fn buildBoxyLibraryObjects(
         try root_modules.append(ctx.arena, view.key.bytes);
     }
     for (visible) |artifact| {
-        if (artifact.platform_type_inputs.requirements.len == 0) continue;
+        if (artifact.platform_type_inputs.requirements.items().len == 0) continue;
         try paired_platforms.append(ctx.arena, artifact.codeGenerationKey().bytes);
         try root_modules.append(ctx.arena, artifact.key.bytes);
     }
@@ -10737,17 +10999,18 @@ fn composeBoxyProgramObject(
     const program_scope = "boxy-program";
     // A record is the object's identity, then the object: the identity was
     // computed from these bytes by the build that composed them.
-    if (program_key) |key| if (cache_manager) |manager| if (manager.loadFamilyBytes(.boxy_object, key, program_scope)) |record| {
+    if (program_key) |key| if (cache_manager) |manager| if (manager.loadFamilyBytes(.boxy_object, key, program_scope)) |loaded| {
+        const record = loaded.bytes;
         defer manager.allocator.free(record);
-        if (record.len >= 40) {
-            const identity: link_artifacts.Identity = .{ .digest = record[0..32].*, .size = std.mem.readInt(u64, record[32..40], .little) };
-            if (identity.size == record.len - 40) {
-                reporter.begin("Object Materialization");
-                const path = link_objects.materializeKnown(record[40..], identity) catch return error.NativeCompilationFailed;
-                reporter.end();
-                return path;
-            }
-        }
+        // The object's size is part of its identity; it must fit the record.
+        const identity: ?link_artifacts.Identity = if (record.len >= 40) .{ .digest = record[0..32].*, .size = std.mem.readInt(u64, record[32..40], .little) } else null;
+        if (identity) |known| if (known.size <= record.len - 40) {
+            reporter.begin("Object Materialization");
+            const path = link_objects.materializeKnown(record[40..][0..@intCast(known.size)], known) catch return error.NativeCompilationFailed;
+            reporter.end();
+            return path;
+        };
+        manager.rejectEntry(.checked, .boxy_object, key, program_scope, loaded.stamp, "its object does not fit the record", .{});
     };
     reporter.begin("Composing Program Object");
     const inputs = try ctx.arena.alloc(*const backend.dev.UnitPieces.Pieces, library.pieces.len + 1);
@@ -10757,10 +11020,11 @@ fn composeBoxyProgramObject(
     // parallel before the walk that decides what the object keeps.
     const seeds = try ctx.arena.alloc([]const lir.ProcIdentity, inputs.len);
     {
+        const reach = library.reach orelse base.invariant("roc build invariant violated: a program object was composed from a library built without its reach", .{});
         var root_seeds: std.ArrayList(lir.ProcIdentity) = .empty;
-        for (library.root_modules) |key| try root_seeds.appendSlice(ctx.arena, library.reach.of(key));
+        for (library.root_modules) |key| try root_seeds.appendSlice(ctx.arena, reach.of(key));
         seeds[0] = root_seeds.items;
-        for (library.module_keys, seeds[1..]) |key, *unit_seeds| unit_seeds.* = library.reach.of(key);
+        for (library.module_keys, seeds[1..]) |key, *unit_seeds| unit_seeds.* = reach.of(key);
     }
     var compiler = backend.ObjectFileCompiler.init(ctx.gpa);
     compiler.post_check_executor = executor;
@@ -10840,7 +11104,7 @@ fn boxyObjectKey(gpa: Allocator, digests: *compile.boxy_interface.Digests, artif
 /// hosted section binds the hosted functions `artifact` declares to their
 /// host symbols. Null for a module declaring none.
 fn boxyUnitPlatform(artifact: *const check.CheckedArtifact.CheckedModuleArtifact, platform: ?check.CheckedArtifact.ImportedModuleView) ?check.CheckedArtifact.ImportedModuleView {
-    if (artifact.hosted_procs.procs.len == 0) return null;
+    if (artifact.hosted_procs.procs.items().len == 0) return null;
     return platform;
 }
 
@@ -10853,7 +11117,7 @@ const BoxyUnitTask = struct {
     io: std.Io,
     policy: BoxyUnitPolicy,
     artifact: *const check.CheckedArtifact.CheckedModuleArtifact,
-    platform: ?check.CheckedArtifact.ImportedModuleView,
+    hosted_bindings: ?[]const check.CheckedArtifact.UnitHostedBinding,
     views: []check.CheckedArtifact.ImportedModuleView,
     target: RocTarget,
     interfaces: *postcheck.Boxy.Lower.ExportInterfaces,
@@ -10870,6 +11134,12 @@ const BoxyUnitTask = struct {
     executor: ?base.post_check_task_executor.Executor,
     /// When the units' phase began, for the work trace.
     phase_started_ns: i96,
+    /// Under detailed timing, when the unit's imports' units were all done,
+    /// and how long keying it took.
+    ready_ns: i64,
+    import_wait_ns: u64 = 0,
+    key_ns: u64 = 0,
+    queue_wait_ns: u64 = 0,
     /// The unit's key, computed by its task (`keyAndBuild`).
     key: compile.boxy_object_cache.Key = undefined,
     want_pieces: bool,
@@ -10910,8 +11180,11 @@ const BoxyUnitTask = struct {
     /// Key the unit from the digests, then take the object compile-time
     /// evaluation left under that key, or restore or build it.
     fn keyAndBuild(self: *BoxyUnitTask) CliMainError!Outcome {
+        const key_started = lir.CheckedPipeline.Timing.startDetail(self.timing);
+        if (lir.CheckedPipeline.Timing.detailOf(self.timing) != null) self.queue_wait_ns = @intCast(@max(0, key_started - self.ready_ns));
         try self.digests.ensurePrepared(self.artifact);
-        self.key = try boxyObjectKey(self.gpa, self.digests, self.artifact, self.platform, self.policy, self.target, &.{}, false);
+        self.key = try compile.boxy_unit.libraryKey(self.gpa, self.digests, self.artifact, self.hosted_bindings, @tagName(self.policy.opt), inlineExpectModeForOpt(self.policy.opt) == .run, self.target, self.policy.test_units, self.policy.wasm_stack_checks);
+        if (lir.CheckedPipeline.Timing.detailOf(self.timing)) |timing| self.key_ns = timing.elapsedSince(key_started);
         self.trace("keyed");
         if (self.build_env.boxyObjectWithKey(self.artifact, self.key)) |known| {
             self.trace("known");
@@ -10923,14 +11196,13 @@ const BoxyUnitTask = struct {
     }
 
     fn build(self: *BoxyUnitTask) CliMainError!compile.boxy_unit.Built {
-        var config = checkedRuntimeLoweringConfig(.linked_output, self.policy.opt, .boxy, self.target, self.policy.synthetic_default_platform);
-        config.target.boxy_unit = .{ .imports = self.interfaces, .root = false, .names = &self.digests.names, .expect_sites = self.policy.test_units };
+        var config = checkedRuntimeLoweringConfig(.linked_output, self.policy.opt, .boxy, self.target);
+        config.target.boxy_unit = .{ .imports = self.interfaces, .root = false, .names = &self.digests.names, .expect_sites = self.policy.test_units, .hosted_bindings = self.hosted_bindings };
         config.target.timing = self.timing;
         config.target.post_check_executor = self.executor;
         const built = try compile.boxy_unit.restoreOrBuild(.{
             .gpa = self.gpa,
             .artifact = self.artifact,
-            .platform = self.platform,
             .views = self.views,
             .target = self.target,
             .config = config.target,
@@ -10940,6 +11212,10 @@ const BoxyUnitTask = struct {
             .want_pieces = self.want_pieces,
             .test_unit = self.policy.test_units,
             .wasm_stack_checks = self.policy.wasm_stack_checks,
+            .key_ns = self.key_ns,
+            .import_wait_ns = self.import_wait_ns,
+            .queue_wait_ns = self.queue_wait_ns,
+            .embedded = embeddedBoxyUnits(),
         });
         errdefer built.deinit(self.gpa);
         return built;
@@ -10971,13 +11247,12 @@ fn lowerBuildCommandToLir(
     relation_artifacts: []const check.CheckedArtifact.ImportedModuleView,
     roots: CheckedLirRoots,
     target: RocTarget,
-    proc_debug_names: bool,
     boxy_unit: ?postcheck.Boxy.Lower.ModuleUnit,
 ) eval.CompileTimeFinalization.RuntimeMaterializationError!lir.CheckedPipeline.LoweredProgram {
-    const specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy);
+    const specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt);
     reporter.begin(loweringProgressLabel(specialization_strategy));
     var spec_timing = lir.CheckedPipeline.Timing.init(ctx.io.std_io);
-    if (args.timings) spec_timing.enableDetailedMonotypeBody();
+    if (args.timings) spec_timing.enableDetail();
     const lowered = try lowerCheckedSourceToLir(
         ctx.gpa,
         ctx.gpa,
@@ -10988,7 +11263,6 @@ fn lowerBuildCommandToLir(
         args.opt,
         specialization_strategy,
         target,
-        proc_debug_names,
         false,
         build_env.postCheckExecutor(),
         &spec_timing,
@@ -11100,9 +11374,8 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
     build_env.setRuntimeLowering(checkedRuntimeLoweringConfig(
         .linked_output,
         args.opt,
-        currentRuntimeSpecializationStrategy(args.specialization_strategy),
+        currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt),
         target,
-        args.synthetic_default_platform,
     ));
     build_env.setValidateTargetFilesForSelectedTarget(true);
     build_env.setDetailedLoweringTiming(args.timings);
@@ -11114,7 +11387,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
     const relation_artifacts = try build_env.collectRelationArtifactViews(ctx.gpa, root_artifact);
     defer ctx.gpa.free(relation_artifacts);
 
-    var lowered = try lowerBuildCommandToLir(ctx, args, &build_env, &reporter, root_artifact, imported_artifacts, relation_artifacts, .linked_output, target, args.synthetic_default_platform, null);
+    var lowered = try lowerBuildCommandToLir(ctx, args, &build_env, &reporter, root_artifact, imported_artifacts, relation_artifacts, .linked_output, target, null);
     defer lowered.deinit();
 
     const entrypoints = try nativeBuildEntrypoints(ctx, root_artifact, &lowered);
@@ -11288,7 +11561,7 @@ fn fastDevLinkFormat(target: RocTarget) ?fast_dev_link.Format {
 /// link writes through the host's own system calls. Every other combination
 /// composes a program object and links it with LLD.
 fn fastDevLinkApplies(target: RocTarget, link_type: roc_target.OutputKind, args: cli_args.BuildArgs) bool {
-    if (args.opt != .dev or currentRuntimeSpecializationStrategy(args.specialization_strategy) != .boxy) return false;
+    if (args.opt != .dev or currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt) != .boxy) return false;
     if (fastDevLinkFormat(target) == null) return false;
     return switch (link_type) {
         .exe, .shared => true,
@@ -11303,7 +11576,7 @@ fn fastDevLinkApplies(target: RocTarget, link_type: roc_target.OutputKind, args:
 /// two units per module: the native one compile-time evaluation runs and
 /// the wasm one for the link.
 fn wasmUnitsApply(target: RocTarget, args: cli_args.BuildArgs) bool {
-    if (args.opt != .dev or currentRuntimeSpecializationStrategy(args.specialization_strategy) != .boxy) return false;
+    if (args.opt != .dev or currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt) != .boxy) return false;
     return compile.boxy_unit.imageKind(target) == .wasm;
 }
 
@@ -11531,8 +11804,8 @@ const WasmFastLink = struct {
             .stack_exports = linker.wasmStackExports(self.target.cpuLevel()),
             .stack_size = stack_size,
             .global_base = global_base,
-            .initial_memory = configuredWasmMinimumMemory(args, link_inputs.wasm),
-            .maximum_memory = maximum_memory,
+            .initial_memory = if (configuredWasmMinimumMemory(args, link_inputs.wasm)) |bytes| bytes else null,
+            .maximum_memory = if (maximum_memory) |bytes| bytes else null,
             .import_memory = if (link_inputs.wasm) |wasm| wasm.import_memory.importsMemory() else false,
             .zero_filled_memory = configuredWasmZeroFilledMemory(link_inputs.wasm),
             .names = args.debug,
@@ -11660,7 +11933,7 @@ const WasmFastLink = struct {
             error.UndefinedExports => return ctx.fail(.{ .wasm_exports_undefined = .{ .symbols = outcome.undefined_exports, .target = target_name } }),
             error.ImportConflict => return ctx.fail(.{ .wasm_import_conflict = .{ .symbol = outcome.conflict.?, .target = target_name } }),
             error.EngineLimit => return ctx.fail(.{ .wasm_engine_limit = .{ .what = outcome.limit.?.what, .count = outcome.limit.?.count, .limit = outcome.limit.?.limit, .target = target_name } }),
-            error.MemoryLayout => return ctx.fail(.{ .wasm_memory_layout = .{ .what = @tagName(outcome.memory.?.what), .needed = outcome.memory.?.needed, .configured = outcome.memory.?.configured, .target = target_name } }),
+            error.MemoryLayout => return ctx.fail(wasmMemoryLayoutProblem(target_name, outcome.memory.?)),
             error.ParameterLimit => {
                 for (outcome.parameters) |problem| try ctx.addProblem(.{ .wasm_host_parameter_limit = .{
                     .symbol = problem.symbol,
@@ -11719,7 +11992,7 @@ fn buildWasmUnits(
         return .{ .library = library, .root_image = root_image, .app_export_symbols = app_export_symbols };
     }
     var lowering_timing = lir.CheckedPipeline.Timing.init(ctx.io.std_io);
-    var lowered = try lowerCheckedSourceToLir(ctx.gpa, ctx.gpa, root_artifact, imported_artifacts, relation_artifacts, .linked_output, args.opt, .boxy, target, args.synthetic_default_platform, false, build_env.postCheckExecutor(), &lowering_timing, null, .{ .imports = &interfaces, .root = true, .names = &digests.names });
+    var lowered = try lowerCheckedSourceToLir(ctx.gpa, ctx.gpa, root_artifact, imported_artifacts, relation_artifacts, .linked_output, args.opt, .boxy, target, false, build_env.postCheckExecutor(), &lowering_timing, null, .{ .imports = &interfaces, .root = true, .names = &digests.names });
     defer lowered.deinit();
     const lowering_snapshot = lowering_timing.snapshot();
     reporter.endWithBreakdown(&.{.{ .name = "Lowering", .ns = postCheckLoweringTotalNs(lowering_snapshot) }});
@@ -12035,6 +12308,8 @@ const FastDevLink = struct {
             },
         };
 
+        var pool_source = try BuildPoolSource.init(ctx.gpa, build_env);
+        defer pool_source.deinit();
         var timing: patch_link.Timing = .{};
         var outcome: patch_link.Outcome = .{};
         const linked: patch_link.LinkError!void = switch (self.spec.format) {
@@ -12044,6 +12319,7 @@ const FastDevLink = struct {
                 .units = units,
                 .root = library.images.len,
                 .host_required = self.spec.host_required,
+                .pool = pool_source.source(),
             }, &self.output, build_env.postCheckExecutor(), &timing, &outcome),
             .macho => macho_patch_link.link(ctx.gpa, ctx.arena, ctx.io.std_io, .{
                 .host = macho_host_prelink.View.init(record_bytes) catch unreachable, // the job or the prelink admitted the record
@@ -12051,6 +12327,7 @@ const FastDevLink = struct {
                 .units = units,
                 .root = library.images.len,
                 .host_required = self.spec.host_required,
+                .pool = pool_source.source(),
             }, &self.output, build_env.postCheckExecutor(), &timing, &outcome),
             .coff => coff_patch_link.link(ctx.gpa, ctx.arena, ctx.io.std_io, .{
                 .host = coff_host_prelink.View.init(record_bytes) catch unreachable, // the job or the prelink admitted the record
@@ -12058,6 +12335,7 @@ const FastDevLink = struct {
                 .units = units,
                 .root = library.images.len,
                 .host_required = self.spec.host_required,
+                .pool = pool_source.source(),
             }, &self.output, build_env.postCheckExecutor(), &timing, &outcome),
         };
         linked catch |err| {
@@ -12104,6 +12382,9 @@ const FastDevLink = struct {
             .{ .name = "Patch sites", .count = timing.sites_patched },
             .{ .name = "References fixed", .count = timing.refs_fixed },
             .{ .name = "Hole bytes dropped", .count = timing.hole_bytes },
+            .{ .name = "Stored images named", .count = timing.pool_named },
+            .{ .name = "Stored images placed", .count = timing.pool_placed },
+            .{ .name = "Stored image bytes", .count = timing.pool_bytes },
         });
     }
 };
@@ -12175,13 +12456,12 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
     defer if (wasm_fast_link) |fast| fast.deinit(ctx.gpa);
 
     build_env.setTarget(target);
-    const runtime_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy);
+    const runtime_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt);
     var runtime_lowering = checkedRuntimeLoweringConfig(
         .linked_output,
         args.opt,
         runtime_strategy,
         target,
-        args.synthetic_default_platform,
     );
     // A `.boxy` dev build of a native target lowers one object per module
     // and files each in the per-module Boxy object cache (design.md
@@ -12240,7 +12520,12 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
         null;
     defer if (boxy_library) |library| library.deinit(ctx.gpa);
     const boxy_cache_manager: ?*CacheManager = if (args.no_cache) null else build_env.cache_manager;
-    const boxy_root_key: ?compile.boxy_object_cache.Key = if (boxy_library) |library| try boxyObjectKey(ctx.gpa, &boxy_digests, root_artifact, boxyUnitPlatform(root_artifact, library.platform), BoxyUnitPolicy.ofBuild(args), target, library.paired_platforms, false) else null;
+    // A link that composes pieces files the root unit's under its pieces
+    // key; a fast dev link reads only its image.
+    const boxy_root_key: ?compile.boxy_object_cache.Key = if (boxy_library) |library| key: {
+        const image_key = try boxyObjectKey(ctx.gpa, &boxy_digests, root_artifact, boxyUnitPlatform(root_artifact, library.platform), BoxyUnitPolicy.ofBuild(args), target, library.paired_platforms, false);
+        break :key if (fast_link == null and compile.boxy_unit.producesImage(target)) compile.boxy_object_cache.piecesKey(image_key) else image_key;
+    } else null;
     if (dev_diagnostics.isSet(.trace_boxy_work)) if (boxy_library) |library| std.debug.print("boxy-work: library units {d}, root key {s}\n", .{ library.pieces.len, &std.fmt.bytesToHex(boxy_root_key.?.bytes[0..8], .lower) });
     // The root program's object is cached under its own key too: a build
     // whose every module is cached lowers nothing.
@@ -12273,13 +12558,16 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
         try linkNativeBuild(ctx, &reporter, args, target, link_type, final_output_path, platform_dir, resolved_targets_config, build_scratch_dir, &link_objects, obj_path, &.{}, link_facts);
         return finishBuildCommand(ctx, args, &build_env, &reporter, final_output_path, diag, timer_start_ns);
     };
-    var lowered = try lowerBuildCommandToLir(ctx, args, &build_env, &reporter, root_artifact, imported_artifacts, relation_artifacts, .linked_output, target, args.synthetic_default_platform, boxy_root_unit);
+    var lowered = try lowerBuildCommandToLir(ctx, args, &build_env, &reporter, root_artifact, imported_artifacts, relation_artifacts, .linked_output, target, boxy_root_unit);
     defer lowered.deinit();
     const entrypoints = try nativeBuildEntrypoints(ctx, root_artifact, &lowered);
     defer ctx.gpa.free(entrypoints);
 
     const static_data_exports = try buildCommandStaticData(ctx, &reporter, root_artifact, imported_artifacts, relation_artifacts, &lowered, target);
-    defer compile.static_data_exports.deinitStaticData(ctx.gpa, static_data_exports);
+    // Root pieces take the static data (`compileToPieces`) and keep it alive
+    // while they live; every other path releases it here.
+    var static_data_owned = true;
+    defer if (static_data_owned) compile.static_data_exports.deinitStaticData(ctx.gpa, static_data_exports);
 
     if (target_arch == .wasm32) {
         reporter.begin(code_generation_phase_name);
@@ -12315,6 +12603,7 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
     object_compiler.erased_capture_prefix = lowered.lir_result.erased_capture_prefix;
 
     if (boxy_library) |library| {
+        static_data_owned = false;
         var root_pieces = object_compiler.compileToPieces(
             &lowered.lir_result.store,
             &lowered.lir_result.layouts,
@@ -12348,15 +12637,13 @@ fn rocBuildNative(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResu
             if (!args.no_cache) {
                 const records = try compile.boxy_unit.exportRecords(ctx.gpa, &lowered, &boxy_interfaces.?);
                 defer ctx.gpa.free(records);
-                const encoded = try backend.dev.UnitPieces.encode(ctx.gpa, &root_pieces);
-                defer ctx.gpa.free(encoded);
                 try compile.boxy_unit.store(ctx.gpa, boxy_cache_manager, boxy_root_key.?, .{
                     .exports = records,
                     .exports_digest = try compile.boxy_object_cache.exportRecordsDigest(ctx.gpa, records),
                     .hosted_symbols = try hostedSymbolsFromLir(ctx.arena, &lowered.lir_result.store),
                     .link_root_symbols = try devObjectLinkRootSymbols(ctx.arena, static_data_exports),
                     .app_export_symbols = try sharedLibraryAppExports(ctx, entrypoints, static_data_exports),
-                    .pieces = encoded,
+                    .pieces = &.{},
                     .image = root_image.?,
                 });
                 build_env.recordBoxyObjects(0, 1);
@@ -12620,9 +12907,8 @@ fn rocBuildEmbedded(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildRe
     build_env.setRuntimeLowering(checkedRuntimeLoweringConfig(
         .{ .platform_entrypoints = .lir_image },
         args.opt,
-        currentRuntimeSpecializationStrategy(args.specialization_strategy),
+        currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt),
         target,
-        false,
     ));
     build_env.setValidateTargetFilesForSelectedTarget(true);
     build_env.setDetailedLoweringTiming(args.timings);
@@ -12641,7 +12927,7 @@ fn rocBuildEmbedded(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildRe
     const shm_allocator = shm.allocator();
     const image_header = try shm_allocator.create(lir.LirImage.Header);
 
-    var lowered = try lowerBuildCommandToLir(ctx, args, &build_env, &reporter, root_artifact, imported_artifacts, relation_artifacts, .{ .platform_entrypoints = .lir_image }, target, false, null);
+    var lowered = try lowerBuildCommandToLir(ctx, args, &build_env, &reporter, root_artifact, imported_artifacts, relation_artifacts, .{ .platform_entrypoints = .lir_image }, target, null);
     defer lowered.deinit();
 
     reporter.begin("LIR Image Generation");
@@ -13154,7 +13440,7 @@ fn collectTestRootRequests(
     var roots = std.ArrayList(check.CheckedArtifact.RootRequest).empty;
     errdefer roots.deinit(allocator);
 
-    for (artifact.root_requests.requests) |root| {
+    for (artifact.root_requests.requests.items()) |root| {
         if (root.kind != .test_expect or root.requires_pairing) continue;
         try roots.append(allocator, root);
     }
@@ -13196,9 +13482,8 @@ fn buildCliTestPlan(
         // the checker's diagnostic is its only report.
         var checking_results = std.ArrayList(CliTestResultItem).empty;
         defer checking_results.deinit(ctx.gpa);
-        for (artifact.compile_time_roots.roots) |root| {
+        for (artifact.compile_time_roots.roots.items()) |root| {
             if (root.kind != .expect or root.request_eligibility != .ineligible) continue;
-            if (std.debug.runtime_safety) std.debug.assert(try artifact.bodies().exprContainsDiagnosticError(root.rootExpr()));
             try checking_results.append(ctx.gpa, .{
                 .result = .compiler_error,
                 .order = @backingInt(root.id),
@@ -13208,7 +13493,7 @@ fn buildCliTestPlan(
         }
         // `roc test` pairs no platform with an app, so an expect that reads a
         // value the platform `requires` has nothing to read and cannot run.
-        for (artifact.root_requests.requests) |root| {
+        for (artifact.root_requests.requests.items()) |root| {
             if (root.kind != .test_expect or !root.requires_pairing) continue;
             try checking_results.append(ctx.gpa, .{
                 .result = .compiler_error,
@@ -13284,7 +13569,7 @@ fn testRootRegion(
 ) base.Region {
     return switch (source) {
         .statement => |statement| env.store.getStatementRegion(statement),
-        .def, .expr, .required_binding, .hoisted, .literal => {
+        .def, .expr, .required_binding, .hoisted, .literal, .literal_argument => {
             base.invariant("CLI test invariant violated: test root was not published from an expect statement", .{});
         },
     };
@@ -13324,7 +13609,7 @@ fn admitCliTestOutcomes(
     var reused_count: usize = 0;
     for (plan.modules) |*planned| {
         const key = cliTestOutcomeFileKey(planned.artifact, strategy, opt);
-        const bytes = manager.loadFamilyBytes(.test_outcomes, key, cli_test_outcome_scope);
+        const bytes = if (manager.loadFamilyBytes(.test_outcomes, key, cli_test_outcome_scope)) |loaded| loaded.bytes else null;
         const outcomes: test_outcome_file.Outcomes = if (bytes) |owned| test_outcome_file.parse(ctx.gpa, owned) catch |err| {
             manager.allocator.free(owned);
             return err;
@@ -13560,49 +13845,53 @@ fn collectExpectBindingPatterns(
 ) Allocator.Error![]CIR.Pattern.Idx {
     const statement_idx = switch (root.source) {
         .statement => |statement| statement,
-        .def, .expr, .required_binding, .hoisted, .literal => return allocator.alloc(CIR.Pattern.Idx, 0),
+        .def, .expr, .required_binding, .hoisted, .literal, .literal_argument => return allocator.alloc(CIR.Pattern.Idx, 0),
     };
-    const statement = env.store.getStatement(statement_idx);
-    if (statement != .s_expect) return allocator.alloc(CIR.Pattern.Idx, 0);
+    const statement = env.store.statementAs(statement_idx, .s_expect) orelse return allocator.alloc(CIR.Pattern.Idx, 0);
 
     var stack = std.ArrayList(CIR.Expr.Idx).empty;
     defer stack.deinit(allocator);
-    try stack.append(allocator, statement.s_expect.body);
+    try stack.append(allocator, statement.body);
 
     var patterns = std.ArrayList(CIR.Pattern.Idx).empty;
     errdefer patterns.deinit(allocator);
 
     while (stack.pop()) |expr_idx| {
-        switch (env.store.getExpr(expr_idx)) {
-            .e_lookup_local => |lookup| {
+        switch (env.store.exprKind(expr_idx)) {
+            .e_lookup_local => {
+                const lookup = env.store.exprView(expr_idx).e_lookup_local.decode();
                 if (std.mem.findScalar(CIR.Pattern.Idx, patterns.items, lookup.pattern_idx) == null) {
                     try patterns.append(allocator, lookup.pattern_idx);
                 }
             },
-            .e_list => |list| try appendExprSpanForExpectBindings(env, allocator, &stack, list.elems),
-            .e_tuple => |tuple| try appendExprSpanForExpectBindings(env, allocator, &stack, tuple.elems),
-            .e_str => |str| try appendExprSpanForExpectBindings(env, allocator, &stack, str.span),
-            .e_tag => |tag| try appendExprSpanForExpectBindings(env, allocator, &stack, tag.args),
-            .e_call => |call| {
+            .e_list => try appendExprSpanForExpectBindings(env, allocator, &stack, env.store.exprView(expr_idx).e_list.get(.elems)),
+            .e_tuple => try appendExprSpanForExpectBindings(env, allocator, &stack, env.store.exprView(expr_idx).e_tuple.get(.elems)),
+            .e_str => try appendExprSpanForExpectBindings(env, allocator, &stack, env.store.exprView(expr_idx).e_str.get(.span)),
+            .e_tag => try appendExprSpanForExpectBindings(env, allocator, &stack, env.store.exprView(expr_idx).e_tag.get(.args)),
+            .e_call => {
+                const call = env.store.exprView(expr_idx).e_call.decode();
                 try stack.append(allocator, call.func);
                 try appendExprSpanForExpectBindings(env, allocator, &stack, call.args);
             },
-            .e_record => |record| {
+            .e_record => {
+                const record = env.store.exprView(expr_idx).e_record.decode();
                 if (record.ext) |ext| try stack.append(allocator, ext);
                 for (env.store.sliceRecordFields(record.fields)) |field_idx| {
                     try stack.append(allocator, env.store.getRecordField(field_idx).value);
                 }
             },
-            .e_block => |block| {
+            .e_block => {
+                const block = env.store.exprView(expr_idx).e_block.decode();
                 try stack.append(allocator, block.final_expr);
                 for (0..block.stmts.span.len) |stmt_offset| {
                     const stmt_idx = env.store.statementAt(block.stmts, stmt_offset);
-                    switch (env.store.getStatement(stmt_idx)) {
-                        inline .s_decl, .s_var, .s_reassign, .s_expr => |decl| try stack.append(allocator, decl.expr),
-                        .s_expect => |stmt| try stack.append(allocator, stmt.body),
-                        .s_dbg => |stmt| try stack.append(allocator, stmt.expr),
-                        .s_return => |stmt| try stack.append(allocator, stmt.expr),
-                        .s_for => |stmt| {
+                    switch (env.store.statementKind(stmt_idx)) {
+                        inline .s_decl, .s_var, .s_reassign, .s_expr => |kind| try stack.append(allocator, @field(env.store.statementView(stmt_idx), @tagName(kind)).get(.expr)),
+                        .s_expect => try stack.append(allocator, env.store.statementView(stmt_idx).s_expect.get(.body)),
+                        .s_dbg => try stack.append(allocator, env.store.statementView(stmt_idx).s_dbg.get(.expr)),
+                        .s_return => try stack.append(allocator, env.store.statementView(stmt_idx).s_return.get(.expr)),
+                        .s_for => {
+                            const stmt = env.store.statementView(stmt_idx).s_for.decode();
                             try stack.append(allocator, stmt.expr);
                             try stack.append(allocator, stmt.body);
                         },
@@ -13623,7 +13912,8 @@ fn collectExpectBindingPatterns(
                     }
                 }
             },
-            .e_if => |if_expr| {
+            .e_if => {
+                const if_expr = env.store.exprView(expr_idx).e_if.decode();
                 try stack.append(allocator, if_expr.final_else);
                 for (env.store.sliceIfBranches(if_expr.branches)) |branch_idx| {
                     const branch = env.store.getIfBranch(branch_idx);
@@ -13631,7 +13921,8 @@ fn collectExpectBindingPatterns(
                     try stack.append(allocator, branch.body);
                 }
             },
-            .e_match => |match_expr| {
+            .e_match => {
+                const match_expr = env.store.exprView(expr_idx).e_match.decode();
                 try stack.append(allocator, match_expr.cond);
                 for (env.store.sliceMatchBranches(match_expr.branches)) |branch_idx| {
                     const branch = env.store.getMatchBranch(branch_idx);
@@ -13639,48 +13930,55 @@ fn collectExpectBindingPatterns(
                     if (branch.guard) |guard| try stack.append(allocator, guard);
                 }
             },
-            .e_lambda => |lambda| try stack.append(allocator, lambda.body),
-            .e_closure => |closure| try stack.append(allocator, closure.lambda_idx),
-            .e_nominal => |nominal| try stack.append(allocator, nominal.backing_expr),
-            .e_nominal_external => |nominal| try stack.append(allocator, nominal.backing_expr),
-            .e_binop => |binop| {
+            .e_lambda => try stack.append(allocator, env.store.exprView(expr_idx).e_lambda.get(.body)),
+            .e_closure => try stack.append(allocator, env.store.exprView(expr_idx).e_closure.get(.lambda_idx)),
+            .e_nominal => try stack.append(allocator, env.store.exprView(expr_idx).e_nominal.get(.backing_expr)),
+            .e_nominal_external => try stack.append(allocator, env.store.exprView(expr_idx).e_nominal_external.get(.backing_expr)),
+            .e_binop => {
+                const binop = env.store.exprView(expr_idx).e_binop.decode();
                 try stack.append(allocator, binop.lhs);
                 try stack.append(allocator, binop.rhs);
             },
-            .e_unary_minus => |unary| try stack.append(allocator, unary.expr),
-            .e_field_access => |field| try stack.append(allocator, field.receiver),
-            inline .e_method_call, .e_dispatch_call => |call| {
+            .e_unary_minus => try stack.append(allocator, env.store.exprView(expr_idx).e_unary_minus.get(.expr)),
+            .e_field_access => try stack.append(allocator, env.store.exprView(expr_idx).e_field_access.get(.receiver)),
+            inline .e_method_call, .e_dispatch_call => |kind| {
+                const call = @field(env.store.exprView(expr_idx), @tagName(kind)).decode();
                 try stack.append(allocator, call.receiver);
                 try appendExprSpanForExpectBindings(env, allocator, &stack, call.args);
             },
-            .e_interpolation => |interpolation| {
+            .e_interpolation => {
+                const interpolation = env.store.exprView(expr_idx).e_interpolation.decode();
                 try stack.append(allocator, interpolation.first);
                 try appendExprSpanForExpectBindings(env, allocator, &stack, interpolation.parts);
             },
-            .e_structural_eq => |eq| {
+            .e_structural_eq => {
+                const eq = env.store.exprView(expr_idx).e_structural_eq.decode();
                 try stack.append(allocator, eq.lhs);
                 try stack.append(allocator, eq.rhs);
             },
-            .e_structural_hash => |hash| {
+            .e_structural_hash => {
+                const hash = env.store.exprView(expr_idx).e_structural_hash.decode();
                 try stack.append(allocator, hash.value);
                 try stack.append(allocator, hash.hasher);
             },
-            .e_method_eq => |eq| {
+            .e_method_eq => {
+                const eq = env.store.exprView(expr_idx).e_method_eq.decode();
                 try stack.append(allocator, eq.lhs);
                 try stack.append(allocator, eq.rhs);
             },
-            .e_type_method_call => |call| try appendExprSpanForExpectBindings(env, allocator, &stack, call.args),
-            .e_type_dispatch_call => |call| try appendExprSpanForExpectBindings(env, allocator, &stack, call.args),
-            .e_tuple_access => |access| try stack.append(allocator, access.tuple),
-            .e_dbg => |dbg| try stack.append(allocator, dbg.expr),
-            .e_expect_err => |expect_err| try stack.append(allocator, expect_err.expr),
-            .e_expect => |expect_expr| try stack.append(allocator, expect_expr.body),
-            .e_return => |ret| try stack.append(allocator, ret.expr),
-            .e_for => |for_expr| {
+            .e_type_method_call => try appendExprSpanForExpectBindings(env, allocator, &stack, env.store.exprView(expr_idx).e_type_method_call.get(.args)),
+            .e_type_dispatch_call => try appendExprSpanForExpectBindings(env, allocator, &stack, env.store.exprView(expr_idx).e_type_dispatch_call.get(.args)),
+            .e_tuple_access => try stack.append(allocator, env.store.exprView(expr_idx).e_tuple_access.get(.tuple)),
+            .e_dbg => try stack.append(allocator, env.store.exprView(expr_idx).e_dbg.get(.expr)),
+            .e_expect_err => try stack.append(allocator, env.store.exprView(expr_idx).e_expect_err.get(.expr)),
+            .e_expect => try stack.append(allocator, env.store.exprView(expr_idx).e_expect.get(.body)),
+            .e_return => try stack.append(allocator, env.store.exprView(expr_idx).e_return.get(.expr)),
+            .e_for => {
+                const for_expr = env.store.exprView(expr_idx).e_for.decode();
                 try stack.append(allocator, for_expr.expr);
                 try stack.append(allocator, for_expr.body);
             },
-            .e_run_low_level => |run| try appendExprSpanForExpectBindings(env, allocator, &stack, run.args),
+            .e_run_low_level => try appendExprSpanForExpectBindings(env, allocator, &stack, env.store.exprView(expr_idx).e_run_low_level.get(.args)),
             .e_num,
             .e_frac_f32,
             .e_frac_f64,
@@ -13721,7 +14019,7 @@ fn sourceBindingForPattern(env: *const ModuleEnv, pattern_idx: CIR.Pattern.Idx) 
         const def = env.store.getDef(def_idx);
         if (def.pattern != pattern_idx) continue;
 
-        const expr_tag = std.meta.activeTag(env.store.getExpr(def.expr));
+        const expr_tag = env.store.exprKind(def.expr);
         if (expr_tag == .e_lambda or expr_tag == .e_closure or expr_tag == .e_hosted_lambda) return null;
 
         const pattern_region = env.store.getPatternRegion(def.pattern);
@@ -13795,10 +14093,16 @@ fn cliTestExecutionMode(opt: cli_args.OptLevel) CliTestExecutionMode {
     };
 }
 
+/// The strategy a command's runtime program lowers under: the explicit
+/// `--specialize` choice, or the default of its optimization level.
 fn currentRuntimeSpecializationStrategy(
     explicit: ?base.SpecializationStrategy,
+    opt: cli_args.OptLevel,
 ) base.SpecializationStrategy {
-    return explicit orelse .lss;
+    return explicit orelse switch (opt) {
+        .speed => .lss,
+        .dev, .interpreter, .size => .boxy,
+    };
 }
 
 fn loweringProgressLabel(strategy: base.SpecializationStrategy) []const u8 {
@@ -13809,9 +14113,14 @@ fn loweringProgressLabel(strategy: base.SpecializationStrategy) []const u8 {
 }
 
 test "runtime specialization strategy helpers" {
-    try std.testing.expectEqual(base.SpecializationStrategy.lss, currentRuntimeSpecializationStrategy(null));
-    try std.testing.expectEqual(base.SpecializationStrategy.lss, currentRuntimeSpecializationStrategy(.lss));
-    try std.testing.expectEqual(base.SpecializationStrategy.boxy, currentRuntimeSpecializationStrategy(.boxy));
+    try std.testing.expectEqual(base.SpecializationStrategy.lss, currentRuntimeSpecializationStrategy(null, .speed));
+    for ([_]cli_args.OptLevel{ .dev, .interpreter, .size }) |opt| {
+        try std.testing.expectEqual(base.SpecializationStrategy.boxy, currentRuntimeSpecializationStrategy(null, opt));
+    }
+    for (std.enums.values(cli_args.OptLevel)) |opt| {
+        try std.testing.expectEqual(base.SpecializationStrategy.lss, currentRuntimeSpecializationStrategy(.lss, opt));
+        try std.testing.expectEqual(base.SpecializationStrategy.boxy, currentRuntimeSpecializationStrategy(.boxy, opt));
+    }
     try std.testing.expectEqualStrings("Specializing", loweringProgressLabel(.lss));
     try std.testing.expectEqualStrings("Lowering", loweringProgressLabel(.boxy));
 }
@@ -13823,7 +14132,7 @@ test "post-check optimization scope per opt level" {
     try std.testing.expectEqual(lir.CheckedPipeline.InlineMode.none, postCheckInlineModeForOpt(.interpreter));
     try std.testing.expectEqual(lir.CheckedPipeline.SpecConstrCloneInlining.all_calls, specConstrCloneInliningForOpt(.speed));
     try std.testing.expectEqual(lir.CheckedPipeline.SpecConstrCloneInlining.all_calls, specConstrCloneInliningForOpt(.size));
-    try std.testing.expectEqual(lir.CheckedPipeline.SpecConstrCloneInlining.iterator_fusion, specConstrCloneInliningForOpt(.dev));
+    try std.testing.expectEqual(lir.CheckedPipeline.SpecConstrCloneInlining.no_calls, specConstrCloneInliningForOpt(.dev));
 }
 
 test "only optimized builds emit thread-confined count updates" {
@@ -13834,12 +14143,12 @@ test "only optimized builds emit thread-confined count updates" {
         .{ .opt = .dev, .confined = false },
         .{ .opt = .interpreter, .confined = false },
     }) |case| {
-        const config = checkedRuntimeLoweringConfig(.linked_output, case.opt, .lss, RocTarget.detectNative(), false);
+        const config = checkedRuntimeLoweringConfig(.linked_output, case.opt, .lss, RocTarget.detectNative());
         try std.testing.expectEqual(case.confined, config.target.thread_confined_rc);
     }
 }
 
-test "only optimized builds prove uniqueness" {
+test "only optimized builds prove uniqueness and drop string literal reference counts" {
     for ([_]struct { opt: cli_args.OptLevel, proves: bool }{
         .{ .opt = .speed, .proves = true },
         .{ .opt = .size, .proves = true },
@@ -13847,79 +14156,13 @@ test "only optimized builds prove uniqueness" {
         .{ .opt = .interpreter, .proves = false },
     }) |case| {
         for ([_]base.SpecializationStrategy{ .lss, .boxy }) |strategy| {
-            const config = checkedRuntimeLoweringConfig(.linked_output, case.opt, strategy, RocTarget.detectNative(), false);
+            const config = checkedRuntimeLoweringConfig(.linked_output, case.opt, strategy, RocTarget.detectNative());
             try std.testing.expectEqual(case.proves, config.target.prove_uniqueness);
             try std.testing.expectEqual(case.proves, lir.CheckedPipeline.LirPolicy.fromTarget(config.target).prove_uniqueness);
+            try std.testing.expectEqual(case.proves, config.target.immortal_string_literals);
+            try std.testing.expectEqual(case.proves, lir.CheckedPipeline.LirPolicy.fromTarget(config.target).immortal_string_literals);
         }
     }
-}
-
-fn postCheckInlineModeForOpt(opt: cli_args.OptLevel) lir.CheckedPipeline.InlineMode {
-    return switch (opt) {
-        .size, .speed => .wrappers,
-        .dev => lir.CheckedPipeline.dev_inline_mode,
-        .interpreter => .none,
-    };
-}
-
-/// Optimized builds let SpecConstr's value-aware clones chase known values
-/// through any direct call; dev builds confine that chase to iterator
-/// pipelines, which keeps post-check time and emitted program size bounded
-/// while still collapsing `Iter` loops. The interpreter never reaches
-/// SpecConstr (its inline mode is `.none`), so its value here is inert.
-fn specConstrCloneInliningForOpt(opt: cli_args.OptLevel) postcheck.MonotypeLifted.SpecConstr.CloneInlining {
-    return switch (opt) {
-        .size, .speed => .all_calls,
-        .dev, .interpreter => lir.CheckedPipeline.dev_spec_constr_clone_inlining,
-    };
-}
-
-/// Only optimized builds, which are what get deployed, keep `Dict`'s runtime
-/// seed (`TargetConfig.zero_dict_seed`).
-fn zeroDictSeedForOpt(opt: cli_args.OptLevel) bool {
-    return switch (opt) {
-        .size, .speed => false,
-        .dev, .interpreter => true,
-    };
-}
-
-/// Give dev procedures stable code keys for hot reload (`TargetConfig.site_code_keys`).
-fn siteCodeKeysForOpt(opt: cli_args.OptLevel) bool {
-    return switch (opt) {
-        .dev => true,
-        .size, .speed, .interpreter => false,
-    };
-}
-
-fn listInPlaceMapForOpt(opt: cli_args.OptLevel) bool {
-    return switch (opt) {
-        .size, .speed => true,
-        .dev, .interpreter => false,
-    };
-}
-
-fn tagReachabilityForOpt(opt: cli_args.OptLevel) bool {
-    return switch (opt) {
-        .size, .speed => true,
-        .dev, .interpreter => false,
-    };
-}
-
-/// Whether the LIR rewrites that only speed up the produced program run.
-/// Dev builds exist to compile fast; `--opt=speed` and `--opt=size` are where
-/// the program's own speed is bought.
-fn optimizeLirForOpt(opt: cli_args.OptLevel) bool {
-    return switch (opt) {
-        .size, .speed => true,
-        .dev, .interpreter => false,
-    };
-}
-
-fn proveRangesForOpt(opt: cli_args.OptLevel) bool {
-    return switch (opt) {
-        .size, .speed => true,
-        .dev, .interpreter => false,
-    };
 }
 
 fn optimizedDbgWarningsForBuild(
@@ -13938,99 +14181,10 @@ fn optimizedDbgWarningsForBuild(
     };
 }
 
-fn inlineExpectModeForOpt(opt: cli_args.OptLevel) lir.CheckedPipeline.InlineExpectMode {
-    return switch (opt) {
-        .size, .speed => .omit,
-        .dev, .interpreter => .run,
-    };
-}
-
-/// Which checked root definitions become LIR roots for a backend.
-const CheckedLirRoots = union(enum) {
-    /// Provided exports: LIR consumed by host
-    /// shims and interpreters (run, embedded builds, hot reload, glue).
-    platform_entrypoints: PlatformEntrypointArtifact,
-    /// Provided exports, with static data
-    /// exports materialized: LIR for linked outputs (native/LLVM builds).
-    linked_output,
-    /// Pre-selected expect/test roots with their plan metadata (roc test).
-    test_plan: struct {
-        requests: []const check.CheckedArtifact.RootRequest,
-        metadata: []const postcheck.Common.RootTestPlanMetadata,
-    },
-};
-
-/// The single "checked artifacts → LIR" adapter shared by every backend: run,
-/// build-LLVM, build-native, embedded, and test lowering all go through here.
-///
-/// Owns platform-root selection and the optimization-derived lowering option
-/// list so a new lowering option lands in every backend at once instead of in
-/// whichever hand-copied option lists remembered it.
-fn checkedRuntimeLoweringConfig(
-    roots: CheckedLirRoots,
-    opt: cli_args.OptLevel,
-    specialization_strategy: base.SpecializationStrategy,
-    target: RocTarget,
-    proc_debug_names: bool,
-) compile.build.RuntimeLoweringConfig {
-    return .{
-        .include_provided_data_exports = roots == .linked_output,
-        .include_internal_static_data = switch (roots) {
-            .linked_output => true,
-            .platform_entrypoints => |artifact| artifact == .dev_run_image,
-            .test_plan => false,
-        },
-        .target = .{
-            .target_usize = base.target.TargetUsize.fromPtrBitWidth(target.ptrBitWidth()),
-            .erased_capture_prefix = devCapturePrefix(roots, opt, target),
-            .specialization_strategy = specialization_strategy,
-            .inline_mode = postCheckInlineModeForOpt(opt),
-            .specialize_arc_modes = optimizeLirForOpt(opt),
-            .spec_constr_clone_inlining = specConstrCloneInliningForOpt(opt),
-            .consume_dead_boxes = switch (roots) {
-                .linked_output => true,
-                .platform_entrypoints => |artifact| artifact == .dev_run_image,
-                .test_plan => opt == .dev,
-            },
-            .inline_expects = switch (roots) {
-                .test_plan => .run,
-                .platform_entrypoints, .linked_output => inlineExpectModeForOpt(opt),
-            },
-            .list_in_place_map = listInPlaceMapForOpt(opt),
-            .zero_dict_seed = zeroDictSeedForOpt(opt),
-            .site_code_keys = siteCodeKeysForOpt(opt),
-            .owned_proc_signatures = opt == .dev,
-            .tag_reachability = tagReachabilityForOpt(opt),
-            .prove_ranges = proveRangesForOpt(opt),
-            .reuse_boxes = optimizeLirForOpt(opt),
-            .thread_confined_rc = optimizeLirForOpt(opt),
-            .prove_uniqueness = optimizeLirForOpt(opt),
-            .proc_debug_names = proc_debug_names,
-        },
-    };
-}
-
-/// The bytes a program's erased callables reserve at the start of their
-/// captures. Native dev code always supports a hot-reload session, so every
-/// native dev build, like compile-time evaluation, reserves the hot-reload
-/// prefix and compiles the same erased callables; other backends and the
-/// interpreter reserve none.
-fn devCapturePrefix(roots: CheckedLirRoots, opt: cli_args.OptLevel, target: RocTarget) u32 {
-    if (opt != .dev) return 0;
-    switch (roots) {
-        .platform_entrypoints => |artifact| switch (artifact) {
-            .dev_run_image => {},
-            .lir_image => return 0,
-        },
-        .linked_output, .test_plan => {},
-    }
-    return if (backend.dev.isa.isaOfOrNull(target) != null) @import("builtins").erased_callable.hot_reload_capture_prefix_size else 0;
-}
-
 test "native test generic procedures use the ordinary native dev representation and ownership policy" {
     const native = RocTarget.detectNative();
-    const tests = checkedRuntimeLoweringConfig(.{ .test_plan = .{ .requests = &.{}, .metadata = &.{} } }, .dev, .lss, native, false);
-    const build = checkedRuntimeLoweringConfig(.linked_output, .dev, .lss, native, false);
+    const tests = checkedRuntimeLoweringConfig(.{ .test_plan = .{ .requests = &.{}, .metadata = &.{} } }, .dev, .lss, native);
+    const build = checkedRuntimeLoweringConfig(.linked_output, .dev, .lss, native);
     try std.testing.expectEqualDeep(lir.CheckedPipeline.LirPolicy.fromTarget(build.target), lir.CheckedPipeline.LirPolicy.fromTarget(tests.target));
     try std.testing.expectEqualDeep(lir.CheckedPipeline.SolvedPolicy.fromTarget(build.target), lir.CheckedPipeline.SolvedPolicy.fromTarget(tests.target));
     try std.testing.expectEqual(build.target.erased_capture_prefix, tests.target.erased_capture_prefix);
@@ -14049,7 +14203,6 @@ fn lowerCheckedSourceToLir(
     opt: cli_args.OptLevel,
     specialization_strategy: base.SpecializationStrategy,
     target: RocTarget,
-    proc_debug_names: bool,
     host_boundary_digests: bool,
     post_check_executor: ?base.post_check_task_executor.Executor,
     timing: ?*lir.CheckedPipeline.Timing,
@@ -14057,8 +14210,8 @@ fn lowerCheckedSourceToLir(
     boxy_unit: ?postcheck.Boxy.Lower.ModuleUnit,
 ) eval.CompileTimeFinalization.RuntimeMaterializationError!lir.CheckedPipeline.LoweredProgram {
     const selected_roots: []const check.CheckedArtifact.RootRequest = switch (roots) {
-        .platform_entrypoints => try lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_artifact.root_requests.runtime_requests),
-        .linked_output => try lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_artifact.root_requests.runtime_requests),
+        .platform_entrypoints => try lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_artifact.root_requests.runtime_requests.items()),
+        .linked_output => try lir.CheckedPipeline.selectPlatformEntrypointRoots(gpa, root_artifact.root_requests.runtime_requests.items()),
         .test_plan => |plan| plan.requests,
     };
     defer switch (roots) {
@@ -14066,7 +14219,7 @@ fn lowerCheckedSourceToLir(
         .test_plan => {},
     };
 
-    var config = checkedRuntimeLoweringConfig(roots, opt, specialization_strategy, target, proc_debug_names);
+    var config = checkedRuntimeLoweringConfig(roots, opt, specialization_strategy, target);
     config.target.host_boundary_digests = host_boundary_digests;
     config.target.post_check_executor = post_check_executor;
     config.target.timing = timing;
@@ -14633,7 +14786,7 @@ const LirExpectSites = struct {
     fn lessThan(self: LirExpectSites, lhs: u32, rhs: u32) bool {
         const a = self.sites[lhs];
         const b = self.sites[rhs];
-        if (a.loc.file != b.loc.file) return a.loc.file < b.loc.file;
+        if (a.loc.file != b.loc.file) return @backingInt(a.loc.file) < @backingInt(b.loc.file);
         if (a.region.start.offset != b.region.start.offset) return a.region.start.offset < b.region.start.offset;
         return a.region.end.offset < b.region.end.offset;
     }
@@ -14641,7 +14794,7 @@ const LirExpectSites = struct {
     fn module(self: LirExpectSites, index: u32) [32]u8 {
         const site = self.sites[index];
         if (!site.loc.hasLocation()) base.invariant("test expect site has no source location", .{});
-        return self.store.sourceFileModuleIdentity(site.loc.file);
+        return self.store.sourceFileModuleIdentity(site.loc.fileIndex());
     }
 
     fn region(self: LirExpectSites, index: u32) base.Region {
@@ -15548,7 +15701,7 @@ fn runCompiledTestPlan(
 /// no unit of the app has in view.
 fn unitImageTestApplies(opt: cli_args.OptLevel, no_cache: bool, strategy: base.SpecializationStrategy, root: *const check.CheckedArtifact.CheckedModuleArtifact) bool {
     if (root.module_identity.kind == .default_app) return false;
-    return unitImageRunApplies(opt, no_cache, strategy, RocTarget.detectNative());
+    return unitImageRunApplies(opt, no_cache, strategy, inProcessUnitTarget());
 }
 
 /// Whether this compiler can load test units' images into its own process.
@@ -15569,43 +15722,46 @@ const UnitTestImage = struct {
     hosted_symbols: []const []const u8,
 };
 
-/// A `roc test` program as test units: built or restored, then loaded into
-/// the compiler's own process, where their wrappers run the test roots.
-const UnitImageTestProgram = struct {
+/// Unit images loaded into the compiler's own process. Each image's imports
+/// bind to the in-process host's symbols, the builtins' implementations, the
+/// compiler's Boxy runtime, the exports of the images loaded before it, and,
+/// for a hosted symbol, a stub that crashes exactly as a hosted call in an
+/// in-process evaluation does. Every image is loaded after everything it
+/// imports from.
+const LoadedUnitImages = struct {
     gpa: Allocator,
-    tables: RunUnitTables,
-    library: ?BoxyLibraryObjects = null,
-    /// The root unit's image, when the root pairs with a platform. Owned.
-    root_image: ?[]align(backend.dev.UnitImage.alignment.toByteUnits()) u8 = null,
     loaded: std.ArrayList(backend.dev.UnitImageLoader.Loaded) = .empty,
     /// What the loaded images export, by name: a procedure two units define
-    /// binds to the first image loaded.
+    /// binds to the first image loaded. The names borrow the images' bytes.
     exports: std.StringHashMapUnmanaged(backend.dev.UnitImageLoader.Binding) = .empty,
     /// Each hosted symbol the units call, bound to a stub that crashes as
     /// a hosted call in an in-process test does.
     hosted: std.StringHashMapUnmanaged(usize) = .empty,
     hosted_stubs: ?backend.dev.ExecutableMemory = null,
-    /// Every loaded image's expect sites, in load order: the program-wide
-    /// site table.
-    sites: std.ArrayList(compile.boxy_object_cache.ExpectSiteRecord) = .empty,
-    wrappers: std.AutoHashMapUnmanaged(UnitTestRootKey, eval.Inspected.UnitImageBoolRootEntryFn) = .empty,
+    /// What the images' code is run for, which a hosted stub's crash names.
+    hosted_unavailable_while: []const u8 = "evaluating at compile time",
+    /// The stored images the loaded images' pool imports name, placed once
+    /// each (design.md "Constant Pool"), and the build's constant stores
+    /// they are found in when this owns them.
+    pool: ?backend.dev.UnitImageLoader.Pool = null,
+    owned_pool_source: ?*BuildPoolSource = null,
 
-    fn deinit(self: *UnitImageTestProgram) void {
+    fn deinit(self: *LoadedUnitImages) void {
         for (self.loaded.items) |*image| image.unload();
+        if (self.pool) |*pool| pool.deinit();
+        if (self.owned_pool_source) |source| {
+            source.deinit();
+            self.gpa.destroy(source);
+        }
         self.loaded.deinit(self.gpa);
         self.exports.deinit(self.gpa);
         self.hosted.deinit(self.gpa);
         if (self.hosted_stubs) |*stubs| stubs.deinit();
-        self.sites.deinit(self.gpa);
-        self.wrappers.deinit(self.gpa);
-        if (self.library) |library| library.deinit(self.gpa);
-        if (self.root_image) |image| self.gpa.free(image);
-        self.tables.deinit();
     }
 
     /// Binds one image's imports while it loads.
     const LoadContext = struct {
-        program: *UnitImageTestProgram,
+        images: *LoadedUnitImages,
         site_base: u32,
 
         fn resolve(context: *anyopaque, name: []const u8) ?backend.dev.UnitImageLoader.Binding {
@@ -15615,25 +15771,50 @@ const UnitImageTestProgram = struct {
             // code calls it.
             if (builtins_registry.BuiltinFn.fromSymbolName(name)) |builtin_fn| return .{ .address = builtin_fn.wrapperAddress(), .function = true };
             if (backend.dev.HostSplice.hostFunction(name)) |address| return .{ .address = address, .function = true };
-            if (self.program.exports.get(name)) |binding| return binding;
-            if (self.program.hosted.get(name)) |address| return .{ .address = address, .function = true };
+            if (self.images.exports.get(name)) |binding| return binding;
+            if (self.images.hosted.get(name)) |address| return .{ .address = address, .function = true };
             return null;
         }
     };
 
-    /// Load `image`, whose sites start at the next program-wide site id.
-    fn load(self: *UnitImageTestProgram, image: UnitTestImage) CliMainError!void {
-        const view = backend.dev.UnitImage.View.init(image.bytes) catch |err| base.invariant("roc test invariant violated: an admitted test unit image does not read: {s}", .{@errorName(err)});
-        var context: LoadContext = .{ .program = self, .site_base = @intCast(self.sites.items.len) };
+    /// Bind the loaded images' pool imports to the images `source` finds.
+    fn attachPool(self: *LoadedUnitImages, source: backend.dev.UnitImage.PoolSource) void {
+        std.debug.assert(self.pool == null);
+        self.pool = .{ .gpa = self.gpa, .source = source };
+    }
+
+    /// Bind the loaded images' pool imports to the images the constant
+    /// stores of `build_env`'s checked modules hold.
+    fn attachBuildPool(self: *LoadedUnitImages, build_env: *BuildEnv) Allocator.Error!void {
+        const source = try self.gpa.create(BuildPoolSource);
+        errdefer self.gpa.destroy(source);
+        source.* = try BuildPoolSource.init(self.gpa, build_env);
+        self.owned_pool_source = source;
+        self.attachPool(source.source());
+    }
+
+    /// Load the image in `bytes`, which outlives it, binding its expect-site
+    /// base to `site_base`, and record what it exports. `code_locations` is
+    /// the image's `CodeLocations`, or empty. The returned image is valid
+    /// until the next load.
+    fn load(
+        self: *LoadedUnitImages,
+        bytes: []align(backend.dev.UnitImage.alignment.toByteUnits()) const u8,
+        site_base: u32,
+        code_locations: []const u8,
+    ) CliMainError!*const backend.dev.UnitImageLoader.Loaded {
+        const view = backend.dev.UnitImage.View.init(bytes) catch |err| base.invariant("unit image invariant violated: an admitted unit image does not read: {s}", .{@errorName(err)});
+        var context: LoadContext = .{ .images = self, .site_base = site_base };
         var diagnostic: backend.dev.UnitImageLoader.Diagnostic = .{};
         try self.loaded.ensureUnusedCapacity(self.gpa, 1);
-        var loaded = backend.dev.UnitImageLoader.load(self.gpa, view, .{ .context = &context, .resolve = LoadContext.resolve }, &diagnostic) catch |err| switch (err) {
+        var loaded = backend.dev.UnitImageLoader.load(self.gpa, view, .{ .context = &context, .resolve = LoadContext.resolve, .pool = if (self.pool) |*pool| pool else null }, &diagnostic) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.UndefinedImport => base.invariant("roc test invariant violated: a test unit's image imports {s}, which nothing loaded defines", .{diagnostic.name}),
-            error.SiteOutOfRange => base.invariant("roc test invariant violated: a test unit's image has a reference to '{s}' out of its field's reach", .{diagnostic.name}),
+            error.FlushInstructionCacheFailed => return error.FlushInstructionCacheFailed,
+            error.UndefinedImport => base.invariant("unit image invariant violated: a unit's image imports {s}, which nothing loaded defines", .{diagnostic.name}),
+            error.SiteOutOfRange => base.invariant("unit image invariant violated: a unit's image has a reference to '{s}' out of its field's reach", .{diagnostic.name}),
         };
         errdefer loaded.unload();
-        (backend.dev.CodeLocations{ .bytes = image.tests.code_locations }).dumpAllocationMap(@intFromPtr(loaded.text().ptr));
+        (backend.dev.CodeLocations{ .bytes = code_locations }).dumpAllocationMap(@intFromPtr(loaded.text().ptr));
         const symbols = view.symbols();
         try self.exports.ensureUnusedCapacity(self.gpa, @intCast(view.exports().len));
         for (view.exports()) |index| {
@@ -15642,26 +15823,21 @@ const UnitImageTestProgram = struct {
             if (entry.found_existing) continue;
             entry.value_ptr.* = .{ .address = loaded.symbolAddress(symbol), .function = symbol.type == @backingInt(backend.dev.UnitImage.SymbolType.func) };
         }
-        try self.wrappers.ensureUnusedCapacity(self.gpa, @intCast(image.tests.test_roots.len));
-        for (image.tests.test_roots) |root| {
-            if (root.symbol >= symbols.len) base.invariant("roc test invariant violated: a test unit's wrapper names symbol {d} of {d}", .{ root.symbol, symbols.len });
-            self.wrappers.putAssumeCapacity(.{ .module = root.module, .root_index = root.root_index }, @ptrFromInt(loaded.symbolAddress(symbols[root.symbol])));
-        }
-        try self.sites.appendSlice(self.gpa, image.tests.expect_sites);
         self.loaded.appendAssumeCapacity(loaded);
+        return &self.loaded.items[self.loaded.items.len - 1];
     }
 
     /// Bind every one of `names` the units call to a stub that reports the
     /// call as a crash, as a hosted call in an in-process test does. The
     /// stub calls `roc_crashed(message, length)` in the host's own calling
     /// convention and traps after it.
-    fn bindHostedStubs(self: *UnitImageTestProgram, arena: Allocator, names: []const []const u8) CliMainError!void {
+    fn bindHostedStubs(self: *LoadedUnitImages, arena: Allocator, names: []const []const u8) CliMainError!void {
         if (names.len == 0) return;
         const stub_size: usize = if (builtin.cpu.arch == .aarch64) 15 * 4 else 4 + 10 + 10 + 10 + 2 + 2;
         const crashed = @import("builtins").in_process_host.Symbol.roc_crashed.address();
         const code = try arena.alloc(u8, names.len * stub_size);
         for (names, 0..) |name, index| {
-            const message = try std.fmt.allocPrint(arena, "hosted function `{s}` is not available while evaluating at compile time", .{name});
+            const message = try std.fmt.allocPrint(arena, "hosted function `{s}` is not available while {s}", .{ name, self.hosted_unavailable_while });
             const stub = code[index * stub_size ..][0..stub_size];
             if (builtin.cpu.arch == .aarch64) {
                 // movz/movk x0, message; movz/movk x1, length; movz/movk
@@ -15703,6 +15879,44 @@ const UnitImageTestProgram = struct {
     }
 };
 
+/// A `roc test` program as test units: built or restored, then loaded into
+/// the compiler's own process, where their wrappers run the test roots.
+const UnitImageTestProgram = struct {
+    gpa: Allocator,
+    tables: RunUnitTables,
+    library: ?BoxyLibraryObjects = null,
+    /// The root unit's image, when the root pairs with a platform. Owned.
+    root_image: ?[]align(backend.dev.UnitImage.alignment.toByteUnits()) u8 = null,
+    images: LoadedUnitImages,
+    /// Every loaded image's expect sites, in load order: the program-wide
+    /// site table.
+    sites: std.ArrayList(compile.boxy_object_cache.ExpectSiteRecord) = .empty,
+    wrappers: std.AutoHashMapUnmanaged(UnitTestRootKey, eval.Inspected.UnitImageBoolRootEntryFn) = .empty,
+
+    fn deinit(self: *UnitImageTestProgram) void {
+        self.images.deinit();
+        self.sites.deinit(self.gpa);
+        self.wrappers.deinit(self.gpa);
+        if (self.library) |library| library.deinit(self.gpa);
+        if (self.root_image) |image| self.gpa.free(image);
+        self.tables.deinit();
+    }
+
+    /// Load `image`, whose sites start at the next program-wide site id.
+    fn load(self: *UnitImageTestProgram, image: UnitTestImage) CliMainError!void {
+        try self.wrappers.ensureUnusedCapacity(self.gpa, @intCast(image.tests.test_roots.len));
+        try self.sites.ensureUnusedCapacity(self.gpa, image.tests.expect_sites.len);
+        const loaded = try self.images.load(image.bytes, @intCast(self.sites.items.len), image.tests.code_locations);
+        const view = backend.dev.UnitImage.View.init(image.bytes) catch unreachable; // `LoadedUnitImages.load` read the same bytes
+        const symbols = view.symbols();
+        for (image.tests.test_roots) |root| {
+            if (root.symbol >= symbols.len) base.invariant("roc test invariant violated: a test unit's wrapper names symbol {d} of {d}", .{ root.symbol, symbols.len });
+            self.wrappers.putAssumeCapacity(.{ .module = root.module, .root_index = root.root_index }, @ptrFromInt(loaded.symbolAddress(symbols[root.symbol])));
+        }
+        self.sites.appendSliceAssumeCapacity(image.tests.expect_sites);
+    }
+};
+
 /// Build or restore `roc test`'s test units and load them: a test unit
 /// per module the planned roots need (design.md "Unit-Image Test
 /// Execution"), each restored from the per-module cache or lowered and
@@ -15716,9 +15930,10 @@ fn prepareUnitImageTests(
 ) CliMainError!UnitImageTestProgram {
     if (comptime !unit_image_tests_supported) unreachable; // unitImageTestApplies holds only on a compiler that loads unit images
     const Artifact = check.CheckedArtifact.CheckedModuleArtifact;
-    const target = RocTarget.detectNative();
-    var program: UnitImageTestProgram = .{ .gpa = ctx.gpa, .tables = RunUnitTables.init(ctx) };
+    const target = inProcessUnitTarget();
+    var program: UnitImageTestProgram = .{ .gpa = ctx.gpa, .tables = RunUnitTables.init(ctx), .images = .{ .gpa = ctx.gpa } };
     errdefer program.deinit();
+    try program.images.attachBuildPool(build_env);
     program.tables.digests = try build_env.boxyLinkDigests();
     const cache_manager = build_env.cache_manager orelse base.invariant("roc test invariant violated: a test run from unit images has no cache manager", .{});
     const root_artifact = build_env.rootModuleCheckedArtifact() orelse base.invariant("roc test invariant violated: a planned test program has no root module", .{});
@@ -15737,8 +15952,8 @@ fn prepareUnitImageTests(
     defer ctx.gpa.free(visible);
     var paired: std.ArrayList(*const Artifact) = .empty;
     defer paired.deinit(ctx.gpa);
-    if (unit_root.platform_type_inputs.requirements.len != 0) try paired.append(ctx.gpa, unit_root);
-    for (visible) |artifact| if (artifact.platform_type_inputs.requirements.len != 0) try paired.append(ctx.gpa, artifact);
+    if (unit_root.platform_type_inputs.requirements.items().len != 0) try paired.append(ctx.gpa, unit_root);
+    for (visible) |artifact| if (artifact.platform_type_inputs.requirements.items().len != 0) try paired.append(ctx.gpa, artifact);
     var test_modules: std.ArrayList(*const Artifact) = .empty;
     defer test_modules.deinit(ctx.gpa);
     // A root unit exists only to export the paired modules' wrappers. A
@@ -15748,7 +15963,7 @@ fn prepareUnitImageTests(
     var paired_roots = false;
     for (test_plan.modules) |planned| {
         if (planned.runCount() == 0) continue;
-        if (planned.artifact.platform_type_inputs.requirements.len != 0) {
+        if (planned.artifact.platform_type_inputs.requirements.items().len != 0) {
             const is_paired = for (paired.items) |artifact| {
                 if (artifact == planned.artifact) break true;
             } else false;
@@ -15758,12 +15973,16 @@ fn prepareUnitImageTests(
         }
         try test_modules.append(ctx.gpa, planned.artifact);
     }
-    // The root unit calls into its modules' imports and the app.
+    // The root unit calls into its modules' dependencies and the app.
     if (paired_roots) {
-        for (paired.items) |artifact| for (artifact.direct_import_module_keys) |key| {
-            const imported = program.tables.digests.artifacts.get(key.bytes) orelse continue;
-            try test_modules.append(ctx.gpa, imported);
-        };
+        for (paired.items) |artifact| {
+            const dependency_keys = try build_env.unitDependencyKeys(ctx.gpa, artifact);
+            defer ctx.gpa.free(dependency_keys);
+            for (dependency_keys) |key| {
+                const dependency = program.tables.digests.artifacts.get(key) orelse continue;
+                try test_modules.append(ctx.gpa, dependency);
+            }
+        }
         if (unit_root != root_artifact) try test_modules.append(ctx.gpa, root_artifact);
     }
 
@@ -15779,16 +15998,16 @@ fn prepareUnitImageTests(
     var seen_hosted = std.StringHashMap(void).init(ctx.arena);
     for (library.hosted_symbols) |name| if (!(try seen_hosted.getOrPut(name)).found_existing) try hosted_names.append(ctx.arena, name);
     if (root_unit) |unit| for (unit.hosted_symbols) |name| if (!(try seen_hosted.getOrPut(name)).found_existing) try hosted_names.append(ctx.arena, name);
-    try program.bindHostedStubs(ctx.arena, hosted_names.items);
-    // Every unit's imports are loaded before it: the builtins, then the
-    // rest after everything they import, then the root unit.
-    const order = try unitLoadOrder(ctx.gpa, library.artifacts);
+    try program.images.bindHostedStubs(ctx.arena, hosted_names.items);
+    // Every unit's dependencies are loaded before it: the builtins, then
+    // the rest after everything they depend on, then the root unit.
+    const order = try unitLoadOrder(ctx.gpa, build_env, library.artifacts);
     defer ctx.gpa.free(order);
     for (order) |index| try program.load(.{ .bytes = library.images[index], .tests = library.tests[index], .hosted_symbols = &.{} });
     if (root_unit) |unit| try program.load(unit);
     reporter.end();
     reporter.recordCounters("Test units", &.{
-        .{ .name = "Images loaded", .count = program.loaded.items.len },
+        .{ .name = "Images loaded", .count = program.images.loaded.items.len },
         .{ .name = "Expect sites", .count = program.sites.items.len },
         .{ .name = "Test root wrappers", .count = program.wrappers.count() },
     });
@@ -15796,8 +16015,9 @@ fn prepareUnitImageTests(
 }
 
 /// The order to load `artifacts`' units in: the first (the builtins), then
-/// each other one after every one of `artifacts` it imports.
-fn unitLoadOrder(gpa: Allocator, artifacts: []const *const check.CheckedArtifact.CheckedModuleArtifact) Allocator.Error![]u32 {
+/// each other one after every one of `artifacts` it depends on
+/// (`Coordinator.unitDependencyKeys`), whose symbols its image imports.
+fn unitLoadOrder(gpa: Allocator, build_env: *BuildEnv, artifacts: []const *const check.CheckedArtifact.CheckedModuleArtifact) Allocator.Error![]u32 {
     var index_by_key = std.AutoHashMap([32]u8, u32).init(gpa);
     defer index_by_key.deinit();
     for (artifacts, 0..) |artifact, index| try index_by_key.put(artifact.key.bytes, @intCast(index));
@@ -15811,23 +16031,27 @@ fn unitLoadOrder(gpa: Allocator, artifacts: []const *const check.CheckedArtifact
     order[0] = 0;
     placed[0] = true;
     count = 1;
-    const Frame = struct { index: u32, next_import: usize };
+    const Frame = struct { index: u32, dependencies: []const [32]u8, next_dependency: usize };
     var stack: std.ArrayList(Frame) = .empty;
-    defer stack.deinit(gpa);
+    defer {
+        for (stack.items) |frame| gpa.free(frame.dependencies);
+        stack.deinit(gpa);
+    }
     for (1..artifacts.len) |start| {
         if (placed[start]) continue;
-        try stack.append(gpa, .{ .index = @intCast(start), .next_import = 0 });
+        try stack.ensureUnusedCapacity(gpa, 1);
+        stack.appendAssumeCapacity(.{ .index = @intCast(start), .dependencies = try build_env.unitDependencyKeys(gpa, artifacts[start]), .next_dependency = 0 });
         while (stack.items.len != 0) {
             const frame = &stack.items[stack.items.len - 1];
-            const imports = artifacts[frame.index].direct_import_module_keys;
-            if (frame.next_import < imports.len) {
-                const key = imports[frame.next_import];
-                frame.next_import += 1;
-                const imported = index_by_key.get(key.bytes) orelse continue;
-                if (placed[imported]) continue;
-                // Module imports are acyclic, so an import on the stack is
-                // never met again before it is placed.
-                try stack.append(gpa, .{ .index = imported, .next_import = 0 });
+            if (frame.next_dependency < frame.dependencies.len) {
+                const key = frame.dependencies[frame.next_dependency];
+                frame.next_dependency += 1;
+                const dependency = index_by_key.get(key) orelse continue;
+                if (placed[dependency]) continue;
+                // Unit dependencies are acyclic, so a dependency on the
+                // stack is never met again before it is placed.
+                try stack.ensureUnusedCapacity(gpa, 1);
+                stack.appendAssumeCapacity(.{ .index = dependency, .dependencies = try build_env.unitDependencyKeys(gpa, artifacts[dependency]), .next_dependency = 0 });
                 continue;
             }
             if (!placed[frame.index]) {
@@ -15835,7 +16059,7 @@ fn unitLoadOrder(gpa: Allocator, artifacts: []const *const check.CheckedArtifact
                 order[count] = frame.index;
                 count += 1;
             }
-            _ = stack.pop();
+            gpa.free(stack.pop().?.dependencies);
         }
     }
     std.debug.assert(count == artifacts.len);
@@ -15880,7 +16104,7 @@ fn unitTestRootImage(
 
     reporter.begin(loweringProgressLabel(.boxy));
     var spec_timing = lir.CheckedPipeline.Timing.init(ctx.io.std_io);
-    if (reporter.always) spec_timing.enableDetailedMonotypeBody();
+    if (reporter.always) spec_timing.enableDetail();
     var requests: std.ArrayList(check.CheckedArtifact.RootRequest) = .empty;
     defer requests.deinit(ctx.gpa);
     var source_modules: std.ArrayList(check.CheckedArtifact.ModuleId) = .empty;
@@ -15910,7 +16134,7 @@ fn unitTestRootImage(
         .root = check.CheckedArtifact.loweringViewWithRelations(root_artifact, relation_artifacts),
         .imports = imported_artifacts,
     };
-    var config = checkedRuntimeLoweringConfig(.linked_output, .dev, .boxy, target, false).target;
+    var config = checkedRuntimeLoweringConfig(.linked_output, .dev, .boxy, target).target;
     config.boxy_unit = .{ .imports = &program.tables.interfaces, .root = true, .names = &program.tables.digests.names, .expect_sites = true };
     config.post_check_executor = build_env.postCheckExecutor();
     config.timing = &spec_timing;
@@ -15923,7 +16147,9 @@ fn unitTestRootImage(
     finishPostCheckLowering(reporter, &spec_timing, .boxy);
 
     const static_data = try compile.static_data_exports.buildStaticData(ctx.gpa, .{ .root = modules.root, .imports = imported_artifacts }, &lowered, target, .{});
-    defer compile.static_data_exports.deinitStaticData(ctx.gpa, static_data);
+    // The pieces take the static data (`compileToPieces`).
+    var static_data_owned = true;
+    defer if (static_data_owned) compile.static_data_exports.deinitStaticData(ctx.gpa, static_data);
     var wrappers = try compile.boxy_unit.testEntrypoints(ctx.gpa, &lowered, module_digests.items, root_indices.items);
     defer wrappers.deinit(ctx.gpa);
     reporter.begin(devBackendPhaseName(target));
@@ -15934,6 +16160,7 @@ fn unitTestRootImage(
     object_compiler.erased_capture_prefix = lowered.lir_result.erased_capture_prefix;
     object_compiler.internal_entrypoints = true;
     object_compiler.relocatable_expect_sites = true;
+    static_data_owned = false;
     var pieces = object_compiler.compileToPieces(
         &lowered.lir_result.store,
         &lowered.lir_result.layouts,
@@ -16742,9 +16969,9 @@ fn readWatchFileState(ctx: *CliCtx, path: []const u8) WatchSnapshotError!WatchFi
     };
     defer ctx.gpa.free(bytes);
 
-    var hasher = base.Sha256.init(.{});
-    hasher.update(bytes);
-    return .{ .hash = hasher.finalResult() };
+    // The same digest the compiler records for a file it read
+    // (`compile.watch_inputs.State.hash`).
+    return .{ .hash = base.SourceDigest.of(bytes).bytes };
 }
 
 fn computeWatchSnapshot(ctx: *CliCtx, paths: []const []const u8) WatchSnapshotError![]WatchSnapshotEntry {
@@ -16949,6 +17176,7 @@ fn buildWatchChildArgv(ctx: *CliCtx, arg0: []const u8, command: WatchCommand, in
     switch (command) {
         .check => |args| {
             try argv.append(ctx.gpa, "check");
+            if (args.specialization_strategy) |strategy| try argv.append(ctx.gpa, if (strategy == .lss) "--specialize=yes" else "--specialize=no");
             if (args.main) |main_path| try appendOwnedArg(ctx.gpa, &argv, &owned, "--main={s}", .{main_path});
             if (args.time) try argv.append(ctx.gpa, "--time");
             if (args.timings) try argv.append(ctx.gpa, "--timings");
@@ -16957,8 +17185,6 @@ fn buildWatchChildArgv(ctx: *CliCtx, arg0: []const u8, command: WatchCommand, in
             if (args.max_threads) |jobs| try appendOwnedArg(ctx.gpa, &argv, &owned, "--jobs={}", .{jobs});
             try appendResolveLimitArgs(ctx.gpa, &argv, &owned, args.resolve_limits);
             try appendReplaceDepArgs(ctx.gpa, &argv, &args.resolve_limits.replace_deps);
-            try appendOwnedArg(ctx.gpa, &argv, &owned, "--watch-inputs-file={s}", .{inputs_path});
-            try argv.append(ctx.gpa, args.path);
         },
         .test_cmd => |args| {
             try argv.append(ctx.gpa, "test");
@@ -16970,8 +17196,6 @@ fn buildWatchChildArgv(ctx: *CliCtx, arg0: []const u8, command: WatchCommand, in
             if (args.max_threads) |jobs| try appendOwnedArg(ctx.gpa, &argv, &owned, "--jobs={}", .{jobs});
             try appendResolveLimitArgs(ctx.gpa, &argv, &owned, args.resolve_limits);
             try appendReplaceDepArgs(ctx.gpa, &argv, &args.resolve_limits.replace_deps);
-            try appendOwnedArg(ctx.gpa, &argv, &owned, "--watch-inputs-file={s}", .{inputs_path});
-            try argv.append(ctx.gpa, args.path);
         },
         .build => |args| {
             try argv.append(ctx.gpa, "build");
@@ -16988,15 +17212,32 @@ fn buildWatchChildArgv(ctx: *CliCtx, arg0: []const u8, command: WatchCommand, in
             if (args.wasm_stack_size) |bytes| try appendOwnedArg(ctx.gpa, &argv, &owned, "--wasm-stack-size={}", .{bytes});
             try appendResolveLimitArgs(ctx.gpa, &argv, &owned, args.resolve_limits);
             try appendReplaceDepArgs(ctx.gpa, &argv, &args.resolve_limits.replace_deps);
-            try appendOwnedArg(ctx.gpa, &argv, &owned, "--watch-inputs-file={s}", .{inputs_path});
-            try argv.append(ctx.gpa, args.path);
         },
     }
+    if (ctx.streamSupportsAnsi(.stdout)) try argv.append(ctx.gpa, "--watch-ansi-stdout");
+    if (ctx.streamSupportsAnsi(.stderr)) try argv.append(ctx.gpa, "--watch-ansi-stderr");
+    try appendOwnedArg(ctx.gpa, &argv, &owned, "--watch-inputs-file={s}", .{inputs_path});
+    try argv.append(ctx.gpa, watchCommandPath(command));
 
     return .{
         .argv = try argv.toOwnedSlice(ctx.gpa),
         .owned = try owned.toOwnedSlice(ctx.gpa),
     };
+}
+
+test "watch check child argv preserves the compile-time strategy" {
+    var io = Io.create(std.testing.io);
+    var ctx = CliCtx.init(std.testing.allocator, std.testing.allocator, &io, .check);
+    ctx.initIo();
+    defer ctx.deinit();
+
+    for ([_]?base.SpecializationStrategy{ null, .boxy, .lss }) |strategy| {
+        var child_argv = try buildWatchChildArgv(&ctx, "roc", .{ .check = .{ .specialization_strategy = strategy } }, "watch-inputs");
+        defer child_argv.deinit(std.testing.allocator);
+        const parsed = try cli_args.parse(std.testing.allocator, std.testing.io, child_argv.argv[1..]);
+        defer parsed.deinit(std.testing.allocator);
+        try std.testing.expectEqual(strategy, parsed.check.specialization_strategy);
+    }
 }
 
 test "watch child argv forwards every dependency replacement" {
@@ -17033,6 +17274,21 @@ test "watch child argv forwards every dependency replacement" {
         try std.testing.expectEqualStrings("../pkg/main.roc", limits.replace_deps.slice()[0].new);
         try std.testing.expectEqualStrings("./b/main.roc", limits.replace_deps.slice()[1].old);
         try std.testing.expectEqualStrings(url, limits.replace_deps.slice()[1].new);
+    }
+}
+
+test "watch child argv preserves the replay destinations' ANSI capabilities" {
+    var io = Io.create(std.testing.io);
+    var ctx = CliCtx.init(std.testing.allocator, std.testing.allocator, &io, .test_cmd);
+    ctx.initIo();
+    defer ctx.deinit();
+
+    for ([_]cli_context.AnsiStreams{ .{}, .{ .stdout = true }, .{ .stderr = true }, .{ .stdout = true, .stderr = true } }) |streams| {
+        ctx.replay_ansi = streams;
+        var child_argv = try buildWatchChildArgv(&ctx, "roc", .{ .test_cmd = .{} }, "watch-inputs");
+        defer child_argv.deinit(std.testing.allocator);
+        const parsed = try cli_args.parse(std.testing.allocator, std.testing.io, child_argv.argv[1..]);
+        try std.testing.expectEqual(streams, parsed.watchReplayAnsi().?);
     }
 }
 
@@ -17230,7 +17486,7 @@ fn rocTest(ctx: *CliCtx, args_in: cli_args.TestArgs, arg0: []const u8) CliMainEr
         .timings = args.timings,
         .resolution_config = resolutionConfigFromLimits(args.resolve_limits),
         .track_watch_inputs = args.watch_inputs_file != null,
-        .specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy),
+        .specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt),
         .root_source_url = args.root_source_url,
         .main_source_url = args.main_source_url,
         // `roc test` never links a program, so it publishes no executable
@@ -17291,7 +17547,7 @@ fn rocTest(ctx: *CliCtx, args_in: cli_args.TestArgs, arg0: []const u8) CliMainEr
             base.invariant("compiled module plan contains duplicate source module {s}", .{qualified_name});
         }
         const identity = artifact.module_identity.stable_hash;
-        const link_identity = lir.CheckedPipeline.BoxyModuleNames.stableName(check.CheckedArtifact.importedView(artifact));
+        const link_identity = lir.CheckedPipeline.BoxyModuleNames.stableName(&check.CheckedArtifact.importedView(artifact));
         entry.value_ptr.* = .{ .env = module.semantic.env, .common = &module.semantic.env.common, .path = module.path, .name = qualified_name, .identity = identity };
         try source_modules.bind(ctx.gpa, identity, workspace);
         try source_modules.bind(ctx.gpa, link_identity, workspace);
@@ -17310,7 +17566,7 @@ fn rocTest(ctx: *CliCtx, args_in: cli_args.TestArgs, arg0: []const u8) CliMainEr
     var test_plan = try buildCliTestPlan(ctx, modules, &module_results);
     defer test_plan.deinit(ctx.gpa);
 
-    const specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy);
+    const specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt);
 
     // A root whose module's outcome file records what running it observed
     // under these exact checked sources and this execution mode observes
@@ -17354,7 +17610,6 @@ fn rocTest(ctx: *CliCtx, args_in: cli_args.TestArgs, arg0: []const u8) CliMainEr
         args.opt,
         specialization_strategy,
         RocTarget.detectNative(),
-        false,
     );
     runtime_config.explicit_roots = runtime_roots;
     runtime_config.compile_time_discovery_roots = .{
@@ -17387,7 +17642,7 @@ fn rocTest(ctx: *CliCtx, args_in: cli_args.TestArgs, arg0: []const u8) CliMainEr
     });
 
     var spec_timing = lir.CheckedPipeline.Timing.init(ctx.io.std_io);
-    if (args.timings) spec_timing.enableDetailedMonotypeBody();
+    if (args.timings) spec_timing.enableDetail();
     var dev_timing = eval.test_helpers.DevBoolRootTiming.init(ctx.io.std_io);
 
     var total = CliTestRunSummary{};
@@ -18549,7 +18804,8 @@ fn rocRepl(ctx: *CliCtx, repl_args: cli_args.ReplArgs) CliMainError!void {
         ctx.gpa,
         ctx.coreCtx(),
         backend_kind,
-        currentRuntimeSpecializationStrategy(repl_args.specialization_strategy),
+        // A REPL evaluation is a compile-time root with no runtime consumer.
+        .boxy,
     );
     defer session.deinit();
 
@@ -18707,16 +18963,168 @@ fn replReportingConfig(ctx: *CliCtx, mode: ReplMode) reporting.ReportingConfig {
 
 const glue = @import("glue");
 
-const RocGlueError = glue.GlueError || CliError || SourceRefResolveError || error{InvalidArguments};
+const RocGlueError = glue.GlueError || CliMainError || SourceRefResolveError || error{InvalidArguments};
+
+/// Whether `roc glue` runs its glue spec from unit images loaded into the
+/// compiler's own process (design.md "Unit-Image Glue Execution"): the same
+/// switch on optimization, strategy, cache presence and host as a composed
+/// dev run of a program for this machine. Every other glue run compiles the
+/// spec to a plugin object.
+fn unitImageGlueApplies(opt: cli_args.OptLevel, no_cache: bool, strategy: base.SpecializationStrategy) bool {
+    return unitImageRunApplies(opt, no_cache, strategy, inProcessUnitTarget());
+}
+
+/// A glue spec as unit images: its units built as a composed dev run builds
+/// them, each restored from the per-module cache or lowered and filed there,
+/// then loaded into the compiler's own process, where the root unit's
+/// `roc_make_glue` wrapper runs the spec. Everything the loaded generator
+/// borrows lives here, so this outlives the glue run.
+const UnitImageGlueGenerator = struct {
+    ctx: *CliCtx,
+    glue_spec: []const u8,
+    /// What the units lower against. The build environment's compile-time
+    /// evaluation records into it, so it outlives the build environment.
+    tables: ?RunUnitTables = null,
+    build_env: ?BuildEnv = null,
+    units: ?RunUnits = null,
+    imported_artifacts: []check.CheckedArtifact.ImportedModuleView = &.{},
+    relation_artifacts: []check.CheckedArtifact.ImportedModuleView = &.{},
+    boundary: ?lir.CheckedPipeline.BoxyEntrypointBoundary = null,
+    images: LoadedUnitImages,
+    /// Why `load` failed, which the command returns in place of the glue
+    /// module's summary of it.
+    failure: ?CliMainError = null,
+
+    fn init(ctx: *CliCtx, glue_spec: []const u8) UnitImageGlueGenerator {
+        return .{ .ctx = ctx, .glue_spec = glue_spec, .images = .{ .gpa = ctx.gpa, .hosted_unavailable_while = "running a glue spec" } };
+    }
+
+    fn deinit(self: *UnitImageGlueGenerator) void {
+        const gpa = self.ctx.gpa;
+        self.images.deinit();
+        if (self.boundary) |*boundary| boundary.deinit();
+        gpa.free(self.relation_artifacts);
+        gpa.free(self.imported_artifacts);
+        if (self.units) |*units| units.deinit(gpa);
+        if (self.build_env) |*build_env| build_env.deinit();
+        if (self.tables) |*tables| tables.deinit();
+    }
+
+    /// What the cache served of the glue spec and what this run built, as
+    /// `roc build --verbose` reports them.
+    fn printCacheStats(self: *UnitImageGlueGenerator) std.Io.Writer.Error!void {
+        const build_env = if (self.build_env) |*env| env else return;
+        const stats = build_env.getBuildStats();
+        const stdout = self.ctx.io.stdout();
+        try stdout.print("\n    Modules: {} total, {} cached, {} built\n", .{ stats.modules_total, stats.cache_hits, stats.modules_compiled });
+        try stdout.print("    Boxy objects: {} cached, {} built\n", .{ stats.boxy_objects_restored, stats.boxy_objects_built });
+    }
+
+    fn source(self: *UnitImageGlueGenerator) glue.GeneratorSource {
+        return .{ .context = self, .load = load };
+    }
+
+    fn load(context: *anyopaque) glue.GlueError!glue.LoadedGenerator {
+        const self: *UnitImageGlueGenerator = @ptrCast(@alignCast(context));
+        return self.prepare() catch |err| {
+            self.failure = err;
+            return error.CompilationFailed;
+        };
+    }
+
+    fn notGlueSpec(self: *UnitImageGlueGenerator, reporter: *progress.Reporter, comptime reason: []const u8) CliMainError {
+        reporter.fail();
+        const display_path = try reporting.displayPath(self.ctx.gpa, self.glue_spec, self.ctx.reportConfig(.stderr).source_path_base);
+        defer self.ctx.gpa.free(display_path);
+        self.ctx.io.stderr().print("Error: '{s}' is not a glue spec: " ++ reason ++ "\n", .{display_path}) catch {};
+        return error.InvalidArguments;
+    }
+
+    fn prepare(self: *UnitImageGlueGenerator) CliMainError!glue.LoadedGenerator {
+        if (comptime !unit_image_tests_supported) unreachable; // unitImageGlueApplies holds only on a compiler that loads unit images
+        const ctx = self.ctx;
+        const target = inProcessUnitTarget();
+        var reporter = makeReporter(ctx, "roc glue", false);
+        defer reporter.deinit();
+        reporter.start();
+        errdefer reporter.fail();
+
+        self.tables = RunUnitTables.init(ctx);
+        const tables = &self.tables.?;
+        self.build_env = try initRunBuildEnv(ctx, .{
+            .source_dir_override = null,
+            .synthetic_default_app = null,
+            .max_threads = null,
+            .resolution_config = .{},
+            .enable_checked_cache = true,
+            .reporter = &reporter,
+            .specialization_strategy = .boxy,
+        });
+        const build_env = &self.build_env.?;
+        try discoverRunDependencies(ctx, build_env, self.glue_spec, self.glue_spec, &reporter);
+        self.units = try lowerRunUnits(ctx, build_env, tables, target, self.glue_spec, &reporter, false);
+        const units = &self.units.?;
+        const root_artifact = units.root_artifact;
+
+        const selected_roots = try lir.CheckedPipeline.selectPlatformEntrypointRoots(ctx.gpa, root_artifact.root_requests.runtime_requests.items());
+        defer ctx.gpa.free(selected_roots);
+        const request = for (selected_roots) |root| {
+            if (std.mem.eql(u8, nativeEntrypointSymbolName(root_artifact, root), shim_symbols.roc_make_glue)) break root;
+        } else return self.notGlueSpec(&reporter, "its platform does not provide `" ++ shim_symbols.roc_make_glue ++ "`.");
+
+        self.imported_artifacts = try build_env.collectImportedArtifactViews(ctx.gpa, root_artifact);
+        self.relation_artifacts = try build_env.collectRelationArtifactViews(ctx.gpa, root_artifact);
+        // Restored or built, the units leave this run no lowered program to
+        // read the entrypoint's layouts from; its host boundary commits them.
+        self.boundary = try lir.CheckedPipeline.BoxyEntrypointBoundary.init(
+            ctx.gpa,
+            .{ .root = check.CheckedArtifact.loweringViewWithRelations(root_artifact, self.relation_artifacts), .imports = self.imported_artifacts },
+            request,
+            base.target.TargetUsize.native,
+        );
+        const boundary = &self.boundary.?;
+        if (boundary.argLayouts().len != 1) return self.notGlueSpec(&reporter, "`" ++ shim_symbols.roc_make_glue ++ "` must take exactly one argument.");
+
+        reporter.begin("Unit Image Load");
+        const library = &units.library.?;
+        var hosted_names: std.ArrayList([]const u8) = .empty;
+        var seen_hosted = std.StringHashMap(void).init(ctx.arena);
+        for (library.hosted_symbols) |name| if (!(try seen_hosted.getOrPut(name)).found_existing) try hosted_names.append(ctx.arena, name);
+        for (units.hosted_symbols) |name| if (!(try seen_hosted.getOrPut(name)).found_existing) try hosted_names.append(ctx.arena, name);
+        try self.images.bindHostedStubs(ctx.arena, hosted_names.items);
+        // Every unit's dependencies are loaded before it: the builtins, then
+        // the rest after everything they depend on, then the root unit.
+        const order = try unitLoadOrder(ctx.gpa, build_env, library.artifacts);
+        defer ctx.gpa.free(order);
+        self.images.attachPool(units.pool_source.source());
+        for (order) |index| _ = try self.images.load(library.images[index], 0, &.{});
+        _ = try self.images.load(units.root_image.?, 0, &.{});
+        reporter.end();
+        reporter.finish();
+
+        const entry = self.images.exports.get(shim_symbols.roc_make_glue) orelse
+            base.invariant("roc glue invariant violated: the root unit's image exports no `{s}` wrapper", .{shim_symbols.roc_make_glue});
+        return .{
+            .entry = @ptrFromInt(entry.address),
+            .boundary = .{
+                .layouts = boundary.layouts(),
+                .schemas = &boundary.runtime_value_schemas,
+                .types_layout = boundary.argLayouts()[0],
+                .ret_layout = boundary.retLayout(),
+            },
+        };
+    }
+};
 
 fn rocGlue(ctx: *CliCtx, args: cli_args.GlueArgs) RocGlueError!void {
     // The glue spec accepts a local path, a bundle URL, or an installed
     // shorthand. An installed glue entry also carries the plugin object that
-    // was built with --opt=speed at install time, so it is loaded directly
-    // instead of compiling a plugin on the fly.
+    // was built specialized with --opt=speed at install time. It is already
+    // compiled, so `--opt` does not apply to it and it is loaded directly;
+    // only an explicit `--specialize=no` compiles the installed source.
     var glue_spec = args.glue_spec;
     var installed_plugin_path: ?[]const u8 = null;
-    const specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy);
+    var specialization_strategy = currentRuntimeSpecializationStrategy(args.specialization_strategy, args.opt);
     switch (install_store.classifySourceRef(args.glue_spec)) {
         .local_path => {},
         .url => glue_spec = (try resolveUrlBundle(ctx, args.glue_spec)).source_path,
@@ -18730,14 +19138,28 @@ fn rocGlue(ctx: *CliCtx, args: cli_args.GlueArgs) RocGlueError!void {
                 return error.InvalidArguments;
             }
             glue_spec = entry.paths.main_roc_path;
-            if (specialization_strategy == .lss) {
+            if ((args.specialization_strategy orelse .lss) == .lss) {
                 installed_plugin_path = entry.artifact_path;
+                specialization_strategy = .lss;
             }
         },
     }
     const platform_path = (try resolveSourceArg(ctx, args.platform_path, false)).path;
 
-    return glue.rocGlue(ctx.gpa, ctx.io.stderr(), ctx.io.stdout(), .{
+    // An installed plugin is the only generator considered for its shorthand.
+    var unit_generator: if (unit_image_tests_supported) ?UnitImageGlueGenerator else ?void = null;
+    defer if (comptime unit_image_tests_supported) if (unit_generator) |*generator| generator.deinit();
+    if (comptime unit_image_tests_supported) {
+        if (installed_plugin_path == null and unitImageGlueApplies(args.opt, args.no_cache, specialization_strategy)) {
+            unit_generator = UnitImageGlueGenerator.init(ctx, glue_spec);
+        }
+    }
+    const generator_source: ?glue.GeneratorSource = if (comptime unit_image_tests_supported)
+        (if (unit_generator) |*generator| generator.source() else null)
+    else
+        null;
+
+    glue.rocGlue(ctx.gpa, ctx.io.stderr(), ctx.io.stdout(), .{
         .glue_spec = glue_spec,
         .output_dir = args.output_dir,
         .platform_path = platform_path,
@@ -18745,6 +19167,7 @@ fn rocGlue(ctx: *CliCtx, args: cli_args.GlueArgs) RocGlueError!void {
         .specialization_strategy = specialization_strategy,
         .no_cache = args.no_cache,
         .installed_plugin_path = installed_plugin_path,
+        .generator = generator_source,
         .opt = switch (args.opt) {
             .dev => .dev,
             .size => .size,
@@ -18752,6 +19175,9 @@ fn rocGlue(ctx: *CliCtx, args: cli_args.GlueArgs) RocGlueError!void {
             .interpreter => unreachable, // the glue command's --opt accepts only dev, size, and speed
         },
     }, ctx.io.std_io) catch |err| {
+        if (comptime unit_image_tests_supported) {
+            if (unit_generator) |*generator| if (generator.failure) |failure| return failure;
+        }
         switch (err) {
             error.GluePluginStampMismatch, error.GluePluginUnavailable => if (installed_plugin_path != null) {
                 try ctx.io.stderr().print(
@@ -18775,6 +19201,9 @@ fn rocGlue(ctx: *CliCtx, args: cli_args.GlueArgs) RocGlueError!void {
         }
         return err;
     };
+    if (comptime unit_image_tests_supported) {
+        if (args.verbose) if (unit_generator) |*generator| try generator.printCacheStats();
+    }
 }
 
 /// Reads, parses, formats, and overwrites all Roc files at the given paths.
@@ -18820,17 +19249,17 @@ fn rocFormat(ctx: *CliCtx, args: cli_args.FormatArgs) CliMainError!void {
 
         elapsed = @as(u64, @intCast(std.Io.Timestamp.now(ctx.io.std_io, .awake).nanoseconds - timer_start_ns));
         if (unformatted_files.items.len > 0) {
-            try stdout.print("The following file(s) failed `roc fmt --check`:", .{});
+            try stdout.print("The following file(s) failed `roc fmt --check`:\n", .{});
             for (unformatted_files.items) |file_name| {
                 try stdout.print("    {f}\n", .{base.bidi.Display{ .bytes = try ctx.displayPath(file_name) }});
             }
-            try stdout.print("You can fix this with `roc fmt FILENAME.roc`.", .{});
+            try stdout.print("You can fix this with `roc fmt FILENAME.roc`.\n", .{});
             had_errors = true;
         } else if (failure_count == 0) {
             try stdout.print("All formatting valid.\n", .{});
         }
         if (failure_count > 0) {
-            try stdout.print("Failed to check {} files.", .{failure_count});
+            try stdout.print("Failed to check {} files.\n", .{failure_count});
             had_errors = true;
         }
     } else {
@@ -18893,7 +19322,16 @@ fn frontEndBreakdown(timing: anytype) [7]progress.SubTiming {
 test "typing reuse work counters display zero-duration hits without inference" {
     const timing: compile.package.TimingInfo = .{
         .type_checking_ns = 13 * std.time.ns_per_ms,
-        .checking_work = .{ .typing_hits = 2, .publications = 2, .publication_ns = 11 * std.time.ns_per_ms },
+        .checking_work = .{
+            .typing_hits = 2,
+            .publications = 2,
+            .publication_ns = 11 * std.time.ns_per_ms,
+            .publication_steps = publication_steps: {
+                var steps: check.CheckedArtifact.PublicationTiming = .{};
+                steps.steps_ns[@backingInt(check.CheckedArtifact.PublicationTiming.Step.checked_types)] = 7 * std.time.ns_per_ms;
+                break :publication_steps steps;
+            },
+        },
     };
     const breakdown = frontEndBreakdown(timing);
     try std.testing.expectEqual(@as(u64, 0), breakdown[2].ns);
@@ -18917,6 +19355,9 @@ test "typing reuse work counters display zero-duration hits without inference" {
     const output = buf.written();
     try std.testing.expect(std.mem.find(u8, output, "Type Inference") == null);
     try std.testing.expect(std.mem.find(u8, output, "Checked Publication (summed)") != null);
+    try std.testing.expect(std.mem.find(u8, output, "Checked Publication Detail") != null);
+    try std.testing.expect(std.mem.find(u8, output, "Checked Types") != null);
+    try std.testing.expect(std.mem.find(u8, output, "Template Demand") == null);
     for ([_][]const u8{ "Typing-only cache hits", "Checked publications" }) |label| {
         const start = std.mem.find(u8, output, label) orelse return error.TestUnexpectedResult;
         const remainder = output[start + label.len ..];
@@ -19003,6 +19444,7 @@ fn finishPostCheckLowering(
     var subs_buf: [26]progress.SubTiming = undefined;
     reporter.endWithParentBreakdown(measuredSubTimings(&subs_buf, &postCheckLoweringBreakdown(snapshot)));
     recordLoweringCounters(reporter, snapshot, strategy, "");
+    recordLoweringDetail(reporter, snapshot, "");
 }
 
 fn recordLoweringCounters(
@@ -19053,6 +19495,328 @@ fn recordPostCheckLowering(
         measuredSubTimings(&subs_buf, &postCheckLoweringBreakdown(snapshot)),
     );
     recordLoweringCounters(reporter, snapshot, strategy, "");
+    recordLoweringDetail(reporter, snapshot, "");
+}
+
+fn boxyStepLabel(step: lir.CheckedPipeline.BoxyTiming.Step) []const u8 {
+    return switch (step) {
+        .setup => "Setup",
+        .seed_workers => "Unit Worker Seeding",
+        .roots => "Root Workers",
+        .bodies => "Worker Bodies",
+        .demand => "Descriptor Demand",
+        .tables => "Type Table Filling",
+        .requests => "Layout + Static Data Requests",
+        .export_needs => "Export Needs Encoding",
+        .finish => "Names + Runtime Schemas",
+        .static_descriptors => "Static Descriptors",
+    };
+}
+
+fn unitStepLabel(step: lir.CheckedPipeline.UnitStep) []const u8 {
+    return switch (step) {
+        .key => "Digest + Key",
+        .restore => "Restore",
+        .lower => "Lower",
+        .lir_passes => "Passes",
+        .arc => "ARC",
+        .static_data => "Static Data",
+        .codegen => "Codegen",
+        .image => "Image",
+        .export_records => "Export Records",
+        .encode => "Encode",
+        .cache_write => "Cache Write",
+        .import_wait => "Import Wait",
+        .queue_wait => "Queue Wait",
+    };
+}
+
+/// Short column headings of the per-unit table, in `UnitStep` order.
+const unit_step_columns = blk: {
+    const names = @typeInfo(lir.CheckedPipeline.UnitStep).@"enum".field_names;
+    var columns: [names.len][]const u8 = undefined;
+    for (names, &columns) |name, *column| column.* = switch (@field(lir.CheckedPipeline.UnitStep, name)) {
+        .key => "key",
+        .restore => "restore",
+        .lower => "lower",
+        .lir_passes => "passes",
+        .arc => "arc",
+        .static_data => "static",
+        .codegen => "codegen",
+        .image => "image",
+        .export_records => "exports",
+        .encode => "encode",
+        .cache_write => "write",
+        .import_wait => "imp-wait",
+        .queue_wait => "q-wait",
+    };
+    break :blk columns;
+};
+
+/// The detailed steps of post-check lowering, which only detailed timing
+/// records: each stage's own steps, the module units' steps summed, and the
+/// slowest units one by one.
+fn recordLoweringDetail(reporter: *progress.Reporter, snapshot: lir.CheckedPipeline.TimingSnapshot, comptime prefix: []const u8) void {
+    if (!reporter.always) return;
+    const Pipeline = lir.CheckedPipeline;
+    recordLirPassDetail(reporter, snapshot, prefix);
+    recordArcDetail(reporter, snapshot, prefix);
+    recordCodegenDetail(reporter, snapshot, prefix);
+    {
+        const Lss = lir.CheckedPipeline.LssStep;
+        const rows = [_]progress.SubTiming{
+            .{ .name = "Analysis Solve", .ns = snapshot.lss_steps_ns[@backingInt(Lss.lambda_analysis_solve)] },
+            .{ .name = "Solver Setup", .ns = snapshot.lss_steps_ns[@backingInt(Lss.lambda_solver_setup)] },
+            .{ .name = "Solve + Finish", .ns = snapshot.lss_steps_ns[@backingInt(Lss.lambda_solve)] },
+        };
+        var buf: [rows.len]progress.SubTiming = undefined;
+        const measured = measuredSubTimings(&buf, &rows);
+        if (measured.len != 0) reporter.recordCompletedWithBreakdown(prefix ++ "Lambda-Set Solving Detail", snapshot.lambda_solve_ns, .{}, measured);
+    }
+    {
+        var rows: [Pipeline.BoxyTiming.step_count]progress.SubTiming = undefined;
+        inline for (@typeInfo(Pipeline.BoxyTiming.Step).@"enum".field_names, 0..) |name, index| {
+            rows[index] = .{ .name = boxyStepLabel(@field(Pipeline.BoxyTiming.Step, name)), .ns = snapshot.boxy_steps_ns[index] };
+        }
+        var buf: [rows.len]progress.SubTiming = undefined;
+        const measured = measuredSubTimings(&buf, &rows);
+        if (measured.len != 0) reporter.recordCompletedWithBreakdown(prefix ++ "Boxy Lowering Detail", snapshot.boxy_lowering_ns, .{}, measured);
+        var counters: [Pipeline.BoxyTiming.worker_kind_count + 1]progress.Counter = undefined;
+        inline for (@typeInfo(std.meta.Tag(postcheck.Boxy.Lower.WorkerKey)).@"enum".field_names, 0..) |name, index| {
+            counters[index] = .{ .name = "Workers lowered: " ++ name, .count = snapshot.boxy_workers_by_kind[index] };
+        }
+        counters[counters.len - 1] = .{ .name = "Type tables filled", .count = snapshot.boxy_tables_filled };
+        if (measured.len != 0) reporter.recordCounters(prefix ++ "Boxy lowering work", &counters);
+    }
+    {
+        var rows: [Pipeline.unit_step_count]progress.SubTiming = undefined;
+        var total: u64 = 0;
+        inline for (@typeInfo(Pipeline.UnitStep).@"enum".field_names, 0..) |name, index| {
+            const step = @field(Pipeline.UnitStep, name);
+            const ns = switch (step) {
+                .restore => snapshot.boxy_unit_restore_ns,
+                .lower, .lir_passes, .arc => 0,
+                .key, .static_data, .codegen, .image, .export_records, .encode, .cache_write, .import_wait, .queue_wait => snapshot.unit_steps_ns[index],
+            };
+            rows[index] = .{ .name = unitStepLabel(step), .ns = ns };
+            if (step != .import_wait and step != .queue_wait) total +|= ns;
+        }
+        var buf: [rows.len]progress.SubTiming = undefined;
+        const measured = measuredSubTimings(&buf, &rows);
+        if (measured.len != 0) reporter.recordCompletedWithBreakdown(prefix ++ "Boxy Unit Steps (summed)", total, .{}, measured);
+    }
+    if (!snapshot.units.isEmpty()) {
+        var rows: [Pipeline.UnitRecords.capacity + 1]progress.TableRow = undefined;
+        var len: usize = 0;
+        var names: [Pipeline.UnitRecords.capacity + 1][64]u8 = undefined;
+        const records = snapshot.units.slowest[0..snapshot.units.len];
+        for (records) |*record| {
+            rows[len] = unitTableRow(&names[len], record);
+            len += 1;
+        }
+        if (snapshot.units.builtin) |*record| {
+            rows[len] = unitTableRow(&names[len], record);
+            len += 1;
+        }
+        reporter.recordTable(prefix ++ "Slowest Boxy Units, and Builtin", &unit_step_columns, rows[0..len]);
+    }
+}
+
+fn passStepLabel(step: lir.CheckedPipeline.PassStep) []const u8 {
+    return switch (step) {
+        .erased_owner => "Erased Owner",
+        .return_slot => "Return Slot",
+        .str_append => "Str Append",
+        .tag_reachability => "Tag Reachability",
+        .reachable_procs_before_arc => "Reachable Procs",
+        .frame_callables => "Frame Callables",
+        .tail_drive => "Tail Drive",
+        .reachable_procs_after_arc => "Reachable Procs After ARC",
+        .immortal_locals => "Immortal Locals",
+        .comptime_value_guards => "Compile-Time Value Guards",
+        .lir_diagnostics => "LIR Dumps + Censuses",
+    };
+}
+
+/// Record `rows` beneath `name`, in as many phases as the reporter's row
+/// limit needs, each after the first named `continued`.
+fn recordChunkedBreakdown(reporter: *progress.Reporter, name: []const u8, continued: []const u8, total_ns: u64, rows: []const progress.SubTiming) void {
+    var start: usize = 0;
+    while (start < rows.len) {
+        const end = @min(rows.len, start + progress.max_subphase_rows);
+        reporter.recordCompletedWithBreakdown(if (start == 0) name else continued, total_ns, .{}, rows[start..end]);
+        start = end;
+    }
+}
+
+/// Detailed LIR pass timing: each segment's elapsed time, preparation, idle
+/// worker capacity and commit under its first phase, each phase's summed
+/// worker time and procedure counts, then the whole-program steps before ARC
+/// and after it.
+fn recordLirPassDetail(reporter: *progress.Reporter, snapshot: lir.CheckedPipeline.TimingSnapshot, comptime prefix: []const u8) void {
+    const Pipeline = lir.CheckedPipeline;
+    const phases = @typeInfo(Pipeline.LirPassPhase).@"enum".field_names;
+    var rows: [phases.len * 5]progress.SubTiming = undefined;
+    var len: usize = 0;
+    var counters: [phases.len * 2]progress.Counter = undefined;
+    var counter_len: usize = 0;
+    inline for (phases) |name| {
+        const phase = @field(Pipeline.LirPassPhase, name);
+        const wall = snapshot.procPass(.wall, phase);
+        const worker = snapshot.procPass(.worker, phase);
+        if (wall != 0) {
+            rows[len..][0..4].* = .{
+                .{ .name = name, .ns = wall },
+                .{ .name = name ++ ": prepare", .ns = snapshot.procPass(.prepare, phase) },
+                .{ .name = name ++ ": idle workers", .ns = snapshot.procPass(.capacity, phase) -| snapshot.procPass(.segment_worker, phase) },
+                .{ .name = name ++ ": commit", .ns = snapshot.procPass(.commit, phase) },
+            };
+            len += 4;
+        }
+        if (wall != 0 or worker != 0) {
+            rows[len] = .{ .name = name ++ ": workers", .ns = worker };
+            len += 1;
+            counters[counter_len..][0..2].* = .{
+                .{ .name = name ++ " procedures visited", .count = snapshot.procPass(.visited, phase) },
+                .{ .name = name ++ " procedures changed", .count = snapshot.procPass(.changed, phase) },
+            };
+            counter_len += 2;
+        }
+    }
+    if (len != 0) {
+        recordChunkedBreakdown(reporter, prefix ++ "LIR Pass Phases", prefix ++ "LIR Pass Phases (cont.)", snapshot.lir_passes_ns, rows[0..len]);
+        reporter.recordCounters(prefix ++ "LIR pass procedures", counters[0..counter_len]);
+    }
+    var before: [Pipeline.pass_step_count]progress.SubTiming = undefined;
+    var before_len: usize = 0;
+    var after: [Pipeline.pass_step_count]progress.SubTiming = undefined;
+    var after_len: usize = 0;
+    var after_total: u64 = 0;
+    inline for (@typeInfo(Pipeline.PassStep).@"enum".field_names, 0..) |name, index| {
+        const step = @field(Pipeline.PassStep, name);
+        const ns = snapshot.pass_steps_ns[index];
+        if (ns != 0) switch (step) {
+            .frame_callables, .tail_drive, .reachable_procs_after_arc, .immortal_locals, .comptime_value_guards, .lir_diagnostics => {
+                after[after_len] = .{ .name = passStepLabel(step), .ns = ns };
+                after_len += 1;
+                after_total +|= ns;
+            },
+            .erased_owner, .return_slot, .str_append, .tag_reachability, .reachable_procs_before_arc => {
+                before[before_len] = .{ .name = passStepLabel(step), .ns = ns };
+                before_len += 1;
+            },
+        };
+    }
+    if (before_len != 0) reporter.recordCompletedWithBreakdown(prefix ++ "LIR Pass Steps", snapshot.lir_passes_ns, .{}, before[0..before_len]);
+    if (after_len != 0) reporter.recordCompletedWithBreakdown(prefix ++ "Post-ARC Steps", after_total, .{}, after[0..after_len]);
+}
+
+fn arcStepLabel(step: lir.CheckedPipeline.ArcTiming.Step) []const u8 {
+    return switch (step) {
+        .refcounted_locals => "Refcounted Locals",
+        .solve => "Borrow + Signature Solve",
+        .dismantle => "Dismantle Analysis",
+        .signatures => "Owned-Only Signatures",
+        .source_prep => "Source Preparation",
+        .source_prep_workers => "Source Preparation Workers",
+        .settle => "Uniqueness Settle + Facts",
+        .planning => "Planning",
+        .planning_workers => "Planning Workers",
+        .variant_reservation => "Variant Reservation",
+        .emission => "Emission",
+        .emission_workers => "Emission Workers",
+        .shard_append => "Shard Append",
+        .certify => "Certification",
+        .procedure_tasks => "Procedure Tasks",
+        .procedure_task_workers => "Procedure Task Workers",
+        .parallel_capacity => "Idle Workers",
+    };
+}
+
+/// Detailed ARC timing: its serial steps, each parallel step's elapsed time
+/// and summed worker time, and the workers' idle capacity over the waves.
+fn recordArcDetail(reporter: *progress.Reporter, snapshot: lir.CheckedPipeline.TimingSnapshot, comptime prefix: []const u8) void {
+    const ArcTiming = lir.CheckedPipeline.ArcTiming;
+    var rows: [ArcTiming.step_count]progress.SubTiming = undefined;
+    const workers = snapshot.arc_steps_ns[@backingInt(ArcTiming.Step.source_prep_workers)] +|
+        snapshot.arc_steps_ns[@backingInt(ArcTiming.Step.planning_workers)] +|
+        snapshot.arc_steps_ns[@backingInt(ArcTiming.Step.emission_workers)] +|
+        snapshot.arc_steps_ns[@backingInt(ArcTiming.Step.procedure_task_workers)];
+    inline for (@typeInfo(ArcTiming.Step).@"enum".field_names, 0..) |name, index| {
+        const step = @field(ArcTiming.Step, name);
+        const ns = snapshot.arc_steps_ns[index];
+        rows[index] = .{ .name = arcStepLabel(step), .ns = if (step == .parallel_capacity) ns -| workers else ns };
+    }
+    var buf: [rows.len]progress.SubTiming = undefined;
+    const measured = measuredSubTimings(&buf, &rows);
+    if (measured.len != 0) reporter.recordCompletedWithBreakdown(prefix ++ "ARC Detail", snapshot.arc_ns, .{}, measured);
+}
+
+fn codegenStepLabel(step: lir.CheckedPipeline.CodegenStep) []const u8 {
+    return switch (step) {
+        .backend_setup => "Backend Setup",
+        .procedure_setup => "Procedure Setup",
+        .procedure_runs => "Procedure Runs",
+        .procedure_worker_setup => "Worker Setup (summed)",
+        .procedure_emit => "Stack Plan + Emission (summed)",
+        .procedure_extract => "Fragment Extraction (summed)",
+        .procedure_idle => "Idle Workers",
+        .procedure_commit => "Fragment Commit",
+        .procedure_resolve => "Symbolic Reference Resolution",
+        .entrypoints => "Entrypoint Instructions",
+        .finish_image => "Finish Image",
+        .catalog => "Data Catalog",
+        .piece_extraction => "Piece Extraction",
+        .content_naming => "Content Naming",
+        .piece_data => "Piece Data + Names",
+        .composition => "Image Composition",
+        .dwarf => "DWARF Generation",
+        .object_encoding => "Object Encoding",
+        .unit_image => "Unit Image Build",
+        .pieces_encoding => "Pieces Encoding",
+    };
+}
+
+/// Detailed native code generation of module units, summed over units:
+/// its steps, its byte counts, and its code bytes by statement kind.
+fn recordCodegenDetail(reporter: *progress.Reporter, snapshot: lir.CheckedPipeline.TimingSnapshot, comptime prefix: []const u8) void {
+    const Pipeline = lir.CheckedPipeline;
+    var rows: [Pipeline.codegen_step_count]progress.SubTiming = undefined;
+    inline for (@typeInfo(Pipeline.CodegenStep).@"enum".field_names, 0..) |name, index| {
+        rows[index] = .{ .name = codegenStepLabel(@field(Pipeline.CodegenStep, name)), .ns = snapshot.codegen_steps_ns[index] };
+    }
+    var buf: [rows.len]progress.SubTiming = undefined;
+    const measured = measuredSubTimings(&buf, &rows);
+    if (measured.len == 0) return;
+    reporter.recordCompletedWithBreakdown(prefix ++ "Unit Codegen Detail (summed)", snapshot.boxy_unit_codegen_ns, .{}, measured);
+    var counts: [Pipeline.codegen_count_count]progress.Counter = undefined;
+    inline for (@typeInfo(Pipeline.CodegenCount).@"enum".field_names, 0..) |name, index| {
+        counts[index] = .{ .name = name, .count = snapshot.codegen_counts[index] };
+    }
+    reporter.recordCounters(prefix ++ "Unit codegen work", &counts);
+    const kinds = @typeInfo(std.meta.Tag(lir.LIR.CFStmt)).@"enum".field_names;
+    var histogram: [kinds.len * 2]progress.Counter = undefined;
+    var len: usize = 0;
+    inline for (kinds, 0..) |name, index| {
+        if (snapshot.stmt_counts[index] != 0) {
+            histogram[len] = .{ .name = name ++ " code bytes", .count = snapshot.stmt_bytes[index] };
+            histogram[len + 1] = .{ .name = name ++ " statements", .count = snapshot.stmt_counts[index] };
+            len += 2;
+        }
+    }
+    var start: usize = 0;
+    while (start < len) {
+        const end = @min(len, start + progress.max_counters_per_group);
+        reporter.recordCounters(prefix ++ "Unit code bytes by statement kind", histogram[start..end]);
+        start = end;
+    }
+}
+
+fn unitTableRow(name_buf: *[64]u8, record: *const lir.CheckedPipeline.UnitRecord) progress.TableRow {
+    const label = std.fmt.bufPrint(name_buf, "{s}{s}", .{ record.name(), if (record.restored) " (restored)" else "" }) catch record.name();
+    var row: progress.TableRow = .{ .name = label };
+    @memcpy(row.ns[0..record.steps_ns.len], &record.steps_ns);
+    return row;
 }
 
 fn devTestExecutionBreakdown(timing: eval.test_helpers.DevBoolRootTimingSnapshot) [6]progress.SubTiming {
@@ -19147,7 +19911,7 @@ fn monotypeSpecializationCounters(diagnostics: postcheck.Monotype.Lower.Diagnost
     };
 }
 
-fn monotypeGraphCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [42]progress.Counter {
+fn monotypeGraphCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [41]progress.Counter {
     const graph = diagnostics.graph;
     return .{
         .{ .name = "Graphs created", .count = diagnostics.body.graphs_created },
@@ -19177,7 +19941,6 @@ fn monotypeGraphCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [42]
         .{ .name = "Argument class snapshot nodes", .count = graph.argument_class_members_snapshotted },
         .{ .name = "Structural backing visited slots", .count = graph.structural_backing_scan_slots },
         .{ .name = "Generated-private guard returns", .count = graph.generated_private_guard_returns },
-        .{ .name = "Generated-iterator index lookups", .count = graph.generated_iterator_lookups },
         .{ .name = "Completion queries", .count = graph.completion_queries },
         .{ .name = "Completion pair entries", .count = graph.completion_pair_entries },
         .{ .name = "Completion pair expansions", .count = graph.completion_pair_expansions },
@@ -19195,22 +19958,10 @@ fn monotypeGraphCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [42]
     };
 }
 
-fn monotypeBodyCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [38]progress.Counter {
+fn monotypeBodyCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [25]progress.Counter {
     const body = diagnostics.body;
     return .{
         .{ .name = "Interface summary hits", .count = diagnostics.specialization.interface_summary_hits },
-        .{ .name = "Persistent interface hits", .count = diagnostics.specialization.interface_persistent_hits },
-        .{ .name = "Persistent interface misses", .count = diagnostics.specialization.interface_persistent_misses },
-        .{ .name = "Persistent interface invalid", .count = diagnostics.specialization.interface_persistent_invalid },
-        .{ .name = "Persistent interface types", .count = diagnostics.specialization.interface_persistent_types },
-        .{ .name = "Persistent interface references", .count = diagnostics.specialization.interface_persistent_references },
-        .{ .name = "Persistent interface composite records", .count = diagnostics.specialization.interface_persistent_composite_records },
-        .{ .name = "Persistent interface default records", .count = diagnostics.specialization.interface_persistent_default_records },
-        .{ .name = "Persistent interface composite hits", .count = diagnostics.specialization.interface_persistent_composite_hits },
-        .{ .name = "Persistent interface default hits", .count = diagnostics.specialization.interface_persistent_default_hits },
-        .{ .name = "Persistent interface bytes", .count = diagnostics.specialization.interface_persistent_bytes },
-        .{ .name = "Persistent interface records", .count = diagnostics.specialization.interface_persistent_records },
-        .{ .name = "Persistent interface unrepresentable", .count = diagnostics.specialization.interface_persistent_unrepresentable },
         .{ .name = "Interface summary expansions", .count = diagnostics.specialization.interface_summary_expansions },
         .{ .name = "Body contexts created", .count = body.body_contexts_created },
         .{ .name = "Type instantiation scopes", .count = body.instantiation_scopes_created },
@@ -19222,7 +19973,6 @@ fn monotypeBodyCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [38]p
         .{ .name = "Dispatch expressions", .count = body.dispatch_expressions },
         .{ .name = "Deferred template requests", .count = body.deferred_template_requests },
         .{ .name = "Caller-owned template bodies lowered", .count = body.caller_owned_template_bodies_lowered },
-        .{ .name = "Eager iterator template bodies lowered", .count = body.eager_iterator_template_bodies_lowered },
         .{ .name = "Deferred template reuses", .count = body.deferred_template_reuses },
         .{ .name = "Deferred template bodies lowered", .count = body.deferred_template_bodies_lowered },
         .{ .name = "Lowered template bodies discarded", .count = body.lowered_template_bodies_discarded },
@@ -19239,7 +19989,7 @@ fn monotypeBodyCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [38]p
     };
 }
 
-fn solvedLirParallelCounters(parallel: lir.CheckedPipeline.SolvedLirParallelMetrics) [14]progress.Counter {
+fn solvedLirParallelCounters(parallel: lir.CheckedPipeline.SolvedLirParallelMetrics) [15]progress.Counter {
     return .{
         .{ .name = "Tasks submitted", .count = parallel.tasks_submitted },
         .{ .name = "Tasks committed", .count = parallel.tasks_committed },
@@ -19255,20 +20005,22 @@ fn solvedLirParallelCounters(parallel: lir.CheckedPipeline.SolvedLirParallelMetr
         .{ .name = "Worker match tasks committed", .count = parallel.worker_match_tasks_committed },
         .{ .name = "Worker literal tasks committed", .count = parallel.worker_literal_tasks_committed },
         .{ .name = "Worker loop tasks committed", .count = parallel.worker_loop_tasks_committed },
+        .{ .name = "Worker further-instance tasks committed", .count = parallel.worker_instance_tasks_committed },
     };
 }
 
-const spec_constr_counter_count = 9 + 2 * @typeInfo(lir.CheckedPipeline.SpecConstrPhase).@"enum".field_names.len;
+const spec_constr_counter_count = 10 + 2 * @typeInfo(lir.CheckedPipeline.SpecConstrPhase).@"enum".field_names.len;
 
 fn specConstrParallelCounters(parallel: lir.CheckedPipeline.SpecConstrParallelMetrics) [spec_constr_counter_count]progress.Counter {
     var rows: [spec_constr_counter_count]progress.Counter = undefined;
-    rows[0..9].* = .{
+    rows[0..10].* = .{
         .{ .name = "Tasks submitted", .count = parallel.tasks_submitted },
         .{ .name = "Tasks committed", .count = parallel.tasks_committed },
         .{ .name = "Patterns recorded", .count = parallel.patterns_recorded },
         .{ .name = "Patterns admitted", .count = parallel.patterns_admitted },
         .{ .name = "Workers written", .count = parallel.workers_written },
         .{ .name = "Worker budget denials", .count = parallel.spec_count_denials },
+        .{ .name = "Prefix functions", .count = parallel.prefix_functions },
         .{ .name = "Bodies committed", .count = parallel.bodies_committed },
         .{ .name = "Expressions committed", .count = parallel.expressions_committed },
         .{ .name = "Peak retained body shards", .count = parallel.peak_retained_shards },
@@ -19277,10 +20029,9 @@ fn specConstrParallelCounters(parallel: lir.CheckedPipeline.SpecConstrParallelMe
         const name = comptime switch (phase) {
             .discovery => "Pattern discovery",
             .unused_loop_results => "Loop-result projection",
-            .iterator_fusion => "Iterator fusion",
         };
-        rows[9 + 2 * index] = .{ .name = name ++ " tasks", .count = parallel.committed_by_phase[index] };
-        rows[10 + 2 * index] = .{ .name = name ++ " changes", .count = parallel.changed_by_phase[index] };
+        rows[10 + 2 * index] = .{ .name = name ++ " tasks", .count = parallel.committed_by_phase[index] };
+        rows[11 + 2 * index] = .{ .name = name ++ " changes", .count = parallel.changed_by_phase[index] };
     }
     return rows;
 }
@@ -19293,17 +20044,28 @@ test "post-check diagnostics preserve labeled SpecConstr counts" {
         .patterns_admitted = 4,
         .workers_written = 5,
         .spec_count_denials = 6,
-        .bodies_committed = 7,
-        .expressions_committed = 8,
-        .peak_retained_shards = 9,
-        .committed_by_phase = .{ 10, 12, 14 },
-        .changed_by_phase = .{ 11, 13, 15 },
+        .prefix_functions = 7,
+        .bodies_committed = 8,
+        .expressions_committed = 9,
+        .peak_retained_shards = 10,
+        .committed_by_phase = .{ 11, 13 },
+        .changed_by_phase = .{ 12, 14 },
     });
     const names = [_][]const u8{
-        "Tasks submitted",                "Tasks committed",         "Patterns recorded",         "Patterns admitted",
-        "Workers written",                "Worker budget denials",   "Bodies committed",          "Expressions committed",
-        "Peak retained body shards",      "Pattern discovery tasks", "Pattern discovery changes", "Loop-result projection tasks",
-        "Loop-result projection changes", "Iterator fusion tasks",   "Iterator fusion changes",
+        "Tasks submitted",
+        "Tasks committed",
+        "Patterns recorded",
+        "Patterns admitted",
+        "Workers written",
+        "Worker budget denials",
+        "Prefix functions",
+        "Bodies committed",
+        "Expressions committed",
+        "Peak retained body shards",
+        "Pattern discovery tasks",
+        "Pattern discovery changes",
+        "Loop-result projection tasks",
+        "Loop-result projection changes",
     };
     for (rows, names, 1..) |row, name, count| {
         try std.testing.expectEqualStrings(name, row.name);
@@ -19411,7 +20173,6 @@ fn lirPassParallelCounters(parallel: lir.CheckedPipeline.LirPassParallelMetrics)
         const name = comptime switch (phase) {
             .branch_expectation => "Branch expectation",
             .trmc => "TRMC",
-            .forwarding_join => "Forwarding joins",
             .tag_fusion => "Tag-case fusion",
             .prune_join_params => "Join parameter pruning",
             .scalarize => "Join scalarization",
@@ -19515,6 +20276,7 @@ test "post-check diagnostics preserve labeled Solved-LIR counts" {
         .worker_match_tasks_committed = 12,
         .worker_literal_tasks_committed = 13,
         .worker_loop_tasks_committed = 14,
+        .worker_instance_tasks_committed = 15,
     });
     const names = [_][]const u8{
         "Tasks submitted",
@@ -19531,6 +20293,7 @@ test "post-check diagnostics preserve labeled Solved-LIR counts" {
         "Worker match tasks committed",
         "Worker literal tasks committed",
         "Worker loop tasks committed",
+        "Worker further-instance tasks committed",
     };
     try std.testing.expectEqual(@typeInfo(lir.CheckedPipeline.SolvedLirParallelMetrics).@"struct".field_names.len, rows.len);
     for (rows, names, 1..) |row, name, count| {
@@ -19549,8 +20312,8 @@ test "post-check diagnostics preserve labeled LIR pass counts" {
         .prepared_statement_rows = 100,
         .appended_statements = 30,
         .peak_retained_shards = 8,
-        .committed_by_phase = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9 },
-        .changed_by_phase = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8 },
+        .committed_by_phase = .{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .changed_by_phase = .{ 0, 1, 2, 3, 4, 5, 6, 7 },
     });
     try std.testing.expectEqualStrings("Tasks submitted", rows[0].name);
     try std.testing.expectEqual(@as(u64, 10), rows[0].count);
@@ -19559,7 +20322,6 @@ test "post-check diagnostics preserve labeled LIR pass counts" {
     const phase_names = .{
         "Branch expectation",
         "TRMC",
-        "Forwarding joins",
         "Tag-case fusion",
         "Join parameter pruning",
         "Join scalarization",
@@ -19584,11 +20346,9 @@ test "post-check diagnostics preserve labeled Monotype counts" {
     diagnostics.graph.nodes_created = 201;
     diagnostics.graph.generated_private_nodes_visited = 202;
     diagnostics.graph.generated_private_guard_returns = 204;
-    diagnostics.graph.generated_iterator_lookups = 206;
     diagnostics.graph.nominal_backing_tombstone_deletions = 203;
     diagnostics.body.instantiation_scopes_created = 303;
     diagnostics.body.checked_node_cache_hits = 301;
-    diagnostics.body.eager_iterator_template_bodies_lowered = 304;
     diagnostics.body.deferred_template_reuses = 305;
     diagnostics.body.nested_closures_prepared = 302;
 
@@ -19608,20 +20368,16 @@ test "post-check diagnostics preserve labeled Monotype counts" {
     try std.testing.expectEqualStrings("Generated-private containment queries", graph[15].name);
     try std.testing.expectEqualStrings("Generated-private guard returns", graph[26].name);
     try std.testing.expectEqual(@as(u64, 204), graph[26].count);
-    try std.testing.expectEqualStrings("Generated-iterator index lookups", graph[27].name);
-    try std.testing.expectEqual(@as(u64, 206), graph[27].count);
 
     const body = monotypeBodyCounters(diagnostics);
-    try std.testing.expectEqualStrings("Type instantiation scopes", body[15].name);
-    try std.testing.expectEqual(@as(u64, 303), body[15].count);
-    try std.testing.expectEqualStrings("Checked node cache hits", body[17].name);
-    try std.testing.expectEqual(@as(u64, 301), body[17].count);
-    try std.testing.expectEqualStrings("Eager iterator template bodies lowered", body[24].name);
-    try std.testing.expectEqual(@as(u64, 304), body[24].count);
-    try std.testing.expectEqualStrings("Deferred template reuses", body[25].name);
-    try std.testing.expectEqual(@as(u64, 305), body[25].count);
-    try std.testing.expectEqualStrings("Nested closures prepared", body[34].name);
-    try std.testing.expectEqual(@as(u64, 302), body[34].count);
+    try std.testing.expectEqualStrings("Type instantiation scopes", body[3].name);
+    try std.testing.expectEqual(@as(u64, 303), body[3].count);
+    try std.testing.expectEqualStrings("Checked node cache hits", body[5].name);
+    try std.testing.expectEqual(@as(u64, 301), body[5].count);
+    try std.testing.expectEqualStrings("Deferred template reuses", body[12].name);
+    try std.testing.expectEqual(@as(u64, 305), body[12].count);
+    try std.testing.expectEqualStrings("Nested closures prepared", body[21].name);
+    try std.testing.expectEqual(@as(u64, 302), body[21].count);
 
     const parallel = monotypeParallelCounters(.{
         .worker_work_ns = 401,
@@ -19693,6 +20449,7 @@ fn finishFrontEndPhaseExcluding(gpa: Allocator, config: reporting.ReportingConfi
         row.* = .{ .name = name, .ns = module.ns };
     }
     reporter.recordRankedTimings("Slowest Module Check and Publication", slowest_rows[0..slowest.len]);
+    recordPublicationDetail(reporter, timing.checking_work);
     reporter.recordCounters("Frontend checking work", &.{
         .{ .name = "Fresh checks", .count = timing.checking_work.fresh_checks },
         .{ .name = "Typing-only cache hits", .count = timing.checking_work.typing_hits },
@@ -19721,19 +20478,136 @@ fn finishFrontEndPhaseExcluding(gpa: Allocator, config: reporting.ReportingConfi
             );
         }
     }
-    if (compile_time.roots_declared != 0) {
+    if (timing.program_finalization_ns != 0) recordCompileTimeDetail(reporter, timing.program_finalization_ns, compile_time);
+    if (compile_time.roots_declared != 0 or compile_time.roots_completed_directly != 0) {
         reporter.recordCounters("Compile-time roots", &.{
             .{ .name = "Declared", .count = compile_time.roots_declared },
             .{ .name = "Evaluated", .count = compile_time.roots_evaluated },
+            .{ .name = "Completed directly", .count = compile_time.roots_completed_directly },
         });
     }
     const counters = timing.compile_time_counters;
     if (!std.meta.eql(counters.lowering, lir.CheckedPipeline.TimingSnapshot{})) {
         recordLoweringCounters(reporter, counters.lowering, .lss, "Shared ");
     }
+    if (timing.program_finalization_ns != 0) recordLoweringDetail(reporter, compile_time.lowering, "Shared ");
     if (!std.meta.eql(counters.native_emission, backend.dev.NativeProcCompiler.Metrics{})) {
         reporter.recordCounters("Shared native artifact emission", &nativeEmissionCounters(counters.native_emission));
     }
+}
+
+/// The steps of checked-artifact publication, which only detailed timing
+/// records. Each step is summed across the worker threads that published.
+fn recordPublicationDetail(reporter: *progress.Reporter, work: compile.package.CheckingWork) void {
+    if (!reporter.always) return;
+    const PublicationTiming = check.CheckedArtifact.PublicationTiming;
+    var steps: [PublicationTiming.step_count]progress.SubTiming = undefined;
+    inline for (@typeInfo(PublicationTiming.Step).@"enum".field_names, 0..) |name, index| {
+        steps[index] = .{ .name = publicationStepLabel(@field(PublicationTiming.Step, name)), .ns = work.publication_steps.steps_ns[index] };
+    }
+    var buf: [PublicationTiming.step_count]progress.SubTiming = undefined;
+    const measured = measuredSubTimings(&buf, &steps);
+    if (measured.len != 0) reporter.recordCompletedWithBreakdown("Checked Publication Detail", work.publication_ns, .{}, measured);
+}
+
+fn publicationStepLabel(step: check.CheckedArtifact.PublicationTiming.Step) []const u8 {
+    return switch (step) {
+        .typed_modules => "Typed Module Graph",
+        .identity => "Identity + Names",
+        .body_analyses => "Body Analyses",
+        .sealed_type_keys => "Sealed Type Keys",
+        .checked_types => "Checked Types",
+        .platform_relation => "Platform Relation",
+        .pairing_defaults => "Pairing Types + Defaults",
+        .procedure_templates => "Procedure Templates",
+        .dispatch_plans => "Dispatch Plans",
+        .hosted_platform_bindings => "Hosted + Platform Bindings",
+        .compile_time_roots => "Compile-Time Roots",
+        .entry_wrappers => "Const Bodies + Entry Wrappers",
+        .top_level_values => "Top-Level Values",
+        .hoisted_values => "Hoisted Values",
+        .resolved_value_refs => "Resolved Value Refs",
+        .callable_forwarding => "Callable Forwarding",
+        .method_registry => "Method Registry",
+        .ordinary_diagnostics => "Ordinary Diagnostics",
+        .template_refs => "Template Refs",
+        .total_dispatch => "Total Dispatch Resolution",
+        .dispatch_callables => "Dispatch Callables",
+        .literal_roots => "Literal Roots",
+        .template_demand => "Template Demand",
+        .sealed_slots => "Sealed Slots",
+        .root_requests => "Root Requests",
+        .nested_proc_sites => "Nested Procedure Sites",
+        .exhaustiveness => "Exhaustiveness Sites",
+        .exports => "Exports + Interface",
+        .public_api => "Public API Dependencies",
+        .lowering_visibility => "Lowering Visibility",
+        .finish => "Artifact Assembly",
+    };
+}
+
+fn compileTimeStepLabel(step: eval.CompileTimeFinalization.Timing.Step) []const u8 {
+    return switch (step) {
+        .value_form_roots => "Value-Form Roots",
+        .value_form_schema => "Value-Form Schema Program",
+        .value_form_root_schemas => "Value-Form Root Schemas",
+        .root_graph => "Root Graph",
+        .root_classification => "Root Classification",
+        .scheduler_wait => "Waiting for Builds",
+        .image_registration => "Import Image Registration",
+        .program_build => "Program Builds (summed)",
+        .program_lowering => "Program Lowering (summed)",
+        .procedure_codegen => "Program Procedures (summed)",
+        .entry_wrappers => "Entry Wrappers (summed)",
+        .image_selection => "Import Image Selection (summed)",
+        .host_splice => "Host Splice + Link (summed)",
+        .static_placement => "Static Data Placement (summed)",
+        .program_run => "Program Runs",
+        .root_job_setup => "Root Job Setup",
+        .unit_keys => "Unit Keys (summed)",
+        .units_wait => "Waiting for Units",
+        .module_commit => "Module Commit",
+        .cache_writes => "Checked Cache Writes",
+    };
+}
+
+fn compileTimeCountLabel(count: eval.CompileTimeFinalization.Timing.Count) []const u8 {
+    return switch (count) {
+        .programs => "Programs",
+        .function_programs => "Function-value programs",
+        .batches => "Batches (dependency levels)",
+        .retry_passes => "Retry passes",
+        .units_restored => "Units restored",
+        .units_built => "Units built",
+        .images_selected => "Import images selected",
+        .images_loaded => "Import images loaded",
+        .progress_threads => "Slow-root progress threads",
+    };
+}
+
+/// The detailed steps and work counts of compile-time evaluation, which only
+/// detailed timing records.
+fn recordCompileTimeDetail(reporter: *progress.Reporter, total_ns: u64, snapshot: eval.CompileTimeFinalization.TimingSnapshot) void {
+    if (!reporter.always) return;
+    const CtfeTiming = eval.CompileTimeFinalization.Timing;
+    var steps: [CtfeTiming.step_count]progress.SubTiming = undefined;
+    inline for (@typeInfo(CtfeTiming.Step).@"enum".field_names, 0..) |name, index| {
+        steps[index] = .{ .name = compileTimeStepLabel(@field(CtfeTiming.Step, name)), .ns = snapshot.steps_ns[index] };
+    }
+    var buf: [CtfeTiming.step_count]progress.SubTiming = undefined;
+    const measured = measuredSubTimings(&buf, &steps);
+    if (measured.len != 0) reporter.recordCompletedWithBreakdown("Compile-Time Eval Detail", total_ns, .{}, measured);
+    const kind_count = CtfeTiming.root_kind_count;
+    var counters: [CtfeTiming.count_count + kind_count]progress.Counter = undefined;
+    inline for (@typeInfo(CtfeTiming.Count).@"enum".field_names, 0..) |name, index| {
+        counters[index] = .{ .name = compileTimeCountLabel(@field(CtfeTiming.Count, name)), .count = snapshot.counts[index] };
+    }
+    inline for (@typeInfo(check.CheckedArtifact.CompileTimeRootKind).@"enum".field_names, 0..) |name, index| {
+        counters[CtfeTiming.count_count + index] = .{ .name = "Roots: " ++ name, .count = snapshot.roots_by_kind[index] };
+    }
+    var any = false;
+    for (counters) |counter| any = any or counter.count != 0;
+    if (any) reporter.recordCounters("Compile-time evaluation work", &counters);
 }
 
 /// The sub-timings of stages that ran. A stage this phase reused from shared
@@ -20058,6 +20932,7 @@ fn handleProcessFileError(err: ProcessFileError, stderr: anytype, path: []const 
         error.UnwindRegistrationFailed,
         error.VirtualAllocFailed,
         error.VirtualProtectFailed,
+        error.FlushInstructionCacheFailed,
         error.WatchBackendFailed,
         error.WatchInputsMalformed,
         error.WatchInputsMissing,
@@ -20202,6 +21077,7 @@ fn requireReportableCheckFailure(err: CheckFileWithBuildEnvPreservedError) error
         error.UnwindRegistrationFailed,
         error.VirtualAllocFailed,
         error.VirtualProtectFailed,
+        error.FlushInstructionCacheFailed,
         => {},
     }
 }
@@ -20279,13 +21155,13 @@ fn checkFileWithBuildEnvPreserved(
     main_source_url: ?[]const u8,
     timings: bool,
     cache_config: CacheConfig,
+    specialization_strategy: base.SpecializationStrategy,
     max_threads: ?usize,
     resolution_config: compile.package_resolution.Config,
     source_dir_override: ?[]const u8,
     track_watch_inputs: bool,
     synthetic_default_app: ?SyntheticDefaultAppMapping,
     reporter: ?*progress.Reporter,
-    specialization_strategy: base.SpecializationStrategy,
 ) CheckFileWithBuildEnvPreservedError!CheckResultWithBuildEnv {
     const trace = tracy.trace(@src());
     defer trace.end();
@@ -20331,12 +21207,12 @@ fn checkFileWithBuildEnv(
     main_source_url: ?[]const u8,
     timings: bool,
     cache_config: CacheConfig,
+    specialization_strategy: base.SpecializationStrategy,
     max_threads: ?usize,
     resolution_config: compile.package_resolution.Config,
     source_dir_override: ?[]const u8,
     synthetic_default_app: ?SyntheticDefaultAppMapping,
     reporter: ?*progress.Reporter,
-    specialization_strategy: base.SpecializationStrategy,
 ) CheckFileWithBuildEnvPreservedError!CheckResult {
     const trace = tracy.trace(@src());
     defer trace.end();
@@ -20513,12 +21389,12 @@ fn rocCheckDefaultApp(
         null,
         args.timings,
         cache_config,
+        args.specialization_strategy orelse .boxy,
         args.max_threads,
         resolutionConfigFromLimits(args.resolve_limits),
         original_source_dir,
         SyntheticDefaultAppMapping.fromStaged(args.path, staged),
         reporter,
-        currentRuntimeSpecializationStrategy(args.specialization_strategy),
     );
     errdefer check_result.deinit(ctx.gpa);
 
@@ -20560,13 +21436,13 @@ fn rocCheckDefaultAppPreserved(
         null,
         args.timings,
         cache_config,
+        args.specialization_strategy orelse .boxy,
         args.max_threads,
         resolutionConfigFromLimits(args.resolve_limits),
         original_source_dir,
         track_watch_inputs,
         SyntheticDefaultAppMapping.fromStaged(args.path, staged),
         reporter,
-        currentRuntimeSpecializationStrategy(args.specialization_strategy),
     );
     errdefer result_with_env.deinit(ctx.gpa);
 
@@ -20661,13 +21537,13 @@ fn rocCheck(ctx: *CliCtx, args_in: cli_args.CheckArgs, arg0: []const u8) RocChec
             args.main_source_url,
             args.timings,
             cache_config,
+            args.specialization_strategy orelse .boxy,
             args.max_threads,
             resolutionConfigFromLimits(args.resolve_limits),
             null,
             true,
             null,
             &reporter,
-            currentRuntimeSpecializationStrategy(args.specialization_strategy),
         ) catch |err| {
             reporter.fail();
             try writeWatchInputsFile(ctx, file_path, null, extra_paths);
@@ -20702,12 +21578,12 @@ fn rocCheck(ctx: *CliCtx, args_in: cli_args.CheckArgs, arg0: []const u8) RocChec
             args.main_source_url,
             args.timings,
             cache_config,
+            args.specialization_strategy orelse .boxy,
             args.max_threads,
             resolutionConfigFromLimits(args.resolve_limits),
             null,
             null,
             &reporter,
-            currentRuntimeSpecializationStrategy(args.specialization_strategy),
         ) catch |err| {
             reporter.fail();
             return handleProcessFileError(err, stderr, args.path);
@@ -21102,13 +21978,13 @@ fn bumpCheckSide(
         null,
         false,
         cache_config,
+        .boxy,
         null,
         resolutionConfigFromLimits(args.resolve_limits),
         null,
         false,
         null,
         null,
-        .lss,
     ) catch |err| {
         try handleProcessFileError(err, stderr, path);
         return error.CliError;
@@ -21418,6 +22294,8 @@ fn rocDeps(ctx: *CliCtx, args: cli_args.DepsArgs) CliMainError!void {
 
     var build_env = try initCliBuildEnv(ctx, .{
         .resolution_config = resolutionConfigFromLimits(args.resolve_limits),
+        // Dependency resolution has no runtime consumer.
+        .specialization_strategy = .boxy,
         .root_source_url = resolved_source.url,
     });
     defer build_env.deinit();
@@ -21653,13 +22531,13 @@ fn rocDocs(ctx: *CliCtx, args_in: cli_args.DocsArgs) CliMainError!void {
         args.main_source_url,
         false,
         cache_config,
+        .boxy,
         null, // max_threads: use default (single-threaded for now)
         resolutionConfigFromLimits(args.resolve_limits),
         null,
         false,
         null,
         null,
-        .lss,
     ) catch |err| {
         return handleProcessFileError(err, stderr, args.path);
     };
@@ -21754,6 +22632,7 @@ fn generateDocs(
             const source_decl = module_info.public_type_decl orelse continue;
             try public_type_projections.append(ctx.gpa, .{
                 .public_name = module_info.name,
+                .page_name = module_info.name,
                 .package_name = build_env.displayNameForPackage(module_info.package_name),
                 .source_env = module_info.checked.env,
                 .source_identity = &module_info.checked.checked_artifact.module_identity.stable_hash,
@@ -21761,6 +22640,25 @@ fn generateDocs(
                 .public_order = module_info.public_order,
             });
         }
+    }
+    // A public alias that renames a nominal type documents that type, so
+    // every such type joins the projections.
+    {
+        var documented = std.ArrayList(extract.DocumentedModule).empty;
+        defer documented.deinit(ctx.gpa);
+        for (modules) |documented_module| {
+            try documented.append(ctx.gpa, .{
+                .name = documented_module.name,
+                .package_name = build_env.displayNameForPackage(documented_module.package_name),
+                .env = documented_module.checked.env,
+                .public_type_decl = documented_module.public_type_decl,
+                .exposed_names = documented_module.docs_exposed_names,
+                .public_order = documented_module.public_order,
+            });
+        }
+        const package_envs = try build_env.getRootPackageModuleEnvs(ctx.gpa);
+        defer ctx.gpa.free(package_envs);
+        try extract.adoptRenamedNominals(ctx.gpa, ctx.arena, documented.items, package_envs, &public_type_projections);
     }
     extract.sortPublicTypeProjections(public_type_projections.items);
 
@@ -21774,6 +22672,7 @@ fn generateDocs(
             .exposed_names = module_info.docs_exposed_names,
             .public_type = if (module_info.public_type_decl) |source_decl| .{
                 .public_name = module_info.name,
+                .page_name = module_info.name,
                 .package_name = sched_pkg_name,
                 .source_env = module_info.checked.env,
                 .source_identity = &module_info.checked.checked_artifact.module_identity.stable_hash,
@@ -21855,7 +22754,7 @@ fn generateBuiltinDocs(ctx: *CliCtx, base_output_dir: []const u8, with_lang_ref:
         errdefer ctx.gpa.free(modules);
         // The builtin is documented as a standalone root type module, whose
         // display package name is `module` (see `BuildEnv.displayNameForPackage`).
-        modules[0] = try docs.extract.extractModuleDocsWithOptions(ctx.gpa, builtin_modules.builtin_module.env, "module", "Builtin.roc", .{});
+        modules[0] = try docs.extract.extractBuiltinDocs(ctx.gpa, builtin_modules.builtin_module.env, "module", "Builtin.roc");
         errdefer modules[0].deinit(ctx.gpa);
         break :package_docs docs.DocModel.PackageDocs{ .name = try ctx.gpa.dupe(u8, "Builtin"), .modules = modules };
     };
@@ -21913,13 +22812,19 @@ fn writeDocsSite(
     };
 
     if (broken_links.items.len > 0) {
-        std.debug.print("Error: {d} doc reference(s) point at non-existent anchors:\n", .{broken_links.items.len});
+        // Report while the link data is alive, through the writer the CLI
+        // tracks when deciding whether a returned error has been explained.
+        const stderr = ctx.io.stderr();
+        const report_config = ctx.reportConfig(.stderr);
+        try stderr.print("Error: {d} doc reference(s) point at non-existent anchors:\n", .{broken_links.items.len});
         for (broken_links.items) |bl| {
             const path = if (bl.source_path.len > 0) bl.source_path else bl.source_module;
+            const display_path = try reporting.displayPath(ctx.gpa, path, report_config.source_path_base);
+            defer ctx.gpa.free(display_path);
             if (bl.source_line > 0) {
-                std.debug.print("  {s}:{d}: [{s}] -> #{s}\n", .{ path, bl.source_line, bl.label, bl.resolved_anchor });
+                try stderr.print("  {s}:{d}: [{s}] -> #{s}\n", .{ display_path, bl.source_line, bl.label, bl.resolved_anchor });
             } else {
-                std.debug.print("  {s}: [{s}] -> #{s}\n", .{ path, bl.label, bl.resolved_anchor });
+                try stderr.print("  {s}: [{s}] -> #{s}\n", .{ display_path, bl.label, bl.resolved_anchor });
             }
         }
         return error.BrokenDocLinks;
@@ -22260,7 +23165,7 @@ test "bidi controls in diagnostic summary paths remain visible" {
 
 test "dev ARC specialization is independent of source inlining" {
     for ([_]cli_args.OptLevel{ .dev, .interpreter, .speed, .size }) |opt| {
-        const config = checkedRuntimeLoweringConfig(.linked_output, opt, .lss, .x64glibc, false);
+        const config = checkedRuntimeLoweringConfig(.linked_output, opt, .lss, .x64glibc);
         const expected = opt == .speed or opt == .size;
         try std.testing.expectEqual(expected, config.target.specialize_arc_modes);
         try std.testing.expectEqual(expected, lir.CheckedPipeline.LirPolicy.fromTarget(config.target).specialize_arc_modes);

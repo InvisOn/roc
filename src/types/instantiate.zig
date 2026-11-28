@@ -8,7 +8,8 @@ const std = @import("std");
 const base = @import("base");
 const types_store = @import("store.zig");
 const types_mod = @import("types.zig");
-const DenseMap = @import("collections").DenseMap;
+const collections = @import("collections");
+const DenseMap = collections.DenseMap;
 const DenseMapPool = @import("collections").DenseMapPool;
 
 const TypesStore = types_store.Store;
@@ -31,8 +32,8 @@ const Rank = types_mod.Rank;
 const Polarity = types_mod.Polarity;
 const Ident = base.Ident;
 
-/// Where a position sits relative to the result rows a where-method use may
-/// widen: the signature's direct result row and a `Try` result's error row
+/// Where a position sits relative to the result row a where-method use may
+/// widen: the signature's direct result row
 /// (design.md "Closed Result Rows At Template Boundaries"). The checker's
 /// annotation walk makes this decision for rows written inline in a signature;
 /// this axis makes the same decision for rows a referenced type declaration
@@ -45,10 +46,8 @@ pub const AdapterReachPosition = enum {
     /// annotation put this declaration in, when that is the signature's direct
     /// result.
     result,
-    /// The ERROR argument of a `Try` standing in that direct result.
-    try_row,
-    /// Every other position: inside a `List`, a record field, a tuple, a tag
-    /// payload, a function, or a non-`Try` nominal.
+    /// Every other position: inside a record field, a tuple, a tag payload, a
+    /// function, or an argument of a named type.
     nested,
 };
 
@@ -79,12 +78,32 @@ pub const DeferredCallable = struct {
 pub fn instantiateNominalBacking(
     store: *TypesStore,
     idents: *const base.Ident.Store,
-    var_map: *@import("collections").DenseMap(Var, Var),
+    var_map: *collections.EpochMap(Var, Var),
     decl: types_mod.NominalDecl,
     args: []const Var,
     current_rank: Rank,
     purpose: Instantiator.Purpose,
 ) std.mem.Allocator.Error!Var {
+    return (try walkNominalBacking(store, idents, var_map, decl, args, current_rank, purpose)).opened;
+}
+
+/// What one walk of a declaration's backing template made.
+const BackingWalk = struct {
+    opened: Var,
+    /// Whether the copy names a variable of the template itself, one the walk
+    /// shared rather than copied.
+    shared_any: bool,
+};
+
+fn walkNominalBacking(
+    store: *TypesStore,
+    idents: *const base.Ident.Store,
+    var_map: *collections.EpochMap(Var, Var),
+    decl: types_mod.NominalDecl,
+    args: []const Var,
+    current_rank: Rank,
+    purpose: Instantiator.Purpose,
+) std.mem.Allocator.Error!BackingWalk {
     const formals = store.sliceVars(decl.formals);
     std.debug.assert(formals.len == args.len);
 
@@ -133,8 +152,425 @@ pub fn instantiateNominalBacking(
     const minted_start: u32 = @intCast(store.len());
     const opened = try instantiator.instantiateVar(decl.backing);
     try store.markNominalBackingStructure(opened, minted_start, @intCast(store.len()));
-    return opened;
+    return .{ .opened = opened, .shared_any = instantiator.shared_any };
 }
+
+/// One opening of a nominal declaration's backing for unification.
+pub const BackingOpening = struct {
+    opened: Var,
+    /// Whether every variable the opening minted holds structure, so none
+    /// carries a binding of its own.
+    structure_only: bool,
+};
+
+/// Open `decl`'s backing for an application with args `application_args`,
+/// exactly as `instantiateNominalBacking` does with purpose `.instantiation`,
+/// through the openings `store` has recorded (`BackingOpenings`).
+pub fn openNominalBackingRecorded(
+    store: *TypesStore,
+    idents: *const base.Ident.Store,
+    var_map: *collections.EpochMap(Var, Var),
+    decl_idx: types_mod.NominalDecl.Idx,
+    decl: types_mod.NominalDecl,
+    application_args: []const Var,
+    current_rank: Rank,
+) std.mem.Allocator.Error!BackingOpening {
+    const openings = &store.backing_openings;
+    // The args are read after the opening appends to the store's pools,
+    // which may move the pool an application's args are a slice of.
+    openings.args.clearRetainingCapacity();
+    try openings.args.appendSlice(store.gpa, application_args);
+    const args = openings.args.items;
+    const known = openings.recordings.get(decl_idx);
+    if (known) |recording| {
+        if (recording.replayable and recording.recordsDecl(decl) and openings.templateUnchanged(store, recording)) {
+            return .{ .opened = try openings.replay(store, recording, args, current_rank), .structure_only = true };
+        }
+    }
+
+    const start: BackingOpenings.PoolLens = .of(store);
+    const ground_epoch = store.groundEpoch();
+    const walk = try walkNominalBacking(store, idents, var_map, decl, args, current_rank, .instantiation);
+    const structure_only = structureOnly(store, start.vars);
+    if (known) |recording| {
+        if (!recording.replayable and recording.recordsDecl(decl)) return .{ .opened = walk.opened, .structure_only = structure_only };
+    }
+    try openings.record(store, var_map, decl_idx, decl, args, walk, structure_only, start, store.groundEpoch() -% ground_epoch);
+    return .{ .opened = walk.opened, .structure_only = structure_only };
+}
+
+/// Whether every variable minted from `minted_start` on holds structure.
+fn structureOnly(store: *const TypesStore, minted_start: u32) bool {
+    const end: u32 = @intCast(store.len());
+    var minted = minted_start;
+    while (minted < end) : (minted += 1) {
+        switch (store.resolveVar(@fromBackingInt(minted)).desc.content) {
+            .flex, .rigid => return false,
+            .alias, .structure, .field_presence, .err => {},
+        }
+    }
+    return true;
+}
+
+/// The openings of nominal declaration backings a type store has recorded
+/// for replay (`openNominalBackingRecorded`).
+///
+/// An opening walks a declaration's backing template, substituting the
+/// application's args for the declaration's formals without reading them,
+/// and gives every variable it mints the same rank. When the variables an
+/// opening mints hold structure alone and name nothing but each other and
+/// the args, the opening is a fixed run of writes to the store: descriptors
+/// minted in order, and runs of vars-pool entries, record fields and tags.
+/// Every opening of the same declaration makes that run with the minted
+/// variables, pool positions, args and rank renamed, as long as every
+/// template variable the walk read still has the root and descriptor it
+/// read. A template's variable-free classes are shared with the uses of the
+/// declarations they apply, so unification can merge one with an equal
+/// class after an opening was recorded, which changes what a walk reads.
+/// Such an opening of a declaration is recorded with every variable named
+/// by its place among the minted variables or the args and every pool range
+/// by its place in the run, together with the template variables it read
+/// and their descriptors; each later opening replays the record, writing
+/// what the walk would write, in the order it would write it, while those
+/// template variables are unchanged, and otherwise walks the template and
+/// records that walk in its place.
+pub const BackingOpenings = struct {
+    recordings: std.AutoHashMapUnmanaged(types_mod.NominalDecl.Idx, Recording) = .empty,
+    /// Every recording's minted descriptors, in minting order.
+    rows: std.ArrayListUnmanaged(types_mod.Descriptor.Row) = .empty,
+    /// Every recording's run of vars-pool entries.
+    pool: std.ArrayListUnmanaged(Var) = .empty,
+    fields: std.ArrayListUnmanaged(RecordField) = .empty,
+    tags: std.ArrayListUnmanaged(Tag) = .empty,
+    /// Each recording's template variables and the rows they held when it
+    /// was made: a recording is replayed only while all of them are
+    /// unchanged.
+    pinned: std.ArrayListUnmanaged(Pinned) = .empty,
+    /// One replay's renamed runs, before they are appended to the store.
+    replay_pool: std.ArrayListUnmanaged(Var) = .empty,
+    replay_fields: std.ArrayListUnmanaged(RecordField) = .empty,
+    replay_tags: std.ArrayListUnmanaged(Tag) = .empty,
+    replay_rows: std.ArrayListUnmanaged(types_mod.Descriptor.Row) = .empty,
+    /// The args of the opening in progress.
+    args: std.ArrayListUnmanaged(Var) = .empty,
+
+    /// A recorded variable reference: the index of a minted variable, or
+    /// `arg_ref` with the index of an application arg.
+    const Ref = u32;
+    const arg_ref: Ref = 1 << 30;
+
+    const Recording = struct {
+        /// The declaration's template and formals when it was recorded.
+        backing: Var,
+        formals: Var.SafeList.Range,
+        /// False for a declaration whose openings mint a variable that holds
+        /// no structure or name a template variable: they are walked.
+        replayable: bool,
+        rows_start: u32 = 0,
+        minted: u32 = 0,
+        pool_start: u32 = 0,
+        pool_len: u32 = 0,
+        fields_start: u32 = 0,
+        fields_len: u32 = 0,
+        tags_start: u32 = 0,
+        tags_len: u32 = 0,
+        pinned_start: u32 = 0,
+        pinned_len: u32 = 0,
+        opened: Ref = 0,
+        /// How far the opening advanced the store's ground epoch.
+        ground_epoch_advance: u64 = 0,
+
+        fn recordsDecl(self: Recording, decl: types_mod.NominalDecl) bool {
+            return self.backing == decl.backing and
+                self.formals.start == decl.formals.start and self.formals.count == decl.formals.count;
+        }
+    };
+
+    const Pinned = struct {
+        var_: Var,
+        row: types_mod.Descriptor.Row,
+    };
+
+    /// The lengths of the pools an opening appends to.
+    const PoolLens = struct {
+        vars: u32,
+        pool: u32,
+        fields: u32,
+        tags: u32,
+
+        fn of(store: *const TypesStore) PoolLens {
+            return .{
+                .vars = @intCast(store.len()),
+                .pool = store.varsPoolLen(),
+                .fields = store.record_fields.len(),
+                .tags = store.tags.len(),
+            };
+        }
+    };
+
+    pub fn deinit(self: *BackingOpenings, gpa: std.mem.Allocator) void {
+        self.recordings.deinit(gpa);
+        self.rows.deinit(gpa);
+        self.pool.deinit(gpa);
+        self.fields.deinit(gpa);
+        self.tags.deinit(gpa);
+        self.pinned.deinit(gpa);
+        self.replay_pool.deinit(gpa);
+        self.replay_fields.deinit(gpa);
+        self.replay_tags.deinit(gpa);
+        self.replay_rows.deinit(gpa);
+        self.args.deinit(gpa);
+    }
+
+    /// Record the opening `walk` just made from `start` on, when it can be
+    /// replayed. An opening whose args repeat a variable is not recorded:
+    /// its references to that variable do not say which arg they stand for.
+    fn record(
+        self: *BackingOpenings,
+        store: *TypesStore,
+        var_map: *collections.EpochMap(Var, Var),
+        decl_idx: types_mod.NominalDecl.Idx,
+        decl: types_mod.NominalDecl,
+        args: []const Var,
+        walk: BackingWalk,
+        structure_only: bool,
+        start: PoolLens,
+        ground_epoch_advance: u64,
+    ) std.mem.Allocator.Error!void {
+        const gpa = store.gpa;
+        for (args, 0..) |arg, index| {
+            for (args[index + 1 ..]) |other| if (arg == other) return;
+        }
+        const unreplayable: Recording = .{ .backing = decl.backing, .formals = decl.formals, .replayable = false };
+        if (!structure_only or walk.shared_any) {
+            try self.recordings.put(gpa, decl_idx, unreplayable);
+            return;
+        }
+        const end = PoolLens.of(store);
+        std.debug.assert(end.vars - start.vars < arg_ref);
+        const renamer: Renamer = .{ .start = start, .end = end, .args = args };
+
+        var recording: Recording = .{
+            .backing = decl.backing,
+            .formals = decl.formals,
+            .replayable = true,
+            .rows_start = @intCast(self.rows.items.len),
+            .minted = end.vars - start.vars,
+            .pool_start = @intCast(self.pool.items.len),
+            .pool_len = end.pool - start.pool,
+            .fields_start = @intCast(self.fields.items.len),
+            .fields_len = end.fields - start.fields,
+            .tags_start = @intCast(self.tags.items.len),
+            .tags_len = end.tags - start.tags,
+            .opened = renamer.ref(walk.opened),
+            .ground_epoch_advance = ground_epoch_advance,
+        };
+
+        try self.rows.ensureUnusedCapacity(gpa, recording.minted);
+        var minted = start.vars;
+        while (minted < end.vars) : (minted += 1) {
+            const resolved = store.resolveVar(@fromBackingInt(minted));
+            std.debug.assert(@backingInt(resolved.var_) == minted);
+            self.rows.appendAssumeCapacity(renamer.recordRow(store.rowAt(resolved.desc_idx)));
+        }
+        try self.pool.ensureUnusedCapacity(gpa, recording.pool_len);
+        for (store.vars.items[start.pool..end.pool]) |entry| {
+            self.pool.appendAssumeCapacity(if (TypesStore.isVarsPoolLengthSlot(entry)) entry else @fromBackingInt(renamer.ref(entry)));
+        }
+        try self.fields.ensureUnusedCapacity(gpa, recording.fields_len);
+        var field_idx = start.fields;
+        while (field_idx < end.fields) : (field_idx += 1) {
+            var field = store.record_fields.get(@fromBackingInt(field_idx));
+            field.presence.var_ = @fromBackingInt(renamer.ref(field.presence.var_));
+            if (field.presence.presenceVar()) |presence_var| field.presence.presence_var = .some(@fromBackingInt(renamer.ref(presence_var)));
+            self.fields.appendAssumeCapacity(field);
+        }
+        try self.tags.ensureUnusedCapacity(gpa, recording.tags_len);
+        var tag_idx = start.tags;
+        while (tag_idx < end.tags) : (tag_idx += 1) {
+            var tag = store.tags.get(@fromBackingInt(tag_idx));
+            tag.args.start = @fromBackingInt(renamer.poolOffset(@backingInt(tag.args.start)));
+            self.tags.appendAssumeCapacity(tag);
+        }
+        recording.pinned_start = @intCast(self.pinned.items.len);
+        try self.pinned.ensureUnusedCapacity(gpa, var_map.count());
+        var mapped = var_map.iterator();
+        while (mapped.next()) |entry| {
+            const resolved = store.resolveVar(entry.key_ptr.*);
+            self.pinned.appendAssumeCapacity(.{ .var_ = resolved.var_, .row = store.rowAt(resolved.desc_idx) });
+        }
+        recording.pinned_len = @as(u32, @intCast(self.pinned.items.len)) - recording.pinned_start;
+        try self.recordings.put(gpa, decl_idx, recording);
+    }
+
+    /// Whether every template variable `recording`'s walk read is still the
+    /// root of its class and holds the descriptor the walk read, so a walk
+    /// would make the run the recording records.
+    fn templateUnchanged(self: *const BackingOpenings, store: *const TypesStore, recording: Recording) bool {
+        for (self.pinned.items[recording.pinned_start..][0..recording.pinned_len]) |pinned| {
+            const resolved = store.resolveVar(pinned.var_);
+            if (resolved.var_ != pinned.var_ or !std.meta.eql(store.rowAt(resolved.desc_idx), pinned.row)) return false;
+        }
+        return true;
+    }
+
+    /// Make the opening `recording` records for args `args` at rank `rank`.
+    fn replay(
+        self: *BackingOpenings,
+        store: *TypesStore,
+        recording: Recording,
+        args: []const Var,
+        rank: Rank,
+    ) std.mem.Allocator.Error!Var {
+        const gpa = store.gpa;
+        const start = PoolLens.of(store);
+        const renamer: Renamer = .{ .start = start, .end = undefined, .args = args };
+
+        if (recording.pool_len != 0) {
+            self.replay_pool.clearRetainingCapacity();
+            try self.replay_pool.ensureUnusedCapacity(gpa, recording.pool_len);
+            for (self.pool.items[recording.pool_start..][0..recording.pool_len]) |entry| {
+                self.replay_pool.appendAssumeCapacity(if (TypesStore.isVarsPoolLengthSlot(entry)) entry else renamer.varOf(@backingInt(entry)));
+            }
+            const pool_start = try store.appendVarsPoolEntries(self.replay_pool.items);
+            std.debug.assert(pool_start == start.pool);
+        }
+        if (recording.fields_len != 0) {
+            self.replay_fields.clearRetainingCapacity();
+            try self.replay_fields.ensureUnusedCapacity(gpa, recording.fields_len);
+            for (self.fields.items[recording.fields_start..][0..recording.fields_len]) |recorded| {
+                var field = recorded;
+                field.presence.var_ = renamer.varOf(@backingInt(field.presence.var_));
+                if (field.presence.presenceVar()) |presence_var| field.presence.presence_var = .some(renamer.varOf(@backingInt(presence_var)));
+                self.replay_fields.appendAssumeCapacity(field);
+            }
+            const fields = try store.appendRecordFields(self.replay_fields.items);
+            std.debug.assert(@backingInt(fields.start) == start.fields);
+        }
+        if (recording.tags_len != 0) {
+            self.replay_tags.clearRetainingCapacity();
+            try self.replay_tags.ensureUnusedCapacity(gpa, recording.tags_len);
+            for (self.tags.items[recording.tags_start..][0..recording.tags_len]) |recorded| {
+                var tag = recorded;
+                tag.args.start = @fromBackingInt(renamer.poolIndex(@backingInt(tag.args.start)));
+                self.replay_tags.appendAssumeCapacity(tag);
+            }
+            const tags = try store.appendTags(self.replay_tags.items);
+            std.debug.assert(@backingInt(tags.start) == start.tags);
+        }
+        self.replay_rows.clearRetainingCapacity();
+        try self.replay_rows.ensureUnusedCapacity(gpa, recording.minted);
+        for (self.rows.items[recording.rows_start..][0..recording.minted]) |recorded| {
+            var row = renamer.replayRow(recorded);
+            row.word.rank = rank;
+            self.replay_rows.appendAssumeCapacity(row);
+        }
+        try store.registerEncodedRows(self.replay_rows.items);
+        std.debug.assert(store.len() == start.vars + recording.minted);
+        store.advanceGroundEpoch(recording.ground_epoch_advance);
+        return renamer.varOf(recording.opened);
+    }
+
+    /// Names variables and pool positions of one opening: the variables it
+    /// mints and the pool runs it appends start at `start`.
+    const Renamer = struct {
+        start: PoolLens,
+        end: PoolLens,
+        args: []const Var,
+
+        /// No opening's pool run starts at offset zero (`poolOffset` names a
+        /// range after the run's first slot), so the stored empty range keeps
+        /// its value in both numberings.
+        const empty_vars_start: u32 = TypesStore.stored_empty_var_range;
+
+        /// The reference a recorded opening makes to `var_`, which is one
+        /// it minted or one of its args.
+        fn ref(self: Renamer, var_: Var) Ref {
+            const raw: u32 = @backingInt(var_);
+            if (raw >= self.start.vars and raw < self.end.vars) return raw - self.start.vars;
+            for (self.args, 0..) |arg, index| {
+                if (arg == var_) return arg_ref | @as(u32, @intCast(index));
+            }
+            base.invariant("an opening of a nominal backing that shared no template variable named a variable it neither minted nor took as an arg", .{});
+        }
+
+        /// The variable `ref` names in a replay.
+        fn varOf(self: Renamer, ref_: Ref) Var {
+            if (ref_ & arg_ref != 0) return self.args[ref_ & ~arg_ref];
+            return @fromBackingInt(self.start.vars + ref_);
+        }
+
+        /// A stored vars-range start as its place in the opening's pool run.
+        fn poolOffset(self: Renamer, stored: u32) u32 {
+            if (stored == empty_vars_start) return stored;
+            std.debug.assert(stored > self.start.pool and stored <= self.end.pool);
+            return stored - self.start.pool;
+        }
+
+        /// The stored vars-range start a place in the pool run names in a
+        /// replay.
+        fn poolIndex(self: Renamer, offset: u32) u32 {
+            if (offset == empty_vars_start) return offset;
+            return self.start.pool + offset;
+        }
+
+        /// A range of fields or tags as its place in the opening's run. A
+        /// range holding nothing names no run.
+        fn runOffset(payload: *types_mod.Descriptor.Payload, run_start: u32, run_end: u32) void {
+            if (payload[1] == 0) return;
+            std.debug.assert(payload[0] >= run_start and payload[0] + payload[1] <= run_end);
+            payload[0] -= run_start;
+        }
+
+        fn recordRow(self: Renamer, stored: types_mod.Descriptor.Row) types_mod.Descriptor.Row {
+            var row = stored;
+            switch (row.word.kind) {
+                .alias, .nominal_type => row.payload[1] = self.poolOffset(row.payload[1]),
+                .tuple => row.payload[0] = self.poolOffset(row.payload[0]),
+                .fn_pure, .fn_effectful, .fn_unbound => {
+                    row.payload[0] = self.poolOffset(row.payload[0]);
+                    row.payload[1] = self.ref(@fromBackingInt(row.payload[1]));
+                    row.payload[2] = self.poolOffset(row.payload[2]);
+                },
+                .record => {
+                    runOffset(&row.payload, self.start.fields, self.end.fields);
+                    row.payload[2] = self.ref(@fromBackingInt(row.payload[2]));
+                },
+                .tag_union => {
+                    runOffset(&row.payload, self.start.tags, self.end.tags);
+                    row.payload[2] = self.ref(@fromBackingInt(row.payload[2]));
+                },
+                .empty_record, .empty_tag_union, .field_presence, .err => {},
+                .flex, .rigid => unreachable, // a recorded opening mints structure only
+            }
+            return row;
+        }
+
+        fn replayRow(self: Renamer, recorded: types_mod.Descriptor.Row) types_mod.Descriptor.Row {
+            var row = recorded;
+            switch (row.word.kind) {
+                .alias, .nominal_type => row.payload[1] = self.poolIndex(row.payload[1]),
+                .tuple => row.payload[0] = self.poolIndex(row.payload[0]),
+                .fn_pure, .fn_effectful, .fn_unbound => {
+                    row.payload[0] = self.poolIndex(row.payload[0]);
+                    row.payload[1] = @backingInt(self.varOf(row.payload[1]));
+                    row.payload[2] = self.poolIndex(row.payload[2]);
+                },
+                .record => {
+                    if (row.payload[1] != 0) row.payload[0] += self.start.fields;
+                    row.payload[2] = @backingInt(self.varOf(row.payload[2]));
+                },
+                .tag_union => {
+                    if (row.payload[1] != 0) row.payload[0] += self.start.tags;
+                    row.payload[2] = @backingInt(self.varOf(row.payload[2]));
+                },
+                .empty_record, .empty_tag_union, .field_presence, .err => {},
+                .flex, .rigid => unreachable, // a recorded opening mints structure only
+            }
+            return row;
+        }
+    };
+};
 
 /// Reusable heap buffers backing `Instantiator`'s explicit worklist. Owned by
 /// the `TypesStore` so every instantiation against a store reuses the same
@@ -207,9 +643,7 @@ const MarkerItem = struct { var_: Var, polarity: Polarity, reach: AdapterReachPo
 /// its parents. Edges with the same child form a list through `next`.
 const ReachEdge = struct {
     parent: Var,
-    next: u32,
-
-    const none = std.math.maxInt(u32);
+    next: collections.OptionalU32,
 };
 
 /// One suspended copy step on the explicit instantiation worklist. Every
@@ -269,6 +703,8 @@ const FlexLikeFrame = struct {
 const AliasFrame = struct {
     common: FillCommon,
     alias: Alias,
+    /// The identity row the source alias names, which its copy names too.
+    identity_row: u32,
     /// Raw base index of the alias's arg run (backing var excluded).
     args_start: u32,
     args_count: u32,
@@ -290,15 +726,15 @@ const NominalFrame = struct {
     saved_polarity: Polarity,
     common: FillCommon,
     nominal: NominalType,
+    /// The identity row the source application names, which its copy names
+    /// too.
+    identity_row: u32,
     args_start: u32,
     args_count: u32,
     vars_base: u32,
-    /// The adapter reach surrounding this nominal application. A `Try` written
-    /// as the direct result passes it to the ERROR argument; every other
-    /// argument of every nominal is a nested position.
+    /// The adapter reach surrounding this nominal application, restored once
+    /// its arguments, which are all nested positions, are instantiated.
     saved_reach: AdapterReachPosition,
-    /// Whether this application is the builtin `Try(ok, err)`.
-    is_try: bool,
 };
 
 const FuncFrame = struct {
@@ -362,7 +798,7 @@ pub const Instantiator = struct {
     // not owned
     store: *TypesStore,
     idents: *const base.Ident.Store,
-    var_map: *@import("collections").DenseMap(Var, Var),
+    var_map: *collections.EpochMap(Var, Var),
 
     current_rank: Rank,
     rigid_behavior: RigidBehavior,
@@ -380,13 +816,11 @@ pub const Instantiator = struct {
 
     /// A rank-1 scheme can contain quantified leaves below monomorphic
     /// structural nodes. While instantiating such a scheme, copy exactly the
-    /// monomorphic nodes from which a generalized variable or per-use
-    /// structure (`DescriptorFlags.per_use_structure`) is reachable,
-    /// per-use structure included (as recorded in `Scratch.reach_state`), so
-    /// the walk reaches every node each use must own. Every other monomorphic
-    /// node stays shared: it is not quantified, so each use must see the same
-    /// node, including a function node's effect kind and effect
-    /// dependencies.
+    /// monomorphic nodes from which a generalized variable is reachable (as
+    /// recorded in `Scratch.reach_state`) so the walk reaches every
+    /// generalized descendant. Every other monomorphic node stays shared: it
+    /// is not quantified, so each use must see the same node, including a
+    /// function node's effect kind and effect dependencies.
     copy_scheme_structure: bool = false,
     /// Set by a caller that knows the next scheme root it instantiates has no
     /// monomorphic structural node from which a generalized variable is
@@ -449,7 +883,7 @@ pub const Instantiator = struct {
     /// When set, the resolved fresh copy of every row extension whose source
     /// is a constrained flex or rigid is added here: the copy stands in a row's
     /// tail position, where the row default closes it to the empty row
-    /// (design.md "Derived Equality And Hashing Over Open Rows").
+    /// (design.md "Methods On Open Rows").
     constrained_row_tail_copies: ?*DenseMap(Var, void) = null,
     /// How to resolve polarity vars (see `PolarityVarBehavior`). `.close`
     /// reproduces the written (closed) row and is the safe default.
@@ -472,6 +906,13 @@ pub const Instantiator = struct {
     /// `instantiateVarHelp` for the whole copy, so it is null only between
     /// instantiations.
     marker_choices: ?*std.AutoHashMapUnmanaged(Var, bool) = null,
+    /// The marker pre-walk (`collectMarkerChoices`) outcome of the next root
+    /// this instantiator copies with a behavior that walks
+    /// (`.resolve_by_polarity`, `.preserve_one_sided`, `.defer_open`): read
+    /// from it when an earlier instantiation of the same root at the same
+    /// behavior, polarity and reach recorded one, written to it otherwise.
+    /// That root copy consumes it.
+    marker_choices_memo: ?*MarkerChoicesMemo = null,
     /// The polarity of the position currently being instantiated. Starts at
     /// the polarity of the instantiation root (callers using
     /// `.resolve_by_polarity` set it). Function argument positions flip it
@@ -482,27 +923,44 @@ pub const Instantiator = struct {
     /// Where the position currently being instantiated sits relative to the
     /// rows a where-method use may widen. Starts at the reach of the
     /// instantiation ROOT (callers using `.defer_open` set it) and demotes to
-    /// `.nested` under every constructor except a function's result and a
-    /// `Try`'s error argument. Only consulted by `.defer_open`.
+    /// `.nested` under every constructor except the signature's own function
+    /// result. Only consulted by `.defer_open`.
     current_reach: AdapterReachPosition = .nested,
-    /// Identity of the builtin `Try(ok, err)` nominal. When null, no nominal is
-    /// treated as a `Try`, so a `Try` error row reached through a declaration
-    /// reference is a nested position like any other nominal argument.
-    try_nominal: ?TryNominalIdent = null,
-
-    /// How to recognize the builtin `Try(ok, err)` nominal while walking. Both
-    /// spellings are needed for the same reason `builtinNominalDeclForIdentInEnv`
-    /// accepts both: a `Try` written through its module interns the qualified
-    /// name. Builtin origin is required on top of the name, so a user nominal
-    /// that shadows `Try` is not mistaken for it.
-    pub const TryNominalIdent = struct {
-        short: Ident.Idx,
-        qualified: Ident.Idx,
-    };
+    /// Set when the walk shared a source variable instead of copying it, so
+    /// the copy names a variable of the source graph.
+    shared_any: bool = false,
 
     pub const SharedSubtree = struct {
         source: Var,
         copy: Var,
+    };
+
+    /// One polarity marker's choice: true opens it (or, for
+    /// `.preserve_one_sided`, keeps it deferred).
+    pub const MarkerChoice = struct { marker: Var, chosen: bool };
+
+    /// What the marker pre-walk decided for one root: the copy is rejected
+    /// (a placement provider reported a rejected declaration), or it copies
+    /// with exactly these marker choices, keyed by resolved marker var.
+    pub const MarkerChoicesOutcome = union(enum) {
+        rejected,
+        chosen: []const MarkerChoice,
+    };
+
+    /// A root copy's pre-walk outcome, owned by the caller (see
+    /// `marker_choices_memo`).
+    pub const MarkerChoicesMemo = struct {
+        /// The outcome an earlier instantiation recorded; the copy reads it
+        /// instead of walking, before anything can append to `sink`.
+        known: ?MarkerChoicesOutcome = null,
+        /// Where a copy that walks appends its marker choices.
+        sink: *std.ArrayListUnmanaged(MarkerChoice),
+        /// Set when the copy walked: `rejected` is its verdict, and an
+        /// accepted copy's choices are `sink.items[start..][0..len]`.
+        walked: bool = false,
+        rejected: bool = false,
+        start: u32 = 0,
+        len: u32 = 0,
     };
 
     /// Re-exported so callers name one enum: `Instantiator.AdapterReach`.
@@ -638,16 +1096,6 @@ pub const Instantiator = struct {
         return self.idents.getText(idx);
     }
 
-    /// Whether this nominal application is the builtin `Try(ok, err)`. Builtin
-    /// origin is required alongside the name, so a user nominal that shadows
-    /// `Try` keeps every one of its type arguments a nested position.
-    fn nominalIsBuiltinTry(self: *const Self, nominal: NominalType) bool {
-        const try_nominal = self.try_nominal orelse return false;
-        if (!nominal.originIsBuiltin()) return false;
-        const name = nominal.ident.ident_idx;
-        return name.eql(try_nominal.short) or name.eql(try_nominal.qualified);
-    }
-
     fn scratch(self: *Self) *Scratch {
         return &self.store.instantiate_scratch;
     }
@@ -701,8 +1149,7 @@ pub const Instantiator = struct {
     }
 
     /// Fill `Scratch.reach_state` for every node reachable from `root`: true
-    /// when a generalized variable, or structure every use copies
-    /// (`schemeCopiesNode`), is reachable from that node. The walk
+    /// when a generalized variable is reachable from that node. The walk
     /// follows exactly the child edges the copy follows, stops at monomorphic
     /// flex and rigid leaves (shared, so their constraints are shared too),
     /// and records every edge by its child. Reachability then propagates from
@@ -718,8 +1165,8 @@ pub const Instantiator = struct {
         machine.reach_stack.clearRetainingCapacity();
         reach_state.clearRetainingCapacity();
 
-        const root_resolved = self.store.resolveVar(root);
-        try reach_state.put(root_resolved.var_, schemeCopiesNode(root_resolved.desc));
+        const root_resolved = self.store.resolveVarWord(root);
+        try reach_state.put(root_resolved.var_, schemeCopiesNode(root_resolved.word));
         try machine.reach_stack.append(self.store.gpa, root_resolved.var_);
 
         while (machine.reach_stack.pop()) |parent| {
@@ -769,15 +1216,15 @@ pub const Instantiator = struct {
             if (entry.value_ptr.*) try machine.reach_stack.append(self.store.gpa, entry.key_ptr.*);
         }
         while (machine.reach_stack.pop()) |child| {
-            var edge_idx = reach_heads.get(child) orelse continue;
-            while (edge_idx != ReachEdge.none) {
+            var next_edge: collections.OptionalU32 = .some(reach_heads.get(child) orelse continue);
+            while (next_edge.get()) |edge_idx| {
                 const edge = machine.reach_edges.items[edge_idx];
                 const parent_state = reach_state.getPtr(edge.parent).?;
                 if (!parent_state.*) {
                     parent_state.* = true;
                     try machine.reach_stack.append(self.store.gpa, edge.parent);
                 }
-                edge_idx = edge.next;
+                next_edge = edge.next;
             }
         }
 
@@ -818,9 +1265,9 @@ pub const Instantiator = struct {
     fn visitReachConstraints(self: *Self, parent: Var, constraints: StaticDispatchConstraint.SafeList.Range) std.mem.Allocator.Error!void {
         var i: u32 = 0;
         while (i < constraints.len()) : (i += 1) {
-            const constraint = self.store.static_dispatch_constraints.items.items[@backingInt(constraints.start) + i];
+            const constraint = self.store.static_dispatch_constraints.items()[@backingInt(constraints.start) + i];
             try self.visitReachChild(parent, constraint.fn_var);
-            if (constraint.interpolation.isPresent()) {
+            if (constraint.interpolation != .none) {
                 const metadata = self.store.getInterpolationMetadata(constraint.interpolation);
                 var part_idx: u32 = 0;
                 while (part_idx < metadata.interpolated_parts.len()) : (part_idx += 1) {
@@ -834,26 +1281,24 @@ pub const Instantiator = struct {
     /// Record the edge to `child` and schedule the child's own children once.
     fn visitReachChild(self: *Self, parent: Var, child: Var) std.mem.Allocator.Error!void {
         const machine = self.scratch();
-        const resolved = self.store.resolveVar(child);
+        const resolved = self.store.resolveVarWord(child);
         const edge_idx: u32 = @intCast(machine.reach_edges.items.len);
         const head = try machine.reach_heads.?.getOrPut(resolved.var_);
         try machine.reach_edges.append(self.store.gpa, .{
             .parent = parent,
-            .next = if (head.found_existing) head.value_ptr.* else ReachEdge.none,
+            .next = if (head.found_existing) .some(head.value_ptr.*) else .none,
         });
         head.value_ptr.* = edge_idx;
         const entry = try machine.reach_state.?.getOrPut(resolved.var_);
         if (entry.found_existing) return;
-        entry.value_ptr.* = schemeCopiesNode(resolved.desc);
+        entry.value_ptr.* = schemeCopiesNode(resolved.word);
         try machine.reach_stack.append(self.store.gpa, resolved.var_);
     }
 
     /// Whether every instantiation of a scheme copies this node itself: a
-    /// generalized variable, or anonymous structure made in the scheme's own
-    /// scope, which a use may lift into a nominal type
-    /// (`DescriptorFlags.per_use_structure`).
-    fn schemeCopiesNode(desc: types_mod.Descriptor) bool {
-        return desc.rank == .generalized or desc.flags.per_use_structure;
+    /// generalized variable.
+    fn schemeCopiesNode(word: types_mod.Descriptor.Word) bool {
+        return word.rank == .generalized;
     }
 
     /// Resolve shared declaration binders before copying. Every semantic
@@ -939,13 +1384,12 @@ pub const Instantiator = struct {
                             std.debug.assert(nominal.sourceDeclOptional() == null);
                             break :blk .{ .at = item.polarity };
                         };
-                        const reach: AdapterReachPosition = base.annotation_positions.nominalArgumentReach(item.reach, self.nominalIsBuiltinTry(nominal), index);
                         switch (position) {
-                            .at => |polarity| try pending.append(allocator, .{ .var_ = arg, .polarity = polarity, .reach = reach }),
+                            .at => |polarity| try pending.append(allocator, .{ .var_ = arg, .polarity = polarity, .reach = .nested }),
                             // Visiting the argument at both polarities makes
                             // every marker in it stand on both sides.
                             .both => for ([_]Polarity{ .pos, .neg }) |polarity| {
-                                try pending.append(allocator, .{ .var_ = arg, .polarity = polarity, .reach = reach });
+                                try pending.append(allocator, .{ .var_ = arg, .polarity = polarity, .reach = .nested });
                             },
                         }
                     },
@@ -1000,11 +1444,11 @@ pub const Instantiator = struct {
         const allocator = self.store.gpa;
         var i: u32 = 0;
         while (i < constraints.len()) : (i += 1) {
-            const constraint = self.store.static_dispatch_constraints.items.items[@backingInt(constraints.start) + i];
+            const constraint = self.store.static_dispatch_constraints.items()[@backingInt(constraints.start) + i];
             // A method signature is its own annotation root, generated at the
             // output polarity whatever position its dispatcher occupies.
             try pending.append(allocator, .{ .var_ = constraint.fn_var, .polarity = .pos, .reach = .nested });
-            if (constraint.interpolation.isPresent()) {
+            if (constraint.interpolation != .none) {
                 const metadata = self.store.getInterpolationMetadata(constraint.interpolation);
                 var part_idx: u32 = 0;
                 while (part_idx < metadata.interpolated_parts.len()) : (part_idx += 1) {
@@ -1012,6 +1456,28 @@ pub const Instantiator = struct {
                 }
                 try pending.append(allocator, .{ .var_ = metadata.item_var, .polarity = polarity, .reach = .nested });
             }
+        }
+    }
+
+    /// A recorded pre-walk outcome stands for a walk this instantiation does
+    /// not run, so it must be exactly what that walk would decide: checked
+    /// against the walk itself in builds with runtime safety. `known` is
+    /// null for a recorded rejection, and otherwise the recorded choices.
+    fn debugAssertKnownMarkerChoices(self: *Self, root: Var, known: ?*const std.AutoHashMapUnmanaged(Var, bool)) std.mem.Allocator.Error!void {
+        if (!std.debug.runtime_safety) return;
+        var walked: std.AutoHashMapUnmanaged(Var, bool) = .empty;
+        defer walked.deinit(self.store.gpa);
+        const accepted = try self.collectMarkerChoices(root, &walked);
+        const choices = known orelse {
+            if (accepted) base.invariant("a recorded marker pre-walk rejected a root whose walk accepts it", .{});
+            return;
+        };
+        if (!accepted) base.invariant("a recorded marker pre-walk accepted a root whose walk rejects it", .{});
+        if (walked.count() != choices.count()) base.invariant("a recorded marker pre-walk has {d} marker choices, the walk {d}", .{ choices.count(), walked.count() });
+        var entries = choices.iterator();
+        while (entries.next()) |entry| {
+            const chosen = walked.get(entry.key_ptr.*) orelse base.invariant("a recorded marker pre-walk names a marker the walk does not reach", .{});
+            if (chosen != entry.value_ptr.*) base.invariant("a recorded marker pre-walk chose differently from the walk", .{});
         }
     }
 
@@ -1027,7 +1493,42 @@ pub const Instantiator = struct {
         defer self.marker_choices = previous_choices;
         switch (self.polarity_var_behavior) {
             .resolve_by_polarity, .preserve_one_sided, .defer_open => {
-                if (!try self.collectMarkerChoices(initial_var, &marker_choices)) {
+                const memo = self.marker_choices_memo;
+                self.marker_choices_memo = null;
+                const known = if (memo) |entry| entry.known else null;
+                const accepted = if (known) |outcome| accepted: {
+                    switch (outcome) {
+                        .rejected => {
+                            try self.debugAssertKnownMarkerChoices(initial_var, null);
+                            break :accepted false;
+                        },
+                        .chosen => |choices| {
+                            // The recorded slice is read before the debug
+                            // walk, whose placement providers may record
+                            // other outcomes and move it.
+                            try marker_choices.ensureTotalCapacity(self.store.gpa, @intCast(choices.len));
+                            for (choices) |choice| marker_choices.putAssumeCapacityNoClobber(choice.marker, choice.chosen);
+                            try self.debugAssertKnownMarkerChoices(initial_var, &marker_choices);
+                            break :accepted true;
+                        },
+                    }
+                } else accepted: {
+                    const walked = try self.collectMarkerChoices(initial_var, &marker_choices);
+                    if (memo) |entry| {
+                        entry.walked = true;
+                        entry.rejected = !walked;
+                        if (walked) {
+                            const sink = entry.sink;
+                            try sink.ensureUnusedCapacity(self.store.gpa, marker_choices.count());
+                            entry.start = @intCast(sink.items.len);
+                            entry.len = marker_choices.count();
+                            var entries = marker_choices.iterator();
+                            while (entries.next()) |choice| sink.appendAssumeCapacity(.{ .marker = choice.key_ptr.*, .chosen = choice.value_ptr.* });
+                        }
+                    }
+                    break :accepted walked;
+                };
+                if (!accepted) {
                     const rejected = try self.store.freshFromContentWithRank(.err, self.current_rank);
                     try self.var_map.put(self.store.resolveVar(initial_var).var_, rejected);
                     return rejected;
@@ -1093,8 +1594,9 @@ pub const Instantiator = struct {
         force_root_copy: bool,
     ) std.mem.Allocator.Error!bool {
         const machine = self.scratch();
-        const resolved = self.store.resolveVar(initial_var);
+        const resolved = self.store.resolveVarWord(initial_var);
         const resolved_var = resolved.var_;
+        const desc_idx = resolved.desc_idx;
 
         // The root and its explicit scheme requirements use one substitution.
         // An established copy takes precedence over ordinary rank-based sharing.
@@ -1106,40 +1608,43 @@ pub const Instantiator = struct {
         }
 
         // Ordinary instantiation shares every non-generalized var. A binding
-        // explicitly classified as a scheme instead copies its per-use
-        // structure and the non-generalized structural nodes from which a
-        // generalized leaf or per-use structure is reachable, so those stay
-        // reachable at arbitrary depth while every other monomorphic node and
-        // leaf keeps its identity. A polarity marker is
+        // explicitly classified as a scheme instead copies the non-generalized
+        // structural nodes from which a generalized leaf is reachable, so
+        // generalized leaves at arbitrary depth remain reachable while every
+        // monomorphic node and leaf keeps its identity. A polarity marker is
         // never shared: it stands for "decided by this instantiation" whatever
         // its rank (a where-method signature is instantiated per body use
         // before the enclosing scheme generalizes).
         const is_polarity_marker = self.polarity_var_ident != null and
-            resolved.desc.content == .rigid and
-            resolved.desc.content.rigid.name.eql(self.polarity_var_ident.?);
-        const is_leaf = switch (resolved.desc.content) {
-            .alias, .structure => false,
+            resolved.word.kind == .rigid and
+            self.store.rigidAt(desc_idx).name.eql(self.polarity_var_ident.?);
+        const is_leaf = switch (resolved.word.kind) {
+            .alias, .record, .tuple, .nominal_type, .fn_pure, .fn_effectful, .fn_unbound, .empty_record, .tag_union, .empty_tag_union => false,
             .flex, .rigid, .field_presence, .err => true,
         };
         if (!force_root_copy and self.share_leaves and is_leaf and !is_polarity_marker) {
+            self.shared_any = true;
             try machine.value_stack.append(self.store.gpa, resolved_var);
             return true;
         }
-        if (!force_root_copy and self.rank_behavior == .respect_rank and resolved.desc.rank != .generalized) {
-            const copy_structure = self.copy_scheme_structure and switch (resolved.desc.content) {
-                .alias, .structure => !self.reach_known_empty and (machine.reach_state.?.get(resolved_var) orelse false),
-                .flex, .rigid, .field_presence, .err => false,
-            };
+        if (!force_root_copy and self.rank_behavior == .respect_rank and resolved.word.rank != .generalized) {
+            const copy_structure = self.copy_scheme_structure and !is_leaf and
+                !self.reach_known_empty and (machine.reach_state.?.get(resolved_var) orelse false);
             if (!copy_structure and !is_polarity_marker) {
+                self.shared_any = true;
                 try machine.value_stack.append(self.store.gpa, resolved_var);
                 return true;
             }
         }
 
-        var flags = resolved.desc.flags.copied();
-        flags.annotation_tag_ext = self.preserve_annotation_tag_ext and resolved.desc.flags.annotation_tag_ext;
-        switch (resolved.desc.content) {
-            .rigid => |rigid| {
+        var flags = resolved.word.flags().copied();
+        flags.annotation_tag_ext = self.preserve_annotation_tag_ext and resolved.word.flags().annotation_tag_ext;
+        // A copy of an uncommitted record tail absorbs optional fields only
+        // (design.md "Uncommitted Record Tails").
+        if (flags.uncommitted_record_tail) flags.uncommitted_copy = true;
+        switch (resolved.word.kind) {
+            .rigid => {
+                const rigid = self.store.rigidAt(desc_idx);
                 // Polarity vars (the deferred open-vs-closed tag union
                 // extensions of alias declaration bodies) are resolved before
                 // any rigid behavior applies: they are compiler-internal and
@@ -1243,20 +1748,18 @@ pub const Instantiator = struct {
                     }
                 };
 
-                // Remember this substitution for recursive references
-                // IMPORTANT: This has to be registered _before_ any child copy runs
-                const fresh_var = try self.store.freshFromContentWithRank(.{ .flex = Flex.init() }, self.current_rank);
-                try self.var_map.put(resolved_var, fresh_var);
-
                 if (self.purpose == .expected_shape or rigid.constraints.len() == 0) {
                     const fresh_content = switch (fresh_type) {
                         .flex => Content{ .flex = Flex{ .name = rigid.name, .constraints = StaticDispatchConstraint.SafeList.Range.empty() } },
                         .rigid => Content{ .rigid = Rigid{ .name = rigid.name, .constraints = StaticDispatchConstraint.SafeList.Range.empty() } },
                     };
-                    try self.fillPlaceholder(fresh_var, fresh_content, flags);
-                    try machine.value_stack.append(self.store.gpa, fresh_var);
-                    return true;
+                    return self.pushLeafCopy(resolved_var, fresh_content, flags);
                 }
+
+                // Remember this substitution for recursive references
+                // IMPORTANT: This has to be registered _before_ any child copy runs
+                const fresh_var = try self.store.freshFromContentWithRank(.{ .flex = Flex.init() }, self.current_rank);
+                try self.var_map.put(resolved_var, fresh_var);
 
                 try machine.frames.append(self.store.gpa, .{ .flex_like = .{
                     .common = .{
@@ -1274,23 +1777,20 @@ pub const Instantiator = struct {
                 } });
                 return false;
             },
-            .flex => |flex| {
+            .flex => {
+                const flex = self.store.flexAt(desc_idx);
+                if (self.close_bounded_row_exts and resolved.word.flags().bounded_row_ext) {
+                    return self.pushLeafCopy(resolved_var, .{ .structure = .empty_tag_union }, flags.forKind(.empty_tag_union));
+                }
+                if (self.purpose == .expected_shape or flex.constraints.len() == 0) {
+                    const fresh_content = Content{ .flex = Flex{ .name = flex.name, .constraints = StaticDispatchConstraint.SafeList.Range.empty() } };
+                    return self.pushLeafCopy(resolved_var, fresh_content, flags);
+                }
+
                 // Remember this substitution for recursive references
                 // IMPORTANT: This has to be registered _before_ any child copy runs
                 const fresh_var = try self.store.fresh();
                 try self.var_map.put(resolved_var, fresh_var);
-
-                if (self.close_bounded_row_exts and resolved.desc.flags.bounded_row_ext) {
-                    try self.fillPlaceholder(fresh_var, .{ .structure = .empty_tag_union }, flags);
-                    try machine.value_stack.append(self.store.gpa, fresh_var);
-                    return true;
-                }
-                if (self.purpose == .expected_shape or flex.constraints.len() == 0) {
-                    const fresh_content = Content{ .flex = Flex{ .name = flex.name, .constraints = StaticDispatchConstraint.SafeList.Range.empty() } };
-                    try self.fillPlaceholder(fresh_var, fresh_content, flags);
-                    try machine.value_stack.append(self.store.gpa, fresh_var);
-                    return true;
-                }
 
                 try machine.frames.append(self.store.gpa, .{ .flex_like = .{
                     .common = .{
@@ -1305,7 +1805,8 @@ pub const Instantiator = struct {
                 } });
                 return false;
             },
-            .alias => |alias| {
+            .alias => {
+                const alias = self.store.aliasAt(desc_idx);
                 const fresh_var = try self.store.fresh();
                 try self.var_map.put(resolved_var, fresh_var);
 
@@ -1317,6 +1818,7 @@ pub const Instantiator = struct {
                         .flags = flags,
                     },
                     .alias = alias,
+                    .identity_row = self.store.aliasIdentityRowAt(desc_idx),
                     .args_start = @backingInt(arg_span.start),
                     .args_count = arg_span.count,
                     .vars_base = @intCast(machine.value_stack.items.len),
@@ -1324,32 +1826,28 @@ pub const Instantiator = struct {
                 } });
                 return false;
             },
-            .field_presence => |field_presence| {
+            .field_presence => {
+                const field_presence = self.store.fieldPresenceAt(desc_idx);
                 // A resolved presence fact carries no inner variables. It is
                 // still copied to a fresh var so an instantiated field-kind
                 // axis has the same identity semantics as every other axis.
-                const fresh_var = try self.store.fresh();
-                try self.var_map.put(resolved_var, fresh_var);
-                try self.fillPlaceholder(fresh_var, .{ .field_presence = field_presence }, flags);
-                try machine.value_stack.append(self.store.gpa, fresh_var);
-                return true;
+                return self.pushLeafCopy(resolved_var, .{ .field_presence = field_presence }, flags);
             },
-            .structure => |flat_type| {
+            .empty_record => return self.pushLeafCopy(resolved_var, Content{ .structure = FlatType.empty_record }, flags),
+            .empty_tag_union => {
+                const copied = try self.pushLeafCopy(resolved_var, Content{ .structure = FlatType.empty_tag_union }, flags);
+                // A copy of a tail a match closed carries that closing.
+                if (flags.uncommitted_tag_tail) try self.store.carryTagTailClosing(resolved_var, self.scratch().value_stack.getLast());
+                return copied;
+            },
+            .record, .tuple, .nominal_type, .fn_pure, .fn_effectful, .fn_unbound, .tag_union => {
                 const fresh_var = try self.store.fresh();
                 try self.var_map.put(resolved_var, fresh_var);
 
-                switch (flat_type) {
-                    .empty_record => {
-                        try self.fillPlaceholder(fresh_var, Content{ .structure = FlatType.empty_record }, flags);
-                        try machine.value_stack.append(self.store.gpa, fresh_var);
-                        return true;
-                    },
-                    .empty_tag_union => {
-                        try self.fillPlaceholder(fresh_var, Content{ .structure = FlatType.empty_tag_union }, flags);
-                        try machine.value_stack.append(self.store.gpa, fresh_var);
-                        return true;
-                    },
-                    .tuple => |tuple| {
+                switch (resolved.word.kind) {
+                    .flex, .rigid, .alias, .field_presence, .err, .empty_record, .empty_tag_union => unreachable, // the outer switch takes these kinds
+                    .tuple => {
+                        const tuple = self.store.tupleAt(desc_idx);
                         try machine.frames.append(self.store.gpa, .{ .tuple = .{
                             .common = .{
                                 .fresh_var = fresh_var,
@@ -1361,7 +1859,8 @@ pub const Instantiator = struct {
                         } });
                         return false;
                     },
-                    .nominal_type => |nominal| {
+                    .nominal_type => {
+                        const nominal = self.store.nominalAt(desc_idx);
                         // A nominal application instantiates its actual args
                         // only. The declaration's backing template is never
                         // touched here; it is instantiated exclusively by
@@ -1374,16 +1873,17 @@ pub const Instantiator = struct {
                                 .flags = flags,
                             },
                             .nominal = nominal,
+                            .identity_row = self.store.nominalIdentityRowAt(desc_idx),
                             .args_start = @backingInt(arg_span.start),
                             .args_count = arg_span.count,
                             .vars_base = @intCast(machine.value_stack.items.len),
                             .saved_reach = self.current_reach,
-                            .is_try = self.nominalIsBuiltinTry(nominal),
                             .saved_polarity = self.current_polarity,
                         } });
                         return false;
                     },
-                    .fn_pure => |func| {
+                    .fn_pure => {
+                        const func = self.store.funcAt(desc_idx);
                         try machine.frames.append(self.store.gpa, .{ .func = .{
                             .common = .{
                                 .fresh_var = fresh_var,
@@ -1397,7 +1897,8 @@ pub const Instantiator = struct {
                         } });
                         return false;
                     },
-                    .fn_effectful => |func| {
+                    .fn_effectful => {
+                        const func = self.store.funcAt(desc_idx);
                         try machine.frames.append(self.store.gpa, .{ .func = .{
                             .common = .{
                                 .fresh_var = fresh_var,
@@ -1411,7 +1912,8 @@ pub const Instantiator = struct {
                         } });
                         return false;
                     },
-                    .fn_unbound => |func| {
+                    .fn_unbound => {
+                        const func = self.store.funcAt(desc_idx);
                         try machine.frames.append(self.store.gpa, .{ .func = .{
                             .common = .{
                                 .fresh_var = fresh_var,
@@ -1425,7 +1927,8 @@ pub const Instantiator = struct {
                         } });
                         return false;
                     },
-                    .record => |record| {
+                    .record => {
+                        const record = self.store.recordAt(desc_idx);
                         try machine.frames.append(self.store.gpa, .{ .record = .{
                             .common = .{
                                 .fresh_var = fresh_var,
@@ -1437,7 +1940,8 @@ pub const Instantiator = struct {
                         } });
                         return false;
                     },
-                    .tag_union => |tag_union| {
+                    .tag_union => {
+                        const tag_union = self.store.tagUnionAt(desc_idx);
                         try machine.frames.append(self.store.gpa, .{ .tag_union = .{
                             .common = .{
                                 .fresh_var = fresh_var,
@@ -1453,40 +1957,65 @@ pub const Instantiator = struct {
                     },
                 }
             },
-            .err => {
-                const fresh_var = try self.store.fresh();
-                try self.var_map.put(resolved_var, fresh_var);
-                try self.fillPlaceholder(fresh_var, Content.err, flags);
-                try machine.value_stack.append(self.store.gpa, fresh_var);
-                return true;
-            },
+            .err => return self.pushLeafCopy(resolved_var, Content.err, flags),
         }
     }
 
+    /// Copy a var whose content has no children: its copy is complete when
+    /// it is created, so it is created with that content.
+    fn pushLeafCopy(
+        self: *Self,
+        resolved_var: Var,
+        content: Content,
+        flags: types_mod.DescriptorFlags,
+    ) std.mem.Allocator.Error!bool {
+        const fresh_var = try self.store.register(.{
+            .content = content,
+            .rank = self.current_rank,
+            .flags = flags,
+        });
+        try self.var_map.put(resolved_var, fresh_var);
+        try self.scratch().value_stack.append(self.store.gpa, fresh_var);
+        return true;
+    }
+
     /// Update the placeholder fresh var with its real content.
-    fn fillPlaceholder(
+    inline fn fillPlaceholder(
         self: *Self,
         fresh_var: Var,
         content: Content,
         flags: types_mod.DescriptorFlags,
     ) std.mem.Allocator.Error!void {
-        try self.store.dangerousSetVarDesc(
-            fresh_var,
-            .{
-                .content = content,
-                .rank = self.current_rank,
-                .flags = flags,
-            },
-        );
+        try self.store.fillFreshPlaceholder(fresh_var, .{
+            .content = content,
+            .rank = self.current_rank,
+            .flags = flags,
+        });
     }
 
     /// Fill `common`'s placeholder and publish it as this frame's result.
-    fn finishFrame(
+    inline fn finishFrame(
         self: *Self,
         common: FillCommon,
         content: Content,
     ) std.mem.Allocator.Error!void {
         try self.fillPlaceholder(common.fresh_var, content, common.flags);
+        try self.scratch().value_stack.append(self.store.gpa, common.fresh_var);
+    }
+
+    /// `finishFrame` for a copied nominal type or alias, whose identity is
+    /// row `identity` of the store, the row its source names.
+    inline fn finishFrameWithIdentity(
+        self: *Self,
+        common: FillCommon,
+        content: Content,
+        identity: u32,
+    ) std.mem.Allocator.Error!void {
+        try self.store.fillFreshPlaceholderWithIdentity(common.fresh_var, .{
+            .content = content,
+            .rank = self.current_rank,
+            .flags = common.flags,
+        }, identity);
         try self.scratch().value_stack.append(self.store.gpa, common.fresh_var);
     }
 
@@ -1500,20 +2029,20 @@ pub const Instantiator = struct {
     /// Append a copy of the constraint run `source` for a flex-like frame to
     /// rewrite in place, returning its raw base index.
     fn appendConstraintRunCopy(self: *Self, source: StaticDispatchConstraint.SafeList.Range) std.mem.Allocator.Error!u32 {
-        const constraints = &self.store.static_dispatch_constraints.items;
-        const fresh_start = std.math.cast(u32, constraints.items.len) orelse return error.OutOfMemory;
+        const constraints = &self.store.static_dispatch_constraints;
+        const fresh_start = std.math.cast(u32, constraints.items().len) orelse return error.OutOfMemory;
         try constraints.ensureUnusedCapacity(self.store.gpa, source.count);
         // The source run lives in the same list, so it is sliced only once
         // the list can no longer move.
         const source_start: usize = @backingInt(source.start);
-        constraints.appendSliceAssumeCapacity(constraints.items[source_start..][0..source.count]);
+        _ = constraints.appendSliceAssumeCapacity(constraints.items()[source_start..][0..source.count]);
         return fresh_start;
     }
 
     /// The fresh copy of the frame's current constraint. Re-fetched on every
     /// use, since child copies append to the same list.
     fn freshConstraint(self: *Self, frame: *const FlexLikeFrame) *StaticDispatchConstraint {
-        return &self.store.static_dispatch_constraints.items.items[frame.fresh_start + frame.cons_idx];
+        return &self.store.static_dispatch_constraints.items()[frame.fresh_start + frame.cons_idx];
     }
 
     fn stepFlexLike(self: *Self, frame: *FlexLikeFrame) std.mem.Allocator.Error!bool {
@@ -1534,7 +2063,7 @@ pub const Instantiator = struct {
                         try self.finishFrame(frame.common, fresh_content);
                         return true;
                     }
-                    const constraint = self.store.static_dispatch_constraints.items.items[frame.cons_start + frame.cons_idx];
+                    const constraint = self.store.static_dispatch_constraints.items()[frame.cons_start + frame.cons_idx];
                     frame.stage = .await_fn;
                     if (self.deferredCallable(constraint)) |source| {
                         frame.has_deferred = true;
@@ -1549,9 +2078,9 @@ pub const Instantiator = struct {
                 },
                 .await_fn => {
                     frame.fresh_fn_var = machine.value_stack.pop().?;
-                    const constraint = self.store.static_dispatch_constraints.items.items[frame.cons_start + frame.cons_idx];
+                    const constraint = self.store.static_dispatch_constraints.items()[frame.cons_start + frame.cons_idx];
                     try self.carryDerivedMapPlan(constraint.fn_var, frame.fresh_fn_var);
-                    if (!constraint.interpolation.isPresent()) {
+                    if (constraint.interpolation == .none) {
                         self.freshConstraint(frame).fn_var = frame.fresh_fn_var;
                         frame.cons_idx += 1;
                         frame.stage = .dispatch_fn;
@@ -1562,7 +2091,7 @@ pub const Instantiator = struct {
                     }
                 },
                 .dispatch_part_or_item => {
-                    const constraint = self.store.static_dispatch_constraints.items.items[frame.cons_start + frame.cons_idx];
+                    const constraint = self.store.static_dispatch_constraints.items()[frame.cons_start + frame.cons_idx];
                     const metadata = self.store.getInterpolationMetadata(constraint.interpolation);
                     self.current_reach = .nested;
                     if (frame.part_idx == metadata.interpolated_parts.len()) {
@@ -1576,7 +2105,7 @@ pub const Instantiator = struct {
                 },
                 .await_part => {
                     const fresh_part_var = machine.value_stack.pop().?;
-                    const constraint = self.store.static_dispatch_constraints.items.items[frame.cons_start + frame.cons_idx];
+                    const constraint = self.store.static_dispatch_constraints.items()[frame.cons_start + frame.cons_idx];
                     const part = self.store.getInterpolationPartAt(self.store.getInterpolationMetadata(constraint.interpolation).interpolated_parts, frame.part_idx);
                     try machine.pending_parts.append(self.store.gpa, .{
                         .var_ = fresh_part_var,
@@ -1612,7 +2141,7 @@ pub const Instantiator = struct {
     /// copy is deferred: deferral is on, the callable is generalized, and
     /// this instantiation has not copied it.
     fn deferredCallable(self: *Self, constraint: StaticDispatchConstraint) ?Var {
-        if (self.deferred_slots == null or constraint.interpolation.isPresent()) return null;
+        if (self.deferred_slots == null or constraint.interpolation != .none) return null;
         const resolved = self.store.resolveVar(constraint.fn_var);
         if (resolved.desc.rank != .generalized) return null;
         if (self.var_map.contains(resolved.var_)) return null;
@@ -1650,17 +2179,16 @@ pub const Instantiator = struct {
             const values = machine.value_stack.items;
             const fresh_backing_var = values[frame.vars_base];
             const fresh_args = values[frame.vars_base + 1 ..][0..frame.args_count];
-            const fresh_content = try self.store.mkAliasWithSourceDeclAndBuiltinOrigin(
+            const fresh_content = try self.store.mkAliasWithPackedSourceDecl(
                 frame.alias.ident,
                 fresh_backing_var,
                 fresh_args,
                 frame.alias.source_arg_count,
                 frame.alias.origin_module,
-                frame.alias.source_decl.toOptional(),
-                frame.alias.source_decl.originIsBuiltin(),
+                frame.alias.source_decl,
             );
             machine.value_stack.items.len = frame.vars_base;
-            try self.finishFrame(frame.common, fresh_content);
+            try self.finishFrameWithIdentity(frame.common, fresh_content, frame.identity_row);
             return true;
         }
     }
@@ -1704,24 +2232,16 @@ pub const Instantiator = struct {
                     .at => |polarity| polarity,
                     .both => .neg,
                 };
-                // A `Try` written as the direct result passes the adapter's
-                // reach to its ERROR row. The ok row is deliberately NOT
-                // reachable: the adapter asserts the ok type is unchanged.
-                self.current_reach = base.annotation_positions.nominalArgumentReach(frame.saved_reach, frame.is_try, arrived);
+                // An argument of a named type is a nested position.
+                self.current_reach = .nested;
                 if (!try self.requestVar(arg_var, false)) return false;
                 continue;
             }
             self.current_polarity = frame.saved_polarity;
-            const fresh_content = try self.store.mkNominalWithSourceDeclAndBuiltinOrigin(
-                frame.nominal.ident,
-                machine.value_stack.items[frame.vars_base..][0..frame.args_count],
-                frame.nominal.origin_module,
-                frame.nominal.sourceDeclOptional(),
-                frame.nominal.isOpaque(),
-                frame.nominal.originIsBuiltin(),
-            );
+            var fresh_nominal = frame.nominal;
+            fresh_nominal.args = try self.store.appendVars(machine.value_stack.items[frame.vars_base..][0..frame.args_count]);
             machine.value_stack.items.len = frame.vars_base;
-            try self.finishFrame(frame.common, fresh_content);
+            try self.finishFrameWithIdentity(frame.common, .{ .structure = .{ .nominal_type = fresh_nominal } }, frame.identity_row);
             return true;
         }
     }
@@ -1877,9 +2397,8 @@ pub const Instantiator = struct {
             switch (frame.stage) {
                 .tags => {
                     if (frame.tag_idx == frame.source_tags.count) {
-                        // Sort the fresh tags alphabetically by name before appending.
-                        // This ensures tag discriminants are consistent after instantiation.
-                        sortTagsByName(machine.pending_tags.items[frame.tags_base..], self.idents);
+                        // The source's own tags are in name order, and the
+                        // copy keeps their order.
                         frame.tags_range = try self.store.appendTags(machine.pending_tags.items[frame.tags_base..]);
                         machine.pending_tags.items.len = frame.tags_base;
                         frame.stage = .await_ext;
@@ -1973,7 +2492,7 @@ pub const Instantiator = struct {
         self: *Self,
         source: StaticDispatchConstraint.InterpolationMetadata.OptIdx,
     ) std.mem.Allocator.Error!StaticDispatchConstraint.InterpolationMetadata.OptIdx {
-        if (!source.isPresent()) return source;
+        if (source == .none) return source;
         const metadata = self.store.getInterpolationMetadata(source);
 
         const machine = self.scratch();
@@ -2002,14 +2521,3 @@ pub const Instantiator = struct {
         });
     }
 };
-
-/// Order tags by name text. Instantiation copies a source union's tags in
-/// order, and source unions are almost always already ordered, so the ordered
-/// case is confirmed in one pass before sorting.
-fn sortTagsByName(tags: []Tag, idents: *const Ident.Store) void {
-    var index: usize = 1;
-    while (index < tags.len) : (index += 1) {
-        if (Tag.orderByName(idents, tags[index - 1], tags[index]) == .gt) break;
-    } else return;
-    std.mem.sort(Tag, tags, idents, comptime Tag.sortByNameAsc);
-}

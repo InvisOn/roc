@@ -36,7 +36,7 @@ const NominalType = types_mod.NominalType;
 /// A mapping from source type variables to destination type variables.
 /// Callers may preseed exact source substitutions; copying reuses those
 /// destination roots and memoizes every newly copied root in the same map.
-const VarMapping = @import("collections").DenseMap(Var, Var);
+const VarMapping = @import("collections").EpochMap(Var, Var);
 
 /// Explicit source declaration identity for alias substitutions performed
 /// while copying a type graph between module stores.
@@ -115,11 +115,20 @@ const CopyContext = struct {
 /// from the source var.
 const Fill = struct {
     placeholder: Var,
-    empty_tag_union_is_default: bool,
     nominal_backing_structure: bool,
     /// A tag row a host-boundary annotation wrote is the same host row in
     /// every module that imports it (design.md "Row Joins").
     host_fixed_row: bool,
+    /// An uncommitted record tail, and the marks of a copy of one and of an
+    /// annotated tag union, describe the type in every module (design.md
+    /// "Uncommitted Record Tails").
+    uncommitted_record_tail: bool,
+    uncommitted_copy: bool,
+    record_pattern_tail: bool,
+    compared_plain: bool,
+    annotation_tag_union: bool,
+    uncommitted_tag_tail: bool,
+    requires_tag_row: bool,
 };
 
 const IdentityResult = enum { flex, rigid };
@@ -373,9 +382,15 @@ fn request(ctx: *CopyContext, source_var: Var) std.mem.Allocator.Error!bool {
 
     const fill = Fill{
         .placeholder = placeholder_var,
-        .empty_tag_union_is_default = resolved.desc.flags.empty_tag_union_is_default,
         .nominal_backing_structure = resolved.desc.flags.nominal_backing_structure,
         .host_fixed_row = resolved.desc.flags.host_fixed_row,
+        .uncommitted_record_tail = resolved.desc.flags.uncommitted_record_tail,
+        .uncommitted_copy = resolved.desc.flags.uncommitted_copy,
+        .record_pattern_tail = resolved.desc.flags.record_pattern_tail,
+        .compared_plain = resolved.desc.flags.compared_plain,
+        .annotation_tag_union = resolved.desc.flags.annotation_tag_union,
+        .uncommitted_tag_tail = resolved.desc.flags.uncommitted_tag_tail,
+        .requires_tag_row = resolved.desc.flags.requires_tag_row,
     };
 
     // NOTE: a copied var whose content is a flex carrying a literal-conversion
@@ -537,9 +552,15 @@ fn finishFrame(ctx: *CopyContext, fill: Fill, content: Content) std.mem.Allocato
         .content = content,
         .rank = types_mod.Rank.generalized,
         .flags = .{
-            .empty_tag_union_is_default = fill.empty_tag_union_is_default,
             .nominal_backing_structure = fill.nominal_backing_structure,
             .host_fixed_row = fill.host_fixed_row,
+            .uncommitted_record_tail = fill.uncommitted_record_tail,
+            .uncommitted_copy = fill.uncommitted_copy,
+            .record_pattern_tail = fill.record_pattern_tail,
+            .compared_plain = fill.compared_plain,
+            .annotation_tag_union = fill.annotation_tag_union,
+            .uncommitted_tag_tail = fill.uncommitted_tag_tail,
+            .requires_tag_row = fill.requires_tag_row,
         },
     });
     try ctx.scratch.values.append(ctx.allocator, fill.placeholder);
@@ -588,7 +609,7 @@ fn stepIdentity(ctx: *CopyContext, frame: *IdentityFrame) std.mem.Allocator.Erro
             },
             .await_fn => {
                 frame.pending.fn_var = machine.values.pop().?;
-                if (!frame.source_constraints[frame.idx].interpolation.isPresent()) {
+                if (frame.source_constraints[frame.idx].interpolation == .none) {
                     frame.stage = .finish_constraint;
                     continue;
                 }
@@ -686,16 +707,18 @@ fn stepAlias(ctx: *CopyContext, frame: *AliasFrame) std.mem.Allocator.Error!bool
                 }
                 // The backing copy leads the run, matching the alias layout's
                 // backing-then-args ordering.
-                const dest_vars_span = try ctx.dest_store.appendVars(machine.values.items[frame.values_base..]);
-                machine.values.items.len = frame.values_base;
                 const translated_origin = try ctx.copyOriginModule(frame.source.origin_module);
-                try finishFrame(ctx, frame.fill, Content{ .alias = Alias{
-                    .ident = types_mod.TypeIdent{ .ident_idx = frame.translated_ident },
-                    .vars = .{ .nonempty = dest_vars_span },
-                    .origin_module = translated_origin,
-                    .source_decl = frame.source.source_decl,
-                    .source_arg_count = frame.source.source_arg_count,
-                } });
+                const copied_vars = machine.values.items[frame.values_base..];
+                const content = try ctx.dest_store.mkAliasWithPackedSourceDecl(
+                    types_mod.TypeIdent{ .ident_idx = frame.translated_ident },
+                    copied_vars[0],
+                    copied_vars[1..],
+                    frame.source.source_arg_count,
+                    translated_origin,
+                    frame.source.source_decl,
+                );
+                machine.values.items.len = frame.values_base;
+                try finishFrame(ctx, frame.fill, content);
                 return true;
             },
         }

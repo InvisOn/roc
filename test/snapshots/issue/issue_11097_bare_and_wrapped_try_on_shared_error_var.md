@@ -86,7 +86,7 @@ NO CHANGE
 					(e-match
 						(match
 							(cond
-								(e-call (constraint-fn-var 284)
+								(e-call (constraint-fn-var 269)
 									(e-lookup-local
 										(p-assign (ident "save")))
 									(e-string
@@ -118,7 +118,7 @@ NO CHANGE
 					(e-match
 						(match
 							(cond
-								(e-call (constraint-fn-var 324)
+								(e-call (constraint-fn-var 283)
 									(e-lookup-local
 										(p-assign (ident "save")))
 									(e-string
@@ -152,7 +152,7 @@ NO CHANGE
 						(e-empty_record))))))
 	(d-let
 		(p-assign (ident "main"))
-		(e-call (constraint-fn-var 380)
+		(e-call (constraint-fn-var 325)
 			(e-lookup-local
 				(p-assign (ident "run")))
 			(e-lambda
@@ -166,9 +166,9 @@ NO CHANGE
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "(a -> Try(ok, err)) -> Try({}, [PersistFailed(err), ..err]) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
-		(patt (type "Try({}, [PersistFailed([])])")))
+		(patt (type "(a -> Try(_ok, err)) -> Try({}, [PersistFailed(err), ..err]) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
+		(patt (type "Try({}, [PersistFailed(err), ..err])")))
 	(expressions
-		(expr (type "(a -> Try(ok, err)) -> Try({}, [PersistFailed(err), ..err]) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
-		(expr (type "Try({}, [PersistFailed([])])"))))
+		(expr (type "(a -> Try(_ok, err)) -> Try({}, [PersistFailed(err), ..err]) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
+		(expr (type "Try({}, [PersistFailed(err), ..err])"))))
 ~~~

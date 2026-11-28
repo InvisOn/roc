@@ -1,7 +1,7 @@
 //! Regression test for issue #12434.
 //!
 //! When an app's public API reaches procedure templates owned by another
-//! module, the root artifact's `lowering_visibility.module_ids` lists every
+//! module, the root artifact's `lowering_visibility.module_ids.items()` lists every
 //! visible checked artifact exactly once: no two entries share key `.bytes`,
 //! the identity `CheckedModuleArtifactKey.eql` compares.
 //! repro for https://github.com/roc-lang/roc/issues/12434
@@ -72,7 +72,7 @@ test "issue 12434: lowering visibility lists each visible artifact once" {
     const main_path = try tmp_dir.dir.realPathFileAlloc(io, "main.roc", gpa);
     defer gpa.free(main_path);
 
-    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build_env.deinit();
 
     try build_env.build(main_path);
@@ -84,7 +84,7 @@ test "issue 12434: lowering visibility lists each visible artifact once" {
     }
 
     const root_artifact = build_env.executableRootCheckedArtifact();
-    const module_ids = root_artifact.lowering_visibility.module_ids;
+    const module_ids = root_artifact.lowering_visibility.module_ids.items();
     for (module_ids, 0..) |key, i| {
         for (module_ids[i + 1 ..]) |other| {
             try std.testing.expect(!std.mem.eql(u8, &key.bytes, &other.bytes));

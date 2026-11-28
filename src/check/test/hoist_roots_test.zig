@@ -103,6 +103,26 @@ test "hoist roots selected for direct closed ordinary call function body" {
     try expectExprTag(&test_env, roots[0].expr, .e_call);
 }
 
+test "hoist roots selected for a closed interpolation its context types as Str" {
+    // The body's result is annotated `Str` and its one part is a `Str`, so
+    // the interpolation is introduced as the builtin `Str` with no dispatch
+    // variables (design.md "Concrete Builtin Interpolation Introduction"). It
+    // is a compile-time root exactly as one that keeps its conversion is.
+    var test_env = try TestEnv.init("Test",
+        \\show : I64 -> Str
+        \\show = |n| Str.inspect(n)
+        \\
+        \\main : {} -> Str
+        \\main = |_| "${show(41.I64)}!"
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    const roots = test_env.checker.selectedHoistedRoots();
+    try std.testing.expectEqual(@as(usize, 1), roots.len);
+    try std.testing.expectEqual(@as(?CIR.Pattern.Idx, null), roots[0].pattern.get());
+}
+
 test "hoist roots are not selected for ordinary call with dbg in reachable body" {
     var test_env = try TestEnv.init("Test",
         \\dbg_value = || {
@@ -241,7 +261,152 @@ test "iterator producer calls leave their closed inputs available for hoisting" 
     try std.testing.expectEqual(@as(usize, 1), countExprRootsByTag(&test_env, .e_list));
 }
 
-test "non-iterator methods sharing iterator producer names remain hoistable" {
+test "a closed method call whose result holds a function leaves its receiver as the root" {
+    // `walk` is an arbitrary user method; its `Iter` result holds a step
+    // function, so the call is not stored and its receiver is.
+    var test_env = try TestEnv.init("Test",
+        \\Bag := { items : List(U64) }.{
+        \\    walk : Bag -> Iter(U64)
+        \\    walk = |bag| bag.items.iter()
+        \\}
+        \\
+        \\main = |runtime| {
+        \\    var $sum = runtime
+        \\    for n in Bag.{ items: [1.U64, 2, 3] }.walk() {
+        \\        $sum = $sum + n
+        \\    }
+        \\    $sum
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    const roots = test_env.checker.selectedHoistedRoots();
+    try std.testing.expectEqual(@as(usize, 1), roots.len);
+    try expectExprTag(&test_env, roots[0].expr, .e_nominal);
+}
+
+test "a closed call whose result holds a function leaves each closed argument as a root" {
+    // The result is a record with a function field, not an iterator: holding
+    // a function is what keeps the call from being stored.
+    var test_env = try TestEnv.init("Test",
+        \\make_counter : List(U64), U64 -> { step : U64 -> U64, items : List(U64) }
+        \\make_counter = |items, by| { step: |n| n + by, items }
+        \\
+        \\main = |runtime| {
+        \\    counter = make_counter([1.U64, 2, 3], 1.U64 + 1)
+        \\    (counter.step)(runtime) + List.len(counter.items)
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try std.testing.expectEqual(@as(usize, 1), countExprRootsByTag(&test_env, .e_list));
+    try std.testing.expectEqual(@as(usize, 1), countExprRootsByTag(&test_env, .e_dispatch_call));
+    try std.testing.expectEqual(@as(usize, 0), countExprRootsByTag(&test_env, .e_call));
+    for (test_env.checker.selectedHoistedRoots()) |root| {
+        try std.testing.expectEqual(@as(?CIR.Pattern.Idx, null), root.pattern.get());
+    }
+}
+
+test "an iterator adapter chain leaves its source collection as the root" {
+    var test_env = try TestEnv.init("Test",
+        \\main = |runtime| {
+        \\    var $sum = runtime
+        \\    for n in [1.U64, 2, 3].iter().map(|x| x * 2).keep_if(|x| x > 2) {
+        \\        $sum = $sum + n
+        \\    }
+        \\    $sum
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    const roots = test_env.checker.selectedHoistedRoots();
+    try std.testing.expectEqual(@as(usize, 1), roots.len);
+    try expectExprTag(&test_env, roots[0].expr, .e_list);
+}
+
+test "a closed call whose result holds no function is a root over a function-holding part" {
+    // The `List` built from the iterator holds no function, so its binding
+    // is a root; the `Iter` inside it is not stored, so its receiver is a
+    // root of its own.
+    var test_env = try TestEnv.init("Test",
+        \\Bag := { items : List(U64) }.{
+        \\    walk : Bag -> Iter(U64)
+        \\    walk = |bag| bag.items.iter()
+        \\}
+        \\
+        \\main = |runtime| {
+        \\    items = List.from_iter(Bag.{ items: [1.U64, 2, 3] }.walk())
+        \\    if runtime == 0 { List.len(items) } else { runtime }
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    const roots = test_env.checker.selectedHoistedRoots();
+    // The receiver, the binding, then the guarded `List.len` root.
+    try std.testing.expectEqual(@as(usize, 3), roots.len);
+    try expectExprTag(&test_env, roots[0].expr, .e_nominal);
+    try std.testing.expectEqual(@as(?CIR.Pattern.Idx, null), roots[0].pattern.get());
+    try expectExprTag(&test_env, roots[1].expr, .e_call);
+    try std.testing.expect(roots[1].pattern != .none);
+    try std.testing.expect(roots[2].guarded);
+}
+
+test "a destructured binding of a function-holding value keeps its binders and closed parts" {
+    var test_env = try TestEnv.init("Test",
+        \\add_one = |n| n + 1.U64
+        \\
+        \\main = |runtime| {
+        \\    (inc, items) = (add_one, [1.U64, 2, 3])
+        \\    inc(runtime) + List.len(items)
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    var extraction_count: usize = 0;
+    var callable_count: usize = 0;
+    for (test_env.checker.selectedHoistedRoots()) |root| {
+        switch (root.body) {
+            .pattern_extraction => extraction_count += 1,
+            .expr, .pattern_validation, .pattern_error, .valueless_binding => {},
+        }
+        if (root.value_kind == .callable_binding) callable_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), extraction_count);
+    try std.testing.expectEqual(@as(usize, 1), callable_count);
+    try std.testing.expectEqual(@as(usize, 1), countExprRootsByTag(&test_env, .e_list));
+}
+
+test "a payload-free tag of a function-holding nominal is no root of its own" {
+    // `Step` holds a function, so `Step.End` is not stored; its backing tag
+    // carries no payload, so like any zero-argument tag it computes nothing
+    // and is no root either.
+    var test_env = try TestEnv.init("Test",
+        \\Machine := [Machine(Box(U64 -> Step))]
+        \\Step := [End, Emit({ machine : Machine, observed : U64 })]
+        \\
+        \\from_state : U64 -> Machine
+        \\from_state = |remaining|
+        \\    Machine.Machine(
+        \\        Box.box(|wake|
+        \\            if remaining == 0 {
+        \\                Step.End
+        \\            } else {
+        \\                Step.Emit({ machine: from_state(remaining - 1), observed: remaining + wake })
+        \\            }),
+        \\    )
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try std.testing.expectEqual(@as(usize, 0), test_env.checker.selectedHoistedRoots().len);
+}
+
+test "a closed method call whose result holds no function is hoistable whatever the method is named" {
     const cases = [_]struct {
         source: []const u8,
         method_name: []const u8,
@@ -858,7 +1023,7 @@ test "unused concrete binder retains refutable destructure validation root" {
     try std.testing.expectEqual(roots[0].expr, validation.base_expr);
 }
 
-test "live concrete extraction subsumes refutable destructure validation root" {
+test "live concrete extraction and validation remain candidates until request publication" {
     var test_env = try TestEnv.init("Test",
         \\main = |arg| {
         \\    Ok(value) = List.get([1.I64], 0)
@@ -868,8 +1033,10 @@ test "live concrete extraction subsumes refutable destructure validation root" {
     defer test_env.deinit();
 
     const roots = test_env.checker.selectedHoistedRoots();
-    try std.testing.expectEqual(@as(usize, 1), roots.len);
+    try std.testing.expectEqual(@as(usize, 2), roots.len);
     try expectPatternExtractionRoot(roots[0]);
+    try std.testing.expectEqual(hoist_roots.ValueKind.proven_data_constant, roots[0].value_kind);
+    try std.testing.expectEqual(roots[0].body.pattern_extraction.scrutinee_pattern, roots[1].body.pattern_validation.scrutinee_pattern);
 }
 
 test "non-concrete extraction retains refutable destructure validation root" {
@@ -970,7 +1137,7 @@ test "hoist roots publish top-level destructure binders used by executable roots
         switch (root.value_kind) {
             .data_constant => data_constant_count += 1,
             .callable_binding => callable_binding_count += 1,
-            .discarded => return error.TestUnexpectedResult,
+            .discarded, .proven_data_constant => return error.TestUnexpectedResult,
         }
     }
     try std.testing.expectEqual(@as(usize, 3), data_constant_count);
@@ -1708,6 +1875,25 @@ test "hoist roots select the pure receiver binding of an effectful static dispat
     try std.testing.expect(roots[0].pattern != .none);
 }
 
+test "issue 12954: hoist roots exclude annotated recursive effectful calls" {
+    // A recursive call's body-inference contribution must not make the call
+    // eligible for compile-time execution.
+    var test_env = try TestEnv.init("Test",
+        \\effect! : () => {}
+        \\effect! = || {}
+        \\
+        \\forever! : () => {}
+        \\forever! = || {
+        \\    effect!()
+        \\    forever!()
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try std.testing.expectEqual(@as(usize, 0), test_env.checker.selectedHoistedRoots().len);
+}
+
 test "hoist roots are not selected when an effectful function argument is called" {
     // Repro for https://github.com/roc-lang/roc/issues/10154
     var test_env = try TestEnv.init("Test",
@@ -2353,4 +2539,76 @@ test "issue 11993 - generic is_eq whose evidence is a rejected capturing local i
     defer test_env.deinit();
 
     try test_env.assertTypeErrorTitles(&.{"Method Captures a Local Value"});
+}
+
+test "hoist roots exclude a recursive call of an annotated effectful function" {
+    var test_env = try TestEnv.init("Test",
+        \\echo! : Str => {}
+        \\echo! = |_| {}
+        \\
+        \\forever! : () => {}
+        \\forever! = || {
+        \\    echo!("again")
+        \\    forever!()
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try std.testing.expectEqual(@as(usize, 0), test_env.checker.selectedHoistedRoots().len);
+}
+
+test "hoist roots exclude a recursive call of an inferred effectful function" {
+    var test_env = try TestEnv.init("Test",
+        \\echo! : Str => {}
+        \\echo! = |_| {}
+        \\
+        \\loop! = || {
+        \\    echo!("again")
+        \\    U64.max(loop!(), 1)
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try std.testing.expectEqual(@as(usize, 0), test_env.checker.selectedHoistedRoots().len);
+}
+
+test "hoist roots exclude mutually recursive calls of effectful functions" {
+    var test_env = try TestEnv.init("Test",
+        \\echo! : Str => {}
+        \\echo! = |_| {}
+        \\
+        \\ping! : () => U64
+        \\ping! = || {
+        \\    echo!("ping")
+        \\    pong!()
+        \\}
+        \\
+        \\pong! : () => U64
+        \\pong! = || {
+        \\    echo!("pong")
+        \\    ping!()
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try std.testing.expectEqual(@as(usize, 0), test_env.checker.selectedHoistedRoots().len);
+}
+
+test "hoist roots keep a recursive call of a pure function" {
+    var test_env = try TestEnv.init("Test",
+        \\count : U64 -> U64
+        \\count = |n| if n == 0 0 else count(n - 1)
+        \\
+        \\main = |arg| {
+        \\    x = count(3)
+        \\    x + arg
+        \\}
+    );
+    defer test_env.deinit();
+
+    try test_env.assertNoErrors();
+    try std.testing.expectEqual(@as(usize, 1), test_env.checker.selectedHoistedRoots().len);
 }

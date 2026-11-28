@@ -30,7 +30,7 @@ test "issue 10940: a default app that never defines main! reports it as exposed 
     const main_path = try tmp_dir.dir.realPathFileAlloc(io, "main.roc", gpa);
     defer gpa.free(main_path);
 
-    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build_env.deinit();
 
     try build_env.build(main_path);
@@ -69,14 +69,14 @@ test "issue 10940: explicit roots do not require a default app entrypoint" {
     const main_path = try tmp_dir.dir.realPathFileAlloc(io, "main.roc", gpa);
     defer gpa.free(main_path);
 
-    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build_env.deinit();
     build_env.setEntryValidation(.explicit_roots);
 
     try build_env.build(main_path);
 
     const artifact = build_env.executableRootCheckedArtifact();
-    for (artifact.root_requests.runtime_requests) |root| {
+    for (artifact.root_requests.runtime_requests.items()) |root| {
         try std.testing.expect(root.kind != .runtime_entrypoint);
     }
 
@@ -110,14 +110,14 @@ test "issue 10940: a headerless default app still publishes main!" {
     const main_path = try tmp_dir.dir.realPathFileAlloc(io, "main.roc", gpa);
     defer gpa.free(main_path);
 
-    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build_env.deinit();
 
     try build_env.build(main_path);
 
     const artifact = build_env.executableRootCheckedArtifact();
     var found_runtime_entrypoint = false;
-    for (artifact.root_requests.runtime_requests) |root| {
+    for (artifact.root_requests.runtime_requests.items()) |root| {
         if (root.kind == .runtime_entrypoint) {
             found_runtime_entrypoint = true;
         }
@@ -145,14 +145,14 @@ test "issue 10940: explicit roots do not automatically publish a defined main!" 
     const main_path = try tmp_dir.dir.realPathFileAlloc(io, "main.roc", gpa);
     defer gpa.free(main_path);
 
-    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build_env = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build_env.deinit();
     build_env.setEntryValidation(.explicit_roots);
 
     try build_env.build(main_path);
 
     const artifact = build_env.executableRootCheckedArtifact();
-    for (artifact.root_requests.runtime_requests) |root| {
+    for (artifact.root_requests.runtime_requests.items()) |root| {
         try std.testing.expect(root.kind != .runtime_entrypoint);
     }
 }

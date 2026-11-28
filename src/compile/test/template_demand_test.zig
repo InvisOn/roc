@@ -26,7 +26,7 @@ fn expectDemands(source: []const u8, expected: []const struct { []const u8, []co
     defer gpa.free(cwd);
     const path = tmp.dir.realPathFileAlloc(io, "Demand.roc", gpa) catch |err| return setupFailed(err);
     defer gpa.free(path);
-    var build = BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io) catch |err| return setupFailed(err);
+    var build = BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss) catch |err| return setupFailed(err);
     defer build.deinit();
     build.build(path) catch |err| return setupFailed(err);
     const reports = build.drainReports() catch |err| return setupFailed(err);
@@ -40,7 +40,7 @@ fn expectDemands(source: []const u8, expected: []const struct { []const u8, []co
     const templates = &artifact.checked_procedure_templates;
     for (expected) |entry| {
         const name, const demands = entry;
-        const template = for (templates.templates.items) |*template| {
+        const template = for (templates.templates.items()) |*template| {
             const export_name = artifact.canonical_names.procBase(template.proc_base).export_name.get() orelse continue;
             if (std.mem.eql(u8, artifact.canonical_names.exportNameText(export_name), name)) break template;
         } else {

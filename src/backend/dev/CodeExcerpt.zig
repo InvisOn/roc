@@ -29,6 +29,7 @@ const lir = @import("lir");
 const layout = @import("layout");
 const RelocationMod = @import("Relocation.zig");
 const LirCodeGenMod = @import("LirCodeGen.zig");
+const abiOf = @import("isa.zig").abiOf;
 const SymbolTable = @import("SymbolTable.zig");
 
 /// Whether a symbol's name means the same thing in every program.
@@ -133,6 +134,11 @@ pub const DataItem = struct {
     /// Immutable backing retained by every set carrying this datum. Null for
     /// data owned directly by a set or borrowed from an external producer.
     owner: ?*DataOwner = null,
+    /// The catalog whose lifetime keeps `bytes` alive. A copy of the item's
+    /// metadata shares the bytes and retains this owner rather than copying
+    /// them. Null when `bytes` belong to whoever holds the item, so a copy
+    /// takes bytes of its own.
+    payload_owner: ?*DataOwner = null,
     name: []const u8,
     bytes: []const u8,
     alignment: u32,
@@ -145,25 +151,69 @@ pub const DataItem = struct {
     /// can give to a different constant. A pack names such a datum by
     /// content instead; see `ContentNames`.
     program_local_name: bool = false,
+    /// A stored constant's image, named by its digest
+    /// (`lir.Program.StaticDataExport.pool_image`): a unit image leaves it to
+    /// the constant pool and imports it (design.md "Constant Pool").
+    pool_image: bool = false,
 };
 
 /// Immutable catalog storage, shared by worker fragments and assembled sets.
 /// Only the reference count changes after the catalog is published.
-const DataOwner = struct {
+pub const DataOwner = struct {
     allocator: Allocator,
     arena: collections.SingleThreadArena,
     references: std.atomic.Value(usize) = .init(1),
+    /// The other owners whose storage holds payload bytes this catalog's
+    /// items share, each retained once while this catalog lives.
+    payload_owners: []const *DataOwner = &.{},
+    /// Storage outside the arena that this owner keeps alive, released with
+    /// it: the exports a keeper (`initKeeper`) holds for catalogs that
+    /// borrow their payload bytes.
+    kept: ?Kept = null,
+
+    pub const Kept = struct {
+        context: *anyopaque,
+        release: *const fn (context: *anyopaque) void,
+    };
+
+    /// An owner holding nothing but `kept`, which it releases with its last
+    /// reference. The caller holds the first reference.
+    pub fn initKeeper(allocator: Allocator, kept: Kept) Allocator.Error!*DataOwner {
+        const owner = try allocator.create(DataOwner);
+        owner.* = .{ .allocator = allocator, .arena = collections.SingleThreadArena.init(allocator), .kept = kept };
+        return owner;
+    }
 
     fn retain(self: *DataOwner) void {
         _ = self.references.fetchAdd(1, .monotonic);
     }
 
-    fn release(self: *DataOwner) void {
+    pub fn release(self: *DataOwner) void {
         if (self.references.fetchSub(1, .acq_rel) != 1) return;
+        // The list lives in the arena, so it is released first.
+        for (self.payload_owners) |owner| owner.release();
         self.arena.deinit();
+        if (self.kept) |kept| kept.release(kept.context);
         self.allocator.destroy(self);
     }
 };
+
+/// The distinct payload owners `items` share, and `also` when given, each
+/// retained once for the caller, which releases them with `releaseOwners`.
+pub fn retainPayloadOwners(a: Allocator, items: []const DataItem, also: ?*DataOwner) Allocator.Error![]const *DataOwner {
+    var owners = std.AutoArrayHashMapUnmanaged(*DataOwner, void).empty;
+    defer owners.deinit(a);
+    if (also) |owner| try owners.put(a, owner, {});
+    for (items) |item| if (item.payload_owner) |owner| try owners.put(a, owner, {});
+    const retained = try a.dupe(*DataOwner, owners.keys());
+    for (retained) |owner| owner.retain();
+    return retained;
+}
+
+/// Release owners `retainPayloadOwners` retained.
+pub fn releaseOwners(owners: []const *DataOwner) void {
+    for (owners) |owner| owner.release();
+}
 
 /// One pointer-sized relocation inside a data item.
 pub const DataRelocation = struct {
@@ -197,6 +247,10 @@ pub const Excerpt = struct {
     /// location (`LirStore.procLoc`) in the set's source-file domain, the
     /// same wherever the procedure lands. `none` for every other kind.
     loc: base.SourceLoc = .none,
+    /// The source name a procedure's debug entry reports
+    /// (`LirStore.procDebugName`), the same wherever the procedure lands.
+    /// Empty for a compiler-generated procedure and for every other kind.
+    name: []const u8 = "",
 };
 
 /// An ordered set of excerpts covering one code buffer. Order is emission
@@ -216,7 +270,10 @@ pub const Set = struct {
         defer owners.deinit();
         for (excerpts) |excerpt| {
             if (excerpt.data_graph) |graph| try owners.put(graph.graph.owner, {});
-            for (excerpt.data) |item| if (item.owner) |owner| try owners.put(owner, {});
+            for (excerpt.data) |item| {
+                if (item.owner) |owner| try owners.put(owner, {});
+                if (item.payload_owner) |owner| try owners.put(owner, {});
+            }
         }
         const retained = try a.alloc(*DataOwner, owners.count());
         var it = owners.keyIterator();
@@ -301,7 +358,7 @@ fn captureFragment(
     string_exports: []const lir.Program.StaticDataExport,
     constant_exports: []const lir.Program.StaticDataExport,
 ) ExtractError!Fragment {
-    var prepared = try PreparedData.init(allocator, string_exports, constant_exports, &.{});
+    var prepared = try PreparedData.init(allocator, string_exports, constant_exports, .copy, &.{});
     defer prepared.deinit();
     return captureFragmentPrepared(CG, allocator, codegen, proc_specs, layout_store, &prepared);
 }
@@ -334,7 +391,9 @@ pub fn compileRcHelperFragmentPrepared(
     return captureFragmentPrepared(CG, allocator, codegen, proc_specs, layout_store, prepared);
 }
 
-fn captureFragmentPrepared(
+/// Lift the fragment `codegen` just emitted out against the coordinator's
+/// shared immutable data catalog.
+pub fn captureFragmentPrepared(
     comptime CG: type,
     allocator: Allocator,
     codegen: *CG,
@@ -357,18 +416,36 @@ fn cloneData(a: Allocator, item: DataItem) Allocator.Error!DataItem {
     return copyData(a, item);
 }
 
-/// Sever ownership when constructing a new immutable catalog.
+/// Sever metadata ownership when constructing a new immutable catalog. The
+/// payload bytes stay shared with their `payload_owner`, which the holder of
+/// the copy retains; bytes with no payload owner are copied.
 fn copyData(a: Allocator, item: DataItem) Allocator.Error!DataItem {
     const relocations = try a.dupe(DataRelocation, item.relocations);
     var copier = NameCopier{};
     for (relocations) |*relocation| relocation.name = try copier.copy(a, relocation.name);
     return .{
+        .payload_owner = item.payload_owner,
         .name = try a.dupe(u8, item.name),
-        .bytes = try a.dupe(u8, item.bytes),
+        .bytes = try payloadFor(a, item),
         .alignment = item.alignment,
         .symbol_offset = item.symbol_offset,
         .relocations = relocations,
         .program_local_name = item.program_local_name,
+        .pool_image = item.pool_image,
+    };
+}
+
+/// The payload bytes a copy of `item` made in `a` holds: the item's own
+/// bytes when a payload owner keeps them alive, else a copy in `a`.
+fn payloadFor(a: Allocator, item: DataItem) Allocator.Error![]const u8 {
+    if (item.payload_owner != null) return item.bytes;
+    return try a.dupe(u8, item.bytes);
+}
+
+fn exportPayloadBytes(a: Allocator, payload: PreparedData.ExportPayload, bytes: []const u8) Allocator.Error![]const u8 {
+    return switch (payload) {
+        .copy => try a.dupe(u8, bytes),
+        .borrow => bytes,
     };
 }
 
@@ -524,7 +601,7 @@ fn combineDistinctNamed(allocator: Allocator, sets: []const *const Set, rename: 
             defer items.deinit(allocator);
             var iterator = names.items.valueIterator();
             while (iterator.next()) |item| try items.append(allocator, try renamedData(a, item.*, &names));
-            renamed_graphs.appendAssumeCapacity(try PreparedData.init(allocator, &.{}, &.{}, items.items));
+            renamed_graphs.appendAssumeCapacity(try PreparedData.init(allocator, &.{}, &.{}, .copy, items.items));
             break :graph &renamed_graphs.items[renamed_graphs.items.len - 1];
         } else null;
         for (set.excerpts, flags) |source, keep| {
@@ -615,6 +692,7 @@ fn copyExcerpts(a: Allocator, excerpts: *std.ArrayList(Excerpt), set: *const Set
         };
         excerpt.lines = lines;
         if (file_map) |map| excerpt.loc = rebindLoc(source.loc, map);
+        excerpt.name = try a.dupe(u8, source.name);
         excerpt.failure_sites = try a.dupe(FailureSite, source.failure_sites);
         const relocations = try a.dupe(NamedRelocation, source.relocations);
         for (relocations) |*relocation| relocation.name = try a.dupe(u8, relocation.name);
@@ -632,7 +710,7 @@ fn copyExcerpts(a: Allocator, excerpts: *std.ArrayList(Excerpt), set: *const Set
 pub fn rebindLoc(loc: base.SourceLoc, file_map: []const u32) base.SourceLoc {
     if (!loc.hasLocation()) return loc;
     var rebound = loc;
-    rebound.file = file_map[loc.file];
+    rebound.file = .some(file_map[loc.fileIndex()]);
     return rebound;
 }
 
@@ -673,7 +751,11 @@ pub const ContentNames = struct {
     depth: u32 = 0,
 
     const domain = "roc.static.data.v2";
-    const no_reference: u32 = std.math.maxInt(u32);
+
+    /// The `Rendered.low` of a rendering that referred back to no active
+    /// stack depth: deeper than every depth, so `@min` with it keeps the
+    /// other operand and it is never below a depth.
+    const no_back_reference: u32 = std.math.maxInt(u32);
 
     pub fn init(allocator: Allocator, set: *const Set) Allocator.Error!ContentNames {
         var self = ContentNames{ .allocator = allocator, .arena = collections.SingleThreadArena.init(allocator) };
@@ -730,7 +812,8 @@ pub const ContentNames = struct {
                 .alignment = data_export.alignment,
                 .symbol_offset = 0,
                 .relocations = relocations,
-                .program_local_name = !data_export.is_exported,
+                .program_local_name = !data_export.is_exported and !data_export.pool_image,
+                .pool_image = data_export.pool_image,
             };
         }
         for (items) |item| try self.items.put(allocator, item.name, item);
@@ -767,7 +850,7 @@ pub const ContentNames = struct {
     }
 
     /// Writes the digest of `item`'s rendering and returns the shallowest
-    /// stack depth that rendering referred back to.
+    /// stack depth that rendering referred back to, or `no_back_reference`.
     fn write(self: *ContentNames, hasher: *Sha256, item: DataItem) Allocator.Error!u32 {
         const rendered = try self.render(item);
         writeNaming(hasher, rendered.naming);
@@ -783,7 +866,8 @@ pub const ContentNames = struct {
 
     const Rendered = struct {
         naming: Naming,
-        /// The shallowest stack depth the rendering referred back to.
+        /// The shallowest stack depth the rendering referred back to, or
+        /// `no_back_reference`.
         low: u32,
     };
 
@@ -803,7 +887,7 @@ pub const ContentNames = struct {
     /// How `item` is named where a rendering refers to it.
     fn render(self: *ContentNames, item: DataItem) Allocator.Error!Rendered {
         if (self.active.get(item.name)) |depth| return .{ .naming = .{ .cycle = self.depth - depth }, .low = depth };
-        if (self.digests.get(item.name)) |digest| return .{ .naming = .{ .data = digest }, .low = no_reference };
+        if (self.digests.get(item.name)) |digest| return .{ .naming = .{ .data = digest }, .low = no_back_reference };
         const depth = self.depth;
         try self.active.putNoClobber(self.allocator, item.name, depth);
         self.depth += 1;
@@ -818,7 +902,7 @@ pub const ContentNames = struct {
         sub.update(item.bytes);
         writeWord(&sub, item.alignment);
         writeWord(&sub, item.symbol_offset);
-        var low: u32 = no_reference;
+        var low: u32 = no_back_reference;
         // Relocations are rendered in offset order; ones already in that
         // order are read in place.
         const in_order = std.sort.isSorted(DataRelocation, item.relocations, {}, relocationOffsetBefore);
@@ -860,7 +944,7 @@ pub const ContentNames = struct {
         const digest = sub.finalResult();
         if (low >= depth) {
             try self.digests.put(self.allocator, item.name, digest);
-            return .{ .naming = .{ .data = digest }, .low = no_reference };
+            return .{ .naming = .{ .data = digest }, .low = no_back_reference };
         }
         return .{ .naming = .{ .data = digest }, .low = low };
     }
@@ -1005,10 +1089,20 @@ pub const PreparedData = struct {
 
     const Targets = struct { data: []const []const u8, all: []const []const u8 };
 
+    /// Where a catalog's items built from exports keep their payload bytes.
+    pub const ExportPayload = union(enum) {
+        /// In the catalog's own storage, so the exports may go away first.
+        copy,
+        /// In the exports themselves, which this keeper (`DataOwner.initKeeper`)
+        /// keeps alive. The catalog retains it.
+        borrow: *DataOwner,
+    };
+
     pub fn init(
         allocator: Allocator,
         string_exports: []const lir.Program.StaticDataExport,
         constant_exports: []const lir.Program.StaticDataExport,
+        export_payload: ExportPayload,
         spliced_data: []const DataItem,
     ) Allocator.Error!PreparedData {
         const owner = try allocator.create(DataOwner);
@@ -1017,12 +1111,12 @@ pub const PreparedData = struct {
         const a = owner.arena.allocator();
         var items = std.StringArrayHashMapUnmanaged(Entry){};
         for (string_exports) |string_export| {
-            const item = try copyData(a, .{
-                .name = string_export.symbol_name,
-                .bytes = string_export.bytes,
+            const item = DataItem{
+                .name = try a.dupe(u8, string_export.symbol_name),
+                .bytes = try exportPayloadBytes(a, export_payload, string_export.bytes),
                 .alignment = string_export.alignment,
                 .symbol_offset = string_export.symbol_offset,
-            });
+            };
             try items.put(a, item.name, .{ .item = item });
         }
         for (constant_exports) |constant| {
@@ -1045,11 +1139,12 @@ pub const PreparedData = struct {
             }
             const item = DataItem{
                 .name = try a.dupe(u8, constant.symbol_name),
-                .bytes = try a.dupe(u8, constant.bytes),
+                .bytes = try exportPayloadBytes(a, export_payload, constant.bytes),
                 .alignment = constant.alignment,
                 .symbol_offset = constant.symbol_offset,
                 .relocations = relocations,
-                .program_local_name = !constant.is_exported,
+                .program_local_name = !constant.is_exported and !constant.pool_image,
+                .pool_image = constant.pool_image,
             };
             try items.put(a, item.name, .{ .item = item });
         }
@@ -1057,7 +1152,17 @@ pub const PreparedData = struct {
             const owned = try copyData(a, item);
             try items.put(a, owned.name, .{ .item = owned });
         }
-        if (items.count() > std.math.maxInt(u32)) return error.OutOfMemory;
+        if (std.math.cast(u32, items.count()) == null) return error.OutOfMemory;
+        // Spliced items keep sharing their payload owners' bytes, and items
+        // of borrowed exports share the exports' bytes, so this catalog
+        // retains those owners; every other item's bytes are this catalog's.
+        owner.payload_owners = try retainPayloadOwners(a, spliced_data, switch (export_payload) {
+            .copy => null,
+            .borrow => |keeper| keeper,
+        });
+        for (items.values()) |*entry| {
+            if (entry.item.payload_owner == null) entry.item.payload_owner = owner;
+        }
         var iterator = items.iterator();
         var data = std.ArrayList([]const u8).empty;
         defer data.deinit(allocator);
@@ -1141,7 +1246,7 @@ pub fn extract(
     constant_exports: []const lir.Program.StaticDataExport,
     spliced_data: []const DataItem,
 ) ExtractError!Set {
-    var prepared = try PreparedData.init(allocator, string_exports, constant_exports, spliced_data);
+    var prepared = try PreparedData.init(allocator, string_exports, constant_exports, .copy, spliced_data);
     defer prepared.deinit();
     return try extractCataloged(CG, allocator, codegen, proc_specs, layout_store, &prepared);
 }
@@ -1389,6 +1494,19 @@ pub fn extractPrepared(
             for (symbolic_refs.items) |ref| CG.normalizeExcerptRefSite(bytes, ref.site, codeRefForm(ref.form), if (ref.veneer) |offset| offset else null);
             break :code_bytes bytes;
         };
+        // A procedure placed from another set carries the location and name
+        // that set recorded; any other has its own.
+        const source: struct { loc: base.SourceLoc = .none, name: []const u8 = "" } = switch (region.kind) {
+            .proc => |proc_id| if (codegen.assembledProcSource(proc_specs[@backingInt(proc_id)].identity)) |placed|
+                .{ .loc = placed.loc, .name = placed.name }
+            else
+                .{ .loc = codegen.store.procLoc(proc_id), .name = codegen.store.procDebugName(proc_id) orelse "" },
+            .spliced_proc => |identity| if (codegen.assembledProcSource(identity)) |placed|
+                .{ .loc = placed.loc, .name = placed.name }
+            else
+                .{},
+            .rc_helper, .entrypoint, .message_pool_run, .branch_island, .hosted_stub, .spliced_helper => .{},
+        };
         excerpts[index] = .{
             .kind = kind,
             .code = excerpt_code,
@@ -1401,13 +1519,8 @@ pub fn extractPrepared(
             .relocations = try region_relocations.toOwnedSlice(arena_allocator),
             .data = &.{},
             .data_graph = region_graph,
-            .loc = switch (region.kind) {
-                // A procedure placed from another set carries the location
-                // that set recorded; any other has its own.
-                .proc => |proc_id| codegen.assembledProcLoc(proc_specs[@backingInt(proc_id)].identity) orelse codegen.store.procLoc(proc_id),
-                .spliced_proc => |identity| codegen.assembledProcLoc(identity) orelse .none,
-                .rc_helper, .entrypoint, .message_pool_run, .branch_island, .hosted_stub, .spliced_helper => .none,
-            },
+            .loc = source.loc,
+            .name = try arena_allocator.dupe(u8, source.name),
         };
     }
 
@@ -1901,7 +2014,7 @@ pub fn arrange(allocator: Allocator, set: *const Set, host_visible: []const Data
     var graph_items = std.ArrayList(DataItem).empty;
     defer graph_items.deinit(allocator);
     for (all_items.items) |item| try graph_items.append(allocator, renamed_items.get(item.name).?);
-    var renamed_graph: ?PreparedData = if (collector.visited.count() != 0) try PreparedData.init(allocator, &.{}, &.{}, graph_items.items) else null;
+    var renamed_graph: ?PreparedData = if (collector.visited.count() != 0) try PreparedData.init(allocator, &.{}, &.{}, .copy, graph_items.items) else null;
     defer if (renamed_graph) |*graph| graph.deinit();
     const excerpts = try a.alloc(Excerpt, set.excerpts.len);
     for (order.items, excerpts) |old, *out| {
@@ -1965,7 +2078,8 @@ pub fn arrange(allocator: Allocator, set: *const Set, host_visible: []const Data
 }
 
 /// `item` under its content name, with its relocations renamed the same
-/// way, owned by `a`.
+/// way, its metadata owned by `a`. Its payload bytes stay shared with the
+/// item's `payload_owner`, which the holder of the result retains.
 pub fn renamedData(a: Allocator, item: DataItem, names: *const ContentNames) Allocator.Error!DataItem {
     const relocations = try a.dupe(DataRelocation, item.relocations);
     var copier = NameCopier{};
@@ -1980,12 +2094,14 @@ pub fn renamedData(a: Allocator, item: DataItem, names: *const ContentNames) All
         relocation.name = try copier.copy(a, renamed);
     }
     return .{
+        .payload_owner = item.payload_owner,
         .name = try a.dupe(u8, names.of(item.name)),
-        .bytes = try a.dupe(u8, item.bytes),
+        .bytes = try payloadFor(a, item),
         .alignment = item.alignment,
         .symbol_offset = item.symbol_offset,
         .relocations = relocations,
         .program_local_name = false,
+        .pool_image = item.pool_image,
     };
 }
 
@@ -2193,16 +2309,16 @@ fn appendMetadata(comptime CG: type, codegen: *CG, excerpt: Excerpt, start: usiz
     switch (excerpt.kind) {
         .proc => |identity| {
             try codegen.registerAssembledProc(identity, start + excerpt.entry);
-            try codegen.registerAssembledProcLoc(identity, switch (lines) {
+            try codegen.registerAssembledProcSource(identity, switch (lines) {
                 .same_domain => excerpt.loc,
                 .file_map => |file_map| loc: {
                     if (!excerpt.loc.hasLocation()) break :loc excerpt.loc;
                     var bound = excerpt.loc;
-                    bound.file = file_map[excerpt.loc.file] orelse
-                        base.invariant("a spliced procedure's location names a module the program lacks", .{});
+                    bound.file = .some(file_map[excerpt.loc.fileIndex()] orelse
+                        base.invariant("a spliced procedure's location names a module the program lacks", .{}));
                     break :loc bound;
                 },
-            });
+            }, excerpt.name);
         },
         .rc_helper => |name| try codegen.registerSplicedHelper(name, start + excerpt.entry),
         .entrypoint, .message_pool_run, .branch_island => {},
@@ -2227,8 +2343,8 @@ fn appendMetadata(comptime CG: type, codegen: *CG, excerpt: Excerpt, start: usiz
                 // An entry whose lines name a module version the program
                 // lacks is never served (`LoadedPacks`), so its lines would
                 // differ from the procedure's own.
-                bound.file = file_map[line.loc.file] orelse
-                    base.invariant("a spliced line names a module the program lacks", .{});
+                bound.file = .some(file_map[line.loc.fileIndex()] orelse
+                    base.invariant("a spliced line names a module the program lacks", .{}));
                 break :loc bound;
             },
         };
@@ -2489,9 +2605,9 @@ pub fn reachingAbsentFiles(allocator: Allocator, set: *const Set, present: []con
     const marked = try allocator.alloc(bool, set.excerpts.len);
     errdefer allocator.free(marked);
     for (set.excerpts, marked) |excerpt, *is_marked| {
-        is_marked.* = excerpt.loc.hasLocation() and !present[excerpt.loc.file];
+        is_marked.* = excerpt.loc.hasLocation() and !present[excerpt.loc.fileIndex()];
         for (excerpt.lines) |line| {
-            if (line.loc.hasLocation() and !present[line.loc.file]) is_marked.* = true;
+            if (line.loc.hasLocation() and !present[line.loc.fileIndex()]) is_marked.* = true;
         }
     }
     try markReferrers(allocator, set, marked, .skip);
@@ -2633,7 +2749,7 @@ pub fn splice(
 test "independent message pools preserve their targets across repeated excerpt assembly" {
     const allocator = std.testing.allocator;
     inline for (.{ @import("roc_target").RocTarget.x64linux, @import("roc_target").RocTarget.arm64linux }) |target| {
-        const CG = LirCodeGenMod.LirCodeGen(target);
+        const CG = LirCodeGenMod.LirCodeGen(abiOf(target));
         var store = lir.LirStore.init(allocator);
         defer store.deinit();
         var layouts = try layout.Store.init(allocator, .u64);
@@ -2675,7 +2791,7 @@ test "independent message pools preserve their targets across repeated excerpt a
 
 test "excerpt local calls reserve veneers before later regions exceed reach" {
     const allocator = std.testing.allocator;
-    const CG = LirCodeGenMod.LirCodeGen(.arm64linux);
+    const CG = LirCodeGenMod.LirCodeGen(abiOf(.arm64linux));
     var store = lir.LirStore.init(allocator);
     defer store.deinit();
     var layouts = try layout.Store.init(allocator, .u64);
@@ -2723,13 +2839,53 @@ test "excerpt prepared data captures only the reached closure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testPreparedData, .{});
 }
 
+test "a catalog borrowing its exports shares their bytes and keeps them until its last holder goes" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testBorrowedCatalog, .{});
+}
+
+fn testBorrowedCatalog(allocator: Allocator) (ExtractError || error{ TestExpectedEqual, TestUnexpectedResult })!void {
+    const Kept = struct {
+        released: bool = false,
+        fn release(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.released = true;
+        }
+    };
+    var kept = Kept{};
+    const constant = testExport("roc__d0", "constant payload bytes", &.{}, false);
+    const keeper = try DataOwner.initKeeper(allocator, .{ .context = &kept, .release = Kept.release });
+    var keeper_live = true;
+    defer if (keeper_live) keeper.release();
+    var prepared = try PreparedData.init(allocator, &.{}, &.{constant}, .{ .borrow = keeper }, &.{});
+    var prepared_live = true;
+    defer if (prepared_live) prepared.deinit();
+    keeper.release();
+    keeper_live = false;
+    // The catalog's item is the export's bytes, which the catalog keeps.
+    try std.testing.expectEqual(constant.bytes.ptr, prepared.items.get("roc__d0").?.item.bytes.ptr);
+    try std.testing.expect(!kept.released);
+    var arena = collections.SingleThreadArena.init(allocator);
+    defer arena.deinit();
+    const refs = [_]NamedRelocation{.{ .offset = 0, .name = "roc__d0", .scope = .program, .kind = .{ .data = .rel32 } }};
+    const items = try captureData(allocator, arena.allocator(), &refs, &prepared);
+    // A copy of the item's metadata still shares its bytes.
+    const renamed = try copyData(arena.allocator(), items[0]);
+    try std.testing.expectEqual(constant.bytes.ptr, renamed.bytes.ptr);
+    const owners = try retainPayloadOwners(arena.allocator(), &.{renamed}, null);
+    prepared.deinit();
+    prepared_live = false;
+    try std.testing.expect(!kept.released);
+    releaseOwners(owners);
+    try std.testing.expect(kept.released);
+}
+
 fn testPreparedData(allocator: Allocator) (ExtractError || error{ TestExpectedEqual, TestUnexpectedResult })!void {
     var prepared = try PreparedData.init(allocator, &.{
         testExport("literal", "owned string", &.{}, false),
         testExport("unreferenced", "must not be carried", &.{}, false),
     }, &.{
         testExport("roc__d0", "placeholder", &.{}, false),
-    }, &.{});
+    }, .copy, &.{});
     var prepared_live = true;
     defer if (prepared_live) prepared.deinit();
     var arena = collections.SingleThreadArena.init(allocator);
@@ -2773,7 +2929,7 @@ test "excerpt metadata queues unresolved targets, preserves same-offset line ord
         pub fn registerAssembledProc(self: *Self, _: lir.ProcIdentity, entry: usize) Allocator.Error!void {
             self.proc_entry = entry;
         }
-        pub fn registerAssembledProcLoc(_: *Self, _: lir.ProcIdentity, _: base.SourceLoc) Allocator.Error!void {}
+        pub fn registerAssembledProcSource(_: *Self, _: lir.ProcIdentity, _: base.SourceLoc, _: []const u8) Allocator.Error!void {}
         pub fn registerSplicedHelper(_: *Self, _: []const u8, _: usize) Allocator.Error!void {}
         pub fn queueAssembledSymbolicRef(self: *Self, ref: SymbolicReference) Allocator.Error!void {
             self.refs[self.refs_len] = ref;
@@ -2801,8 +2957,8 @@ test "excerpt metadata queues unresolved targets, preserves same-offset line ord
             .{ .site = 1, .form = .addr, .target = .{ .rc_helper = "unemitted" } },
         },
         .lines = &.{
-            .{ .offset = 0, .loc = .{ .file = 3, .line = 10, .column = 1 }, .region = base.Region.zero() },
-            .{ .offset = 0, .loc = .{ .file = 3, .line = 11, .column = 2 }, .region = base.Region.zero() },
+            .{ .offset = 0, .loc = .{ .file = .some(3), .line = 10, .column = 1 }, .region = base.Region.zero() },
+            .{ .offset = 0, .loc = .{ .file = .some(3), .line = 11, .column = 2 }, .region = base.Region.zero() },
         },
         .relocations = &.{},
         .data = &.{},
@@ -2824,7 +2980,7 @@ test "excerpt metadata queues unresolved targets, preserves same-offset line ord
     try appendMetadata(Recorder, &persistent, excerpt, 100, .{ .file_map = &.{ null, null, null, 1 } });
     try std.testing.expectEqual(@as(usize, 2), persistent.lines_len);
     for (excerpt.lines, persistent.lines[0..persistent.lines_len]) |original, rebound| {
-        try std.testing.expectEqual(@as(u32, 1), rebound.loc.file);
+        try std.testing.expectEqual(@as(u32, 1), rebound.loc.fileIndex());
         try std.testing.expectEqual(original.loc.line, rebound.loc.line);
         try std.testing.expectEqual(original.loc.column, rebound.loc.column);
     }
@@ -2845,8 +3001,8 @@ fn testCombineOwnership(allocator: Allocator) (Allocator.Error || error{TestExpe
                 .{ .site = 2, .form = .addr, .target = .{ .proc = lir.ProcIdentity.forTest(4) } },
             },
             .lines = &.{
-                .{ .offset = 0, .loc = .{ .file = 0, .line = 3, .column = 2 }, .region = base.Region.zero() },
-                .{ .offset = 0, .loc = .{ .file = 0, .line = 4, .column = 5 }, .region = base.Region.zero() },
+                .{ .offset = 0, .loc = .{ .file = .some(0), .line = 3, .column = 2 }, .region = base.Region.zero() },
+                .{ .offset = 0, .loc = .{ .file = .some(0), .line = 4, .column = 5 }, .region = base.Region.zero() },
             },
             .relocations = &.{.{ .offset = 0, .name = "external", .scope = .shared, .kind = .{ .function = .x86_call_rel32 } }},
             .data = &.{.{
@@ -3142,7 +3298,7 @@ test "an image keeps only the code its roots reach" {
     const pointer = [_]DataRelocation{.{ .offset = 0, .name = pointed, .addend = 0, .function = true }};
     const constant = [_]DataItem{.{ .name = "roc__d1", .bytes = &@as([8]u8, @splat('\x00')), .alignment = 8, .symbol_offset = 0, .relocations = &pointer, .program_local_name = true }};
     const root_relocations = [_]NamedRelocation{.{ .offset = 1, .name = "roc__d1", .scope = .program, .kind = .{ .data = .rel32 } }};
-    var catalog = try PreparedData.init(allocator, &.{}, &.{}, &constant);
+    var catalog = try PreparedData.init(allocator, &.{}, &.{}, .copy, &constant);
     defer catalog.deinit();
     const set = Set{
         .arena = collections.SingleThreadArena.init(allocator),
@@ -3194,8 +3350,8 @@ test "a splice reaches a procedure through references and stable references" {
     // which the program lowers itself, so a stable reference to it places
     // nothing; a reference into the pack does.
     var lined = [_]Excerpt{ set.excerpts[0], set.excerpts[1], set.excerpts[2], set.excerpts[3] };
-    lined[2].lines = &.{.{ .offset = 0, .loc = .{ .file = 1, .line = 3, .column = 1 }, .region = base.Region.zero() }};
-    lined[3].loc = .{ .file = 0, .line = 1, .column = 1 };
+    lined[2].lines = &.{.{ .offset = 0, .loc = .{ .file = .some(1), .line = 3, .column = 1 }, .region = base.Region.zero() }};
+    lined[3].loc = .{ .file = .some(0), .line = 1, .column = 1 };
     const lined_set = Set{ .arena = collections.SingleThreadArena.init(allocator), .excerpts = &lined };
     const absent = try reachingAbsentFiles(allocator, &lined_set, &.{ true, false });
     defer allocator.free(absent);
@@ -3219,7 +3375,7 @@ fn testSharedCatalog(allocator: Allocator) (ExtractError || error{ TestExpectedE
         .{ .offset = 24, .name = "leaf", .addend = 0, .function = false },
         .{ .offset = 32, .name = "roc__d0", .addend = 0, .function = false },
     };
-    var prepared = try PreparedData.init(allocator, &.{}, &.{}, &.{
+    var prepared = try PreparedData.init(allocator, &.{}, &.{}, .copy, &.{
         .{ .name = "roc__d0", .bytes = "0123456701234567012345670123456701234567", .alignment = 8, .symbol_offset = 0, .relocations = &relocations, .program_local_name = true },
         .{ .name = "leaf", .bytes = "leaf value", .alignment = 1, .symbol_offset = 0 },
         .{ .name = "unreferenced", .bytes = "not reached", .alignment = 1, .symbol_offset = 0 },
@@ -3274,8 +3430,11 @@ fn testSharedCatalog(allocator: Allocator) (ExtractError || error{ TestExpectedE
     try std.testing.expectEqualStrings("roc__d0", source.excerpts[0].data[0].name);
     try std.testing.expectEqualStrings("roc__d0", source.excerpts[0].data[0].relocations[4].name);
     try std.testing.expect(std.mem.startsWith(u8, renamed.excerpts[0].data[0].name, content_data_prefix));
+    // Renaming gives the items new metadata over the same payload bytes.
+    try std.testing.expectEqual(source.excerpts[0].data[0].bytes.ptr, renamed.excerpts[0].data[0].bytes.ptr);
     source.deinit();
     source_live = false;
+    try std.testing.expectEqualStrings("0123456701234567012345670123456701234567", renamed.excerpts[0].data[0].bytes);
     try std.testing.expectEqualStrings("leaf value", reachable.excerpts[0].data[1].bytes);
     var arranged = try arrange(allocator, &reachable, &.{});
     defer arranged.deinit();
@@ -3294,7 +3453,7 @@ fn testSharedGraphs(allocator: Allocator) (Allocator.Error || error{ TestExpecte
         .{ .offset = 0, .name = "roc__d1", .addend = 0, .function = false },
         .{ .offset = 8, .name = "roc__d0", .addend = 0, .function = false },
     };
-    var catalog = try PreparedData.init(allocator, &.{}, &.{}, &.{
+    var catalog = try PreparedData.init(allocator, &.{}, &.{}, .copy, &.{
         testItem("roc__d0", &@as([16]u8, @splat(0)), &edges, true),
         testItem("roc__d1", "leaf", &.{}, true),
         testItem("roc__d2", "unreachable", &.{}, true),
@@ -3343,7 +3502,7 @@ test "shared graphs publish transitive code pointer eligibility through cycles" 
         .{ .offset = 0, .name = "root", .addend = 0, .function = false },
         .{ .offset = 8, .name = "code", .addend = 0, .function = true },
     };
-    var prepared = try PreparedData.init(allocator, &.{}, &.{}, &.{
+    var prepared = try PreparedData.init(allocator, &.{}, &.{}, .copy, &.{
         testItem("root", "00000000", &root_edges, false),
         testItem("leaf", "0000000000000000", &leaf_edges, false),
         testItem("plain", "plain", &.{}, false),

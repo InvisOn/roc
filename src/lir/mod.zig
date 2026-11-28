@@ -36,8 +36,6 @@ pub const LocalWrites = @import("LocalWrites.zig");
 /// Struct-typed join parameters split into per-field parameters before ARC.
 pub const PruneJoinParams = @import("prune_join_params.zig");
 pub const ScalarizeJoins = @import("scalarize_joins.zig");
-pub const SingleUseInline = @import("single_use_inline.zig");
-pub const ForwardingJoinInline = @import("forwarding_join_inline.zig");
 pub const TagCaseFusion = @import("tag_case_fusion.zig");
 pub const KnownTagJump = @import("known_tag_jump.zig");
 pub const LoopAppendPromote = @import("loop_append_promote.zig");
@@ -82,6 +80,8 @@ test "LIR image tests" {
 pub const ImmortalLocals = @import("immortal_locals.zig");
 /// Decides where erased calls left pending by a tail call are run.
 pub const TailDrive = @import("tail_drive.zig");
+/// Function values built in their caller's frame.
+pub const FrameCallables = @import("frame_callables.zig");
 /// Final immutable failure-image guards and explicit completion.
 pub const ComptimeValueGuards = @import("comptime_value_guards.zig");
 
@@ -191,6 +191,7 @@ test "lir tests" {
     std.testing.refAllDecls(@import("arc_liveness.zig"));
     std.testing.refAllDecls(ArcDismantle);
     std.testing.refAllDecls(LirImage);
+    std.testing.refAllDecls(FrameCallables);
 }
 
 /// Canonical packed product data and committed-layout copy plans.

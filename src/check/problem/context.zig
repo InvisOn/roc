@@ -11,6 +11,8 @@ const base = @import("base");
 const types_mod = @import("types");
 const can = @import("can");
 
+const snapshot = @import("../snapshot.zig");
+
 const Ident = base.Ident;
 const Var = types_mod.Var;
 const CIR = can.CIR;
@@ -54,6 +56,9 @@ pub const Context = union(enum) {
     fn_call_non_function: FnCallNonFunctionContext,
     /// Argument to a function call
     fn_call_arg: FnCallArgContext,
+    /// Two operands of one call that each fit the called function's declared
+    /// type, but not both at once
+    fn_call_args_conflict: FnCallArgsConflictContext,
 
     // Control flow contexts
     /// Condition of an if expression
@@ -161,8 +166,33 @@ pub const Context = union(enum) {
         arg_index: u32,
         /// Total number of arguments
         num_args: u32,
-        /// The type variable of the argument (for type display)
-        arg_var: Var,
+        /// Region of the argument
+        arg_region: base.Region,
+    };
+
+    /// Context for two operands of one call that conflict with each other.
+    /// The mismatch's expected type is the earlier operand's and its actual
+    /// type is the later argument's.
+    pub const FnCallArgsConflictContext = struct {
+        /// Name of the function being called, if known
+        fn_name: ?Ident.Idx,
+        /// The earlier operand
+        first: Operand,
+        /// Region of the earlier operand
+        first_region: base.Region,
+        /// 0-based index of the later argument
+        second_arg_index: u32,
+        /// Region of the later argument
+        second_region: base.Region,
+        /// The called function's declared type
+        fn_type: snapshot.SnapshotContentIdx,
+
+        pub const Operand = union(enum) {
+            /// The value a method is called on
+            receiver,
+            /// 0-based index of an argument
+            arg: u32,
+        };
     };
 
     /// Context for if branch type errors
@@ -263,9 +293,9 @@ pub const Context = union(enum) {
         /// Name of the record field
         field_name: Ident.Idx,
         /// Region of the record field
-        field_region_idx: base.Region.Idx,
+        field_region: base.Region,
         /// Region of the record being update
-        record_region_idx: base.Region.Idx,
+        record_region: base.Region,
         /// Name of the record being update
         record_name: ?Ident.Idx,
     };
@@ -310,8 +340,8 @@ pub const Context = union(enum) {
         fn_name: ?Ident.Idx,
         /// Type variable of the first argument
         first_arg_var: Var,
-        /// Type variable of the second argument
-        second_arg_var: Var,
+        /// Region of the second argument
+        second_arg_region: base.Region,
         /// 0-based index of the first argument
         first_arg_index: u32,
         /// 0-based index of the second argument
@@ -330,8 +360,8 @@ pub const Context = union(enum) {
 
     /// Context for method type mismatch (where clause)
     pub const MethodTypeContext = struct {
-        /// The dispatcher type variable
-        constraint_var: Var,
+        /// Region of the dispatcher type variable
+        constraint_region: base.Region,
         /// Exact owning use for a copied relation. Direct constraints retain
         /// their historical type-var-derived region when this is null.
         source_region: ?base.Region = null,

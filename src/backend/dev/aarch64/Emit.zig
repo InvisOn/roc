@@ -5,13 +5,12 @@
 //!
 //! Note: All aarch64 instructions are 32 bits (4 bytes) and must be 4-byte aligned.
 //!
-//! The Emit function is parameterized by RocTarget to enable full cross-compilation.
-//! Each target variant is specialized at comptime with the correct calling convention.
+//! The Emit function is parameterized by the dev-backend `Abi` it emits code for.
 
 const std = @import("std");
 const invariant = @import("base").invariant;
 const Allocator = std.mem.Allocator;
-const RocTarget = @import("roc_target").RocTarget;
+const Abi = @import("../isa.zig").Abi;
 const Registers = @import("Registers.zig");
 const RegisterWidth = Registers.RegisterWidth;
 const Call = @import("Call.zig");
@@ -19,11 +18,10 @@ const Call = @import("Call.zig");
 const Relocation = @import("../Relocation.zig").Relocation;
 
 /// aarch64 instruction emitter for generating machine code.
-/// Parameterized by target for cross-compilation support.
-pub fn Emit(comptime target: RocTarget) type {
-    // Validate this is an aarch64 target
-    if (target.toCpuArch() != .aarch64) {
-        @compileError("aarch64.Emit requires a little-endian aarch64 target");
+/// Parameterized by the ABI of the code it emits.
+pub fn Emit(comptime machine_abi: Abi) type {
+    if (machine_abi.isa() != .aarch64) {
+        @compileError("aarch64.Emit requires an aarch64 ABI");
     }
 
     return struct {
@@ -33,8 +31,8 @@ pub fn Emit(comptime target: RocTarget) type {
         pub const GeneralReg = Registers.GeneralReg;
         pub const FloatReg = Registers.FloatReg;
 
-        /// The target this Emit was instantiated for
-        pub const roc_target = target;
+        /// The ABI this Emit was instantiated for
+        pub const code_abi = machine_abi;
 
         /// Calling convention constants derived from target (AAPCS64)
         /// Note: aarch64 uses AAPCS64 for all targets, including Windows.
@@ -51,6 +49,33 @@ pub fn Emit(comptime target: RocTarget) type {
             pub const BASE_PTR = Registers.GeneralReg.FP;
             pub const STACK_PTR = Registers.GeneralReg.ZRSP;
             pub const STACK_ALIGNMENT: u32 = 16;
+
+            /// Roc-internal return registers, in order, for results of
+            /// compiled-proc calls; a result of several words fills them from
+            /// the first.
+            pub const ROC_RET_REGS = [_]Registers.GeneralReg{ .X0, .X1, .X2, .X3, .X4, .X5, .X6, .X7, .XR, .X9, .X10, .X11, .X12, .X13, .X14, .X15 };
+            /// Callee-saved register that internal procs receiving stack
+            /// arguments set to the caller's stack-argument base: deferred
+            /// prologues put FP at the bottom of the frame, so incoming
+            /// arguments are not at a fixed FP offset.
+            pub const CALLER_STACK_ARG_BASE_REG = Registers.GeneralReg.X28;
+            /// Offset of the first incoming stack argument from
+            /// `CALLER_STACK_ARG_BASE_REG`.
+            pub const INCOMING_STACK_ARG_BASE_OFFSET: i32 = 0;
+            /// Registers a frame-replacing call hands to the frame teardown:
+            /// the callee's address, and the signed distance from this
+            /// procedure's entry stack pointer to the callee's. Neither carries
+            /// an argument, is callee-saved, or is used by address
+            /// materialization.
+            pub const TAIL_CALL_TARGET_REG = Registers.GeneralReg.IP1;
+            pub const TAIL_CALL_DELTA_REG = Registers.GeneralReg.X15;
+            /// Callee-saved register that holds an entrypoint's result pointer.
+            pub const RESULT_PTR_SAVE_REG = Registers.GeneralReg.X19;
+            /// Callee-saved register that holds the RocOps pointer.
+            pub const ROC_OPS_SAVE_REG = Registers.GeneralReg.X20;
+            /// Register that holds an immediate result while it is stored
+            /// through the hidden return pointer, which `SCRATCH_REG` holds.
+            pub const RET_PTR_COPY_REG = Registers.GeneralReg.X10;
 
             /// Align a stack size to the platform's required alignment.
             pub fn alignStackSize(size: u32) u32 {
@@ -1870,9 +1895,9 @@ pub fn Emit(comptime target: RocTarget) type {
 }
 
 // Target-specific Emit types for cross-platform testing
-const LinuxEmit = Emit(.arm64linux);
-const WinEmit = Emit(.arm64win);
-const MacEmit = Emit(.arm64mac);
+const LinuxEmit = Emit(.aarch64_aapcs);
+const WinEmit = Emit(.aarch64_windows);
+const MacEmit = Emit(.aarch64_apple);
 
 fn testReadInst(buf: []const u8, inst_index: usize) u32 {
     const byte_index = inst_index * 4;

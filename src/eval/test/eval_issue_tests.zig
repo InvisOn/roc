@@ -707,6 +707,48 @@ pub const tests = [_]TestCase{
         .source = @import("issue_11626_source.zig").source ++ "\nmain = (run(\"\", stats_page), run(\"\", lead_page), run(\"ok\", stats_page), run(\"ok\", lead_page))\n",
         .expected = .{ .inspect_str = "(Err(NotFound(IndexStats)), Err(NotFound(LeadMissing)), Ok(\"stats\"), Ok(\"lead\"))" },
     },
+    // A constant whose rows a program's joins widened is stored at its
+    // declared rows, so its image is written at the declared layout, each tag
+    // at its variant of the same name (design.md "Stored Images").
+    .{
+        .name = "issue 11626: a constant of joined rows is stored at its declared rows",
+        .source_kind = .module,
+        .source = @import("issue_11626_source.zig").source ++
+            \\
+            \\pair : (Try(Str, [NotFound([IndexStats])]), Try(Str, [NotFound([LeadMissing])]))
+            \\pair = (stats_page(""), lead_page(""))
+            \\
+            \\main = pair
+            \\
+        ,
+        .expected = .{ .inspect_str = "(Err(NotFound(IndexStats)), Err(NotFound(LeadMissing)))" },
+    },
+    .{
+        .name = "issue 11626: joined rows in a record's list are stored at their declared rows",
+        .source_kind = .module,
+        .source = @import("issue_11626_source.zig").source ++
+            \\
+            \\pages : { results : List(Try(Str, [NotFound([IndexStats])])), lead : Try(Str, [NotFound([LeadMissing])]) }
+            \\pages = { results: [stats_page(""), stats_page("ok"), stats_page("")], lead: lead_page("") }
+            \\
+            \\main = pages
+            \\
+        ,
+        .expected = .{ .inspect_str = "{ lead: Err(NotFound(LeadMissing)), results: [Err(NotFound(IndexStats)), Ok(\"stats\"), Err(NotFound(IndexStats))] }" },
+    },
+    .{
+        .name = "issue 11626: joined rows in a boxed record are stored at their declared rows",
+        .source_kind = .module,
+        .source = @import("issue_11626_source.zig").source ++
+            \\
+            \\boxed : Box({ stats : Try(Str, [NotFound([IndexStats])]), lead : Try(Str, [NotFound([LeadMissing])]) })
+            \\boxed = Box.box({ stats: stats_page(""), lead: lead_page("") })
+            \\
+            \\main = Box.unbox(boxed)
+            \\
+        ,
+        .expected = .{ .inspect_str = "{ lead: Err(NotFound(LeadMissing)), stats: Err(NotFound(IndexStats)) }" },
+    },
     .{
         .name = "issue 11626: composed returns carry captured callable payloads",
         .source_kind = .module,
@@ -1469,13 +1511,13 @@ pub const tests = [_]TestCase{
         .expected = .{ .inspect_str = "1" },
     },
     .{
-        .name = "issue 9391: fractional method receiver specializes to F64 argument",
+        .name = "issue 9391: fractional comparison receiver specializes to F64 argument",
         .source_kind = .module,
         .source =
         \\f : U64 -> F64
         \\f = |_n| 0.001
         \\
-        \\main = 0.001.is_lte(f(3))
+        \\main = 0.001 <= f(3)
         ,
         .expected = .{ .inspect_str = "True" },
     },
@@ -4083,9 +4125,8 @@ pub const tests = [_]TestCase{
     .{
         // https://github.com/roc-lang/roc/issues/11668
         // The literal's target `Sql(a)` gets `a` from the record argument, whose
-        // field kind is still open when the literal is lowered, so the
-        // `from_quote` call must lower at the open target instead of demanding
-        // its finished type.
+        // field kind no use pins. `run`'s scheme does not quantify that kind, so
+        // it is decided as required and the conversion is fixed in `run`.
         .name = "issue 11668: from_quote literal argument whose type parameter comes from a record argument",
         .source_kind = .module,
         .source =
@@ -4122,6 +4163,31 @@ pub const tests = [_]TestCase{
         \\run = |_| total(3, { id: 1.I32 })
         \\
         \\main = run({})
+        ,
+        .expected = .{ .inspect_str = "7" },
+    },
+    .{
+        // https://github.com/roc-lang/roc/issues/11668
+        // `wrap` returns the record, so its scheme quantifies the field's kind
+        // and the literal's conversion depends on `wrap`'s instance: it is
+        // fixed at the call, which leaves the kind unpinned.
+        .name = "issue 11668: from_numeral literal argument whose record's field kind the enclosing scheme quantifies",
+        .source_kind = .module,
+        .source =
+        \\Tally(a) := { count : I64 }.{
+        \\    from_numeral : Numeral -> Try(Tally(a), [InvalidNumeral(Str)])
+        \\    from_numeral = |_| Ok(Tally.{ count: 7 })
+        \\}
+        \\
+        \\total : Tally(a), a -> I64
+        \\total = |tally, _| tally.count
+        \\
+        \\wrap = |v| {
+        \\    r = { id: v }
+        \\    (r, total(3, r))
+        \\}
+        \\
+        \\main = wrap(1.I32).1
         ,
         .expected = .{ .inspect_str = "7" },
     },
@@ -4929,10 +4995,10 @@ pub const tests = [_]TestCase{
     },
     .{
         // https://github.com/roc-lang/roc/issues/12100
-        // The two `+` relations merge into one declarative relation once `==`
-        // unifies their receivers; both dispatches must share its checked
+        // The two `plus` relations merge into one declarative relation once
+        // `==` unifies their receivers; both dispatches must share its checked
         // target instantiation, including the target's scheme variable.
-        .name = "issue 12100: two merged operator relations whose target has a scheme variable",
+        .name = "issue 12100: two merged method relations whose target has a scheme variable",
         .source_kind = .module,
         .source =
         \\Unit :: I64.{
@@ -4943,7 +5009,7 @@ pub const tests = [_]TestCase{
         \\}
         \\
         \\check : { a : Unit, b : Unit } -> Bool
-        \\check = |{ a, b }| (a + []) == (b + []) and a == b
+        \\check = |{ a, b }| a.plus([]) == b.plus([]) and a == b
         \\
         \\main = check({ a: Unit.(1), b: Unit.(1) })
         ,
@@ -5157,5 +5223,42 @@ pub const tests = [_]TestCase{
         \\main = (get("a"), get(""))
         ,
         .expected = .{ .inspect_str = "(Ok(\"a\"), Err(Missing))" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/12997
+        // `"kept"` has the type `child`, which constructing the generalized
+        // local `|_parent| "kept"` fixes, so that construction is a literal
+        // argument root's edge. The root converts the literal at the edge
+        // and evaluates none of the lambda that owns it.
+        .name = "issue 12997: literal argument root on a nested generalized lambda's construction evaluates none of the lambda",
+        .source_kind = .module,
+        .source =
+        \\wrap : { get : parent -> child } -> Str
+        \\wrap = |_config| "x"
+        \\
+        \\build : U64 -> { render : U64 -> Str }
+        \\build = |_n| { render: |_| wrap({ get: |_parent| "kept" }) }
+        \\
+        \\main = (build(1).render)(1)
+        ,
+        .expected = .{ .inspect_str = "\"x\"" },
+    },
+    .{
+        // repro for https://github.com/roc-lang/roc/issues/12997
+        .name = "issue 12997: literal argument root on a nested generalized lambda's construction inside a tuple",
+        .source_kind = .module,
+        .source =
+        \\wrap : { get : parent -> child } -> Str
+        \\wrap = |_config| "x"
+        \\
+        \\build : U64 -> ((U64 -> Str), U64)
+        \\build = |n| (|_| wrap({ get: |_parent| "kept" }), n)
+        \\
+        \\main = {
+        \\    (f, _) = build(1)
+        \\    f(1)
+        \\}
+        ,
+        .expected = .{ .inspect_str = "\"x\"" },
     },
 };

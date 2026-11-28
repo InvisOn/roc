@@ -106,24 +106,23 @@ pub const LowLevel = enum(u16) {
     list_replace_unsafe,
     list_swap,
     list_prepend,
-    list_take_first,
-    list_take_last,
     list_reverse,
     list_reserve,
     list_reserve_for_append,
     list_release_excess_capacity,
     /// `List.clear`: the list with every item removed, keeping its
-    /// allocation and capacity when it is uniquely owned. Every backend
-    /// runs it as a zero-length sublist from index zero, whose result is
-    /// never a slice, so unlike `list_sublist` the result is born unique.
+    /// allocation and capacity when it is uniquely owned, and allocating the
+    /// capacity static data records when it is static data. Every backend
+    /// runs it as the `listClear` builtin, whose result is never a slice and
+    /// never shared, so unlike `list_sublist` the result is born unique.
     list_clear,
     list_map_prepare_reuse,
     list_map_can_reuse,
     list_map_cast_unsafe,
     /// `list_move_out_unsafe` for a buffer retyped to `List.map`'s output item.
-    /// Its third operand is `typeOnlyOperands`' `transform`: the buffer's type
-    /// does not say what its unwritten slots hold, so this operand tells
-    /// Lambda Solved.
+    /// Its third operand is `typeOnlyOperands`' input list, the list the
+    /// buffer was retyped from: the buffer's type does not say what its
+    /// unwritten slots hold, so this operand tells Lambda Solved.
     list_map_extract_unsafe,
     list_map_write_unsafe,
     /// Moves the item at an index out of a uniquely owned list's buffer. The
@@ -202,6 +201,8 @@ pub const LowLevel = enum(u16) {
     num_float_sub,
     num_float_mul,
     dec_mul,
+    /// Multiply, rescale toward zero, and clamp to the signed Dec bounds.
+    dec_mul_saturated,
     num_div_by,
     num_div_by_checked,
     num_div_trunc_by,
@@ -637,11 +638,14 @@ pub const LowLevel = enum(u16) {
     /// runtime check succeeds; otherwise copies the payload into a fresh box,
     /// retains nested payload children, and releases the consumed input.
     box_prepare_update,
+    /// (capture pointer, owner) -> captures: read an erased frame's capture
+    /// record from the capture pointer. The owner is the frame's reuse
+    /// argument, the erased-callable allocation holding the capture bytes
+    /// whenever the caller transferred it. Like `box_unbox`, the neutral
+    /// operation consumes its owner, taking the captures out of it.
     erased_capture_load,
-    /// Pack an erased step and its length hint into one opaque sequence handle.
-    boxed_sequence_pack,
-    /// Unpack a sequence's record while borrowing the owning handle.
-    boxed_sequence_unpack,
+    /// ARC-only borrowing variant of erased_capture_load.
+    erased_capture_load_borrowed,
 
     // Compiler-internal pointer operations, introduced by the TRMC pass
     // (src/lir/trmc.zig). Never produced by user code or canonicalization.
@@ -1111,8 +1115,6 @@ pub const LowLevel = enum(u16) {
 
         .list_drop_at = byLayout(.runtimeUniquenessMaybeSharedResult(arg_0)).elements(&.{ .layout, .none }),
         .list_sublist = byLayout(.runtimeUniquenessMaybeSharedResult(arg_0)).elements(&.{ .layout, .none }),
-        .list_take_first = byType(.runtimeUniquenessMaybeSharedResult(arg_0)).elements(&.{ .layout, .none }),
-        .list_take_last = byType(.runtimeUniquenessMaybeSharedResult(arg_0)).elements(&.{ .layout, .none }),
 
         .list_sublist_borrowed = byType(.retainsResultBorrowingArgs(arg_0)).elements(&.{ .layout, .none }),
 
@@ -1167,10 +1169,9 @@ pub const LowLevel = enum(u16) {
 
         // Moves one element's ownership out of a unique list's buffer.
         // The buffer slot keeps stale bytes until `list_map_write_unsafe`
-        // stores the replacement; the op itself performs no RC work.
-        // Its `transform` operand puts a function in every request's type,
-        // and a function's type is program-specific, so it is not layout-keyed.
-        .list_map_extract_unsafe = byType(.none()).elements(&.{ .layout, .none, .none }).typeOnly(1),
+        // stores the replacement; the op itself performs no RC work. Its
+        // input list operand exists for its type, so it reads nothing of it.
+        .list_map_extract_unsafe = byLayout(.none()).elements(&.{ .layout, .none, .none }).typeOnly(1),
 
         // The move `list_map_extract_unsafe` performs, on a list whose item
         // type does not change.
@@ -1250,12 +1251,8 @@ pub const LowLevel = enum(u16) {
 
         .box_prepare_update = byType(.runtimeUniqueness(arg_0)),
 
-        // The capture environment is read through the executing frame's
-        // closure, not through an explicit refcounted argument, so the
-        // result cannot name a lender to borrow from.
-        .erased_capture_load = byType(.retainsResult()),
-        .boxed_sequence_pack = byType(.allocatesConsumingArgs(arg_0)),
-        .boxed_sequence_unpack = byType(.retainsResultBorrowingArgs(arg_0)),
+        .erased_capture_load = byType(.{ .may_retain_or_release = true, .consume_args = arg_1, .result_shares_args = arg_1 }),
+        .erased_capture_load_borrowed = byType(.retainsResultBorrowingArgs(arg_1)),
 
         .box_alloc_zeroed = byType(.allocates()),
 
@@ -1330,6 +1327,7 @@ pub const LowLevel = enum(u16) {
         .num_float_sub = byType(.none()),
         .num_float_mul = byType(.none()),
         .dec_mul = byType(.none()),
+        .dec_mul_saturated = byType(.none()),
         .num_div_by = byType(.none()),
         .num_div_by_checked = byType(.none()),
         .num_div_trunc_by = byType(.none()),
@@ -1442,6 +1440,20 @@ pub const LowLevel = enum(u16) {
     pub fn arcBorrowedResultVariant(self: LowLevel) ?LowLevel {
         if (self == .list_sublist) return .list_sublist_borrowed;
         if (self == .box_unbox) return .box_unbox_borrowed;
+        if (self == .erased_capture_load) return .erased_capture_load_borrowed;
+        return null;
+    }
+
+    /// The argument position of the allocation a dead-lender read takes its
+    /// result out of: `box_unbox`'s box and `erased_capture_load`'s owner.
+    /// Such an operation is solved as consuming that allocation, so its
+    /// result has an ownership place of its own. Emission selects the
+    /// borrowing variant while the allocation stays live, and otherwise
+    /// normalizes the consuming form into the borrowing read, a retain of
+    /// the result, and a release of the allocation.
+    pub fn deadLenderArg(self: LowLevel) ?u32 {
+        if (self == .box_unbox) return 0;
+        if (self == .erased_capture_load) return 1;
         return null;
     }
 
@@ -1449,11 +1461,24 @@ pub const LowLevel = enum(u16) {
     /// Operations without an ARC-only borrowed variant retain their declared
     /// statement effect, including synthetic effects used by focused tests.
     pub fn arcInferenceRcEffect(self: LowLevel, declared: RcEffect) RcEffect {
-        // Box.unbox must establish an independent payload ownership place in
-        // the solved graph. Emission may still select the borrowing variant
-        // when the box lender survives, but an owned variant must not leave
-        // the payload's unit keyed to the consumed box allocation.
+        // A dead-lender read must establish an independent result ownership
+        // place in the solved graph. Emission may still select the borrowing
+        // variant when the lender survives, but an owned variant must not
+        // leave the result's unit keyed to the consumed allocation.
         if (!self.arcOwnedResultConsumesLender()) return declared;
+        return self.arcBorrowedResultVariant().?.rcEffect();
+    }
+
+    /// Ownership signature ARC solves for a dead-lender read when it may not
+    /// consume the lender (`consume_dead_boxes` off), so emission always
+    /// selects the borrowing variant. `Box.unbox`'s payload borrows its box.
+    /// An erased frame's capture record is always an owned container
+    /// (design.md "Constraints Per Statement Form"): it takes its own unit
+    /// and leaves the reuse argument unconsumed, so a repack of that
+    /// allocation as the frame's result is not held back by reads of the
+    /// captures that follow it.
+    pub fn arcLiveLenderRcEffect(self: LowLevel) RcEffect {
+        if (self == .erased_capture_load) return .retainsResult();
         return self.arcBorrowedResultVariant().?.rcEffect();
     }
 
@@ -1462,7 +1487,7 @@ pub const LowLevel = enum(u16) {
     /// argument, exactly when the result is owned. An ownership demand on such
     /// a result is therefore a demand on its lender's unit.
     pub fn arcOwnedResultConsumesLender(self: LowLevel) bool {
-        if (self == .box_unbox) return false;
+        if (self.deadLenderArg() != null) return false;
         return self.arcBorrowedResultVariant() != null;
     }
 

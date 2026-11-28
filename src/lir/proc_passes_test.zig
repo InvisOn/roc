@@ -36,6 +36,7 @@ fn fusionFixture(phase: passes.Phase) std.mem.Allocator.Error!Fixture {
     };
     fixture.fusion_joins = joins;
     for (0..8) |index| {
+        const body_mark = store.bodyMark();
         const selector = try store.addLocal(.{ .layout_idx = .u64 });
         const result = try store.addLocal(.{ .layout_idx = .u64 });
         const outer = try store.addLocal(.{ .layout_idx = if (phase == .tag_fusion) .bool else .u64 });
@@ -140,15 +141,15 @@ fn fusionFixture(phase: passes.Phase) std.mem.Allocator.Error!Fixture {
                 .remainder = initialize_carried,
             },
         }, .test_fixture);
-        _ = try store.addProcSpec(.{
+        const proc = try store.addProcSpec(.{
             .identity = core.LIR.ProcIdentity.forTest(@intCast(index)),
             .name = store.freshSyntheticSymbol(),
             .args = try store.addLocalSpan(&.{selector}),
             .frame_locals = try store.addLocalSpan(&.{ selector, result, outer, inner, disc, carried }),
             .body = .some(root),
-            .iterator_fusion_scope = true,
             .ret_layout = .u64,
         }, .none);
+        try store.recordBodyChunk(proc, body_mark);
     }
     return fixture;
 }
@@ -205,6 +206,7 @@ const Fixture = struct {
         // More procedures than lanes exercises replenishment as well as a
         // reversed first group. Each body has a concrete scalarization.
         for (0..8) |_| {
+            const body_mark = self.store.bodyMark();
             const number = try self.store.addLocal(.{ .layout_idx = .i64 });
             const text = try self.store.addLocal(.{ .layout_idx = .str });
             const wrapper = try self.store.addLocal(.{ .layout_idx = pair });
@@ -220,13 +222,14 @@ const Fixture = struct {
                 .fields = try self.store.addLocalSpan(&.{ number, text }),
                 .next = read,
             } }, .test_fixture);
-            _ = try self.store.addProcSpec(.{
+            const proc = try self.store.addProcSpec(.{
                 .identity = core.LIR.ProcIdentity.forTest(@intCast(self.store.procSpecCount())),
                 .name = self.store.freshSyntheticSymbol(),
                 .args = try self.store.addLocalSpan(&.{ number, text }),
                 .body = .some(body),
                 .ret_layout = .i64,
             }, .none);
+            try self.store.recordBodyChunk(proc, body_mark);
         }
         return self;
     }
@@ -272,6 +275,7 @@ const Fixture = struct {
             .{ .index = 1, .layout = .str },
         });
         for (0..8) |index| {
+            const body_mark = self.store.bodyMark();
             const state = try self.store.addLocal(.{ .layout_idx = pair });
             const input = try self.store.addLocal(.{ .layout_idx = pair });
             const number = try self.store.addLocal(.{ .layout_idx = .i64 });
@@ -303,13 +307,14 @@ const Fixture = struct {
                 .body = read_number,
                 .remainder = set,
             } }, .test_fixture);
-            _ = try self.store.addProcSpec(.{
+            const proc = try self.store.addProcSpec(.{
                 .identity = core.LIR.ProcIdentity.forTest(@intCast(self.store.procSpecCount())),
                 .name = self.store.freshSyntheticSymbol(),
                 .args = try self.store.addLocalSpan(&.{input}),
                 .body = .some(body),
                 .ret_layout = .i64,
             }, .none);
+            try self.store.recordBodyChunk(proc, body_mark);
         }
         return self;
     }
@@ -409,7 +414,7 @@ const ReverseExecutor = struct {
 };
 
 test "LIR proc pass fusion relocates only generated joins in procedure order" {
-    inline for (.{ passes.Phase.forwarding_join, passes.Phase.tag_fusion }) |phase| {
+    inline for (.{passes.Phase.tag_fusion}) |phase| {
         var serial = try fusionFixture(phase);
         defer serial.deinit();
         try passes.run(testing.allocator, &serial.store, &serial.layouts, phase, null, null);
@@ -428,7 +433,8 @@ test "LIR proc pass fusion relocates only generated joins in procedure order" {
             try expectFusionJoins(&fixture, phase);
             try testing.expect(runner.ended);
             try testing.expect(runner.source_unchanged_until_end);
-            try testing.expectEqual(@as(usize, 8), runner.received);
+            try testing.expect(runner.received >= 1);
+            try testing.expectEqual(runner.accepted, runner.received);
             try testing.expectEqual(@as(u64, 8), metrics.tasks_submitted);
             try testing.expectEqual(@as(u64, 8), metrics.tasks_committed);
             for (metrics.changed_by_phase, metrics.committed_by_phase, 0..) |changed, committed, index| {
@@ -459,105 +465,8 @@ test "LIR proc pass fusion relocates only generated joins in procedure order" {
     }
 }
 
-/// Move the entire tag-fusion graph, including its external join, into an
-/// iterator continuation. That fresh external identity becomes source input
-/// to the following tag phase and must not be relocated a second time.
-fn wrapFusionInForwarder(fixture: *Fixture) std.mem.Allocator.Error!void {
-    const store = &fixture.store;
-    for (0..store.procSpecCount()) |index| {
-        const id: core.LIR.LirProcSpecId = @fromBackingInt(@intCast(index));
-        const proc = store.getProcSpec(id);
-        const outer = try store.addLocal(.{ .layout_idx = .u64 });
-        const inner = try store.addLocal(.{ .layout_idx = .u64 });
-        const jump_outer = try store.addCFStmt(.{ .jump = .{ .target = @fromBackingInt(@intCast(4)) } }, .test_fixture);
-        const forward = try store.addCFStmt(.{ .set_local = .{
-            .target = outer,
-            .value = inner,
-            .mode = .initialize_join_param,
-            .next = jump_outer,
-        } }, .test_fixture);
-        const jump_inner = try store.addCFStmt(.{ .jump = .{ .target = @fromBackingInt(@intCast(3)) } }, .test_fixture);
-        const initialize = try store.addCFStmt(.{ .set_local = .{
-            .target = inner,
-            .value = core.LirStore.GuardedList.at(store.getLocalSpan(proc.args), 0),
-            .mode = .initialize_join_param,
-            .next = jump_inner,
-        } }, .test_fixture);
-        const inner_join = try store.addCFStmt(.{ .join = .{
-            .id = @fromBackingInt(@intCast(3)),
-            .params = try store.addLocalSpan(&.{inner}),
-            .body = forward,
-            .remainder = initialize,
-        } }, .test_fixture);
-        const body = try store.addCFStmt(.{ .join = .{
-            .id = @fromBackingInt(@intCast(4)),
-            .params = try store.addLocalSpan(&.{outer}),
-            .body = proc.body.get().?,
-            .remainder = inner_join,
-        } }, .test_fixture);
-        var frame = std.ArrayList(core.LIR.LocalId).empty;
-        defer frame.deinit(testing.allocator);
-        const old_frame = store.getLocalSpan(proc.frame_locals);
-        for (0..old_frame.len) |local| try frame.append(testing.allocator, core.LirStore.GuardedList.at(old_frame, local));
-        try frame.appendSlice(testing.allocator, &.{ outer, inner });
-        const frame_span = try store.addLocalSpan(frame.items);
-        store.getProcSpecPtr(id).body = .some(body);
-        store.getProcSpecPtr(id).frame_locals = frame_span;
-    }
-}
-
-test "LIR proc pass forwarding generated joins become frozen source for tag fusion" {
-    var reference = std.Io.Writer.Allocating.init(testing.allocator);
-    defer reference.deinit();
-    var expected: ?passes.ParallelMetrics = null;
-    for ([_]usize{ 1, 2, 4 }) |lanes| {
-        var fixture = try fusionFixture(.tag_fusion);
-        defer fixture.deinit();
-        try wrapFusionInForwarder(&fixture);
-        var runner: ReverseExecutor = .{ .lanes = lanes };
-        defer runner.deinit();
-        var metrics: passes.ParallelMetrics = .{};
-        const exec: ?executor.Executor = if (lanes == 1) null else runner.interface();
-        try passes.run(testing.allocator, &fixture.store, &fixture.layouts, .forwarding_join, exec, &metrics);
-        var external_ids: [8]core.LIR.JoinPointId = undefined;
-        for (&external_ids, 0..) |*external, index| {
-            const proc = fixture.store.getProcSpec(@fromBackingInt(@intCast(index)));
-            const inner = fixture.store.getCFStmtImmediate(proc.body.get().?).join;
-            try testing.expectEqual(@as(u32, 3), @backingInt(inner.id));
-            external.* = fixture.store.getCFStmtImmediate(inner.body).join.id;
-            try testing.expect(@backingInt(external.*) > 4);
-        }
-        try passes.run(testing.allocator, &fixture.store, &fixture.layouts, .tag_fusion, exec, &metrics);
-        for (external_ids, 0..) |external, index| {
-            const proc = fixture.store.getProcSpec(@fromBackingInt(@intCast(index)));
-            const inner = fixture.store.getCFStmtImmediate(proc.body.get().?).join;
-            try testing.expectEqual(external, fixture.store.getCFStmtImmediate(inner.body).join.id);
-            var walk = try body_clone.ReachableStmts.init(&fixture.store, proc.body.get().?);
-            defer walk.deinit();
-            var external_jumps: usize = 0;
-            while (try walk.next()) |id| {
-                const stmt = fixture.store.getCFStmt(id);
-                if (stmt == .jump and stmt.jump.target == external) external_jumps += 1;
-            }
-            try testing.expectEqual(@as(usize, 2), external_jumps);
-        }
-        if (lanes == 1) {
-            try fixture.dump(&reference.writer);
-        } else {
-            try testing.expectEqual(@as(u64, 8), metrics.changed_by_phase[@backingInt(passes.Phase.forwarding_join)]);
-            try testing.expectEqual(@as(u64, 8), metrics.changed_by_phase[@backingInt(passes.Phase.tag_fusion)]);
-            if (expected) |counts| try testing.expectEqualDeep(counts, metrics);
-            expected = metrics;
-            var actual = std.Io.Writer.Allocating.init(testing.allocator);
-            defer actual.deinit();
-            try fixture.dump(&actual.writer);
-            try testing.expectEqualStrings(reference.written(), actual.written());
-        }
-    }
-}
-
 test "LIR proc pass fusion output scratch and submission failures drain before commit" {
-    inline for (.{ passes.Phase.forwarding_join, passes.Phase.tag_fusion }) |phase| {
+    inline for (.{passes.Phase.tag_fusion}) |phase| {
         for (0..3) |kind| {
             var fail_index: usize = 0;
             while (true) : (fail_index += 1) {
@@ -572,9 +481,9 @@ test "LIR proc pass fusion output scratch and submission failures drain before c
                 var runner: ReverseExecutor = .{
                     .lanes = 4,
                     .frozen_source = &fixture.store,
-                    .fail_output_task = if (kind == 0) 7 else null,
-                    .fail_scratch_task = if (kind == 1) 7 else null,
-                    .fail_submit_task = if (kind == 2) 7 else null,
+                    .fail_output_task = if (kind == 0) 0 else null,
+                    .fail_scratch_task = if (kind == 1) 0 else null,
+                    .fail_submit_task = if (kind == 2) 0 else null,
                     .output_failure = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index }),
                     .scratch_failure = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index }),
                 };
@@ -583,7 +492,8 @@ test "LIR proc pass fusion output scratch and submission failures drain before c
                 const result = passes.run(testing.allocator, &fixture.store, &fixture.layouts, phase, runner.interface(), &metrics);
                 try testing.expect(runner.ended);
                 try testing.expect(runner.source_unchanged_until_end);
-                try testing.expectEqual(@as(usize, if (kind == 2) 7 else 8), runner.accepted);
+                // Every procedure shares the run's one drain task, task 0.
+                if (kind == 2) try testing.expectEqual(@as(usize, 0), runner.accepted) else try testing.expect(runner.accepted >= 1);
                 try testing.expectEqual(runner.accepted, runner.received);
                 try testing.expectEqual(@as(usize, 0), runner.pending_len);
                 const failed = kind == 2 or (if (kind == 0) runner.output_failure.has_induced_failure else runner.scratch_failure.has_induced_failure);
@@ -651,7 +561,8 @@ test "LIR proc pass reverse completions preserve serial scalarization and accoun
         var metrics: passes.ParallelMetrics = .{};
         try passes.run(testing.allocator, &candidate.store, &candidate.layouts, .scalarize, mock.interface(), &metrics);
         try testing.expect(mock.ended);
-        try testing.expectEqual(@as(usize, 8), mock.received);
+        try testing.expect(mock.received >= 1);
+        try testing.expectEqual(mock.accepted, mock.received);
         try testing.expectEqual(@as(u64, 8), metrics.tasks_submitted);
         try testing.expectEqual(metrics.tasks_submitted, metrics.tasks_committed);
         try testing.expectEqual(@as(u64, 8), metrics.changed_by_phase[@backingInt(passes.Phase.scalarize)]);
@@ -698,9 +609,9 @@ test "LIR proc pass worker and submission OOM drain without partial source mutat
         const prefix = fixture.store.captureBodyPrefix();
         var mock: ReverseExecutor = .{
             .lanes = 4,
-            .fail_output_task = if (failure == 0) 7 else null,
-            .fail_scratch_task = if (failure == 1) 7 else null,
-            .fail_submit_task = if (failure == 2) 7 else null,
+            .fail_output_task = if (failure == 0) 0 else null,
+            .fail_scratch_task = if (failure == 1) 0 else null,
+            .fail_submit_task = if (failure == 2) 0 else null,
         };
         defer mock.deinit();
         var metrics: passes.ParallelMetrics = .{};
@@ -713,7 +624,9 @@ test "LIR proc pass worker and submission OOM drain without partial source mutat
             &metrics,
         ));
         try testing.expect(mock.ended);
-        try testing.expectEqual(@as(usize, if (failure == 2) 7 else 8), mock.received);
+        // Every procedure shares the run's one drain task, task 0.
+        if (failure == 2) try testing.expectEqual(@as(usize, 0), mock.received) else try testing.expect(mock.received >= 1);
+        try testing.expectEqual(mock.accepted, mock.received);
         try testing.expectEqual(@as(u64, 0), metrics.tasks_committed);
         try testing.expectEqualDeep(prefix, fixture.store.captureBodyPrefix());
         var after = std.Io.Writer.Allocating.init(testing.allocator);
@@ -737,8 +650,8 @@ test "LIR proc pass sweeps output and scratch OOM through appended join rewrites
             const prefix = fixture.store.captureBodyPrefix();
             var runner: ReverseExecutor = .{
                 .lanes = 4,
-                .fail_output_task = if (kind == 0) 7 else null,
-                .fail_scratch_task = if (kind == 1) 7 else null,
+                .fail_output_task = if (kind == 0) 0 else null,
+                .fail_scratch_task = if (kind == 1) 0 else null,
                 .output_failure = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index }),
                 .scratch_failure = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index }),
             };
@@ -746,7 +659,7 @@ test "LIR proc pass sweeps output and scratch OOM through appended join rewrites
             var metrics: passes.ParallelMetrics = .{};
             const result = passes.run(testing.allocator, &fixture.store, &fixture.layouts, .scalarize, runner.interface(), &metrics);
             try testing.expect(runner.ended);
-            try testing.expectEqual(@as(usize, 8), runner.accepted);
+            try testing.expect(runner.accepted >= 1);
             try testing.expectEqual(runner.accepted, runner.received);
             try testing.expectEqual(@as(usize, 0), runner.pending_len);
             const failed = if (kind == 0) runner.output_failure.has_induced_failure else runner.scratch_failure.has_induced_failure;
@@ -777,6 +690,7 @@ test "LIR proc pass prunes unread join parameters to a fixed point" {
     const LIR = core.LIR;
     var store = core.LirStore.init(testing.allocator);
     defer store.deinit();
+    const body_mark = store.bodyMark();
     var layouts = try layout.Store.init(testing.allocator, .u64);
     defer layouts.deinit();
     var join_ids = body_clone.JoinParamIndex.init(testing.allocator);
@@ -823,6 +737,7 @@ test "LIR proc pass prunes unread join parameters to a fixed point" {
         .body = .some(outer),
         .ret_layout = .u64,
     }, .none);
+    try store.recordBodyChunk(proc, body_mark);
 
     var metrics: passes.ParallelMetrics = .{};
     try passes.run(testing.allocator, &store, &layouts, .prune_join_params, null, &metrics);
@@ -857,6 +772,7 @@ test "LIR proc pass deletes pure definitions that only fed pruned join parameter
     const LIR = core.LIR;
     var store = core.LirStore.init(testing.allocator);
     defer store.deinit();
+    const body_mark = store.bodyMark();
     var layouts = try layout.Store.init(testing.allocator, .u64);
     defer layouts.deinit();
     var join_ids = body_clone.JoinParamIndex.init(testing.allocator);
@@ -898,6 +814,7 @@ test "LIR proc pass deletes pure definitions that only fed pruned join parameter
         .body = .some(join),
         .ret_layout = .u64,
     }, .none);
+    try store.recordBodyChunk(proc, body_mark);
 
     var metrics: passes.ParallelMetrics = .{};
     try passes.run(testing.allocator, &store, &layouts, .prune_join_params, null, &metrics);
@@ -914,6 +831,7 @@ test "LIR proc pass prunes a join parameter whose only reader is a dead definiti
     const LIR = core.LIR;
     var store = core.LirStore.init(testing.allocator);
     defer store.deinit();
+    const body_mark = store.bodyMark();
     var layouts = try layout.Store.init(testing.allocator, .u64);
     defer layouts.deinit();
     var join_ids = body_clone.JoinParamIndex.init(testing.allocator);
@@ -946,6 +864,7 @@ test "LIR proc pass prunes a join parameter whose only reader is a dead definiti
         .body = .some(join),
         .ret_layout = .u64,
     }, .none);
+    try store.recordBodyChunk(proc, body_mark);
 
     var metrics: passes.ParallelMetrics = .{};
     try passes.run(testing.allocator, &store, &layouts, .prune_join_params, null, &metrics);
@@ -963,6 +882,7 @@ test "LIR proc pass keeps join parameters that are read or are procedure argumen
     const LIR = core.LIR;
     var store = core.LirStore.init(testing.allocator);
     defer store.deinit();
+    const body_mark = store.bodyMark();
     var layouts = try layout.Store.init(testing.allocator, .u64);
     defer layouts.deinit();
     var join_ids = body_clone.JoinParamIndex.init(testing.allocator);
@@ -990,6 +910,7 @@ test "LIR proc pass keeps join parameters that are read or are procedure argumen
         .body = .some(join),
         .ret_layout = .u64,
     }, .none);
+    try store.recordBodyChunk(proc, body_mark);
 
     var metrics: passes.ParallelMetrics = .{};
     try passes.run(testing.allocator, &store, &layouts, .prune_join_params, null, &metrics);
@@ -1003,6 +924,7 @@ test "LIR proc pass range phase admits a body whose only provable statement is a
     const LIR = core.LIR;
     var store = core.LirStore.init(testing.allocator);
     defer store.deinit();
+    const body_mark = store.bodyMark();
     var layouts = try layout.Store.init(testing.allocator, .u64);
     defer layouts.deinit();
 
@@ -1031,6 +953,7 @@ test "LIR proc pass range phase admits a body whose only provable statement is a
         .body = .some(body),
         .ret_layout = .bool,
     }, .none);
+    try store.recordBodyChunk(proc, body_mark);
 
     const shapes = store.getProcSpecImmediate(proc).shapes;
     try testing.expect(shapes.unsigned_compare);
@@ -1049,6 +972,7 @@ test "LIR proc pass range phase admits a body whose only provable statement is a
     const LIR = core.LIR;
     var store = core.LirStore.init(testing.allocator);
     defer store.deinit();
+    const body_mark = store.bodyMark();
     var layouts = try layout.Store.init(testing.allocator, .u64);
     defer layouts.deinit();
 
@@ -1071,6 +995,7 @@ test "LIR proc pass range phase admits a body whose only provable statement is a
         .body = .some(body),
         .ret_layout = .u8x16,
     }, .none);
+    try store.recordBodyChunk(proc, body_mark);
 
     const shapes = store.getProcSpecImmediate(proc).shapes;
     try testing.expect(shapes.simd_concat_shift);
@@ -1105,6 +1030,30 @@ test "LIR store records an unsigned comparison shape only for range-tracked oper
             const ret = try store.addCFStmt(.{ .ret = .{ .value = result } }, .test_fixture);
             _ = try store.addLowLevelStmt(result, op, &.{ lhs, rhs }, ret, .test_fixture);
             try testing.expectEqual(case[1], store.shapes.unsigned_compare);
+        }
+    }
+}
+
+test "LIR proc pass phases on real threads match serial output at every worker count" {
+    for ([_]passes.Phase{ .scalarize, .tag_fusion }) |phase| {
+        var serial = if (phase == .scalarize) try Fixture.init() else try fusionFixture(phase);
+        defer serial.deinit();
+        try passes.run(testing.allocator, &serial.store, &serial.layouts, phase, null, null);
+        var reference = std.Io.Writer.Allocating.init(testing.allocator);
+        defer reference.deinit();
+        try serial.dump(&reference.writer);
+        for ([_]usize{ 0, 1, 2, 4, 8 }) |threads| {
+            var candidate = if (phase == .scalarize) try Fixture.init() else try fusionFixture(phase);
+            defer candidate.deinit();
+            var pool = executor.ThreadedTestExecutor{};
+            try pool.start(threads);
+            defer pool.stop();
+            var metrics: passes.ParallelMetrics = .{};
+            try passes.run(testing.allocator, &candidate.store, &candidate.layouts, phase, pool.executor(), &metrics);
+            var output = std.Io.Writer.Allocating.init(testing.allocator);
+            defer output.deinit();
+            try candidate.dump(&output.writer);
+            try testing.expectEqualStrings(reference.written(), output.written());
         }
     }
 }

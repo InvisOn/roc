@@ -147,18 +147,18 @@ test "issue 11236: independent valid code still lowers alongside a rejected bind
 
 fn expectRejectedBinding(artifact: *const check.CheckedArtifact.CheckedModuleArtifact) error{ TestUnexpectedResult, TestExpectedEqual }!void {
     var rejected: usize = 0;
-    for (artifact.top_level_procedure_bindings.bindings.items) |binding| {
+    for (artifact.top_level_procedure_bindings.bindings.items()) |binding| {
         if (binding.body != .checked_error) continue;
         rejected += 1;
         const expr = binding.body.checked_error;
         try std.testing.expect(artifact.bodies().exprData(expr) == .runtime_error);
-        for (artifact.compile_time_roots.roots) |root| try std.testing.expect(root.expr.get() != expr);
+        for (artifact.compile_time_roots.roots.items()) |root| try std.testing.expect(root.expr.get() != expr);
     }
     try std.testing.expectEqual(@as(usize, 1), rejected);
-    try std.testing.expectEqual(@as(usize, 0), artifact.callable_eval_templates.templates.items.len);
+    try std.testing.expectEqual(@as(usize, 0), artifact.callable_eval_templates.templates.items().len);
     var exported_rejected: usize = 0;
     var exported_valid: usize = 0;
-    for (artifact.exported_procedure_bindings.bindings) |binding| {
+    for (artifact.exported_procedure_bindings.bindings.items()) |binding| {
         switch (binding.body) {
             .checked_error => {
                 exported_rejected += 1;
@@ -206,7 +206,7 @@ test "issue 11236: rejection survives exports and serialization without callable
     defer gpa.free(bad_path);
     const alias_path = try tmp.dir.realPathFileAlloc(io, "Alias.roc", gpa);
     defer gpa.free(alias_path);
-    var build = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io);
+    var build = try BuildEnv.init(gpa, .single_threaded, 1, roc_target.RocTarget.detectNative(), cwd, io, .lss);
     defer build.deinit();
     try build.build(path);
     const reports = try build.drainReports();
@@ -219,10 +219,10 @@ test "issue 11236: rejection survives exports and serialization without callable
     const artifact = build.findModuleByPath(bad_path).?.semanticData().?.checked_artifact.?;
     try expectRejectedBinding(artifact);
     const alias = build.findModuleByPath(alias_path).?.semanticData().?.checked_artifact.?;
-    try std.testing.expectEqual(@as(usize, 1), alias.exported_procedure_bindings.bindings.len);
-    try std.testing.expect(alias.exported_procedure_bindings.bindings[0].body == .checked_error);
+    try std.testing.expectEqual(@as(usize, 1), alias.exported_procedure_bindings.bindings.items().len);
+    try std.testing.expect(alias.exported_procedure_bindings.bindings.items()[0].body == .checked_error);
     // The alias's evaluation reaches the rejected binding and stores the crash.
-    for (alias.compile_time_roots.roots) |root| {
+    for (alias.compile_time_roots.roots.items()) |root| {
         try std.testing.expect(root.payload == .const_node);
         try std.testing.expect(alias.const_store.get(root.payload.const_node) == .checked_error);
     }
@@ -231,7 +231,7 @@ test "issue 11236: rejection survives exports and serialization without callable
     const importer_bodies = importer.bodies();
     try importer_bodies.demandIndex();
     const importer_store = &importer.moduleEnvConst().store;
-    for (0..importer_bodies.nodeCount()) |raw| {
+    for (can.CIR.Node.first_idx..importer_bodies.nodeCount()) |raw| {
         if (importer_bodies.index().nodeKind(@intCast(raw)) != .expr) continue;
         const expr: can.CIR.Expr.Idx = @fromBackingInt(@intCast(raw));
         const region = importer_store.getExprRegion(expr);
@@ -239,7 +239,6 @@ test "issue 11236: rejection survives exports and serialization without callable
         if (std.mem.eql(u8, source, "Alias.f")) {
             try std.testing.expect(importer_bodies.exprData(expr) == .runtime_error);
             try std.testing.expect(try importer_bodies.exprDiverges(expr, .run));
-            try std.testing.expect(try importer_bodies.exprContainsDiagnosticError(expr));
             try std.testing.expect(!try importer_bodies.exprEvaluationMayBeElidedForInspect(expr));
             found_use = true;
         }

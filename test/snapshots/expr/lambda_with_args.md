@@ -36,7 +36,7 @@ NO CHANGE
 	(args
 		(p-assign (ident "x"))
 		(p-assign (ident "y")))
-	(e-dispatch-call (method "plus") (constraint-fn-var 219)
+	(e-dispatch-call (method "plus") (constraint-fn-var 214)
 		(receiver
 			(e-lookup-local
 				(p-assign (ident "x"))))
@@ -46,5 +46,5 @@ NO CHANGE
 ~~~
 # TYPES
 ~~~clojure
-(expr (type "a, b -> a where [a.plus : a, b -> a]"))
+(expr (type "a, a -> a where [a.plus : a, a -> a]"))
 ~~~

@@ -249,6 +249,10 @@ pub const Statement = union(enum) {
         evaluated: CIR.Expr.Span = .{ .span = .{ .start = 0, .len = 0 } },
     },
 
+    /// Which variant a statement is, without its fields. `NodeStore` reads it
+    /// from a node's tag alone.
+    pub const Kind = std.meta.Tag(@This());
+
     pub const Idx = enum(u32) { _ };
     pub const Span = extern struct { span: DataSpan };
 
@@ -401,7 +405,8 @@ pub const Statement = union(enum) {
                 const attrs = tree.beginNode();
 
                 try env.store.getTypeHeader(s.header).pushToSExprTree(env, tree, s.header);
-                try env.store.getTypeAnno(s.anno).pushToSExprTree(env, tree, s.anno);
+                // A never-filled forward placeholder has no annotation.
+                if (s.anno != .placeholder) try env.store.getTypeAnno(s.anno).pushToSExprTree(env, tree, s.anno);
 
                 try tree.endNode(begin, attrs);
             },
@@ -410,7 +415,8 @@ pub const Statement = union(enum) {
                 const attrs = tree.beginNode();
 
                 try env.store.getTypeHeader(s.header).pushToSExprTree(env, tree, s.header);
-                try env.store.getTypeAnno(s.anno).pushToSExprTree(env, tree, s.anno);
+                // A never-filled forward placeholder has no annotation.
+                if (s.anno != .placeholder) try env.store.getTypeAnno(s.anno).pushToSExprTree(env, tree, s.anno);
 
                 try tree.endNode(begin, attrs);
             },
@@ -419,7 +425,8 @@ pub const Statement = union(enum) {
                 const attrs = tree.beginNode();
 
                 try env.store.getTypeHeader(s.header).pushToSExprTree(env, tree, s.header);
-                try env.store.getTypeAnno(s.receiver).pushToSExprTree(env, tree, s.receiver);
+                // A never-filled forward placeholder has no receiver.
+                if (s.receiver != .placeholder) try env.store.getTypeAnno(s.receiver).pushToSExprTree(env, tree, s.receiver);
 
                 const where_begin = try tree.beginNamedNode("where");
                 const where_attrs = tree.beginNode();

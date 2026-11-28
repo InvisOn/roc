@@ -20,6 +20,7 @@ const mem = std.mem;
 const unicode = std.unicode;
 const testing = std.testing;
 const rcNone = @import("utils.zig").rcNone;
+const utf8 = @import("utf8.zig");
 
 const InPlace = enum(u8) {
     InPlace,
@@ -128,6 +129,12 @@ pub const RocStr = extern struct {
     /// `encodeCapacity`, but on a `u64` so it can hold any target word's value.
     pub fn encodeCapacityForWidth(capacity: u64) u64 {
         return encodeCapacityGeneric(u64, capacity);
+    }
+
+    /// Decode a big-string capacity word read from a target whose pointer
+    /// width may differ from the host's.
+    pub fn decodeCapacityForWidth(encoded: u64) u64 {
+        return encoded >> capacity_shift;
     }
 
     pub inline fn decodeCapacity(encoded: usize) usize {
@@ -427,7 +434,7 @@ pub const RocStr = extern struct {
             return str;
         } else {
             const length = str.len();
-            const new_str = RocStr.allocateBig(length, length, roc_ops);
+            const new_str = RocStr.allocateBig(length, str.copyCapacity(), roc_ops);
 
             const old_bytes: [*]u8 = @as([*]u8, @ptrCast(str.bytes));
             const new_bytes: [*]u8 = @as([*]u8, @ptrCast(new_str.bytes));
@@ -443,7 +450,9 @@ pub const RocStr = extern struct {
     /// slices still reallocate fresh: neither owns a growable big-string
     /// allocation, so the structural checks are not uniqueness checks. When
     /// growth is necessary, the resulting big string has exactly `new_length`
-    /// capacity; append operations use `reallocateForAppend` instead.
+    /// capacity; append operations use `reallocateForAppend` instead. A copy
+    /// of static data keeps the capacity its descriptor records when that
+    /// exceeds `new_length` (`copyCapacity`).
     pub fn reallocate(
         self: RocStr,
         new_length: usize,
@@ -454,7 +463,7 @@ pub const RocStr = extern struct {
         const old_capacity = self.getCapacity();
 
         if (!self.canReuseAllocation(update_mode)) {
-            return self.reallocateFresh(new_length, roc_ops);
+            return self.copyKeepingCapacity(new_length, roc_ops);
         }
 
         if (self.bytes) |source_ptr| {
@@ -476,7 +485,7 @@ pub const RocStr = extern struct {
 
             return RocStr{ .bytes = new_source, .capacity_or_alloc_ptr = encodeCapacity(new_capacity), .length = new_length };
         }
-        return self.reallocateFresh(new_length, roc_ops);
+        return self.copyKeepingCapacity(new_length, roc_ops);
     }
 
     /// Grow for a concatenation that appends bytes to this string. Unlike an
@@ -511,12 +520,16 @@ pub const RocStr = extern struct {
             return RocStr{ .bytes = new_source, .capacity_or_alloc_ptr = encodeCapacity(new_capacity), .length = new_length };
         }
 
-        const growth_base = if (self.isSmallStr()) old_capacity else old_length;
-        const new_capacity = if (new_length == old_length)
-            new_length
+        // The capacity the copy has before it grows: a small string's is
+        // its inline capacity, static data's is the capacity its descriptor
+        // records, and any other string's is the bytes it holds.
+        const kept_capacity = if (self.isSmallStr()) old_length else self.copyCapacity();
+        const growth_base = if (self.isSmallStr()) old_capacity else kept_capacity;
+        const new_capacity = if (new_length <= kept_capacity)
+            kept_capacity
         else
             @max(new_length, utils.geometricGrowth(growth_base, 1));
-        if (new_length >= SMALL_STRING_SIZE) {
+        if (new_length >= SMALL_STRING_SIZE or kept_capacity >= SMALL_STRING_SIZE) {
             var result = RocStr.allocateBig(new_length, new_capacity, roc_ops);
             std.mem.copyForwards(u8, result.asU8ptrMut()[0..old_length], self.asU8ptr()[0..old_length]);
             self.decref(roc_ops);
@@ -524,6 +537,46 @@ pub const RocStr = extern struct {
         }
 
         return self.reallocateFresh(new_length, roc_ops);
+    }
+
+    /// Returns true when this string's storage is immutable static data: a
+    /// literal or a completed compile-time value. Its allocation carries the
+    /// static refcount, so it is never unique, never written and never freed.
+    /// A small string holds no allocation and is never static data.
+    pub fn isStaticData(self: RocStr) bool {
+        return utils.rcConstant(@bitCast(self.refcount()));
+    }
+
+    /// The capacity a fresh copy of this string's bytes starts with.
+    ///
+    /// Static data stands for a value the program would otherwise have built
+    /// for itself, and its descriptor records the capacity that value has. The
+    /// copy that first gives the program storage of its own is that value, so
+    /// it keeps the recorded capacity: a string built by `Str.with_capacity`
+    /// at compile time still reserves once at runtime. A copy of a string some
+    /// other reference holds is sized by the bytes it copies instead, since
+    /// that string's spare capacity belongs to whoever still owns it.
+    pub fn copyCapacity(self: RocStr) usize {
+        return if (self.isStaticData()) self.getCapacity() else self.len();
+    }
+
+    /// Consumes this string into a fresh one of `new_length` bytes that
+    /// starts with its bytes, the rest zeroed, and that has room for at
+    /// least `copyCapacity()`.
+    fn copyKeepingCapacity(
+        self: RocStr,
+        new_length: usize,
+        roc_ops: *RocOps,
+    ) RocStr {
+        const capacity = @max(new_length, self.copyCapacity());
+        if (capacity == new_length or capacity < SMALL_STRING_SIZE) return self.reallocateFresh(new_length, roc_ops);
+        const old_length = self.len();
+        var result = RocStr.allocateBig(new_length, capacity, roc_ops);
+        const dest_ptr = result.asU8ptrMut();
+        std.mem.copyForwards(u8, dest_ptr[0..old_length], self.asU8ptr()[0..old_length]);
+        @memset(dest_ptr[old_length..new_length], 0);
+        self.decref(roc_ops);
+        return result;
     }
 
     /// reallocate by explicitly making a new allocation and copying elements over
@@ -672,8 +725,8 @@ pub const RocStr = extern struct {
             self.bytes;
 
         if (data_ptr) |non_null_ptr| {
-            const ptr: [*]usize = utils.alignedPtrCast([*]usize, non_null_ptr, @src());
-            return (ptr - 1)[0];
+            const ptr: [*]isize = utils.alignedPtrCast([*]isize, non_null_ptr, @src());
+            return @bitCast(utils.loadRefcountForUniqueness(&(ptr - 1)[0]));
         } else {
             unreachable; // a seamless slice or a non-small string with nonzero capacity always points into an allocation
         }
@@ -1747,89 +1800,6 @@ pub fn fromUtf8C(
 
 const UNICODE_REPLACEMENT: u21 = 0xfffd;
 
-const Utf8Iterator = struct {
-    bytes: []u8,
-    i: usize,
-
-    pub fn init(list: RocList) Utf8Iterator {
-        const bytes = @as([*]u8, @ptrCast(list.bytes))[0..list.length];
-        return Utf8Iterator{
-            .bytes = bytes,
-            .i = 0,
-        };
-    }
-
-    pub fn nextLossy(it: *Utf8Iterator) ?u32 {
-        if (it.bytes.len <= it.i) {
-            return null;
-        }
-
-        const rest = it.bytes[it.i..];
-        const n = unicode.utf8ByteSequenceLength(rest[0]) catch {
-            // invalid start byte
-            it.i += 1;
-            it.skipAdjacentInvalidStartBytes();
-            return UNICODE_REPLACEMENT;
-        };
-
-        for (1..n) |i| {
-            if (rest.len == i) {
-                // unexpected end
-                it.i += i;
-                return UNICODE_REPLACEMENT;
-            }
-            if ((rest[i] & 0xC0) != 0x80) {
-                // expected continuation byte (0b10xx_xxxx)
-                it.i += i;
-                return UNICODE_REPLACEMENT;
-            }
-        }
-
-        it.i += n;
-        return unicode.utf8Decode(rest[0..n]) catch {
-            return UNICODE_REPLACEMENT;
-        };
-    }
-
-    fn skipAdjacentInvalidStartBytes(it: *Utf8Iterator) void {
-        while (it.i < it.bytes.len) {
-            const byte = it.bytes[it.i];
-            if (byte < 0x80) return;
-            _ = unicode.utf8ByteSequenceLength(byte) catch {
-                it.i += 1;
-                continue;
-            };
-            return;
-        }
-    }
-
-    pub fn reset(it: *Utf8Iterator) void {
-        it.i = 0;
-    }
-};
-
-fn codepointSeqLengthLossy(c: u32) u3 {
-    if (c < 0x110000) {
-        if (unicode.utf8CodepointSequenceLength(@intCast(c))) |n| {
-            return n;
-        } else |_| {
-            // fallthrough
-        }
-    }
-    return unicode.utf8CodepointSequenceLength(UNICODE_REPLACEMENT) catch unreachable; // U+FFFD is a valid scalar value
-}
-
-fn utf8EncodeLossy(c: u32, out: []u8) u3 {
-    if (c < 0x110000) {
-        if (unicode.utf8Encode(@intCast(c), out)) |n| {
-            return n;
-        } else |_| {
-            // fallthrough
-        }
-    }
-    return unicode.utf8Encode(UNICODE_REPLACEMENT, out) catch unreachable; // U+FFFD is a valid scalar value
-}
-
 /// Borrows bytes whose producer guarantees valid UTF-8. No validation scan is
 /// needed: copy inline output, or retain and share the existing byte allocation.
 pub fn fromUtf8Validated(list: RocList, roc_ops: *RocOps) callconv(.c) RocStr {
@@ -1969,6 +1939,14 @@ test "short wide UTF decoding: inline capacity boundaries" {
 
 /// Convert borrowed bytes to an owned string, replacing invalid UTF-8 with U+FFFD.
 /// Valid UTF-8 shares the input allocation without copying.
+///
+/// Each ill-formed sequence becomes one U+FFFD. A sequence whose lead byte
+/// announces a length (C0-DF: 2, E0-EF: 3, F0-F7: 4) consumes its lead byte and
+/// the continuation bytes that follow it, up to the first byte that is not a
+/// continuation byte or the end of the input; when all of its bytes are
+/// continuation bytes, it consumes the whole announced length. Any other
+/// non-ASCII byte (80-BF or F8-FF) consumes itself together with the run of
+/// such bytes that follows it.
 pub fn fromUtf8Lossy(
     list: RocList,
     roc_ops: *RocOps,
@@ -1978,30 +1956,69 @@ pub fn fromUtf8Lossy(
     }
 
     const bytes = @as([*]const u8, @ptrCast(list.bytes))[0..list.len()];
-    if (isValidUnicode(bytes)) {
-        return fromValidUtf8List(list, .Immutable, roc_ops);
-    }
+    const first_error = validateUtf8(bytes) orelse return fromValidUtf8List(list, .Immutable, roc_ops);
 
-    var it = Utf8Iterator.init(list);
-
-    var enc_len: usize = 0;
-    while (it.nextLossy()) |c| {
-        enc_len += codepointSeqLengthLossy(c);
-    }
-
-    var str = RocStr.allocate(enc_len, roc_ops);
-    const ptr = str.asU8ptrMut()[0..enc_len];
-    var end_index: usize = 0;
-    it.reset();
-    while (it.nextLossy()) |c| {
-        end_index += utf8EncodeLossy(c, ptr[end_index..]);
-    }
-    str.setLen(end_index);
-
+    const len = lossyUtf8(bytes, first_error.index, null);
+    var str = RocStr.allocate(len, roc_ops);
+    const written = lossyUtf8(bytes, first_error.index, str.asU8ptrMut()[0..len]);
+    std.debug.assert(written == len);
     return str;
 }
 
-/// TODO: Document fromUtf8.
+const REPLACEMENT_UTF8 = "\u{FFFD}";
+
+/// Lossy UTF-8 output of `bytes`, whose first ill-formed sequence starts at
+/// `first_error`. Returns the output length, and writes the output to `out`
+/// when it is given.
+fn lossyUtf8(bytes: []const u8, first_error: usize, out: ?[]u8) usize {
+    if (out) |o| @memcpy(o[0..first_error], bytes[0..first_error]);
+    var written = first_error;
+    var i = first_error;
+    while (i < bytes.len) {
+        i += lossyReplacedLen(bytes, i);
+        if (out) |o| @memcpy(o[written..][0..REPLACEMENT_UTF8.len], REPLACEMENT_UTF8);
+        written += REPLACEMENT_UTF8.len;
+
+        const rest = bytes[i..];
+        const valid_len = if (validateUtf8(rest)) |err| err.index else rest.len;
+        if (out) |o| @memcpy(o[written..][0..valid_len], rest[0..valid_len]);
+        written += valid_len;
+        i += valid_len;
+    }
+    return written;
+}
+
+/// Number of bytes one U+FFFD replaces for the ill-formed sequence starting at
+/// `start` (see `fromUtf8Lossy`).
+fn lossyReplacedLen(bytes: []const u8, start: usize) usize {
+    const announced: usize = switch (bytes[start]) {
+        0xC0...0xDF => 2,
+        0xE0...0xEF => 3,
+        0xF0...0xF7 => 4,
+        0x00...0x7F => unreachable, // ASCII bytes are always well-formed, so no ill-formed sequence starts with one
+        0x80...0xBF, 0xF8...0xFF => {
+            var end = start + 1;
+            while (end < bytes.len and isUtf8InvalidLeadByte(bytes[end])) end += 1;
+            return end - start;
+        },
+    };
+    for (1..announced) |k| {
+        if (start + k == bytes.len or !isUtf8Continuation(bytes[start + k])) return k;
+    }
+    return announced;
+}
+
+fn isUtf8Continuation(byte: u8) bool {
+    return byte & 0xC0 == 0x80;
+}
+
+/// Bytes that neither are ASCII nor announce a sequence length.
+fn isUtf8InvalidLeadByte(byte: u8) bool {
+    return (byte >= 0x80 and byte <= 0xBF) or byte >= 0xF8;
+}
+
+/// Convert borrowed bytes to an owned string, or report the first ill-formed
+/// UTF-8 sequence (see `validateUtf8`).
 pub fn fromUtf8(
     list: RocList,
     update_mode: UpdateMode,
@@ -2017,24 +2034,20 @@ pub fn fromUtf8(
     }
     const bytes = @as([*]const u8, @ptrCast(list.bytes))[0..list.len()];
 
-    if (isValidUnicode(bytes)) {
-        const string = fromValidUtf8List(list, update_mode, roc_ops);
-        return FromUtf8Try{
-            .is_ok = true,
-            .string = string,
-            .byte_index = 0,
-            .problem_code = Utf8ByteProblem.InvalidStartByte,
-        };
-    } else {
-        const temp = errorToProblem(bytes) orelse utils.builtinInvariant(roc_ops, "fromUtf8: errorToProblem found no problem in bytes isValidUnicode rejected");
-
+    if (validateUtf8(bytes)) |err| {
         return FromUtf8Try{
             .is_ok = false,
             .string = RocStr.empty(),
-            .byte_index = @intCast(temp.index),
-            .problem_code = temp.problem,
+            .byte_index = @intCast(err.index),
+            .problem_code = err.problem,
         };
     }
+    return FromUtf8Try{
+        .is_ok = true,
+        .string = fromValidUtf8List(list, update_mode, roc_ops),
+        .byte_index = 0,
+        .problem_code = Utf8ByteProblem.InvalidStartByte,
+    };
 }
 
 /// Retain a validated, nonempty byte list for an independently owned string.
@@ -2045,114 +2058,14 @@ fn fromValidUtf8List(list: RocList, update_mode: UpdateMode, roc_ops: *RocOps) R
     return RocStr.fromSubListUnsafe(list, 0, list.len(), update_mode, roc_ops);
 }
 
-fn errorToProblem(bytes: []const u8) ?struct { index: usize, problem: Utf8ByteProblem } {
-    const len = bytes.len;
-    var index: usize = 0;
+pub const Utf8ByteProblem = utf8.Utf8ByteProblem;
+pub const Utf8Error = utf8.Utf8Error;
 
-    while (index < len) {
-        const nextNumBytes = numberOfNextCodepointBytes(bytes, index) catch |err| {
-            switch (err) {
-                error.UnexpectedEof => {
-                    return .{ .index = index, .problem = Utf8ByteProblem.UnexpectedEndOfSequence };
-                },
-                error.Utf8InvalidStartByte => return .{ .index = index, .problem = Utf8ByteProblem.InvalidStartByte },
-                error.Utf8ExpectedContinuation => return .{ .index = index, .problem = Utf8ByteProblem.ExpectedContinuation },
-                error.Utf8OverlongEncoding => return .{ .index = index, .problem = Utf8ByteProblem.OverlongEncoding },
-                error.Utf8EncodesSurrogateHalf => return .{ .index = index, .problem = Utf8ByteProblem.EncodesSurrogateHalf },
-                error.Utf8CodepointTooLarge => return .{ .index = index, .problem = Utf8ByteProblem.CodepointTooLarge },
-            }
-        };
-        index += nextNumBytes;
-    }
-
-    return null;
+/// The first ill-formed UTF-8 sequence in `bytes`, or null for well-formed
+/// UTF-8 (see `utf8.validate`).
+pub fn validateUtf8(bytes: []const u8) ?Utf8Error {
+    return utf8.validate(bytes);
 }
-
-/// Returns true if the given buffer contains valid Unicode data.
-pub fn isValidUnicode(buf: []const u8) bool {
-    const size = @sizeOf(u64);
-    // TODO: we should test changing the step on other platforms.
-    // The general tradeoff is making extremely large strings potentially much faster
-    // at the cost of small strings being slightly slower.
-    const step = size;
-    var i: usize = 0;
-    while (i + step < buf.len) {
-        var bytes: u64 = undefined;
-        @memcpy(@as([*]u8, @ptrCast(&bytes))[0..size], buf[i..(i + size)]);
-        const unicode_bytes = bytes & 0x8080_8080_8080_8080;
-        if (unicode_bytes == 0) {
-            i += step;
-            continue;
-        }
-
-        while (buf[i] < 0b1000_0000) : (i += 1) {}
-
-        while (buf[i] >= 0b1000_0000) {
-            // This forces prefetching, otherwise the loop can run at about half speed.
-            if (i + 4 >= buf.len) break;
-            var small_buf: [4]u8 = undefined;
-            @memcpy(small_buf[0..4], buf[i..(i + 4)]);
-            // TODO: Should we always inline these function calls below?
-            if (std.unicode.utf8ByteSequenceLength(small_buf[0])) |cp_len| {
-                if (std.meta.isError(std.unicode.utf8Decode(small_buf[0..cp_len]))) {
-                    return false;
-                }
-                i += cp_len;
-            } else |_| {
-                return false;
-            }
-        }
-    }
-
-    if (i == buf.len) return true;
-    while (buf[i] < 0b1000_0000) {
-        i += 1;
-        if (i == buf.len) return true;
-    }
-
-    return @call(.always_inline, unicode.utf8ValidateSlice, .{buf[i..]});
-}
-
-/// TODO
-pub const Utf8DecodeError = error{
-    UnexpectedEof,
-    Utf8InvalidStartByte,
-    Utf8ExpectedContinuation,
-    Utf8OverlongEncoding,
-    Utf8EncodesSurrogateHalf,
-    Utf8CodepointTooLarge,
-};
-
-/// Returns the number of bytes in the next codepoint starting at the given index in the byte slice.
-/// Returns an error if the bytes are not valid UTF-8.
-///
-/// Essentially unicode.utf8ValidateSlice -> https://github.com/ziglang/zig/blob/0.7.x/lib/std/unicode.zig#L156
-/// but only for the next codepoint from the index. Then we return the number of bytes of that codepoint.
-///
-/// TODO: we only ever use the values 0-4, so can we use smaller int than `usize`?
-pub fn numberOfNextCodepointBytes(bytes: []const u8, index: usize) Utf8DecodeError!usize {
-    const codepoint_len = try unicode.utf8ByteSequenceLength(bytes[index]);
-    const codepoint_end_index = index + codepoint_len;
-    if (codepoint_end_index > bytes.len) {
-        return error.UnexpectedEof;
-    }
-    const codepoint = try unicode.utf8Decode(bytes[index..codepoint_end_index]);
-    if (codepoint > 0x10FFFF) {
-        return error.Utf8CodepointTooLarge;
-    }
-    return codepoint_end_index - index;
-}
-
-/// Return types for validateUtf8Bytes
-/// Values must be in alphabetical order. That is, lowest values are the first alphabetically.
-pub const Utf8ByteProblem = enum(u8) {
-    CodepointTooLarge = 0,
-    EncodesSurrogateHalf = 1,
-    ExpectedContinuation = 2,
-    InvalidStartByte = 3,
-    OverlongEncoding = 4,
-    UnexpectedEndOfSequence = 5,
-};
 
 /// TODO
 pub fn validateUtf8Bytes(
@@ -2381,10 +2294,8 @@ inline fn strWithAsciiCase(
     // the backing allocation. This is not an allocation-reuse decision.
     var new_str = if (string.isExclusive(update_mode))
         string
-    else blk: {
-        string.decref(roc_ops);
-        break :blk RocStr.fromSlice(string.asSlice(), roc_ops);
-    };
+    else
+        string.copyKeepingCapacity(string.len(), roc_ops);
 
     const new_str_bytes = new_str.asU8ptrMut()[0..string.len()];
     for (new_str_bytes) |*c| {
@@ -2769,7 +2680,10 @@ pub fn reserve(
     // of wrapping below the capacity and becoming a no-op.
     const desired_length = old_length +| spare;
 
-    if (string.getCapacity() >= desired_length) {
+    // Only a string nobody else holds may be handed back as the result: the
+    // op's `result_unique` claim (`base/LowLevel.zig`) lets ARC treat it as
+    // freshly owned, and static data records capacity it has no room for.
+    if (string.getCapacity() >= desired_length and string.isExclusive(update_mode)) {
         return string;
     } else {
         var output = string.reallocate(desired_length, update_mode, roc_ops);
@@ -4344,14 +4258,12 @@ test "fromUtf8Lossy: empty input does not allocate" {
 fn expectErr(
     list: RocList,
     index: usize,
-    err: Utf8DecodeError,
     problem: Utf8ByteProblem,
     test_env: *TestEnv,
-) error{ TestExpectedError, TestUnexpectedError, TestExpectedEqual }!void {
+) error{TestExpectedEqual}!void {
     const str_ptr = @as([*]u8, @ptrCast(list.bytes));
     const len = list.length;
 
-    try std.testing.expectError(err, numberOfNextCodepointBytes(str_ptr[0..len], index));
     try std.testing.expectEqual(
         toErrUtf8ByteResponse(index, problem),
         validateUtf8Bytes(str_ptr, len, test_env.getOps()),
@@ -4370,7 +4282,6 @@ test "validateUtf8Bytes: invalid start byte" {
     try expectErr(
         list,
         2,
-        error.Utf8InvalidStartByte,
         Utf8ByteProblem.InvalidStartByte,
         &test_env,
     );
@@ -4388,7 +4299,6 @@ test "validateUtf8Bytes: unexpected eof for 2 byte sequence" {
     try expectErr(
         list,
         3,
-        error.UnexpectedEof,
         Utf8ByteProblem.UnexpectedEndOfSequence,
         &test_env,
     );
@@ -4406,7 +4316,6 @@ test "validateUtf8Bytes: expected continuation for 2 byte sequence" {
     try expectErr(
         list,
         3,
-        error.Utf8ExpectedContinuation,
         Utf8ByteProblem.ExpectedContinuation,
         &test_env,
     );
@@ -4424,7 +4333,6 @@ test "validateUtf8Bytes: unexpected eof for 3 byte sequence" {
     try expectErr(
         list,
         3,
-        error.UnexpectedEof,
         Utf8ByteProblem.UnexpectedEndOfSequence,
         &test_env,
     );
@@ -4442,7 +4350,6 @@ test "validateUtf8Bytes: expected continuation for 3 byte sequence" {
     try expectErr(
         list,
         3,
-        error.Utf8ExpectedContinuation,
         Utf8ByteProblem.ExpectedContinuation,
         &test_env,
     );
@@ -4460,7 +4367,6 @@ test "validateUtf8Bytes: unexpected eof for 4 byte sequence" {
     try expectErr(
         list,
         3,
-        error.UnexpectedEof,
         Utf8ByteProblem.UnexpectedEndOfSequence,
         &test_env,
     );
@@ -4478,7 +4384,6 @@ test "validateUtf8Bytes: expected continuation for 4 byte sequence" {
     try expectErr(
         list,
         3,
-        error.Utf8ExpectedContinuation,
         Utf8ByteProblem.ExpectedContinuation,
         &test_env,
     );
@@ -4496,7 +4401,6 @@ test "validateUtf8Bytes: overlong" {
     try expectErr(
         list,
         3,
-        error.Utf8OverlongEncoding,
         Utf8ByteProblem.OverlongEncoding,
         &test_env,
     );
@@ -4514,7 +4418,6 @@ test "validateUtf8Bytes: codepoint out too large" {
     try expectErr(
         list,
         3,
-        error.Utf8CodepointTooLarge,
         Utf8ByteProblem.CodepointTooLarge,
         &test_env,
     );
@@ -4532,10 +4435,315 @@ test "validateUtf8Bytes: surrogate halves" {
     try expectErr(
         list,
         3,
-        error.Utf8EncodesSurrogateHalf,
         Utf8ByteProblem.EncodesSurrogateHalf,
         &test_env,
     );
+}
+
+const ExpectedUtf8Error = struct { index: usize, problem: Utf8ByteProblem };
+
+/// The `fromUtf8` result specified by byte ranges: null for well-formed UTF-8,
+/// otherwise the start index of the first ill-formed sequence and its problem.
+/// A lead byte's length comes from its bit pattern alone (C0-DF: 2, E0-EF: 3,
+/// F0-F7: 4). A sequence running past the end reports UnexpectedEndOfSequence
+/// before its available bytes are inspected; then each continuation byte must be
+/// 80-BF; then the lead and first continuation byte decide overlong encodings,
+/// surrogates, and code points above U+10FFFF.
+fn expectedUtf8Error(bytes: []const u8) ?ExpectedUtf8Error {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const lead = bytes[i];
+        const len: usize = switch (lead) {
+            0x00...0x7F => 1,
+            0xC0...0xDF => 2,
+            0xE0...0xEF => 3,
+            0xF0...0xF7 => 4,
+            else => return .{ .index = i, .problem = .InvalidStartByte },
+        };
+        if (i + len > bytes.len) return .{ .index = i, .problem = .UnexpectedEndOfSequence };
+        for (bytes[i + 1 .. i + len]) |byte| {
+            if (byte & 0xC0 != 0x80) return .{ .index = i, .problem = .ExpectedContinuation };
+        }
+        if (len > 1) {
+            const second = bytes[i + 1];
+            const problem: ?Utf8ByteProblem = switch (lead) {
+                0xC0, 0xC1 => .OverlongEncoding,
+                0xE0 => if (second < 0xA0) .OverlongEncoding else null,
+                0xED => if (second >= 0xA0) .EncodesSurrogateHalf else null,
+                0xF0 => if (second < 0x90) .OverlongEncoding else null,
+                0xF4 => if (second >= 0x90) .CodepointTooLarge else null,
+                0xF5...0xF7 => .CodepointTooLarge,
+                else => null,
+            };
+            if (problem) |p| return .{ .index = i, .problem = p };
+        }
+        i += len;
+    }
+    return null;
+}
+
+fn expectFromUtf8MatchesSpec(bytes: []const u8, ops: *RocOps) error{ TestUnexpectedResult, TestExpectedEqual }!void {
+    const list = RocList.fromSlice(u8, bytes, false, ops);
+    defer list.decref(@alignOf(u8), @sizeOf(u8), false, null, &rcNone, ops);
+    const result = fromUtf8(list, .Immutable, ops);
+    if (expectedUtf8Error(bytes)) |expected| {
+        if (result.is_ok or result.byte_index != expected.index or result.problem_code != expected.problem) {
+            result.string.decref(ops);
+            std.debug.print("fromUtf8({x}) = is_ok: {}, index: {d}, problem: {s}; expected index {d}, {s}\n", .{
+                bytes,
+                result.is_ok,
+                result.byte_index,
+                @tagName(result.problem_code),
+                expected.index,
+                @tagName(expected.problem),
+            });
+            return error.TestUnexpectedResult;
+        }
+    } else {
+        defer result.string.decref(ops);
+        if (!result.is_ok) {
+            std.debug.print("fromUtf8({x}) = Err(index: {d}, problem: {s}); expected Ok\n", .{
+                bytes,
+                result.byte_index,
+                @tagName(result.problem_code),
+            });
+            return error.TestUnexpectedResult;
+        }
+        try testing.expectEqualStrings(bytes, result.string.asSlice());
+    }
+}
+
+// Pins the exact `Str.from_utf8` error index and problem for every kind of
+// ill-formed sequence, at positions inside and across word-sized ASCII chunks
+// and near the end of the input, for the validator in
+// https://github.com/roc-lang/roc/issues/13025.
+test "fromUtf8: error index and problem match the byte-range specification" {
+    var test_env = TestEnv.init(std.testing.allocator);
+    defer test_env.deinit();
+    const ops = test_env.getOps();
+
+    // Every two-byte input, alone.
+    for (0..0x10000) |n| {
+        const pair = [2]u8{ @intCast(n >> 8), @intCast(n & 0xFF) };
+        try expectFromUtf8MatchesSpec(&pair, ops);
+    }
+
+    // Each non-ASCII lead byte, alone and followed by second bytes on both
+    // sides of every second-byte range boundary, then by further continuation
+    // and non-continuation bytes. Each sequence sits after ASCII and multi-byte
+    // prefixes and before suffixes of several lengths.
+    const seconds = [_]u8{ 0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xF0, 0xFF };
+    const thirds = [_]u8{ 0x41, 0x80, 0xBF };
+    const fourths = [_]u8{ 0x41, 0x80 };
+    const prefixes = [_][]const u8{ "", "abcdefg", "abcdefgh", "abcdefghi", "abcdefghijklmnopq", "\u{e9}\u{6f22}\u{1f389}ab" };
+    const suffixes = [_][]const u8{ "", "z", "zzzzzzzzz", "\u{e9}" };
+
+    var buf: [64]u8 = undefined;
+    for (0x80..0x100) |lead_int| {
+        const lead: u8 = @intCast(lead_int);
+        var seqs: [1 + seconds.len * (1 + thirds.len * (1 + fourths.len))][4]u8 = undefined;
+        var seq_lens: [seqs.len]usize = undefined;
+        var count: usize = 0;
+        seqs[count] = .{ lead, 0, 0, 0 };
+        seq_lens[count] = 1;
+        count += 1;
+        for (seconds) |b1| {
+            seqs[count] = .{ lead, b1, 0, 0 };
+            seq_lens[count] = 2;
+            count += 1;
+            for (thirds) |b2| {
+                seqs[count] = .{ lead, b1, b2, 0 };
+                seq_lens[count] = 3;
+                count += 1;
+                for (fourths) |b3| {
+                    seqs[count] = .{ lead, b1, b2, b3 };
+                    seq_lens[count] = 4;
+                    count += 1;
+                }
+            }
+        }
+        for (seqs[0..count], seq_lens[0..count]) |*seq, seq_len| {
+            for (prefixes) |prefix| {
+                for (suffixes) |suffix| {
+                    var len: usize = 0;
+                    @memcpy(buf[len..][0..prefix.len], prefix);
+                    len += prefix.len;
+                    @memcpy(buf[len..][0..seq_len], seq[0..seq_len]);
+                    len += seq_len;
+                    @memcpy(buf[len..][0..suffix.len], suffix);
+                    len += suffix.len;
+                    try expectFromUtf8MatchesSpec(buf[0..len], ops);
+                }
+            }
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 0), test_env.getAllocationCount());
+}
+
+/// Writes `len` bytes of well-formed text to `out`: ASCII, or a cycle of 2-, 3-
+/// and 4-byte sequences padded with ASCII where the next one does not fit.
+fn fillValidUtf8(out: []u8, multi_byte: bool) void {
+    const cycle = "\u{e9}\u{6f22}\u{1f389}x";
+    var i: usize = 0;
+    var c: usize = 0;
+    while (i < out.len) {
+        const width: usize = if (!multi_byte) 1 else switch (cycle[c]) {
+            0x00...0x7F => 1,
+            0xC0...0xDF => 2,
+            0xE0...0xEF => 3,
+            else => 4,
+        };
+        if (width <= out.len - i) {
+            @memcpy(out[i..][0..width], if (multi_byte) cycle[c..][0..width] else "a");
+            i += width;
+            c = (c + width) % cycle.len;
+        } else {
+            out[i] = 'a';
+            i += 1;
+        }
+    }
+}
+
+// Every input length up to 80 with an ill-formed sequence at every position,
+// after ASCII or multi-byte text, so errors land in each 16- and 32-byte block
+// position, in the tail, and straddling block boundaries.
+test "validateUtf8: errors at every position of every length up to 80" {
+    const templates = [_][]const u8{
+        "\x80",             "\xbf",             "\xf8",             "\xff",
+        "\xc0\x80",         "\xc1\xbf",         "\xc2\x41",         "\xc2",
+        "\xe0\x80\x80",     "\xe0\x9f\xbf",     "\xed\xa0\x80",     "\xe2\x82\x41",
+        "\xe2\x41\x41",     "\xe2\x82",         "\xe2\x41",         "\xf0\x8f\xbf\xbf",
+        "\xf4\x90\x80\x80", "\xf5\x80\x80\x80", "\xf1\x80\x80\x41", "\xf0\x9f\x98",
+    };
+    var buf: [80]u8 = undefined;
+    for (0..buf.len + 1) |len| {
+        for ([_]bool{ false, true }) |multi_byte| {
+            fillValidUtf8(buf[0..len], multi_byte);
+            try testing.expectEqual(@as(?Utf8Error, null), validateUtf8(buf[0..len]));
+            for (templates) |template| {
+                if (template.len > len) continue;
+                for (0..len - template.len + 1) |pos| {
+                    fillValidUtf8(buf[0..pos], multi_byte);
+                    @memcpy(buf[pos..][0..template.len], template);
+                    fillValidUtf8(buf[pos + template.len .. len], multi_byte);
+                    const bytes = buf[0..len];
+                    const expected = expectedUtf8Error(bytes).?;
+                    const actual = validateUtf8(bytes) orelse {
+                        std.debug.print("validateUtf8({x}) = null; expected index {d}, {s}\n", .{ bytes, expected.index, @tagName(expected.problem) });
+                        return error.TestUnexpectedResult;
+                    };
+                    if (actual.index != expected.index or actual.problem != expected.problem) {
+                        std.debug.print("validateUtf8({x}) = index {d}, {s}; expected index {d}, {s}\n", .{ bytes, actual.index, @tagName(actual.problem), expected.index, @tagName(expected.problem) });
+                        return error.TestUnexpectedResult;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `Str.from_utf8_lossy` output specified by byte ranges. Well-formed sequences
+/// (Unicode Table 3-7) are copied. Each ill-formed sequence becomes one U+FFFD:
+/// a byte in 80-BF or F8-FF consumes itself and every directly following byte in
+/// those ranges; a lead byte C0-F7 consumes itself and the continuation bytes
+/// after it, up to its announced length (C0-DF: 2, E0-EF: 3, F0-F7: 4), stopping
+/// early at a non-continuation byte or the end of the input. Returns the output
+/// length and writes the output to `out`.
+fn expectedLossyUtf8(bytes: []const u8, out: []u8) usize {
+    var written: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const lead = bytes[i];
+        const len: usize = switch (lead) {
+            0x00...0x7F => 1,
+            0xC0...0xDF => 2,
+            0xE0...0xEF => 3,
+            0xF0...0xF7 => 4,
+            else => 0,
+        };
+        if (len == 0) {
+            i += 1;
+            while (i < bytes.len and ((bytes[i] >= 0x80 and bytes[i] <= 0xBF) or bytes[i] >= 0xF8)) i += 1;
+            @memcpy(out[written..][0..3], "\u{FFFD}");
+            written += 3;
+            continue;
+        }
+        var present: usize = 1;
+        while (present < len and i + present < bytes.len and bytes[i + present] & 0xC0 == 0x80) present += 1;
+        const well_formed = present == len and (len == 1 or switch (lead) {
+            0xC0, 0xC1, 0xF5...0xF7 => false,
+            0xE0 => bytes[i + 1] >= 0xA0,
+            0xED => bytes[i + 1] <= 0x9F,
+            0xF0 => bytes[i + 1] >= 0x90,
+            0xF4 => bytes[i + 1] <= 0x8F,
+            else => true,
+        });
+        if (well_formed) {
+            @memcpy(out[written..][0..len], bytes[i..][0..len]);
+            written += len;
+        } else {
+            @memcpy(out[written..][0..3], "\u{FFFD}");
+            written += 3;
+        }
+        i += present;
+    }
+    return written;
+}
+
+fn expectFromUtf8LossyMatchesSpec(bytes: []const u8, ops: *RocOps) error{TestUnexpectedResult}!void {
+    var expected_buf: [3 * 128]u8 = undefined;
+    const expected = expected_buf[0..expectedLossyUtf8(bytes, &expected_buf)];
+    const list = RocList.fromSlice(u8, bytes, false, ops);
+    defer list.decref(@alignOf(u8), @sizeOf(u8), false, null, &rcNone, ops);
+    const result = fromUtf8Lossy(list, ops);
+    defer result.decref(ops);
+    if (!mem.eql(u8, expected, result.asSlice())) {
+        std.debug.print("fromUtf8Lossy({x}) = {x}; expected {x}\n", .{ bytes, result.asSlice(), expected });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "fromUtf8Lossy: replacements match the byte-range specification" {
+    var test_env = TestEnv.init(std.testing.allocator);
+    defer test_env.deinit();
+    const ops = test_env.getOps();
+    var buf: [80]u8 = undefined;
+
+    // Random mostly-ASCII inputs with boundary bytes of every range mixed in.
+    const alphabet = [_]u8{ 0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF, 0xE0, 0xE1, 0xEC, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF3, 0xF4, 0xF5, 0xF7, 0xF8, 0xFF };
+    var prng = std.Random.DefaultPrng.init(13025);
+    const random = prng.random();
+    for (0..100_000) |_| {
+        const len = random.uintLessThan(usize, buf.len + 1);
+        const density = random.uintLessThan(u32, 4);
+        for (buf[0..len]) |*byte| {
+            byte.* = if (density != 0 and random.uintLessThan(u32, 4 * density) != 0) 'a' else alphabet[random.uintLessThan(usize, alphabet.len)];
+        }
+        try expectFromUtf8LossyMatchesSpec(buf[0..len], ops);
+    }
+
+    // Each non-ASCII lead byte followed by boundary bytes, truncated at every
+    // length, between ASCII and multi-byte text.
+    const seconds = [_]u8{ 0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xF0, 0xFF };
+    const laters = [_]u8{ 0x41, 0x80, 0xC0 };
+    const prefixes = [_][]const u8{ "", "abcdefghijklmnopq", "\u{e9}\u{6f22}\u{1f389}ab" };
+    const suffixes = [_][]const u8{ "", "\u{e9}", "\x80\x80" };
+    for (0x80..0x100) |lead| {
+        for (seconds) |b1| for (laters) |b2| for (laters) |b3| for (1..5) |seq_len| for (prefixes) |prefix| for (suffixes) |suffix| {
+            const seq = [4]u8{ @intCast(lead), b1, b2, b3 };
+            var len: usize = 0;
+            @memcpy(buf[len..][0..prefix.len], prefix);
+            len += prefix.len;
+            @memcpy(buf[len..][0..seq_len], seq[0..seq_len]);
+            len += seq_len;
+            @memcpy(buf[len..][0..suffix.len], suffix);
+            len += suffix.len;
+            try expectFromUtf8LossyMatchesSpec(buf[0..len], ops);
+        };
+    }
+
+    try testing.expectEqual(@as(usize, 0), test_env.getAllocationCount());
 }
 
 test "fromUtf8Lossy: invalid start byte" {
@@ -5528,4 +5736,113 @@ test "validated UTF-8 construction: seamless slices retain their allocation" {
     try testing.expectEqualStrings(text[8..], result.asSlice());
     result.decref(env.getOps());
     try testing.expectEqual(@as(usize, 0), env.allocation_map.count());
+}
+
+/// Static storage for one test string: the static refcount word, then
+/// `bytes`. `str` is the frozen form of a string holding those bytes with
+/// room for `capacity`.
+const StaticTestStr = struct {
+    words: [9]usize,
+    len: usize,
+
+    fn init(bytes: []const u8) StaticTestStr {
+        var result: StaticTestStr = .{ .words = @splat(0), .len = bytes.len };
+        result.words[0] = @bitCast(utils.REFCOUNT_STATIC_DATA);
+        const dest: [*]u8 = @ptrCast(&result.words[1]);
+        @memcpy(dest[0..bytes.len], bytes);
+        return result;
+    }
+
+    fn str(self: *StaticTestStr, capacity: usize) RocStr {
+        return .{
+            .bytes = @ptrCast(&self.words[1]),
+            .capacity_or_alloc_ptr = RocStr.encodeCapacity(capacity),
+            .length = self.len,
+        };
+    }
+};
+
+test "a static string is never unique and its copy keeps the recorded capacity" {
+    var test_env = TestEnv.init(std.testing.allocator);
+    defer test_env.deinit();
+    const ops = test_env.getOps();
+
+    var storage = StaticTestStr.init("ab");
+    const static_str = storage.str(100);
+    try std.testing.expect(static_str.isStaticData());
+    try std.testing.expect(!static_str.isUnique());
+    try std.testing.expectEqual(@as(usize, 100), static_str.copyCapacity());
+
+    // Appending copies once, into the capacity the descriptor records.
+    var appended = strConcat(static_str, RocStr.fromSliceSmall("cd"), .Immutable, ops);
+    defer appended.decref(ops);
+    try std.testing.expect(appended.isUnique());
+    try std.testing.expect(!appended.isSmallStr());
+    try std.testing.expectEqualStrings("abcd", appended.asSlice());
+    try std.testing.expectEqual(@as(usize, 100), appended.getCapacity());
+    const allocation = appended.bytes;
+    appended = strConcat(appended, RocStr.fromSliceSmall("ef"), .Immutable, ops);
+    try std.testing.expect(appended.bytes == allocation);
+    // The static storage is untouched.
+    try std.testing.expectEqual(@as(usize, @bitCast(utils.REFCOUNT_STATIC_DATA)), storage.words[0]);
+    try std.testing.expectEqualStrings("ab", static_str.asSlice());
+}
+
+test "a static string with no bytes reserves its recorded capacity on the first append" {
+    var test_env = TestEnv.init(std.testing.allocator);
+    defer test_env.deinit();
+    const ops = test_env.getOps();
+
+    // The frozen form of `Str.with_capacity(100)`.
+    var storage = StaticTestStr.init("");
+    const appended = strConcat(storage.str(100), RocStr.fromSliceSmall("x"), .Immutable, ops);
+    defer appended.decref(ops);
+    try std.testing.expectEqualStrings("x", appended.asSlice());
+    try std.testing.expectEqual(@as(usize, 100), appended.getCapacity());
+}
+
+test "a static string outgrown by an append grows from its recorded capacity" {
+    var test_env = TestEnv.init(std.testing.allocator);
+    defer test_env.deinit();
+    const ops = test_env.getOps();
+
+    const text = "a literal long enough to be a big string";
+    var storage = StaticTestStr.init(text);
+    // A literal has no spare capacity, so the copy takes one geometric step
+    // from its bytes, as a uniquely owned string of that length would.
+    const appended = strConcat(storage.str(text.len), RocStr.fromSliceSmall("!"), .Immutable, ops);
+    defer appended.decref(ops);
+    try std.testing.expectEqual(utils.geometricGrowth(text.len, 1), appended.getCapacity());
+}
+
+test "Str.reserve hands back only a string nobody else holds" {
+    var test_env = TestEnv.init(std.testing.allocator);
+    defer test_env.deinit();
+    const ops = test_env.getOps();
+
+    // Static data whose recorded capacity covers the request is still copied:
+    // it has no room for the bytes the capacity promises.
+    var storage = StaticTestStr.init("ab");
+    const from_static = reserve(storage.str(100), 50, .Immutable, ops);
+    defer from_static.decref(ops);
+    try std.testing.expect(from_static.isUnique());
+    try std.testing.expect(from_static.bytes != storage.str(100).bytes);
+    try std.testing.expectEqual(@as(usize, 100), from_static.getCapacity());
+    try std.testing.expectEqualStrings("ab", from_static.asSlice());
+
+    // So is a string another reference holds.
+    var shared = withCapacityC(100, ops);
+    shared.incref(1, ops);
+    defer shared.decref(ops);
+    const from_shared = reserve(shared, 50, .Immutable, ops);
+    defer from_shared.decref(ops);
+    try std.testing.expect(from_shared.bytes != shared.bytes);
+    try std.testing.expect(from_shared.isUnique());
+    try std.testing.expectEqual(@as(usize, 50), from_shared.getCapacity());
+
+    // A unique string with room keeps its allocation.
+    const unique = withCapacityC(100, ops);
+    const kept = reserve(unique, 50, .Immutable, ops);
+    defer kept.decref(ops);
+    try std.testing.expect(kept.bytes == unique.bytes);
 }

@@ -302,6 +302,79 @@ rect = Geometry.Rectangle.{
 This is useful for grouping related types together, especially since each
 [type module](modules#type-modules) exposes only one type.
 
+### Names Inside a `.{ … }` Block
+
+Inside a type's `.{ … }` block, a member's plain name (like `double` instead of
+`Counter.double`) refers to that member everywhere in the block. This is true no matter
+what order the members are written in, and no matter where any other definitions with the
+same name are written.
+
+If a member has the same name as a definition outside the block, the member
+[shadows](naming#shadowing) it, so you get a shadowing warning:
+
+```roc
+double : U64 -> U64
+double = |n| n * 2
+
+Counter := U64.{
+    double : Counter -> Counter
+    double = |Counter.(n)| Counter.(n * 2) # Warning: double shadows the double above
+
+    quadruple : Counter -> Counter
+    quadruple = |counter| double(double(counter)) # Calls Counter.double
+}
+```
+
+Moving the top-level `double` below `Counter` doesn't change anything: `double(…)` inside
+the block still calls `Counter.double`, and you still get the warning. That's because a
+name's meaning shouldn't depend on which of two definitions happens to come first in the file.
+(If it did, then moving a definition to a different place in the file could silently
+change which function gets called, and a method meant to call a top-level function of the
+same name could end up calling itself forever.)
+
+Names inside the block shadow members too. Here, the argument `owner` shadows the
+`owner` method, so it gets a warning even though the method is written after it:
+
+```roc
+Account := { owner : Str }.{
+    new : Str -> Account
+    new = |owner| Account.{ owner } # Warning: owner shadows the owner method below
+
+    owner : Account -> Str
+    owner = |account| account.owner
+}
+```
+
+A member that's a function can call itself by its plain name, which makes it recursive.
+A member that isn't a function can't refer to itself, so inside its own definition, its
+name refers to whatever it shadows:
+
+```roc
+limit : U64
+limit = 10
+
+Config := [].{
+    limit : U64
+    limit = limit * 2 # Warning: limit shadows the limit above. This is 10 * 2.
+}
+```
+
+A nested type's block is inside its enclosing type's block, so a nested type's member
+shadows a member of the enclosing type that has the same name, just like any other
+definition outside its block:
+
+```roc
+Temperature := F64.{
+    Celsius := F64.{
+        to_str : Celsius -> Str
+        to_str = |Celsius.(degrees)| degrees.to_str() # Warning: to_str shadows the to_str below
+    }
+
+    to_str : Temperature -> Str
+    to_str = |Temperature.(degrees)| degrees.to_str()
+}
+```
+
 ## Type Aliases
 
 A _type alias_ is a different name for an existing type. You declare one with `:` (instead of
@@ -391,6 +464,8 @@ directly on its own type's memory layout. This is called
 templates do too. The tradeoff is that using one function with many different types makes the
 compiled program larger, but it means you never pay for generic code being generic at runtime.
 
-> Note that `roc build --specialize=no` uses an experimental alternative to monomorphization,
-> which compiles each generalized function only once, and passes it values in heap-allocated
-> boxes. Programs compiled this way do extra work at runtime that monomorphized programs don't.
+> Note that monomorphization is the default only when you build with `--opt=speed`. At the other
+> optimization levels, the compiler compiles each generalized function only once, and passes it
+> values in heap-allocated boxes. That makes builds faster, but programs compiled this way do
+> extra work at runtime that monomorphized programs don't. You can choose either one explicitly
+> with `--specialize=yes` or `--specialize=no`.

@@ -44,22 +44,83 @@ pub const module_env_layout: [32]u8 = check.rootLayoutVersionHash(can.ModuleEnv.
 const checked_reports_layout: [32]u8 = check.rootLayoutVersionHash(check.CheckedReports.Serialized, 1);
 
 /// Version of the checked-module envelope and opaque body encodings not
-/// reflected in layout fingerprints. Version 33 stores reproducible checking
+/// reflected in layout fingerprints. Version 48 stores reproducible checking
 /// and evaluation reports beside paired callable forwarding and request
 /// completion and cached literal argument roots for both strategies,
 /// body-local type context arguments, generated-codec recurrences,
 /// field-default identities in Boxy stored-function types, integer list
-/// worker item-type bindings, nominal declaration backings whose formals
-/// bind by binder identity rather than by name, stored function recipes
-/// naming modules the storing module imports, type stores listing their
-/// widening field names once, and anonymous structure that every use shares
-/// when nothing visible can lift or widen it. It rejects every earlier
-/// format. Platform-pairing entries share it.
-const checked_envelope_version: u32 = 33;
+/// worker item-type bindings, Boxy stored-function type tables that store a
+/// padded record's declaration entries rather than its slots, nominal
+/// declaration backings whose formals bind by binder identity rather than by
+/// name, stored function recipes naming modules the storing module imports,
+/// type stores listing their widening field names once, anonymous structure
+/// that every use shares when nothing visible can lift or widen it, record and
+/// tag tails a use closes or lifts in place of that sharing, literal conversion
+/// roots published for deferred literals, checked artifacts' type, scheme, blob
+/// and proc-base interning tables, type tags that record whether only `match`
+/// branch patterns put them in their row, literal argument roots whose source
+/// is their edge owner and which hold no expression, stored function recipes
+/// whose lambda tables refer to their creators' tables, compile-time roots
+/// indexed by pattern, each checking problem carrying the source regions its
+/// report highlights in place of a region per type variable, validate-only
+/// interpolation conversion roots and literal argument roots completed as
+/// `discarded`, specialization-interface relations that equate no use of a
+/// name a destructuring scheme alias binds with that name's type, and site
+/// evidence that leaves a requirement a use of a constant's scheme alias does
+/// not pin to the stored function's request, hoisted source-pattern root
+/// wrappers whose requirement paths lie below their return, the bodies of
+/// those roots resolved against no evidence chain, and top-level constants'
+/// right-hand sides resolved against their wrapper's own requirements,
+/// evidence parameters recording the edge that hands a captured codec
+/// requirement on, an alias-bound dispatch edge's among them, private codec
+/// instances whose copies of a template's variables the ambiguity rule does
+/// not judge, procedure templates' closed row nodes, and compile-time roots
+/// the checked-value writer completes when they read only constants it
+/// completes. It rejects every earlier format, including the independent
+/// version 19 through 51 formats.
+/// Version 52 also excludes artifacts with builtin-conflicting import bindings.
+/// Version 53 stores constant stores whose type tables hold one copy of each
+/// type a store writer copied from its program.
+/// Version 54 stores every tag union's own tags in name order.
+/// Version 55 stores lists of tag unions whose payloads are all zero-sized,
+/// and of records and tuples holding them, as packed bytes.
+/// Version 56 combines version 55 with checked bindings and stored constant
+/// types that carry no iterator representation fields.
+/// Version 57 stores absent optional ids and indices as zero. Version 58
+/// gives the remaining absences explicit representations.
+/// Version 59 stores sealed type stores whose dead descriptors, pool rows and
+/// merged-away variables sealing removed, renumbering the variables checking
+/// made with every variable checking recorded outside the store. Version 60
+/// stores each checked type's identity-variable fact.
+/// Version 61 combines version 60 with these: a compile-time root whose value
+/// is data alone is stored as an image with the type it was stored at, and
+/// each strategy's entry is filed under its own key; each closed instance of a
+/// polymorphic constant is stored as a `constant_instance` root of its own,
+/// with the canonical instantiation's roots; for each use of a name a
+/// destructuring scheme alias binds, the variables of the name's scheme are
+/// recorded, with a constant's instances at the substitutions checking
+/// recorded for those uses and for dispatches to methods bound to polymorphic
+/// callable bindings; for each `to_inspect` override whose inspection instance
+/// is closed, that use's edge and the constant instances it names are
+/// recorded; and value-form bytes literals and files imported as `Str` are
+/// stored as images.
+/// Version 66 combines version 61 with these: each part holding no function
+/// of a stored value holding one is stored as an image of its own, no stored
+/// list is stored as packed bytes, and the `zst`, `scalar` and `str`
+/// constant store node forms, which no producer writes, are gone.
+/// Version 67 combines version 66 with these: a polymorphic constant's
+/// instance roots are evaluated by the compilation's own strategy, so a
+/// literal argument root records no function-holding flag, and a Solved
+/// program's data root is stored as an image at its declared rows' layout.
+/// Platform-pairing entries share it.
+const checked_envelope_version: u32 = 67;
 
 /// Version of the canonicalized-module envelope: its magic, header layout, and
-/// body order.
-const canonicalized_envelope_version: u32 = 3;
+/// body order and alignment. Version 5 rejects builtin-conflicting import
+/// bindings and records their uses as explicit errors. Version 6 stores
+/// absent optional ids and indices as zero. Version 7 gives the remaining
+/// absences explicit representations.
+const canonicalized_envelope_version: u32 = 7;
 
 /// The running compiler's admission hash for `entry`.
 pub fn entryVersionHash(comptime entry: Entry) [32]u8 {
@@ -154,8 +215,8 @@ test "module_env_layout golden value" {
     // an *intentional* layout change, bump `Constants.CACHE_VERSION` and replace the
     // golden bytes below with the ones this assertion prints.
     const golden: [32]u8 = .{
-        0xA5, 0x02, 0xCF, 0x91, 0x5D, 0xA9, 0x3B, 0xE5, 0xCE, 0xAF, 0x8F, 0xBF, 0xD6, 0x1D, 0x75, 0xD2,
-        0x49, 0xBD, 0x23, 0xCB, 0xEE, 0xB3, 0x10, 0xCF, 0xCB, 0xB4, 0xD4, 0xEC, 0xDA, 0xD4, 0xFE, 0x09,
+        0x81, 0x6D, 0xDA, 0xEA, 0xA7, 0x09, 0x43, 0xB4, 0x38, 0x32, 0x1E, 0x5D, 0x57, 0x0A, 0xA1, 0xF6,
+        0xD1, 0xF8, 0xAD, 0x7E, 0x08, 0x16, 0x1B, 0xCC, 0x54, 0x15, 0x74, 0xDB, 0xD0, 0x12, 0x23, 0xA1,
     };
     try std.testing.expectEqualSlices(u8, &golden, &module_env_layout);
 }

@@ -94,14 +94,21 @@ pub fn identityVarsFromVar(
 }
 
 /// Whether the canonical-key walk enumerates a variable with this descriptor
-/// as an identity variable: a flex, a rigid (`#polarity` markers included), or
-/// an identity the checker explicitly closed to `[]`. Every producer of a
-/// scheme instantiation's substitution pairs exactly these variables.
+/// as an identity variable: a flex or a rigid (`#polarity` markers included).
+/// Every producer of a scheme instantiation's substitution pairs exactly these
+/// variables.
 pub fn isIdentityVariable(desc: types.Descriptor) bool {
-    if (desc.flags.empty_tag_union_is_default) return true;
     return switch (desc.content) {
         .flex, .rigid => true,
         .alias, .field_presence, .structure, .err => false,
+    };
+}
+
+/// `isIdentityVariable`, judged from the descriptor's stored word.
+pub fn isIdentityVariableWord(word: types.Descriptor.Word) bool {
+    return switch (word.kind) {
+        .flex, .rigid => true,
+        .alias, .field_presence, .err, .record, .tuple, .nominal_type, .fn_pure, .fn_effectful, .fn_unbound, .empty_record, .tag_union, .empty_tag_union => false,
     };
 }
 
@@ -383,12 +390,21 @@ pub const TypeWriter = struct {
     }
 
     /// Enumerate a callable and its explicit relations under one fresh
-    /// numbering, retaining only scratch capacity between schemes.
+    /// numbering, retaining only scratch capacity between schemes. The walk
+    /// also notes whether it reached an uncommitted tag tail
+    /// (`lastSchemeHeldUncommittedTagTail`).
     pub fn identityVarsFromScheme(self: *TypeWriter, root: Var, relation_roots: []const Var) Allocator.Error![]Var {
         self.inspector.resetDigest();
+        self.inspector.adapter.saw_uncommitted_tag_tail = false;
         try self.inspector.writeVar(root);
         for (relation_roots) |relation_root| try self.inspector.writeVar(relation_root);
         return self.inspector.allocator.dupe(Var, self.inspector.identity_variables.items);
+    }
+
+    /// Whether the last `identityVarsFromScheme` walk reached an uncommitted
+    /// tag tail a scheme quantifies (design.md "Uncommitted Tag Tails").
+    pub fn lastSchemeHeldUncommittedTagTail(self: *const TypeWriter) bool {
+        return self.inspector.adapter.saw_uncommitted_tag_tail;
     }
 
     /// Enumerate ordinary structure without following identity constraints.
@@ -540,6 +556,10 @@ const SourceAdapter = struct {
     /// Whether a nominal whose declaration is invalid marks its description
     /// erroneous; only a traversal that detects errors reads the mark.
     detect_invalid_nominals: bool = false,
+    /// Whether a description since the last reset was of an uncommitted tag
+    /// tail a scheme quantifies (`SealedTypeView.uncommittedTagTail`), which
+    /// a scheme walk reports (`TypeWriter.identityVarsFromScheme`).
+    saw_uncommitted_tag_tail: bool = false,
     rank_scratch: base.TextRankCache,
     text_ranks: []const u32 = &.{},
     fields: std.ArrayList(RecordFieldForKey) = .empty,
@@ -601,11 +621,12 @@ const SourceAdapter = struct {
             return .leaf;
         }
 
-        // The checker explicitly records when it closes an otherwise
-        // unresolved identity to `[]`; the surviving root is that identity.
-        if (resolved.desc.flags.empty_tag_union_is_default) {
-            return try self.describeIdentity(sink, var_, .defaulted_empty_tag_union, null, types.StaticDispatchConstraint.SafeList.Range.empty());
-        }
+        if (resolved.desc.flags.uncommitted_tag_tail) switch (resolved.desc.content) {
+            .structure => |flat| if (flat == .empty_tag_union) {
+                self.saw_uncommitted_tag_tail = true;
+            },
+            .flex, .rigid, .alias, .field_presence, .err => {},
+        };
 
         switch (resolved.desc.content) {
             .flex => |flex| {
@@ -757,7 +778,12 @@ const SourceAdapter = struct {
                     .empty_tag_union, .tuple, .nominal_type, .fn_pure, .fn_effectful, .fn_unbound, .tag_union => break,
                 },
                 .tag_union => switch (flat) {
-                    .empty_tag_union => return null,
+                    .empty_tag_union => {
+                        // The row ends here, so no walk visits its tail as a
+                        // node of its own.
+                        if (resolved.desc.flags.uncommitted_tag_tail) self.saw_uncommitted_tag_tail = true;
+                        return null;
+                    },
                     .tag_union => |tag_union| {
                         try self.appendTags(tag_union.tags);
                         tail = tag_union.ext;
@@ -986,7 +1012,6 @@ pub const KeyTag = enum(u8) {
     err_var,
     flex,
     rigid,
-    defaulted_empty_tag_union,
     identity_var_anchor,
     identity_var_ref,
     cycle,
@@ -1130,7 +1155,7 @@ const Inspector = struct {
             }
             const item = items[frame.item];
             frame.item += 1;
-            if (item.isChild()) try self.visit(item.child);
+            if (item.child.get()) |child| try self.visit(child);
         }
         if (self.adapter.duplicate_row) |row| {
             if (self.duplicate_row == null) self.duplicate_row = row;
@@ -2114,7 +2139,7 @@ const KeyEncodingReader = struct {
             },
             .cycle, .identity_var_ref => if (try self.varint() == 0) return error.TestUnexpectedResult,
             .identity_var_anchor, .err_var, .opaque_root => _ = try self.varint(),
-            .flex, .rigid, .defaulted_empty_tag_union => {
+            .flex, .rigid => {
                 if (try self.boolean()) try self.lengthPrefixed();
                 if (try self.varint() != 0) return error.TestUnexpectedResult;
             },
@@ -2154,7 +2179,6 @@ const KeyEncodingReader = struct {
                             .err_var,
                             .flex,
                             .rigid,
-                            .defaulted_empty_tag_union,
                             .identity_var_anchor,
                             .identity_var_ref,
                             .cycle,

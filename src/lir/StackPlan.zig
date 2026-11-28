@@ -11,7 +11,7 @@ const LirStore = core.LirStore;
 const LocalId = LIR.LocalId;
 const CFStmtId = LIR.CFStmtId;
 const Allocator = std.mem.Allocator;
-const none = std.math.maxInt(u32);
+const OptionalU32 = collections.OptionalU32;
 const Self = @This();
 
 allocator: Allocator,
@@ -40,6 +40,9 @@ size_classes: std.ArrayList(SizeClass) = .empty,
 class_of_size: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 reservations: std.ArrayList(Reservations) = .empty,
 reservation_nodes: std.ArrayList(Reservations.Node) = .empty,
+/// The block structure's storage, released after each solve with its
+/// capacity kept.
+structure_arena: collections.SingleThreadArena,
 
 /// A local's index in a plan's `values`, by local id.
 pub const LocalIndices = collections.DenseMap(LocalId, u32);
@@ -105,39 +108,66 @@ pub const Indexes = struct {
     }
 };
 
+/// How defining a value whose representative is another value touches the
+/// representative's bytes.
+pub const AliasDefinition = enum {
+    /// It writes none of them: the alias names bytes the representative
+    /// already holds, so its definition reads the representative.
+    reads,
+    /// It writes part of them first on every path that reaches the
+    /// representative's other writes, so the bytes start living there.
+    writes,
+    /// It writes part of them after another definition began their life,
+    /// so the bytes it leaves alone stay live across it.
+    updates,
+};
+
 /// One local, or the representative of a proven immutable alias group.
 pub const Value = struct {
     local: LocalId,
     representative: u32,
+    /// How defining this value touches its representative's bytes, when it
+    /// has a representative other than itself.
+    alias_definition: AliasDefinition = .reads,
     definitions: u32 = 0,
     mutable: bool = false,
     size: u32 = 0,
-    /// The value's physical slot, or `none`.
-    slot: u32 = none,
+    /// The value's physical slot, once placement assigns one.
+    slot: OptionalU32 = .none,
     /// The value's run in `ranges`.
     range_start: u32 = 0,
     range_len: u32 = 0,
 
     /// The value's physical slot.
     pub fn slotIndex(self: Value) ?u32 {
-        return if (self.slot == none) null else self.slot;
+        return self.slot.get();
     }
 };
 const Node = struct {
-    succ: u32 = none,
-    pred: u32 = none,
+    /// The head of the node's successor edge chain.
+    succ: OptionalU32 = .none,
+    /// The head of the node's predecessor edge chain.
+    pred: OptionalU32 = .none,
     succ_count: u32 = 0,
     pred_count: u32 = 0,
-    block: u32 = none,
-    position: u32 = none,
+    /// The node's block, once lifetime solving lays out blocks.
+    block: OptionalU32 = .none,
+    /// The node's position; block layout writes it before any read.
+    position: u32 = undefined,
+
+    /// The node's block, which block layout has assigned.
+    fn blockIndex(self: Node) u32 {
+        return self.block.get().?;
+    }
 };
-const Edge = struct { from: u32, to: u32, next_succ: u32, next_pred: u32 };
+const Edge = struct { from: u32, to: u32, next_succ: OptionalU32, next_pred: OptionalU32 };
 /// One explicit read and/or write of a value at a node.
 pub const Access = struct { node: u32, value: u32, read: bool, write: bool };
 const Block = struct { first: u32, start: u32, end: u32 };
 /// A half-open span of solved positions.
 pub const Range = struct { start: u32, end: u32 };
-const BlockState = struct { epoch: u32 = none, last_write: ?u32 = null, propagated: bool = false };
+/// `epoch` is the value whose solving last wrote the state.
+const BlockState = struct { epoch: OptionalU32 = .none, last_write: OptionalU32 = .none, propagated: bool = false };
 /// A unit of propagation: a block, or a loop that writes the value nowhere
 /// and so holds it at every position or at none.
 const Unit = struct { loop: bool, index: u32 };
@@ -153,7 +183,11 @@ fn rangeOrder(a: Range, b: Range) std.math.Order {
 
 /// Start an empty procedure plan.
 pub fn init(allocator: Allocator) Self {
-    return .{ .allocator = allocator, .local_indices = LocalIndices.init(allocator) };
+    return .{
+        .allocator = allocator,
+        .local_indices = LocalIndices.init(allocator),
+        .structure_arena = collections.SingleThreadArena.init(allocator),
+    };
 }
 /// Release all storage.
 pub fn deinit(self: *Self) void {
@@ -176,6 +210,7 @@ pub fn deinit(self: *Self) void {
     self.class_of_size.deinit(a);
     self.reservations.deinit(a);
     self.reservation_nodes.deinit(a);
+    self.structure_arena.deinit();
 }
 /// Empty the plan for another procedure, keeping its storage.
 pub fn clearRetainingCapacity(self: *Self) void {
@@ -214,9 +249,9 @@ pub fn node(self: *Self) Allocator.Error!u32 {
 pub fn edge(self: *Self, from: u32, to: u32) Allocator.Error!void {
     const index: u32 = @intCast(self.edges.items.len);
     try self.edges.append(self.allocator, .{ .from = from, .to = to, .next_succ = self.nodes.items[from].succ, .next_pred = self.nodes.items[to].pred });
-    self.nodes.items[from].succ = index;
+    self.nodes.items[from].succ = .some(index);
     self.nodes.items[from].succ_count += 1;
-    self.nodes.items[to].pred = index;
+    self.nodes.items[to].pred = .some(index);
     self.nodes.items[to].pred_count += 1;
 }
 /// Record an explicit local access. A write kills only that local's old value.
@@ -428,12 +463,12 @@ fn appendBlock(self: *Self, blocks: *std.ArrayList(Block), first: u32, position:
     var current = first;
     while (true) {
         const n = &self.nodes.items[current];
-        n.block = index;
+        n.block = .some(index);
         n.position = position.*;
         position.* += 1;
         if (n.succ_count != 1) break;
-        const next = self.edges.items[n.succ].to;
-        if (self.nodes.items[next].pred_count != 1 or self.nodes.items[next].block != none) break;
+        const next = self.edges.items[n.succ.get().?].to;
+        if (self.nodes.items[next].pred_count != 1 or self.nodes.items[next].block != .none) break;
         current = next;
     }
     try blocks.append(self.allocator, .{ .first = first, .start = start, .end = position.* });
@@ -480,20 +515,18 @@ const BlockStructure = struct {
     end_position: []u32,
     contiguous: []bool,
 
-    fn init(plan: *Self, blocks: []Block) Allocator.Error!BlockStructure {
-        const allocator = plan.allocator;
+    /// Everything is allocated in `allocator`, which frees it all at once.
+    fn init(plan: *Self, allocator: Allocator, blocks: []Block) Allocator.Error!BlockStructure {
         const count = blocks.len;
         const succ_starts = try allocator.alloc(u32, count + 1);
-        errdefer allocator.free(succ_starts);
         const pred_starts = try allocator.alloc(u32, count + 1);
-        errdefer allocator.free(pred_starts);
         @memset(succ_starts, 0);
         @memset(pred_starts, 0);
         for (blocks, 0..) |block, index| {
             const last_node = plan.lastNodeOf(block);
-            var edge_index = plan.nodes.items[last_node].succ;
-            while (edge_index != none) : (edge_index = plan.edges.items[edge_index].next_succ) {
-                const target = plan.nodes.items[plan.edges.items[edge_index].to].block;
+            var next_edge = plan.nodes.items[last_node].succ.get();
+            while (next_edge) |edge_index| : (next_edge = plan.edges.items[edge_index].next_succ.get()) {
+                const target = plan.nodes.items[plan.edges.items[edge_index].to].blockIndex();
                 succ_starts[index + 1] += 1;
                 pred_starts[target + 1] += 1;
             }
@@ -503,19 +536,15 @@ const BlockStructure = struct {
             pred_starts[index] += pred_starts[index - 1];
         }
         const succs = try allocator.alloc(u32, succ_starts[count]);
-        errdefer allocator.free(succs);
         const preds = try allocator.alloc(u32, pred_starts[count]);
-        errdefer allocator.free(preds);
         {
             const succ_fill = try allocator.dupe(u32, succ_starts[0..count]);
-            defer allocator.free(succ_fill);
             const pred_fill = try allocator.dupe(u32, pred_starts[0..count]);
-            defer allocator.free(pred_fill);
             for (blocks, 0..) |block, index| {
                 const last_node = plan.lastNodeOf(block);
-                var edge_index = plan.nodes.items[last_node].succ;
-                while (edge_index != none) : (edge_index = plan.edges.items[edge_index].next_succ) {
-                    const target = plan.nodes.items[plan.edges.items[edge_index].to].block;
+                var next_edge = plan.nodes.items[last_node].succ.get();
+                while (next_edge) |edge_index| : (next_edge = plan.edges.items[edge_index].next_succ.get()) {
+                    const target = plan.nodes.items[plan.edges.items[edge_index].to].blockIndex();
                     succs[succ_fill[index]] = target;
                     succ_fill[index] += 1;
                     preds[pred_fill[target]] = @intCast(index);
@@ -523,18 +552,17 @@ const BlockStructure = struct {
                 }
             }
         }
-        var forest = try LoopForest.build(allocator, succ_starts, succs, pred_starts, preds);
-        errdefer forest.deinit();
+        const forest = try LoopForest.build(allocator, succ_starts, succs, pred_starts, preds);
         const loop_count = forest.loops.len;
 
         // Side entries, by loop.
         const SideEntry = struct { loop: u32, pred: u32 };
         var side: std.ArrayList(SideEntry) = .empty;
-        defer side.deinit(allocator);
         for (0..count) |target_index| {
             for (preds[pred_starts[target_index]..pred_starts[target_index + 1]]) |pred| {
-                var loop = forest.innermostOf(target_index);
-                while (loop != LoopForest.none and !forest.containsNode(loop, pred)) : (loop = forest.loops[loop].parent) {
+                var cursor = forest.innermostOf(target_index);
+                while (cursor) |loop| : (cursor = forest.loops[loop].parent.get()) {
+                    if (forest.containsNode(loop, pred)) break;
                     if (forest.loops[loop].header != target_index) try side.append(allocator, .{ .loop = loop, .pred = pred });
                 }
             }
@@ -545,9 +573,7 @@ const BlockStructure = struct {
             }
         }.lessThan);
         var entry_list: std.ArrayList(u32) = .empty;
-        defer entry_list.deinit(allocator);
         const entry_starts = try allocator.alloc(u32, loop_count + 1);
-        errdefer allocator.free(entry_starts);
         {
             var cursor: usize = 0;
             for (0..loop_count) |loop| {
@@ -563,17 +589,15 @@ const BlockStructure = struct {
             entry_starts[loop_count] = @intCast(entry_list.items.len);
         }
         const entries = try entry_list.toOwnedSlice(allocator);
-        errdefer allocator.free(entries);
 
         // Blocks grouped by loop-tree position, and each loop's coverage.
         const blocks_by_loop = try allocator.alloc(u32, count);
-        errdefer allocator.free(blocks_by_loop);
         for (blocks_by_loop, 0..) |*slot, index| slot.* = @intCast(index);
         const LoopOrder = struct {
             forest: *const LoopForest,
             fn key(ctx: @This(), block: u32) u64 {
-                const loop = ctx.forest.innermostOf(block);
-                const position: u64 = if (loop == LoopForest.none) std.math.maxInt(u32) else ctx.forest.loops[loop].enter;
+                // A block in no loop sorts after every loop's blocks.
+                const position: u64 = if (ctx.forest.innermostOf(block)) |loop| ctx.forest.loops[loop].enter else std.math.maxInt(u32);
                 return (position << 32) | block;
             }
             fn lessThan(ctx: @This(), lhs: u32, rhs: u32) bool {
@@ -594,7 +618,7 @@ const BlockStructure = struct {
                 while (true) {
                     const n = &plan.nodes.items[current];
                     const next_in_block: ?u32 = if (n.succ_count == 1) blk: {
-                        const next = plan.edges.items[n.succ].to;
+                        const next = plan.edges.items[n.succ.get().?].to;
                         const next_node = plan.nodes.items[next];
                         break :blk if (next_node.block == n.block and next_node.position == n.position + 1) next else null;
                     } else null;
@@ -607,20 +631,15 @@ const BlockStructure = struct {
             }
         }
         const first_position = try allocator.alloc(u32, loop_count);
-        errdefer allocator.free(first_position);
         const end_position = try allocator.alloc(u32, loop_count);
-        errdefer allocator.free(end_position);
         const contiguous = try allocator.alloc(bool, loop_count);
-        errdefer allocator.free(contiguous);
         {
             const covered = try allocator.alloc(u64, loop_count);
-            defer allocator.free(covered);
             @memset(first_position, std.math.maxInt(u32));
             @memset(end_position, 0);
             @memset(covered, 0);
             for (blocks, 0..) |block, index| {
-                const loop = forest.innermostOf(index);
-                if (loop == LoopForest.none) continue;
+                const loop = forest.innermostOf(index) orelse continue;
                 first_position[loop] = @min(first_position[loop], block.start);
                 end_position[loop] = @max(end_position[loop], block.end);
                 covered[loop] += block.end - block.start;
@@ -629,8 +648,7 @@ const BlockStructure = struct {
             while (order > 0) {
                 order -= 1;
                 const loop = forest.preorder[order];
-                const parent = forest.loops[loop].parent;
-                if (parent == LoopForest.none) continue;
+                const parent = forest.loops[loop].parent.get() orelse continue;
                 first_position[parent] = @min(first_position[parent], first_position[loop]);
                 end_position[parent] = @max(end_position[parent], end_position[loop]);
                 covered[parent] += covered[loop];
@@ -653,20 +671,6 @@ const BlockStructure = struct {
         };
     }
 
-    fn deinit(self: *BlockStructure, allocator: Allocator) void {
-        allocator.free(self.contiguous);
-        allocator.free(self.end_position);
-        allocator.free(self.first_position);
-        allocator.free(self.blocks_by_loop);
-        allocator.free(self.entries);
-        allocator.free(self.entry_starts);
-        self.forest.deinit();
-        allocator.free(self.preds);
-        allocator.free(self.pred_starts);
-        allocator.free(self.succs);
-        allocator.free(self.succ_starts);
-    }
-
     fn blockPreds(self: *const BlockStructure, block: u32) []const u32 {
         return self.preds[self.pred_starts[block]..self.pred_starts[block + 1]];
     }
@@ -682,8 +686,7 @@ const BlockStructure = struct {
         var high: usize = self.blocks_by_loop.len;
         while (low < high) {
             const mid = low + (high - low) / 2;
-            const loop = self.forest.innermostOf(self.blocks_by_loop[mid]);
-            const position = if (loop == LoopForest.none) std.math.maxInt(u32) else self.forest.loops[loop].enter;
+            const position = if (self.forest.innermostOf(self.blocks_by_loop[mid])) |loop| self.forest.loops[loop].enter else std.math.maxInt(u32);
             if (position < order) low = mid + 1 else high = mid;
         }
         return low;
@@ -728,8 +731,9 @@ const Transparency = struct {
 
     /// The largest loop around `innermost` (a block's innermost loop) that
     /// holds none of the value's writes, or none.
-    fn outermost(self: Transparency, innermost: u32) ?u32 {
-        if (innermost == LoopForest.none or self.holdsWrite(innermost)) return null;
+    fn outermost(self: Transparency, innermost_or_null: ?u32) ?u32 {
+        const innermost = innermost_or_null orelse return null;
+        if (self.holdsWrite(innermost)) return null;
         return self.forest.outermostWhile(innermost, self, transparent);
     }
 };
@@ -739,7 +743,7 @@ fn lastNodeOf(self: *const Self, block: Block) u32 {
     while (true) {
         const n = self.nodes.items[current];
         if (n.succ_count != 1) return current;
-        const next = self.edges.items[n.succ].to;
+        const next = self.edges.items[n.succ.get().?].to;
         if (self.nodes.items[next].block != n.block or self.nodes.items[next].position != n.position + 1) return current;
         current = next;
     }
@@ -885,11 +889,14 @@ fn applyAliases(self: *Self, entry: u32, aliases: []Alias) Allocator.Error!void 
 fn resolveAliasAccesses(self: *Self) void {
     for (self.accesses.items) |*a| {
         const root = self.representative(a.value);
-        if (root != a.value and a.write) {
-            // Defining an alias does not overwrite the representative's bytes.
-            a.write = false;
-            a.read = true;
-        }
+        if (root != a.value and a.write) switch (self.values.items[a.value].alias_definition) {
+            .reads => {
+                a.write = false;
+                a.read = true;
+            },
+            .writes => {},
+            .updates => a.read = true,
+        };
         a.value = root;
     }
 }
@@ -909,17 +916,24 @@ pub fn solveLifetimes(self: *Self) Allocator.Error!void {
     blocks.clearRetainingCapacity();
     var position: u32 = 0;
     for (self.nodes.items, 0..) |n, i| {
-        if (n.block != none) continue;
-        if (n.pred_count == 1 and self.nodes.items[self.edges.items[n.pred].from].succ_count == 1) continue;
+        if (n.block != .none) continue;
+        if (n.pred_count == 1 and self.nodes.items[self.edges.items[n.pred.get().?].from].succ_count == 1) continue;
         try self.appendBlock(blocks, @intCast(i), &position);
     }
     // A component consisting entirely of a cycle has no distinguished entry.
-    for (self.nodes.items, 0..) |n, i| if (n.block == none) {
+    for (self.nodes.items, 0..) |n, i| if (n.block == .none) {
         try self.appendBlock(blocks, @intCast(i), &position);
     };
     self.resolveAliasAccesses();
-    var structure = try BlockStructure.init(self, blocks.items);
-    defer structure.deinit(self.allocator);
+    // A procedure that is one block no edge enters has no loop and no block
+    // edge to propagate along, so the in-block scan is its whole solution.
+    if (blocks.items.len == 1 and self.nodes.items[blocks.items[0].first].pred_count == 0) {
+        std.mem.sort(Access, self.accesses.items, self, accessLess);
+        return self.solveSingleBlockLifetimes();
+    }
+    // The block structure lays out positions, which order the accesses.
+    defer _ = self.structure_arena.reset(.retain_capacity);
+    const structure = try BlockStructure.init(self, self.structure_arena.allocator(), blocks.items);
     std.mem.sort(Access, self.accesses.items, self, accessLess);
     try self.block_states.resize(self.allocator, blocks.items.len);
     const states = self.block_states.items;
@@ -947,39 +961,19 @@ pub fn solveLifetimes(self: *Self) Allocator.Error!void {
         write_loops.clearRetainingCapacity();
         for (self.accesses.items[begin..end]) |a| {
             if (!a.write) continue;
-            const loop = structure.forest.innermostOf(self.nodes.items[a.node].block);
-            if (loop != LoopForest.none) try write_loops.append(self.allocator, structure.forest.loops[loop].enter);
+            if (structure.forest.innermostOf(self.nodes.items[a.node].blockIndex())) |loop| try write_loops.append(self.allocator, structure.forest.loops[loop].enter);
         }
         std.mem.sort(u32, write_loops.items, {}, std.sort.asc(u32));
         const transparency = Transparency{ .forest = &structure.forest, .write_enters = write_loops.items };
 
         var b = begin;
         while (b < end) {
-            const block = self.nodes.items[self.accesses.items[b].node].block;
+            const block = self.nodes.items[self.accesses.items[b].node].blockIndex();
             var e = b;
-            while (e < end and self.nodes.items[self.accesses.items[e].node].block == block) : (e += 1) {}
-            const state = &states[block];
-            state.* = .{ .epoch = value };
-            var needed_until: ?u32 = null;
-            var cursor = e;
-            while (cursor > b) {
-                cursor -= 1;
-                const pos = self.nodes.items[self.accesses.items[cursor].node].position;
-                var reads = self.accesses.items[cursor].read;
-                var writes = self.accesses.items[cursor].write;
-                while (cursor > b and self.nodes.items[self.accesses.items[cursor - 1].node].position == pos) {
-                    cursor -= 1;
-                    reads = reads or self.accesses.items[cursor].read;
-                    writes = writes or self.accesses.items[cursor].write;
-                }
-                if (writes) {
-                    if (state.last_write == null) state.last_write = pos;
-                    try ranges.append(self.allocator, .{ .start = pos, .end = needed_until orelse pos + 1 });
-                    needed_until = null;
-                }
-                if (reads and needed_until == null) needed_until = pos + 1;
-            }
-            if (needed_until) |limit| {
+            while (e < end and self.nodes.items[self.accesses.items[e].node].blockIndex() == block) : (e += 1) {}
+            const scan = try self.scanBlockAccesses(self.accesses.items[b..e]);
+            states[block] = .{ .epoch = .some(value), .last_write = .of(scan.last_write) };
+            if (scan.needed_until) |limit| {
                 try ranges.append(self.allocator, .{ .start = blocks.items[block].start, .end = limit });
                 if (transparency.outermost(structure.forest.innermostOf(block))) |loop| {
                     if (!loop_epochs.testAndInsert(loop)) {
@@ -1004,13 +998,73 @@ pub fn solveLifetimes(self: *Self) Allocator.Error!void {
                     continue;
                 }
                 const state = &states[pred];
-                if (state.epoch != value) state.* = .{ .epoch = value };
+                if (state.epoch != OptionalU32.some(value)) state.* = .{ .epoch = .some(value) };
                 if (state.propagated) continue;
                 state.propagated = true;
-                try ranges.append(self.allocator, .{ .start = state.last_write orelse blocks.items[pred].start, .end = blocks.items[pred].end });
-                if (state.last_write == null) try work.append(self.allocator, .{ .loop = false, .index = pred });
+                try ranges.append(self.allocator, .{ .start = state.last_write.get() orelse blocks.items[pred].start, .end = blocks.items[pred].end });
+                if (state.last_write == .none) try work.append(self.allocator, .{ .loop = false, .index = pred });
             }
         }
+        const range_len = compactRanges(ranges.items[range_start..]);
+        ranges.shrinkRetainingCapacity(range_start + range_len);
+        const v = &self.values.items[value];
+        v.range_start = std.math.cast(u32, range_start) orelse return error.OutOfMemory;
+        v.range_len = std.math.cast(u32, range_len) orelse return error.OutOfMemory;
+    }
+}
+
+/// What scanning one block's accesses of a value found.
+const BlockScan = struct {
+    /// The end of the span from the block's start that a read no write in
+    /// the block precedes needs, if there is such a read.
+    needed_until: ?u32,
+    /// The position of the block's last write of the value.
+    last_write: ?u32,
+};
+
+/// Scan one value's accesses within one block, `run`, sorted by position:
+/// append a range from each write to the last read it reaches.
+fn scanBlockAccesses(self: *Self, run: []const Access) Allocator.Error!BlockScan {
+    var scan: BlockScan = .{ .needed_until = null, .last_write = null };
+    var cursor = run.len;
+    while (cursor > 0) {
+        cursor -= 1;
+        const pos = self.nodes.items[run[cursor].node].position;
+        var reads = run[cursor].read;
+        var writes = run[cursor].write;
+        while (cursor > 0 and self.nodes.items[run[cursor - 1].node].position == pos) {
+            cursor -= 1;
+            reads = reads or run[cursor].read;
+            writes = writes or run[cursor].write;
+        }
+        if (writes) {
+            if (scan.last_write == null) scan.last_write = pos;
+            try self.ranges.append(self.allocator, .{ .start = pos, .end = scan.needed_until orelse pos + 1 });
+            scan.needed_until = null;
+        }
+        if (reads and scan.needed_until == null) scan.needed_until = pos + 1;
+    }
+    return scan;
+}
+
+/// `solveLifetimes` for a procedure that is one block no edge enters, whose
+/// positions are its nodes' order from zero and whose accesses are sorted:
+/// each value's ranges are its block scan's, plus the span from the start to
+/// a read that no write precedes.
+fn solveSingleBlockLifetimes(self: *Self) Allocator.Error!void {
+    const ranges = &self.ranges;
+    std.debug.assert(ranges.items.len == 0);
+    const accesses = self.accesses.items;
+    var begin: usize = 0;
+    while (begin < accesses.len) {
+        const value = accesses[begin].value;
+        var end = begin;
+        while (end < accesses.len and accesses[end].value == value) : (end += 1) {}
+        defer begin = end;
+        if (self.values.items[value].size == 0) continue;
+        const range_start = ranges.items.len;
+        const scan = try self.scanBlockAccesses(accesses[begin..end]);
+        if (scan.needed_until) |limit| try ranges.append(self.allocator, .{ .start = 0, .end = limit });
         const range_len = compactRanges(ranges.items[range_start..]);
         ranges.shrinkRetainingCapacity(range_start + range_len);
         const v = &self.values.items[value];
@@ -1127,6 +1181,12 @@ pub fn liveIn(self: *const Self, value: u32, value_accesses: []const Access, at:
     return lifetime.liveIn(at);
 }
 
+/// After `solveLifetimes`, the straight-line block holding `at`: a block is
+/// entered only at its first node and runs its nodes in position order.
+pub fn nodeBlock(self: *const Self, at: u32) u32 {
+    return self.nodes.items[at].blockIndex();
+}
+
 /// The positions at which a solved value is occupied: where it is live on
 /// entry, plus where it is written.
 pub fn liveRanges(self: *const Self, value: u32) []const Range {
@@ -1147,11 +1207,10 @@ pub fn nodeSuccessors(self: *const Self, at: u32) SuccessorIterator {
 /// Walks one node's runtime successors.
 pub const SuccessorIterator = struct {
     plan: *const Self,
-    edge: u32,
+    edge: OptionalU32,
 
     pub fn next(self: *SuccessorIterator) ?u32 {
-        if (self.edge == none) return null;
-        const e = self.plan.edges.items[self.edge];
+        const e = self.plan.edges.items[self.edge.get() orelse return null];
         self.edge = e.next_succ;
         return e.to;
     }
@@ -1179,7 +1238,7 @@ fn valueLess(self: *Self, a: u32, b: u32) bool {
 pub fn resetSlots(self: *Self) void {
     self.slots.clearRetainingCapacity();
     self.class_of_size.clearRetainingCapacity();
-    for (self.values.items) |*value| value.slot = none;
+    for (self.values.items) |*value| value.slot = .none;
 }
 
 /// Assign physical storage to the already solved nonzero-sized values.
@@ -1199,8 +1258,12 @@ pub fn assignSlots(self: *Self) Allocator.Error!void {
     reservations.clearRetainingCapacity();
     var node_count: usize = 0;
     for (order.items) |index| node_count += self.values.items[index].range_len;
-    try self.reservation_nodes.resize(self.allocator, node_count);
-    const nodes = self.reservation_nodes.items;
+    // When every value is one interval, a slot leaves its class's busy queue
+    // only once its last reservation has ended, so every available slot is
+    // free from the value's start on and the last one is the one chosen:
+    // its reservations need no record.
+    const intervals_only = node_count == order.items.len;
+    if (!intervals_only) try self.reservation_nodes.resize(self.allocator, node_count);
     var next_node: usize = 0;
     for (order.items) |index| {
         const value = &self.values.items[index];
@@ -1224,43 +1287,52 @@ pub fn assignSlots(self: *Self) Allocator.Error!void {
             _ = class.busy.pop();
             try class.available.append(self.allocator, busy.slot);
         }
-        var chosen: ?u32 = null;
-        var i = class.available.items.len;
-        while (i > 0) {
-            i -= 1;
-            const slot_index = class.available.items[i];
-            const tree = &reservations.items[slot_index];
-            if (lastStartingBefore(tree, start + 1)) |covering| {
-                if (covering.key.end > start) {
-                    _ = class.available.swapRemove(i);
-                    try class.busy.push(self.allocator, .{ .end = covering.key.end, .slot = slot_index });
-                    continue;
-                }
-            }
-            if (reservationsOverlap(tree, ranges)) continue;
-            chosen = slot_index;
-            _ = class.available.swapRemove(i);
-            break;
-        }
+        const chosen = if (intervals_only) class.available.pop() else try self.takeReservableSlot(class, ranges);
         const slot_index = chosen orelse blk: {
             const next: u32 = @intCast(self.slots.items.len);
             try self.slots.append(self.allocator, .{ .size = value.size });
-            try reservations.append(self.allocator, .{});
+            if (!intervals_only) try reservations.append(self.allocator, .{});
             break :blk next;
         };
-        const tree = &reservations.items[slot_index];
-        for (ranges) |range| {
-            const reservation = &nodes[next_node];
-            next_node += 1;
-            var slot_entry = tree.getEntryFor(range);
-            std.debug.assert(slot_entry.node == null);
-            slot_entry.set(reservation);
+        if (!intervals_only) {
+            const tree = &reservations.items[slot_index];
+            for (ranges) |range| {
+                const reservation = &self.reservation_nodes.items[next_node];
+                next_node += 1;
+                var slot_entry = tree.getEntryFor(range);
+                std.debug.assert(slot_entry.node == null);
+                slot_entry.set(reservation);
+            }
         }
-        value.slot = slot_index;
+        value.slot = .some(slot_index);
         // The value's own first range is the slot's earliest live reservation:
         // an earlier one would have overlapped `start`.
         try class.busy.push(self.allocator, .{ .end = ranges[0].end, .slot = slot_index });
     }
+}
+
+/// Take the last available slot of `class` whose reservations leave `ranges`
+/// free, moving each slot found occupied at the first range's start back to
+/// the busy queue.
+fn takeReservableSlot(self: *Self, class: *SizeClass, ranges: []const Range) Allocator.Error!?u32 {
+    const start = ranges[0].start;
+    var i = class.available.items.len;
+    while (i > 0) {
+        i -= 1;
+        const slot_index = class.available.items[i];
+        const tree = &self.reservations.items[slot_index];
+        if (lastStartingBefore(tree, start + 1)) |covering| {
+            if (covering.key.end > start) {
+                _ = class.available.swapRemove(i);
+                try class.busy.push(self.allocator, .{ .end = covering.key.end, .slot = slot_index });
+                continue;
+            }
+        }
+        if (reservationsOverlap(tree, ranges)) continue;
+        _ = class.available.swapRemove(i);
+        return slot_index;
+    }
+    return null;
 }
 
 /// The reservation with the greatest start below `limit`.
@@ -1298,7 +1370,10 @@ fn testLocal(index: u32) LocalId {
 test "stack plan matches exact liveness on generated typed scalar graphs" {
     var rng = std.Random.DefaultPrng.init(0x11448);
     const random = rng.random();
-    for (0..100) |_| {
+    for (0..100) |iteration| {
+        // Every fourth graph is one straight-line block, which the planner
+        // solves without a block structure.
+        const straight_line = iteration % 4 == 3;
         var plan = init(std.testing.allocator);
         defer plan.deinit();
         const count = 20;
@@ -1325,7 +1400,7 @@ test "stack plan matches exact liveness on generated typed scalar graphs" {
         for (0..count - 1) |i| {
             try plan.edge(@intCast(i), @intCast(i + 1));
             successors[i] |= @as(u32, 1) << @intCast(i + 1);
-            if (i > 0 and random.boolean()) {
+            if (!straight_line and i > 0 and random.boolean()) {
                 const next = 1 + random.uintLessThan(u32, count - 1);
                 try plan.edge(@intCast(i), next);
                 successors[i] |= @as(u32, 1) << @intCast(next);

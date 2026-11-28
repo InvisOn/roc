@@ -4,6 +4,204 @@ const std = @import("std");
 const CIR = @import("can").CIR;
 const TestEnv = @import("./TestEnv.zig");
 
+fn expectNominalParameters(env: *const TestEnv, name: []const u8, declared: u32, context: u16) error{ TestExpectedEqual, TestUnexpectedResult }!void {
+    for (env.module_env.types.nominal_decls.items()) |decl| {
+        if (!std.mem.eql(u8, env.module_env.getIdent(decl.ident.ident_idx), name)) continue;
+        try std.testing.expectEqual(context, decl.flags.context_len);
+        try std.testing.expectEqual(declared + context, decl.formals.count);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+// https://github.com/roc-lang/roc/issues/13347
+test "check - issue 13347 - platform declarations take the abstract types they reach as context" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for main : model }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "entry": entry }
+        \\
+        \\Direct := { model : Model }
+        \\
+        \\Inner : { model : Model }
+        \\
+        \\ThroughAlias(a) := { inner : Inner, extra : a }
+        \\
+        \\ThroughNominal := [Wrapped(ThroughAlias(U64))]
+        \\
+        \\ThroughLater := [Earlier(Later)]
+        \\
+        \\Later := [Later(Model), Stop]
+        \\
+        \\Recursive := [Leaf(Model), Node(Recursive, Recursive)]
+        \\
+        \\Independent(a) := [Independent(a)]
+        \\
+        \\entry : U64 -> U64
+        \\entry = |n| n
+    );
+    defer env.deinit();
+    try env.assertNoErrors();
+    try expectNominalParameters(&env, "Direct", 0, 1);
+    try expectNominalParameters(&env, "ThroughAlias", 1, 1);
+    try expectNominalParameters(&env, "ThroughNominal", 0, 1);
+    try expectNominalParameters(&env, "ThroughLater", 0, 1);
+    try expectNominalParameters(&env, "Later", 0, 1);
+    try expectNominalParameters(&env, "Recursive", 0, 1);
+    try expectNominalParameters(&env, "Independent", 1, 0);
+}
+
+test "check - issue 13347 - a platform nominal's arity counts its declared parameters only" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for main : model }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "entry": entry }
+        \\
+        \\S := { model : Model }
+        \\
+        \\f : S(U64) -> U64
+        \\f = |_| 0
+        \\
+        \\entry : U64 -> U64
+        \\entry = |n| n
+    );
+    defer env.deinit();
+    try std.testing.expectEqual(@as(usize, 1), try env.typeProblemCount());
+}
+
+test "check - issue 13347 - a platform's body-local declaration takes the abstract type beside its function's variable" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for main : model }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "entry": entry }
+        \\
+        \\wrapped : a -> Str
+        \\wrapped = |x| {
+        \\    Both := [Both(a, Model)]
+        \\    OnlyModel := [OnlyModel(Model)]
+        \\    _only = OnlyModel.OnlyModel(main)
+        \\    Str.inspect([Both.Both(x, main)])
+        \\}
+        \\
+        \\entry : U64 -> U64
+        \\entry = |n| n
+    );
+    defer env.deinit();
+    try env.assertNoErrors();
+    try expectNominalParameters(&env, "Both", 0, 2);
+    try expectNominalParameters(&env, "OnlyModel", 0, 1);
+}
+
+test "check - issue 13347 - a platform nominal over the platform abstract type prints without its context" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for main : model }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "entry": entry }
+        \\
+        \\S := { model : Model }
+        \\
+        \\entry : {} -> S
+        \\entry = |{}| { model: main }
+    );
+    defer env.deinit();
+    try env.assertNoErrors();
+    try env.assertDefType("entry", "{} -> S");
+}
+
+test "check - issue 13347 - a platform nominal's declared parameter stays independent of its context" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for main : model }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "entry": entry }
+        \\
+        \\P(a) := { model : Model, extra : a }
+        \\
+        \\with_num : P(U64)
+        \\with_num = { model: main, extra: 1 }
+        \\
+        \\with_str : P(Str)
+        \\with_str = { model: main, extra: "s" }
+        \\
+        \\entry : {} -> P(Str)
+        \\entry = |{}| with_str
+    );
+    defer env.deinit();
+    try env.assertNoErrors();
+    try env.assertDefType("with_num", "P(U64)");
+    try env.assertDefType("with_str", "P(Str)");
+}
+
+test "check - issue 13347 - a platform nominal's field of the platform abstract type is not another type" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for main : model }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "entry": entry }
+        \\
+        \\S := { model : Model }
+        \\
+        \\f : S -> Str
+        \\f = |s| s.model
+        \\
+        \\entry : U64 -> U64
+        \\entry = |n| n
+    );
+    defer env.deinit();
+    try env.assertOneTypeError("Type Mismatch");
+}
+
+// https://github.com/roc-lang/roc/issues/13263
+test "check - repro - issue 13263 - chained aliases preserve the platform abstract type" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for main : model -> U64 }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "entry": entry }
+        \\
+        \\Inner : Model
+        \\Outer : Inner
+        \\
+        \\f : Outer -> Str
+        \\f = |x| x
+        \\
+        \\entry : U64 -> U64
+        \\entry = |n| n
+    );
+    defer env.deinit();
+    try env.assertOneTypeError("Type Mismatch");
+}
+
+test "check - issue 13263 - a declaration cannot generalize a platform host entrypoint" {
+    var env = try TestEnv.init("Platform",
+        \\platform ""
+        \\    requires { [Model : model] for program : { init : {} -> Box(model) } }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "roc_init": init_for_host, "roc_release": release_for_host }
+        \\
+        \\init_for_host = program.init
+        \\release_for_host : Box(Model) -> {}
+        \\release_for_host = |_model| {}
+        \\
+        \\Inner : Model
+        \\Outer : Inner
+    );
+    defer env.deinit();
+    try env.assertNoErrors();
+}
+
 // https://github.com/roc-lang/roc/issues/11938
 test "check - repro - issue 11938 - undeclared local annotation becomes a runtime error" {
     const src =
@@ -371,7 +569,7 @@ test "check - repro - issue 9693 - polymorphic helper method constraints are not
         \\
         \\char_value = |char, index| {
         \\    if char >= '0' and char <= '9' {
-        \\        Ok((10 - index) * (char - '0').to_u64())
+        \\        Ok((10.U64 - index) * (char - '0').to_u64())
         \\    } else {
         \\        Err(BadChar)
         \\    }
@@ -1002,7 +1200,7 @@ test "check - issue 11271 - polymorphic calls retain every omitted-default const
         var env = try TestEnv.init("Test", source);
         defer env.deinit();
         try env.assertDefType("xs", "List(Config)");
-        const omissions = env.module_env.record_omitted_defaults.items.items;
+        const omissions = env.module_env.record_omitted_defaults.items();
         try std.testing.expectEqual(case.fields_per_owner * case.owners, omissions.len);
         for (omissions) |omission| {
             const expr = env.module_env.store.getExpr(omission.expr);
@@ -1059,7 +1257,7 @@ test "check - issue 11271 - polymorphic omission preserves independent nominal a
     defer env.deinit();
     try env.assertDefType("numbers", "Config(U8)");
     try env.assertDefType("strings", "Config(Str)");
-    try std.testing.expectEqual(2, env.module_env.record_omitted_defaults.items.items.len);
+    try std.testing.expectEqual(2, env.module_env.record_omitted_defaults.items().len);
 }
 
 test "check - issue 11271 - merged constructions retain recursive-default rejection" {
@@ -1084,7 +1282,7 @@ test "check - issue 11024 - nested empty literals own their omitted defaults" {
     defer env.deinit();
     try env.assertDefType("xs", "List(Foo)");
 
-    const omissions = env.module_env.record_omitted_defaults.items.items;
+    const omissions = env.module_env.record_omitted_defaults.items();
     try std.testing.expectEqual(4, omissions.len);
     for (omissions) |omission| {
         try std.testing.expect(env.module_env.store.getExpr(omission.expr) == .e_empty_record);
@@ -1248,8 +1446,7 @@ test "check - repro - issue 11398 - annotated lambda return mismatch points at t
     try test_env.assertOneTypeError("Type Mismatch");
 
     const problem = test_env.checker.problems.problems.items[0];
-    const actual_var = problem.type_mismatch.types.actual_var;
-    const region = test_env.checker.regions.get(@fromBackingInt(@intCast(@backingInt(actual_var)))).*;
+    const region = problem.type_mismatch.actual_region;
     try std.testing.expectEqualStrings("{}", test_env.module_env.getSource(region));
 }
 
@@ -1260,8 +1457,7 @@ fn expectOneMismatchAt(src: []const u8, expected_region_text: []const u8) TestEn
     try test_env.assertOneTypeError("Type Mismatch");
 
     const problem = test_env.checker.problems.problems.items[0];
-    const actual_var = problem.type_mismatch.types.actual_var;
-    const region = test_env.checker.regions.get(@fromBackingInt(@intCast(@backingInt(actual_var)))).*;
+    const region = problem.type_mismatch.actual_region;
     try std.testing.expectEqualStrings(expected_region_text, test_env.module_env.getSource(region));
 }
 
@@ -1646,4 +1842,376 @@ test "check - issue 12521 - a hashed row tail that is also a value type is close
     var test_env = try TestEnv.init("Test", src);
     defer test_env.deinit();
     try test_env.assertNoErrors();
+}
+
+// https://github.com/roc-lang/roc/issues/13244
+test "check - repro - issue 13244 - a match replaced by a runtime error still reports its missing patterns" {
+    const src =
+        \\f = {
+        \\    var $s = match B {
+        \\        C(_) => 0
+        \\    }
+        \\    $s = S($s)
+        \\    0
+        \\}
+    ;
+
+    var test_env = try TestEnv.init("Test", src);
+    defer test_env.deinit();
+
+    try test_env.assertHasTypeError("Non Exhaustive Match");
+    try test_env.assertHasTypeError("Anonymous Recursion");
+}
+
+test "check - repro - issue 13244 - unmatchable pattern report reads a match replaced by a runtime error" {
+    const src =
+        \\f = {
+        \\    x : Try(U64, [])
+        \\    x = Ok(1)
+        \\    var $s = match x {
+        \\        Ok(_) => 0
+        \\        Err(_) => 1
+        \\    }
+        \\    $s = S($s)
+        \\    0
+        \\}
+    ;
+
+    var test_env = try TestEnv.init("Test", src);
+    defer test_env.deinit();
+
+    try test_env.assertHasTypeError("Unmatchable Pattern");
+    try test_env.assertHasTypeError("Anonymous Recursion");
+}
+
+// https://github.com/roc-lang/roc/issues/13236
+test "check - repro - issue 13236 - a parameter sharing an unmatchable tag's payload keeps its own type" {
+    const src =
+        \\f = |n| match Oops {
+        \\    Oops => n
+        \\    Zero(p) => p
+        \\}
+        \\
+        \\x : U64
+        \\x = f(1.U64)
+        \\
+        \\y : Str
+        \\y = f("a")
+    ;
+    var test_env = try TestEnv.init("Test", src);
+    defer test_env.deinit();
+    try test_env.assertTypeErrorTitles(&.{ "Unconditional Condition", "Unmatchable Pattern" });
+    try test_env.assertDefTypeOptions("f", "a -> a", .{ .allow_type_errors = true });
+}
+
+test "check - repro - issue 13236 - a local function sharing an unmatchable tag's payload keeps its own type" {
+    const src =
+        \\x : U64
+        \\x = {
+        \\    f = |n| match Oops {
+        \\        Oops => n
+        \\        Zero(p) => p
+        \\    }
+        \\    f(1.U64)
+        \\}
+    ;
+    var test_env = try TestEnv.init("Test", src);
+    defer test_env.deinit();
+    try std.testing.expectEqual(@as(usize, 0), try test_env.typeProblemCount());
+    try test_env.assertHasTypeError("Unmatchable Pattern");
+}
+
+/// Every way to write a function whose body builds only `Ok`: unannotated, or
+/// with an error row that is a hole or a named variable, ignored or not.
+const issue_13237_signatures = [_][]const u8{
+    "",
+    "f : U64 -> Try(U64, _)\n",
+    "f : U64 -> Try(U64, _e)\n",
+    "f : U64 -> Try(U64, e)\n",
+};
+const issue_13237_bodies = [_][]const u8{
+    "f = |n| if n == 0 Ok(0.U64) else Ok(n)\n",
+    "f = |n| Ok(n)\n",
+};
+
+fn expectEveryOkOnlyFunctionAccepts(comptime uses: []const u8) TestEnv.TestEnvError!void {
+    inline for (issue_13237_signatures) |signature| {
+        inline for (issue_13237_bodies) |body| {
+            var test_env = try TestEnv.init("Test", signature ++ body ++ "\n" ++ uses);
+            defer test_env.deinit();
+            test_env.assertNoErrors() catch |err| {
+                std.debug.print("rejected:\n{s}{s}\n{s}\n", .{ signature, body, uses });
+                return err;
+            };
+        }
+    }
+}
+
+// https://github.com/roc-lang/roc/issues/13237
+test "check - repro - issue 13237 - an all-Ok function's result is used at a wider error row" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\x : Try(U64, [B])
+        \\x = f(1.U64)
+    );
+}
+
+test "check - repro - issue 13237 - an all-Ok function's result is forwarded into a wider error row" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\h : U64 -> Try(U64, [B])
+        \\h = |n| f(n)
+    );
+}
+
+test "check - repro - issue 13237 - an all-Ok function's result is unwrapped with ? inside a wider error row" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\h : U64 -> Try(U64, [B])
+        \\h = |n| {
+        \\    v = f(n)?
+        \\    if v == 7 Err(B) else Ok(v)
+        \\}
+    );
+}
+
+test "check - repro - issue 13237 - an all-Ok function's result is a local value with a wider error row" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\h : U64 -> Bool
+        \\h = |n| {
+        \\    x : Try(U64, [B])
+        \\    x = f(n)
+        \\    x == Ok(1.U64)
+        \\}
+    );
+}
+
+test "check - repro - issue 13237 - an all-Ok function's result joins a branch that builds an Err" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\h : U64 -> Bool
+        \\h = |n| {
+        \\    x = if n == 3 Err(B) else f(n)
+        \\    x == Ok(1.U64)
+        \\}
+    );
+}
+
+test "check - repro - issue 13237 - an Ok-only match on an all-Ok function's result is exhaustive" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\g : U64 -> U64
+        \\g = |n| match f(n) {
+        \\    Ok(v) => v
+        \\}
+    );
+}
+
+test "check - repro - issue 13237 - an Ok-only match on a local holding an all-Ok function's result is exhaustive" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\g : U64 -> U64
+        \\g = |n| {
+        \\    r = f(n)
+        \\    match r {
+        \\        Ok(v) => v
+        \\    }
+        \\}
+    );
+}
+
+test "check - repro - issue 13237 - each use of an all-Ok function decides its own error row" {
+    try expectEveryOkOnlyFunctionAccepts(
+        \\x : Try(U64, [B])
+        \\x = f(1.U64)
+        \\
+        \\y : Try(U64, [C(Str)])
+        \\y = f(2.U64)
+        \\
+        \\g : U64 -> U64
+        \\g = |n| match f(n) {
+        \\    Ok(v) => v
+        \\}
+    );
+}
+
+test "check - repro - issue 13237 - an all-Ok function keeps its error row generalized" {
+    inline for (issue_13237_bodies) |body| {
+        var test_env = try TestEnv.init("Test", "f : U64 -> Try(U64, _)\n" ++ body);
+        defer test_env.deinit();
+        try test_env.assertDefType("f", "U64 -> Try(U64, _a)");
+    }
+}
+
+test "check - repro - issue 13237 - an empty error row in the annotation stays empty" {
+    const signature = "f : U64 -> Try(U64, [])\nf = |n| if n == 0 Ok(0.U64) else Ok(n)\n\n";
+    {
+        var test_env = try TestEnv.init("Test", signature ++
+            \\x : Try(U64, [B])
+            \\x = f(1.U64)
+        );
+        defer test_env.deinit();
+        try test_env.assertOneTypeError("Type Mismatch");
+    }
+    {
+        var test_env = try TestEnv.init("Test", signature ++
+            \\g : U64 -> U64
+            \\g = |n| match f(n) {
+            \\    Ok(v) => v
+            \\}
+        );
+        defer test_env.deinit();
+        try test_env.assertNoErrors();
+    }
+}
+
+test "check - repro - issue 13237 - an early Err return keeps the error row" {
+    const signature =
+        \\f : U64 -> Try(U64, _)
+        \\f = |n| {
+        \\    if n == 9 {
+        \\        return Err(Nine)
+        \\    }
+        \\    if n == 0 Ok(0.U64) else Ok(n)
+        \\}
+        \\
+        \\
+    ;
+    {
+        var test_env = try TestEnv.init("Test", signature ++
+            \\x : Try(U64, [Nine, B])
+            \\x = f(1.U64)
+        );
+        defer test_env.deinit();
+        try test_env.assertNoErrors();
+    }
+    {
+        var test_env = try TestEnv.init("Test", signature ++
+            \\g : U64 -> U64
+            \\g = |n| match f(n) {
+            \\    Ok(v) => v
+            \\}
+        );
+        defer test_env.deinit();
+        try test_env.assertOneTypeError("Non Exhaustive Match");
+    }
+}
+
+test "check - repro - issue 13237 - an Ok-only match on a parameter needs an Err branch" {
+    inline for ([_][]const u8{ "err", "_err", "_" }) |error_row| {
+        var test_env = try TestEnv.init("Test", "g : Try(I64, " ++ error_row ++ ") -> I64\n" ++
+            \\g = |t| match t {
+            \\    Ok(v) => v
+            \\}
+        );
+        defer test_env.deinit();
+        try test_env.assertOneTypeError("Non Exhaustive Match");
+    }
+}
+
+test "check - repro - issue 13237 - an Ok-only destructure of a parameter needs an Err branch" {
+    var test_env = try TestEnv.init("Test",
+        \\g : Try(I64, err) -> I64
+        \\g = |t| {
+        \\    Ok(v) = t
+        \\    v
+        \\}
+    );
+    defer test_env.deinit();
+    try test_env.assertOneTypeError("Non Exhaustive Destructure");
+}
+
+test "check - repro - issue 13237 - an Err branch on an all-Ok function's result leaves the error row undecided" {
+    var test_env = try TestEnv.init("Test",
+        \\f : U64 -> Try(U64, e)
+        \\f = |n| Ok(n)
+        \\
+        \\g : U64 -> U64
+        \\g = |n| match f(n) {
+        \\    Ok(v) => v
+        \\    Err(_) => 0
+        \\}
+    );
+    defer test_env.deinit();
+    try test_env.assertNoErrors();
+}
+
+test "check - repro - issue 13237 - a constant's undecided error payload is quantified" {
+    // The payload variable carries no requirement, so the constant quantifies
+    // it (design.md "Polymorphic Constants"); the `expect` closes its own
+    // copy.
+    var test_env = try TestEnv.init("Test",
+        \\x : Try(I64, _)
+        \\x = Ok(42)
+        \\
+        \\expect x == Ok(42)
+    );
+    defer test_env.deinit();
+    try test_env.assertNoErrors();
+    try test_env.assertDefType("x", "Try(I64, _a)");
+}
+
+test "check - repro - issue 13237 - a use deciding a constant's payload decides only its own copy" {
+    var test_env = try TestEnv.init("Test",
+        \\x : Try(I64, _)
+        \\x = Ok(42)
+        \\
+        \\y : Try(I64, [B])
+        \\y = x
+    );
+    defer test_env.deinit();
+    try test_env.assertNoErrors();
+    try test_env.assertDefType("x", "Try(I64, _a)");
+}
+
+test "check - repro - issue 13237 - a named and an ignored payload variable behave the same" {
+    inline for ([_][]const u8{ "payload", "_payload" }) |name| {
+        var test_env = try TestEnv.init("Test", "g : [Something, Other(" ++ name ++ ")] -> I64\n" ++
+            \\g = |x| match x {
+            \\    Something => 1
+            \\}
+        );
+        defer test_env.deinit();
+        try test_env.assertOneTypeError("Non Exhaustive Match");
+    }
+}
+
+test "check - repro - issue 13372 - a construction typed through an alias owns its omitted defaults" {
+    const cases = [_]struct { source: []const u8, omissions: usize }{
+        // The default `{}` is checked at `Environment`, an alias of `Boot`.
+        .{ .omissions = 2, .source =
+        \\Boot := { url : Str ?? "/" }
+        \\Environment : Boot
+        \\Spec := { environment : Environment ?? {} }
+        \\spec : Spec
+        \\spec = Spec.{}
+        },
+        // An annotation naming the alias.
+        .{ .omissions = 1, .source =
+        \\Boot := { url : Str ?? "/" }
+        \\Environment : Boot
+        \\value : Environment
+        \\value = {}
+        },
+        // A chain of aliases, with a supplied field beside the omitted one.
+        .{ .omissions = 1, .source =
+        \\Boot := { url : Str ?? "/", port : U16 ?? 80 }
+        \\Environment : Boot
+        \\Outer : Environment
+        \\value : Outer
+        \\value = { port: 8080 }
+        },
+        // A parameterized alias.
+        .{ .omissions = 1, .source =
+        \\Boot(a) := { items : List(a) ?? [] }
+        \\Environment(a) : Boot(a)
+        \\value : Environment(U8)
+        \\value = {}
+        },
+    };
+    for (cases) |case| {
+        var env = try TestEnv.init("Test", case.source);
+        defer env.deinit();
+        try env.assertNoErrors();
+        const omissions = env.module_env.record_omitted_defaults.items();
+        try std.testing.expectEqual(case.omissions, omissions.len);
+        for (omissions) |omission| {
+            const expr = env.module_env.store.getExpr(omission.expr);
+            try std.testing.expect(expr == .e_empty_record or expr == .e_record);
+        }
+    }
 }

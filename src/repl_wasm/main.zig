@@ -122,7 +122,8 @@ const RequestError = ReplSession.ReplInitError ||
 fn ensureSession() ReplSession.ReplInitError!*ReplSession {
     if (repl_session == null) {
         const roc_ctx = CoreCtx.default(allocator, allocator, @as(std.Io, undefined));
-        repl_session = try ReplSession.initVirtual(allocator, roc_ctx, .interpreter, .lss);
+        // A REPL evaluation is a compile-time root with no runtime consumer.
+        repl_session = try ReplSession.initVirtual(allocator, roc_ctx, .interpreter, .boxy);
     }
     return &repl_session.?;
 }
@@ -205,8 +206,7 @@ fn inputMetadata(info: ReplSession.InputInfo) SnippetMetadata {
 }
 
 fn advanceRevision() error{RevisionExhausted}!u32 {
-    if (session_revision == std.math.maxInt(u32)) return error.RevisionExhausted;
-    session_revision += 1;
+    session_revision = std.math.add(u32, session_revision, 1) catch return error.RevisionExhausted;
     return session_revision;
 }
 

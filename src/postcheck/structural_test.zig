@@ -382,7 +382,7 @@ test "Monotype generated-private selection cannot become ordinary or reopen fini
     const request_selection = sourceSliceBetween(
         lower_source,
         "fn selectRequestRepresentation(",
-        "const ClosedResultRow = struct",
+        "fn checkedResultRowIsClosed(",
     );
     try expectContains(request_selection, "containsFinishedMono(public_node)");
     try expectContains(request_selection, "containsFinishedMono(private_node)");
@@ -439,33 +439,6 @@ test "Monotype draft local identity stays graph-native" {
     try expectContains(identity, "rhs_data.ty.toGraphNode(self.graph)");
     try expectContains(identity, "self.graph.sameClass(lhs_node, rhs_node)");
     try expectNotContains(identity, "activeTypeFromCell");
-}
-
-test "Monotype iterator result completion stays out of relation replay and retains public request lookups" {
-    const lower_source = @embedFile("monotype/lower.zig");
-    const dispatch_result = sourceSliceBetween(
-        lower_source,
-        "fn stepDispatchResult(",
-        "fn stepCallResult(",
-    );
-    try expectContains(dispatch_result, "if (task.phase == .expression_lowering)");
-    try expectContains(dispatch_result, "lowerAndCompleteIteratorMethodResultAtNode(");
-
-    const completion = sourceSliceBetween(
-        lower_source,
-        "fn completeDeferredIteratorResult(",
-        "fn constUseMonoType(",
-    );
-    try expectContains(completion, "try updateTemplateSpecInterfaceLookups(");
-    try expectContains(completion, "completed_source.evidence_digest.bytes");
-    try expectNotContains(completion, "unregisterTemplateSpec");
-
-    const template_spec = sourceSliceBetween(
-        lower_source,
-        "const DraftTemplateSpec = struct",
-        "const DraftConstUseProvenance",
-    );
-    try expectContains(template_spec, "lookup_request_fn_node: solve.MaybeNodeId");
 }
 
 test "Monotype direct uninhabited calls lower argument through graph cell" {
@@ -542,7 +515,22 @@ test "Monotype gates divergent relations and crash dispatches before type instan
     try expectContains(crash_dispatch, ".crash => |reason|");
     try expectContains(crash_dispatch, "addExprWithTypeCell(expected_ret_cell");
     try expectNotContains(crash_dispatch, "unitType()");
-    try expectNotContains(crash_dispatch, "plan.callable_ty");
+    // Only a statically closed procedure may consult its callable type before
+    // the crash gate, because a closed resolution is never a crash dispatch.
+    const before_closed_arm = sourceSliceBetween(crash_dispatch, "fn stepDispatchLower(", ".direct_closed => |direct| {");
+    const parametric_arm_index = std.mem.find(u8, crash_dispatch, ".direct_parametric => |direct| {") orelse
+        return error.TestUnexpectedResult;
+    const after_closed_arm = crash_dispatch[parametric_arm_index..];
+    try expectNotContains(before_closed_arm, "plan.callable_ty");
+    try expectNotContains(after_closed_arm, "plan.callable_ty");
+    const closed_procedure_arm = sourceSliceBetween(crash_dispatch, ".procedure => {", ".intrinsic => {},");
+    try expectContains(closed_procedure_arm, "self.closedCallRepresentation(plan.callable_ty, true)");
+    const crash_reason = sourceSliceBetween(
+        lower_source,
+        "fn dispatchCrashReason(",
+        "fn methodLookupForEvidenceNode(",
+    );
+    try expectContains(crash_reason, ".direct_closed, .direct_parametric, .structural => null,");
 
     const contextual_gate = sourceSliceBetween(
         lower_source,
@@ -774,8 +762,6 @@ test "Monotype open specialization lookup covers the complete function interface
         try expectContains(lookup_source, "source_ctx.runtimeDemandGuardFrameAddresses()");
         try expectContains(lookup_source, "if (!selection.add(raw_spec, exact_interface))");
         try expectContains(lookup_source, "if (selection.selected()) |raw_spec|");
-        try expectContains(lookup_source, "try source_ctx.graph.unifyRecursiveFunctionInterface(");
-        try expectContains(lookup_source, "spec.initial_request_arg_classes");
         try expectNotContains(lookup_source, "functionInterfaceAnchor");
     }
     try expectContains(template_source, "template_spec_lookup.openPairs(lookup_prefix)");
@@ -1042,7 +1028,7 @@ test "Monotype closed direct low-level lowering stays sealed and allocation disc
         "fn sourceLocFor(",
         "fn sourceRegionForExpr(",
     );
-    try expectContains(source_mapping, ".file = self.source_file_id");
+    try expectContains(source_mapping, ".file = .some(self.source_file_id");
     try expectNotContains(source_mapping, "sourceFileIdFor");
 
     const proof_fold = sourceSliceBetween(
@@ -1194,7 +1180,7 @@ test "Monotype iterator One bodies preserve explicit reachability guard frames" 
         "fn beginIteratorOneBranch(",
         "fn finishIteratorLoop(",
     );
-    try expectContains(iterator, "self.constrainCheckedInterfaceToCell(self.view.bodies.pattern(for_.pattern).ty, item_cell)");
+    try expectContains(iterator, "self.constrainCheckedInterfaceToCell(self.view.bodies.patternType(for_.pattern), item_cell)");
     try expectContains(iterator, "self.withIteratorOneRuntimeDemandGuardFrame(for_.pattern, step)");
     try expectContains(iterator, "task.one_guard_frames = self.runtime_demand_guard_frames");
     try expectContains(lower_source, "self.runtime_demand_guard_frames = task.one_guard_frames");
@@ -1292,10 +1278,10 @@ test "Monotype recursive materialization predicate stays paired with graph shell
         "fn patternNeedsExplicitBinding(",
         "const CheckedPatternRefutabilityAdapter",
     );
-    try expectContains(predicate, ".as => |as| try children.append(self.allocator, as.pattern)");
-    try expectContains(predicate, ".applied_tag => |tag|");
-    try expectContains(predicate, ".nominal => |nominal| try children.append(self.allocator, nominal.backing_pattern)");
-    try expectContains(predicate, ".tuple => |items|");
+    try expectContains(predicate, ".as => try children.append(self.allocator, self.view.bodies.patternDataOf(pattern_id, .as).pattern)");
+    try expectContains(predicate, ".applied_tag => try children.appendSlice(self.allocator, self.view.bodies.patternDataOf(pattern_id, .applied_tag).args)");
+    try expectContains(predicate, ".nominal => try children.append(self.allocator, self.view.bodies.patternDataOf(pattern_id, .nominal).backing_pattern)");
+    try expectContains(predicate, ".tuple => try children.appendSlice(self.allocator, self.view.bodies.patternDataOf(pattern_id, .tuple))");
     try expectContains(predicate, "patternRequiresOwnMaterialization");
     try expectContains(predicate, "recordDestructsHaveOptionalField");
 
@@ -1365,9 +1351,19 @@ test "Monotype returns consume the active specialization return cell" {
         "fn stepReturn(",
         "const InspectedTask = struct",
     );
-    try expectContains(lower_source, "self.current_return_target = .{ .lambda = lambda_id, .cell = body_ret_cell }");
+    try expectContains(lower_source, "self.current_return_target = .{ .lambda = lambda_id, .cell = body_ret_cell, .output = return_output }");
     try expectContains(lower_return, "task.lambda != target.lambda");
     try expectContains(lower_return, "requestLowerChild(self, task.expr, target.cell)");
+    // A return names its lambda's result, which the lambda settles once its
+    // body has selected an output witness.
+    try expectContains(lower_return, "task.target = target.output");
+    try expectNotContains(lower_return, "task.target = target.cell");
+    const finish_lambda = sourceSliceBetween(
+        lower_source,
+        "fn finishLambdaLowering(",
+        "fn restoreLambdaLowering(",
+    );
+    try expectContains(finish_lambda, "self.draft.return_targets.items[@backingInt(lowering.return_output)] = produced_ret_cell");
     try expectNotContains(lower_source, "returnTargetTypeCell");
 
     const lambda_node = sourceSliceBetween(
@@ -1419,7 +1415,7 @@ test "Monotype evidence chains retain checker-recorded lexical scope topology" {
     try expectNotContains(lower_source, "parent.* = source_ctx.evidence");
     try expectNotContains(lower_source, "publicOpaqueUnificationType");
     try expectContains(lower_source, "const EvidenceScope = struct");
-    try expectContains(lower_source, "const scope_record = view.templates.dispatch_scopes[raw_scope]");
+    try expectContains(lower_source, "const scope_record = view.templates.dispatch_scopes.items()[raw_scope]");
     try expectContains(lower_source, "context.evidence");
     try expectContains(lower_source, "const_evidence_frames");
 
@@ -1731,30 +1727,6 @@ test "post-check invariant helper is failure-only" {
     try std.testing.expect(fn_info.return_type.? == noreturn);
 }
 
-test "hoist-preserving iterator producers are reachable through their method names" {
-    // The checker pre-filters hoist classification on
-    // `hoist_preserving_method_names` before resolving a receiver, so every
-    // producer that answers "preserves hoistable source input" must be
-    // reachable through one of those names; one that is not would silently
-    // stop having its receiver hoisted. This lives here because the type
-    // checker's own sources may not compare strings.
-    const registry = check.StaticDispatchRegistry;
-    for (registry.iterator_procedure_names) |entry| {
-        if (!entry[1].preservesHoistableSourceInput()) continue;
-        const qualified_name = entry[0];
-        const start = if (std.mem.findScalarLast(u8, qualified_name, '.')) |dot| dot + 1 else 0;
-        const method = qualified_name[start..];
-        var reachable = false;
-        for (registry.hoist_preserving_method_names) |candidate| {
-            if (std.mem.eql(u8, method, candidate)) reachable = true;
-        }
-        if (!reachable) {
-            std.debug.print("unreachable hoist-preserving producer: {s}\n", .{qualified_name});
-        }
-        try std.testing.expect(reachable);
-    }
-}
-
 test "value rules have one definition site" {
     // Inspection, structural equality and hashing, and `to_inspect` override
     // selection are defined once, in `value_rules/`, for both lowering
@@ -2026,19 +1998,10 @@ test "post-check lowerers define no helper twice with near-identical bodies" {
     // parameters, so any name defined twice with near-identical bodies is
     // either listed here, with its reason, or a copy to extract.
     const intended_per_scope = [_][]const u8{
-        // The const-restorer interface `runConstRestore` walks over: each
-        // scope's own expression store, id types, and node bookkeeping.
-        "constEmit",
-        "constNameStore",
-        "constTypeStore",
-        "finishConstRestoreLayer",
-        "finishConstRestoreData",
         // Each scope's emission primitives into its own expression store
-        // (`Ast.Program` for `Builder`, the body draft for `BodyContext`),
-        // and each store's record of a restored root read.
+        // (`Ast.Program` for `Builder`, the body draft for `BodyContext`).
         "localExpr",
         "bindPat",
-        "recordRestoredRootRead",
         // `AnyAll.Evaluation` leaf policies and the `EqDeriver` /
         // `HashDeriver` walker callbacks: one generic walk, one policy
         // struct per question.
@@ -2054,9 +2017,10 @@ test "post-check lowerers define no helper twice with near-identical bodies" {
         "leaf",
         "namedEnter",
         "tagPayloadOperand",
+        "tagUnionEnter",
         "tagUnionExit",
         // Conventional method names on unrelated types (sort orders,
-        // lifecycle, map access, timing scopes, worker task entry points).
+        // lifecycle, map access, timing scopes).
         "lessThan",
         "init",
         "deinit",
@@ -2065,7 +2029,6 @@ test "post-check lowerers define no helper twice with near-identical bodies" {
         "contains",
         "get",
         "childCount",
-        "run",
         // Hash map context equality over two key representations.
         "eql",
     };

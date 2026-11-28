@@ -131,7 +131,7 @@ expect f(["a"]) == "x"
 			(e-block
 				(s-let
 					(p-assign (ident "inner"))
-					(e-dispatch-call (method "map") (constraint-fn-var 287)
+					(e-dispatch-call (method "map") (constraint-fn-var 269)
 						(receiver
 							(e-lookup-local
 								(p-assign (ident "list"))))
@@ -144,7 +144,7 @@ expect f(["a"]) == "x"
 										(p-assign (ident "#interp_0"))
 										(e-lookup-local
 											(p-assign (ident "x"))))
-									(e-interpolation (constraint-fn-var 264) (dispatcher-var 13)
+									(e-interpolation (constraint-fn-var 255) (dispatcher-var 14)
 										(first
 											(e-literal (string "")))
 										(parts
@@ -156,7 +156,7 @@ expect f(["a"]) == "x"
 						(p-assign (ident "#interp_1"))
 						(e-lookup-local
 							(p-assign (ident "inner"))))
-					(e-interpolation (constraint-fn-var 304) (dispatcher-var 23)
+					(e-interpolation (constraint-fn-var 281) (dispatcher-var 24)
 						(first
 							(e-literal (string "<tr>")))
 						(parts
@@ -166,7 +166,7 @@ expect f(["a"]) == "x"
 	(s-expect
 		(e-method-eq (negated "false")
 			(lhs
-				(e-call (constraint-fn-var 350)
+				(e-call (constraint-fn-var 304)
 					(e-runtime-error (tag "erroneous_value_expr"))
 					(e-list
 						(elems
@@ -180,7 +180,7 @@ expect f(["a"]) == "x"
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "c -> d where [c.map : c, (item -> e) -> item, d.from_interpolation : List(Str) -> Try(Iter(item) -> d, [InvalidInterpolation(Str)]), e.from_interpolation : List(Str) -> Try(Iter(item) -> e, [InvalidInterpolation(Str)])]")))
+		(patt (type "c -> d where [c.map : c, (item -> e) -> g, d.from_interpolation : List(Str) -> Try(Iter(g) -> d, [InvalidInterpolation(Str)]), e.from_interpolation : List(Str) -> Try(Iter(item) -> e, [InvalidInterpolation(Str)])]")))
 	(expressions
-		(expr (type "c -> d where [c.map : c, (item -> e) -> item, d.from_interpolation : List(Str) -> Try(Iter(item) -> d, [InvalidInterpolation(Str)]), e.from_interpolation : List(Str) -> Try(Iter(item) -> e, [InvalidInterpolation(Str)])]"))))
+		(expr (type "c -> d where [c.map : c, (item -> e) -> g, d.from_interpolation : List(Str) -> Try(Iter(g) -> d, [InvalidInterpolation(Str)]), e.from_interpolation : List(Str) -> Try(Iter(item) -> e, [InvalidInterpolation(Str)])]"))))
 ~~~

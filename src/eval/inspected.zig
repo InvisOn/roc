@@ -71,6 +71,7 @@ pub const Error = Allocator.Error || lir.CheckedPipeline.LowerResourceError || s
     VirtualAllocFailed,
     MprotectFailed,
     VirtualProtectFailed,
+    FlushInstructionCacheFailed,
     InvalidHandle,
     CompilationFailed,
     NoBitcodeModules,
@@ -347,11 +348,8 @@ else
 const EVAL_SHARED_MEMORY_MIN_SIZE: usize = 1024 * 1024 * 1024;
 
 fn configuredSharedMemorySize() usize {
-    if (comptime build_options.shared_memory_size > std.math.maxInt(usize)) {
+    return comptime std.math.cast(usize, build_options.shared_memory_size) orelse
         @compileError("-Dshared-memory-size does not fit in usize for this target");
-    }
-
-    return @intCast(build_options.shared_memory_size);
 }
 
 /// LIR image stored in shared memory, ready for an eval backend to execute.
@@ -649,14 +647,22 @@ pub const ParseOptions = struct {
     /// A Builtin artifact the caller already published and keeps owning.
     pre_published_builtin: ?PrePublishedBuiltin = null,
     problem_reporting: ComptimeProblemReporting = .ignore_comptime_problems,
-    ctfe_options: ?*const CompileTimeFinalization.Options = null,
+    /// The strategy whose evaluator completes the compile-time roots of the
+    /// program and of every import published with it
+    /// (`CompileTimeFinalization.Options.strategy`). The harness's runtime
+    /// programs lower under `.lss` unless a caller asks otherwise, so its
+    /// publication does too; a caller with no runtime consumer names `.boxy`.
+    strategy: base.SpecializationStrategy = .lss,
+    /// Receives the compile-time events of the program's own roots.
+    event_callback: ?CompileTimeFinalization.EventCallback = null,
     /// Filesystem access for `import "path" as x : Str`/`: List(U8)`
     /// statements; the REPL passes its real `CoreCtx`.
     roc_ctx: ?CoreCtx = null,
 };
 
 /// Same as `parseProgram` with published-roots-only selection, reusing a
-/// Builtin artifact the caller has already published.
+/// Builtin artifact the caller has already published. `strategy`'s
+/// evaluator completes the program's compile-time roots.
 pub fn parseAndCanonicalizeProgramPublishedRootsWithBuiltin(
     allocator: Allocator,
     io: std.Io,
@@ -665,11 +671,13 @@ pub fn parseAndCanonicalizeProgramPublishedRootsWithBuiltin(
     imports: []const ModuleSource,
     pre_published_builtin: PrePublishedBuiltin,
     roc_ctx: ?CoreCtx,
+    strategy: base.SpecializationStrategy,
 ) Error!ParsedResources {
     return parseProgram(allocator, source_kind, source, imports, .{
         .io = io,
         .roots = .published_only,
         .pre_published_builtin = pre_published_builtin,
+        .strategy = strategy,
         .roc_ctx = roc_ctx,
     });
 }
@@ -821,7 +829,8 @@ pub const allocation_test_lower_options: LowerToLirOptions = .{
     .prove_ranges = true,
 };
 
-/// Parse, canonicalize, type-check, and lower to native and wasm LIR.
+/// Parse, canonicalize, type-check, and lower to native and wasm LIR. The
+/// program is published under the strategy it is lowered under.
 pub fn compileProgram(
     allocator: Allocator,
     io: std.Io,
@@ -830,7 +839,7 @@ pub fn compileProgram(
     imports: []const ModuleSource,
     options: LowerToLirOptions,
 ) Error!CompiledProgram {
-    var resources = try parseProgram(allocator, source_kind, source, imports, .{ .io = io });
+    var resources = try parseProgram(allocator, source_kind, source, imports, .{ .io = io, .strategy = options.specialization_strategy });
     errdefer cleanupParseAndCanonical(allocator, resources);
 
     const lowered = try lowerParsedProgramToLirWithOptions(allocator, io, &resources, .native, options);
@@ -867,11 +876,12 @@ pub fn compileProgramForTargetWithBuiltin(
     return compileForTarget(allocator, io, source_kind, source, imports, target_usize, .{
         .io = io,
         .pre_published_builtin = pre_published_builtin,
-    }, .lss);
+    });
 }
 
-/// Compile one explicit evaluation root for `target_usize` under
-/// `specialization_strategy`.
+/// Compile one explicit evaluation root for `target_usize`. The program is
+/// published and lowered under `parse_options.strategy`, so every value its
+/// runtime program restores is stored in that strategy's representation.
 pub fn compileForTarget(
     allocator: Allocator,
     io: std.Io,
@@ -880,7 +890,6 @@ pub fn compileForTarget(
     imports: []const ModuleSource,
     target_usize: base.target.TargetUsize,
     parse_options: ParseOptions,
-    specialization_strategy: base.SpecializationStrategy,
 ) Error!CompiledTargetProgram {
     var resources = try parseProgram(allocator, source_kind, source, imports, parse_options);
     errdefer cleanupParseAndCanonical(allocator, resources);
@@ -894,7 +903,7 @@ pub fn compileForTarget(
     }
 
     const lowered = try lowerParsedProgramToLirWithOptions(allocator, io, &resources, target_usize, .{
-        .specialization_strategy = specialization_strategy,
+        .specialization_strategy = parse_options.strategy,
     });
     errdefer {
         var owned = lowered;
@@ -916,6 +925,7 @@ pub const InspectedCompileOptions = struct {
     pre_published_builtin: ?PrePublishedBuiltin = null,
     /// Filesystem access for file imports; the REPL passes its real `CoreCtx`.
     roc_ctx: ?CoreCtx = null,
+    /// The strategy the program is published and lowered under.
     specialization_strategy: base.SpecializationStrategy = .lss,
     wasm: WasmLowering = .lower,
 };
@@ -963,6 +973,7 @@ pub fn compileInspectedProgramWithOptions(
         .io = io,
         .roots = .inspected,
         .pre_published_builtin = options.pre_published_builtin,
+        .strategy = options.specialization_strategy,
         .roc_ctx = options.roc_ctx,
     });
     return lowerInspected(allocator, io, resources, options.specialization_strategy, options.wasm);
@@ -999,8 +1010,9 @@ pub fn parseAndCanonicalizeInspectedProgramWithBuiltin(
 }
 
 /// Lower already-published inspect-wrapped resources for native and wasm
-/// evaluation. This function takes ownership of `resources`, including when
-/// lowering returns an error.
+/// evaluation under `.lss`, the strategy `parseAndCanonicalizeInspectedProgram`
+/// publishes them under. This function takes ownership of `resources`,
+/// including when lowering returns an error.
 pub fn lowerInspectedProgram(
     allocator: Allocator,
     io: std.Io,
@@ -1075,8 +1087,9 @@ pub fn compileInspectedProgramForTargetWithBuiltin(
         .io = io,
         .roots = .inspected,
         .pre_published_builtin = pre_published_builtin,
+        .strategy = specialization_strategy,
         .roc_ctx = roc_ctx,
-    }, specialization_strategy);
+    });
 }
 
 /// Free all resources held by a ParsedResources value.
@@ -1156,7 +1169,7 @@ pub fn devEvalTopLevelExpects(
     defer requests.deinit(allocator);
     var test_plan = std.ArrayList(lir.CheckedPipeline.RootTestPlanMetadata).empty;
     defer test_plan.deinit(allocator);
-    for (resources.checked_artifact.root_requests.requests) |request| {
+    for (resources.checked_artifact.root_requests.requests.items()) |request| {
         if (request.kind != .test_expect) continue;
         const index: u32 = @intCast(requests.items.len);
         try requests.append(allocator, request);
@@ -1208,7 +1221,7 @@ pub fn devEvalTopLevelExpects(
         std.debug.assert(metadata.kind == .test_expect and metadata.order == request.order);
         regions[index] = switch (request.source) {
             .statement => |statement| resources.module_env.store.getStatementRegion(statement),
-            .def, .expr, .required_binding, .hoisted, .literal => {
+            .def, .expr, .required_binding, .hoisted, .literal, .literal_argument => {
                 base.invariant("eval helper invariant violated: test root was not published from an expect statement", .{});
             },
         };
@@ -1219,7 +1232,7 @@ pub fn devEvalTopLevelExpects(
             .symbol_name = symbol_name,
             .proc = root_proc,
             .arg_layouts = arg_layouts,
-            .ret_layout = lowered.lir_result.store.getProcSpec(root_proc).ret_layout,
+            .ret_layout = lowered.lir_result.store.getProcSpecImmediate(root_proc).ret_layout,
         };
         roots_len += 1;
     }
@@ -1241,7 +1254,8 @@ pub fn devEvalTopLevelExpects(
 /// Publish a program for an interactive compile-time evaluation while retaining
 /// the exact checked resources that own both its diagnostics and finalized
 /// `ConstStore` values. Unlike the runtime inspected-program helpers, this does
-/// not publish or lower an executable root.
+/// not publish or lower an executable root. `strategy`'s evaluator completes
+/// the program's compile-time roots, the interactive root among them.
 pub fn publishProgramKeepingReportedComptimeProblemsWithBuiltinAndContext(
     allocator: Allocator,
     io: std.Io,
@@ -1250,17 +1264,16 @@ pub fn publishProgramKeepingReportedComptimeProblemsWithBuiltinAndContext(
     imports: []const ModuleSource,
     pre_published_builtin: PrePublishedBuiltin,
     roc_ctx: ?CoreCtx,
+    strategy: base.SpecializationStrategy,
     event_callback: ?CompileTimeFinalization.EventCallback,
 ) Error!ParsedResources {
-    const ctfe_options: CompileTimeFinalization.Options = .{
-        .event_callback = event_callback,
-    };
     return parseProgram(allocator, source_kind, source, imports, .{
         .io = io,
         .roots = .comptime_repl,
         .pre_published_builtin = pre_published_builtin,
         .problem_reporting = .report_comptime_problems,
-        .ctfe_options = &ctfe_options,
+        .strategy = strategy,
+        .event_callback = event_callback,
         .roc_ctx = roc_ctx,
     });
 }
@@ -1268,7 +1281,7 @@ pub fn publishProgramKeepingReportedComptimeProblemsWithBuiltinAndContext(
 /// Return the finalized string value of the explicitly published compile-time
 /// REPL root. The returned bytes borrow from `resources`.
 pub fn finalizedComptimeReplStr(resources: *const ParsedResources) Error![]const u8 {
-    for (resources.checked_artifact.compile_time_roots.roots) |root| {
+    for (resources.checked_artifact.compile_time_roots.roots.items()) |root| {
         if (root.kind != .repl_expr) continue;
 
         var node = switch (root.payload) {
@@ -1277,12 +1290,11 @@ pub fn finalizedComptimeReplStr(resources: *const ParsedResources) Error![]const
         };
         while (true) {
             switch (resources.checked_artifact.const_store.get(node)) {
-                .str => |str| return resources.checked_artifact.const_store.strBytes(str),
+                // The root is the inspected `Str`, whose image is its descriptor.
+                .image => |image| return resources.checked_artifact.const_store.image(image).strAt(0),
                 .nominal => |nominal| node = nominal.backing,
                 .boxy_fn,
                 .pending,
-                .zst,
-                .scalar,
                 .list,
                 .box,
                 .tuple,
@@ -1342,6 +1354,13 @@ pub fn parseProgram(
 
     var typed_cir_modules = try check.TypedCIR.Modules.init(allocator, source_modules);
     defer typed_cir_modules.deinit();
+    // One strategy completes every module published here, so each module
+    // holds the representation its readers' evaluator restores.
+    const import_ctfe_options: CompileTimeFinalization.Options = .{ .strategy = options.strategy };
+    const ctfe_options: CompileTimeFinalization.Options = .{
+        .strategy = options.strategy,
+        .event_callback = options.event_callback,
+    };
     const import_artifacts = try publishImportArtifacts(
         allocator,
         options.io,
@@ -1351,6 +1370,7 @@ pub fn parseProgram(
         &builtin_module_owned_by_artifact,
         pre_published_builtin,
         options.problem_reporting,
+        &import_ctfe_options,
     );
     errdefer {
         for (import_artifacts) |*artifact| artifact.deinit(allocator);
@@ -1380,7 +1400,7 @@ pub fn parseProgram(
             const root_name = evalRootName(source_kind, false);
             const root_def_idx = main_checked.can.explicitRootDefByName(root_name) orelse base.invariant("eval helper invariant violated: compile-time REPL root `{s}` was not found", .{root_name});
             const root_def = main_checked.module_env.store.getDef(root_def_idx);
-            if (main_checked.module_env.store.getExpr(root_def.expr) != .e_runtime_error) {
+            if (main_checked.module_env.store.exprKind(root_def.expr) != .e_runtime_error) {
                 const body_expr = main_checked.checker.compileTimeExecutableRootBody(root_def_idx) orelse base.invariant("eval helper invariant violated: compile-time REPL root body was not recorded", .{});
                 explicit_root_storage[0] = .{
                     .kind = .repl_expr,
@@ -1400,6 +1420,8 @@ pub fn parseProgram(
         0,
         .{
             .module_env_storage = .{ .checked_source = main_checked.module_env },
+            // Builtin is the first import, borrowed or published first.
+            .builtin_artifact = .{ .imported = publish_imports[0].key.digest() },
             .io = options.io,
             .imports = publish_imports,
             .available_artifacts = available_artifacts,
@@ -1408,10 +1430,7 @@ pub fn parseProgram(
                 .eval, .inspected, .comptime_repl => .top_level,
                 .published_only => .selected,
             },
-            .compile_time_finalizer = if (options.ctfe_options) |ctfe_options|
-                CompileTimeFinalization.finalizerWithOptions(ctfe_options)
-            else
-                CompileTimeFinalization.finalizer(),
+            .compile_time_finalizer = CompileTimeFinalization.finalizerWithOptions(&ctfe_options),
             .problem_store = switch (options.problem_reporting) {
                 .ignore_comptime_problems => null,
                 .report_comptime_problems => &main_checked.checker.problems,
@@ -1561,7 +1580,6 @@ pub fn parseCheckModule(
         module_env,
         imported_envs,
         auto_imported_types,
-        &module_env.store.regions,
         builtin_ctx,
     );
     checker.fixupTypeWriter();
@@ -1597,6 +1615,8 @@ pub fn parseCheckModule(
 /// Options for lowering checked modules to LIR.
 pub const LowerToLirOptions = struct {
     inline_expects: lir.CheckedPipeline.InlineExpectMode = .run,
+    /// The strategy the program is lowered under, which is the strategy its
+    /// modules were published under (`ParseOptions.strategy`).
     specialization_strategy: base.SpecializationStrategy = .lss,
     inline_mode: lir.CheckedPipeline.InlineMode = .none,
     tag_reachability: bool = false,
@@ -1616,7 +1636,7 @@ fn lowerParsedProgramToLirWithOptions(
 ) Error!LoweredProgram {
     const import_views = try parsedImportViews(allocator, resources);
     defer allocator.free(import_views);
-    return lowerCheckedRootWithViews(allocator, io, &resources.checked_artifact, resources.import_artifacts, import_views, target_usize, options);
+    return lowerCheckedRootWithViews(allocator, io, &resources.checked_artifact, import_views, target_usize, options);
 }
 
 /// Views of every module a parsed program imports, the borrowed Builtin first.
@@ -1647,12 +1667,13 @@ fn lowerToLirTarget(target_usize: base.target.TargetUsize, options: LowerToLirOp
     };
 }
 
-/// Lower already-published checked modules to a LIR image.
+/// Lower already-published checked modules to a LIR image, under the strategy
+/// the caller published them under (`options.specialization_strategy`).
 pub fn lowerCheckedModuleSetToLir(
     allocator: Allocator,
     io: std.Io,
-    root_module: *check.CheckedArtifact.CheckedModuleArtifact,
-    import_modules: []check.CheckedArtifact.CheckedModuleArtifact,
+    root_module: *const check.CheckedArtifact.CheckedModuleArtifact,
+    import_modules: []const check.CheckedArtifact.CheckedModuleArtifact,
     target_usize: base.target.TargetUsize,
     options: LowerToLirOptions,
 ) Error!LoweredProgram {
@@ -1661,14 +1682,13 @@ pub fn lowerCheckedModuleSetToLir(
     for (import_modules, 0..) |*module, i| {
         import_views[i] = check.CheckedArtifact.importedView(module);
     }
-    return lowerCheckedRootWithViews(allocator, io, root_module, import_modules, import_views, target_usize, options);
+    return lowerCheckedRootWithViews(allocator, io, root_module, import_views, target_usize, options);
 }
 
 fn lowerCheckedRootWithViews(
     allocator: Allocator,
     io: std.Io,
-    root_module: *check.CheckedArtifact.CheckedModuleArtifact,
-    import_modules: []check.CheckedArtifact.CheckedModuleArtifact,
+    root_module: *const check.CheckedArtifact.CheckedModuleArtifact,
     import_views: []const check.CheckedArtifact.ImportedModuleView,
     target_usize: base.target.TargetUsize,
     options: LowerToLirOptions,
@@ -1680,38 +1700,18 @@ fn lowerCheckedRootWithViews(
     const shm_allocator = shm.allocator();
     const image_header = try shm_allocator.create(LirImage.Header);
 
-    // Publication may have produced only LSS function values. Prepare the
-    // owned imports in their producer order as well as the root; borrowed
-    // Builtin artifacts already contain both representations.
-    var pending_modules = std.ArrayList(CompileTimeFinalization.ProgramModule).empty;
-    defer pending_modules.deinit(allocator);
-    if (options.specialization_strategy == .boxy) for (import_modules) |*module| {
-        if (!module.hasUnevaluatedRequests(.boxy)) continue;
-        if (module.evaluation_state == .finalized) try module.reopenForEvaluation(.boxy);
-        try pending_modules.append(allocator, .{ .module = module, .problem_store = null });
-    };
-    const reopened = options.specialization_strategy == .boxy and
-        root_module.evaluation_state == .finalized and
-        root_module.hasUnevaluatedRequests(.boxy);
-    if (reopened) try root_module.reopenForEvaluation(.boxy);
-    if (options.specialization_strategy == .boxy) try pending_modules.append(allocator, .{ .module = root_module, .problem_store = null });
-
     const modules: lir.CheckedPipeline.CheckedModuleSet = .{
         .root = check.CheckedArtifact.loweringView(root_module),
         .imports = import_views,
     };
-    const roots: lir.CheckedPipeline.RootRequestSet = .{ .requests = root_module.root_requests.runtime_requests };
+    const roots: lir.CheckedPipeline.RootRequestSet = .{ .requests = root_module.root_requests.runtime_requests.items() };
     const target = lowerToLirTarget(target_usize, options);
+    // The modules were published under the strategy they are lowered under,
+    // so every value the program restores, a function value included, is
+    // stored in that strategy's representation.
     var lowered = switch (target.specialization_strategy) {
         .lss => try lir.CheckedPipeline.lowerCheckedModulesToLir(allocator, modules, roots, target),
-        // A `.boxy` runtime program reads the values compile-time evaluation
-        // converts its literals to, as a compilation's runtime consumer does.
-        .boxy => blk: {
-            var session = try CompileTimeFinalization.finalizeProgram(allocator, pending_modules.items, modules, roots, roots, target, .{ .strategy = .boxy });
-            defer session.deinit();
-            for (pending_modules.items) |module| module.module.evaluation_state = .finalized;
-            break :blk try session.takeRuntime(allocator, roots, target);
-        },
+        .boxy => try CompileTimeFinalization.lowerBoxyRuntime(allocator, modules, roots, target),
     };
     defer lowered.deinit();
 
@@ -1759,8 +1759,8 @@ fn zeroArgRootInvariant(message: []const u8) noreturn {
 
 fn zeroArgRootBody(module_env: *const ModuleEnv, def_idx: CIR.Def.Idx) ZeroArgRootBody {
     const def = module_env.store.getDef(def_idx);
-    const lambda_idx = switch (module_env.store.getExpr(def.expr)) {
-        .e_closure => |closure| closure.lambda_idx,
+    const lambda_idx = switch (module_env.store.exprKind(def.expr)) {
+        .e_closure => module_env.store.exprView(def.expr).e_closure.get(.lambda_idx),
         .e_lambda => def.expr,
         .e_num,
         .e_frac_f32,
@@ -1821,8 +1821,8 @@ fn zeroArgRootBody(module_env: *const ModuleEnv, def_idx: CIR.Def.Idx) ZeroArgRo
         => zeroArgRootInvariant("compile-time REPL root was not a lambda"),
         .e_deferred_import_ref => base.invariant("compiler invariant violated: deferred import reference reached a stage that runs after import resolution", .{}),
     };
-    const lambda = switch (module_env.store.getExpr(lambda_idx)) {
-        .e_lambda => |lambda| lambda,
+    const lambda = switch (module_env.store.exprKind(lambda_idx)) {
+        .e_lambda => module_env.store.exprView(lambda_idx).e_lambda.decode(),
         .e_num,
         .e_frac_f32,
         .e_frac_f64,
@@ -1898,6 +1898,7 @@ fn publishImportArtifacts(
     builtin_module_owned_by_artifact: *bool,
     pre_published_builtin: ?PrePublishedBuiltin,
     problem_reporting: ComptimeProblemReporting,
+    ctfe_options: *const CompileTimeFinalization.Options,
 ) Error![]check.CheckedArtifact.CheckedModuleArtifact {
     const extra_module_count = extra_modules.len;
     var artifacts = std.ArrayList(check.CheckedArtifact.CheckedModuleArtifact).empty;
@@ -1928,9 +1929,10 @@ fn publishImportArtifacts(
             1,
             .{
                 .module_env_storage = .{ .static_builtin = builtin_module.?.env },
+                .builtin_artifact = .this_module,
                 .hoisted_roots = .none,
                 .io = io,
-                .compile_time_finalizer = CompileTimeFinalization.finalizer(),
+                .compile_time_finalizer = CompileTimeFinalization.finalizerWithOptions(ctfe_options),
             },
         );
         builtin_module_owned_by_artifact.* = true;
@@ -1970,11 +1972,13 @@ fn publishImportArtifacts(
                 module_idx,
                 .{
                     .module_env_storage = .{ .checked_source = extra_modules[extra_i].module_env },
+                    // Builtin is published or borrowed before any other module.
+                    .builtin_artifact = .{ .imported = published_keys.items[0].key.digest() },
                     .io = io,
                     .imports = published_keys.items,
                     .available_artifacts = available_artifacts,
                     .hoisted_roots = .none,
-                    .compile_time_finalizer = CompileTimeFinalization.finalizer(),
+                    .compile_time_finalizer = CompileTimeFinalization.finalizerWithOptions(ctfe_options),
                     .problem_store = switch (problem_reporting) {
                         .ignore_comptime_problems => null,
                         .report_comptime_problems => &extra_modules[extra_i].checker.problems,
@@ -2023,7 +2027,7 @@ fn directImportsArePublished(
     published: []const check.CheckedArtifact.PublishImportArtifact,
 ) bool {
     const module_env = module.moduleEnvConst();
-    for (module_env.imports.imports.items.items, 0..) |_, i| {
+    for (module_env.imports.imports.items(), 0..) |_, i| {
         const import_idx: CIR.Import.Idx = @fromBackingInt(@intCast(@as(u32, @intCast(i))));
         const resolved_module_idx = module.resolvedImportModule(import_idx) orelse continue;
         var found = false;
@@ -2227,7 +2231,7 @@ fn makeModuleSource(
 fn resolveImportsByModuleIndex(module_envs: []const *ModuleEnv) void {
     for (module_envs) |module_env| {
         module_env.imports.clearResolvedModules();
-        for (module_env.imports.imports.items.items, 0..) |str_idx, i| {
+        for (module_env.imports.imports.items(), 0..) |str_idx, i| {
             const import_name = module_env.getString(str_idx);
             const import_idx: CIR.Import.Idx = @fromBackingInt(@intCast(i));
             if (CIR.Import.isCompilerBuiltinImportName(import_name)) {
@@ -2252,7 +2256,7 @@ fn resolveImportsByModuleIndex(module_envs: []const *ModuleEnv) void {
 
 fn resolveImportsConst(module_env: *ModuleEnv, imported_envs: []const *const ModuleEnv) void {
     module_env.imports.clearResolvedModules();
-    for (module_env.imports.imports.items.items, 0..) |str_idx, i| {
+    for (module_env.imports.imports.items(), 0..) |str_idx, i| {
         const import_name = module_env.getString(str_idx);
         const import_idx: CIR.Import.Idx = @fromBackingInt(@intCast(i));
         if (CIR.Import.isCompilerBuiltinImportName(import_name)) {

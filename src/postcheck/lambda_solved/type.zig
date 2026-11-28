@@ -69,11 +69,50 @@ comptime {
     std.debug.assert(@sizeOf(Capture) == 64);
 }
 
-/// Function member of a lambda set.
+/// Identifier for one instantiation of a binding group: a row of
+/// `Ast.Polymorphism.instantiations`.
+pub const InstId = enum(u32) { _ };
+
+/// Function member of a lambda set: a lambda at one instantiation of its
+/// binding group. Lambda solving gives every member it creates its group's
+/// identity instantiation, and instantiating a generalized group gives each
+/// copied member the reference's instantiation. A consumer reads a member
+/// under an instance (`instances.zig`), which names the member's function at
+/// one instance of its group.
 pub const FnMember = struct {
     lambda: Common.Symbol,
     captures: Span,
+    inst: InstId,
 };
+
+/// The owner of a type variable class: the binding group whose solving
+/// created it, numbered from `first_group_owner`, `global_owner`, or
+/// `unowned`. A class takes the oldest owner of the variables it joined
+/// (`olderOwner`); a smaller owner number is older, and `unowned` is younger
+/// than every owner.
+pub const Owner = u32;
+
+/// Owner of variables created before any group is solved (registered
+/// function types and local types): no group has related them yet, so they
+/// belong to the first group whose solving relates them.
+pub const unowned: Owner = 0;
+
+/// Owner of variables created outside every binding group's solve, once
+/// solving has finished: older than every group.
+pub const global_owner: Owner = 1;
+
+/// Owner number of the first binding group.
+pub const first_group_owner: Owner = 2;
+
+/// Whether owner `a` is older than owner `b`.
+pub fn ownerOlder(a: Owner, b: Owner) bool {
+    return a != unowned and (b == unowned or a < b);
+}
+
+/// The older of two owners.
+pub fn olderOwner(a: Owner, b: Owner) Owner {
+    return if (ownerOlder(b, a)) b else a;
+}
 
 /// One entry of a nominal record's declared fields; consumed by layout and
 /// descriptor planning (the backing row stays lexicographic).
@@ -86,7 +125,6 @@ pub const DeclaredField = union(enum) {
 pub const Content = union(enum) {
     link: TypeVarId,
     unbound,
-    forall,
     primitive: MonoType.Primitive,
     named: struct {
         named_type: MonoType.NamedType,
@@ -132,10 +170,12 @@ pub const Content = union(enum) {
     /// clones that can reach `unify` must own their vars.
     mono: struct {
         id: MonoType.TypeId,
-        /// Clone context tying recursive back-references within one lazily
-        /// materialized tree to their existing vars, exactly as an eager
-        /// clone's memo map did. `no_leaf_context` until first expansion.
-        ctx: u32 = no_leaf_context,
+        /// Clone context tying the occurrences of one Monotype within one
+        /// instance of a Monotype cycle to one var, so a recursive
+        /// back-reference reaches
+        /// the node it recurs into. Absent for a leaf that begins a tree of
+        /// its own.
+        ctx: collections.OptionalU32 = .none,
     },
 };
 
@@ -153,7 +193,7 @@ pub const NamedBacking = struct {
 pub const OptionalNamedBacking = collections.OptionalStruct(NamedBacking, "ty");
 
 comptime {
-    std.debug.assert(@sizeOf(NamedContent) == 152);
+    std.debug.assert(@sizeOf(NamedContent) == 76);
     std.debug.assert(@sizeOf(Field) == 20);
 }
 
@@ -167,7 +207,6 @@ pub const ErasedContent = std.meta.fieldInfo(Content, .erased).type;
 pub const StoredNode = union(enum(u8)) {
     link: TypeVarId,
     unbound,
-    forall,
     primitive: MonoType.Primitive,
     named: u32,
     record: Span,
@@ -188,7 +227,6 @@ fn contentOf(node: StoredNode, named_payloads: []const NamedContent, erased_payl
     return switch (node) {
         .link => |target| .{ .link = target },
         .unbound => .unbound,
-        .forall => .forall,
         .primitive => |primitive| .{ .primitive = primitive },
         .named => |index| .{ .named = named_payloads[index] },
         .record => |span_| .{ .record = span_ },
@@ -204,9 +242,6 @@ fn contentOf(node: StoredNode, named_payloads: []const NamedContent, erased_payl
         .mono => |leaf| .{ .mono = leaf },
     };
 }
-
-/// Sentinel for a lazy leaf that has not been reached by any expansion yet.
-pub const no_leaf_context: u32 = std.math.maxInt(u32);
 
 test "lambda solved named backing preserves generated-private authority" {
     const content = Content{ .named = .{
@@ -241,6 +276,14 @@ pub const Store = struct {
     captures: std.ArrayList(Capture),
     fn_members: std.ArrayList(FnMember),
     declared_fields: std.ArrayList(DeclaredField),
+    /// The owner of each variable's class, read at its root.
+    owners: std.ArrayList(Owner) = .empty,
+    /// The owner every new variable gets.
+    current_owner: Owner = unowned,
+    /// While a binding group is solved: its owner, and the class roots older
+    /// than it that a link joined to a class it owns (`escapes`).
+    escape_watch: ?Owner = null,
+    escapes: std.ArrayList(TypeVarId) = .empty,
     /// Advances on every write that can change a variable's meaning, so a
     /// result derived from the store can tell whether it is still current.
     mutation_epoch: u64 = 0,
@@ -264,6 +307,8 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        self.escapes.deinit(self.allocator);
+        self.owners.deinit(self.allocator);
         self.declared_fields.deinit(self.allocator);
         self.fn_members.deinit(self.allocator);
         self.captures.deinit(self.allocator);
@@ -284,7 +329,6 @@ pub const Store = struct {
         return switch (content) {
             .link => |target| .{ .link = target },
             .unbound => .unbound,
-            .forall => .forall,
             .primitive => |primitive| .{ .primitive = primitive },
             .named => |named| blk: {
                 if (previous) |node| if (node == .named) {
@@ -323,34 +367,57 @@ pub const Store = struct {
     }
 
     pub fn add(self: *Store, content: Content) std.mem.Allocator.Error!TypeVarId {
-        if (self.vars.items.len >= std.math.maxInt(u32)) return error.OutOfMemory;
+        // `MaybeTypeVarId` stores an id plus one.
+        if (std.math.cast(u32, self.vars.items.len + 1) == null) return error.OutOfMemory;
         const id: TypeVarId = @fromBackingInt(@as(u32, @intCast(self.vars.items.len)));
         try self.vars.ensureUnusedCapacity(self.allocator, 1);
         try self.analysis_changes.ensureUnusedCapacity(self.allocator, 1);
         try self.owned_named_backings.ensureUnusedCapacity(self.allocator, 1);
+        try self.owners.ensureUnusedCapacity(self.allocator, 1);
         self.vars.appendAssumeCapacity(try self.storeNode(content, null));
         self.owned_named_backings.appendAssumeCapacity(false);
+        self.owners.appendAssumeCapacity(self.current_owner);
         self.analysis_changes.appendAssumeCapacity();
         return id;
     }
 
     pub fn set(self: *Store, id: TypeVarId, content: Content) std.mem.Allocator.Error!void {
-        if (content == .link) return self.setLink(id, content.link);
+        if (content == .link) return try self.setLink(id, content.link);
         const node = try self.storeNode(content, self.vars.items[@backingInt(id)]);
         self.mutation_epoch +%= 1;
         self.analysis_changes.mark(id);
         self.vars.items[@backingInt(id)] = node;
     }
 
-    /// Link `id` to `target`, carrying an owned named backing to its root.
-    pub fn setLink(self: *Store, id: TypeVarId, target: TypeVarId) void {
+    /// Link `id` to `target`, carrying an owned named backing and the older
+    /// owner to its root.
+    pub fn setLink(self: *Store, id: TypeVarId, target: TypeVarId) std.mem.Allocator.Error!void {
         self.mutation_epoch +%= 1;
         self.analysis_changes.mark(id);
+        const target_root = self.root(target);
         if (self.owned_named_backings.items[@backingInt(id)]) {
-            const target_root = self.root(target);
             self.owned_named_backings.items[@backingInt(target_root)] = true;
         }
+        const id_owner = self.owners.items[@backingInt(self.root(id))];
+        const target_owner = self.owners.items[@backingInt(target_root)];
+        if (id_owner != target_owner) {
+            const older = olderOwner(id_owner, target_owner);
+            const younger = if (older == id_owner) target_owner else id_owner;
+            if (self.escape_watch) |watched| {
+                // A class the watched group owns joined an older one: the
+                // older class is part of that group's environment now.
+                if (ownerOlder(older, watched) and !ownerOlder(younger, watched)) {
+                    try self.escapes.append(self.allocator, target_root);
+                }
+            }
+            self.owners.items[@backingInt(target_root)] = older;
+        }
         self.vars.items[@backingInt(id)] = .{ .link = target };
+    }
+
+    /// The owner of `id`'s class.
+    pub fn ownerOf(self: *const Store, id: TypeVarId) Owner {
+        return self.owners.items[@backingInt(self.root(id))];
     }
 
     /// Visit exactly the identities changed since a proof observer last ran.
@@ -377,7 +444,7 @@ pub const Store = struct {
         while (true) {
             switch (self.vars.items[@backingInt(current)]) {
                 .link => |target| current = target,
-                .unbound, .forall, .primitive, .named, .record, .tuple, .tag_union, .list, .box, .func, .lambda_set, .erased, .zst, .hole, .mono => return current,
+                .unbound, .primitive, .named, .record, .tuple, .tag_union, .list, .box, .func, .lambda_set, .erased, .zst, .hole, .mono => return current,
             }
         }
     }
@@ -394,7 +461,7 @@ pub const Store = struct {
         while (current != root_id) {
             const next = switch (self.vars.items[@backingInt(current)]) {
                 .link => |target| target,
-                .unbound, .forall, .primitive, .named, .record, .tuple, .tag_union, .list, .box, .func, .lambda_set, .erased, .zst, .hole, .mono => break,
+                .unbound, .primitive, .named, .record, .tuple, .tag_union, .list, .box, .func, .lambda_set, .erased, .zst, .hole, .mono => break,
             };
             // Existing links already transferred backing ownership. Compression
             // only shortens that exact path, without changing any dependency.
@@ -442,7 +509,7 @@ pub const Store = struct {
         if (len == 0) return .{ .span = .empty(), .slots = &.{} };
         const start = std.math.cast(u32, list.items.len) orelse return error.OutOfMemory;
         const count = std.math.cast(u32, len) orelse return error.OutOfMemory;
-        if (std.math.maxInt(u32) - start < count) return error.OutOfMemory;
+        _ = std.math.add(u32, start, count) catch return error.OutOfMemory;
         const slots = try list.addManyAsSlice(allocator, len);
         return .{ .span = .{ .start = start, .len = count }, .slots = slots };
     }
@@ -523,45 +590,45 @@ pub const Store = struct {
         fn_members: []const FnMember,
         declared_fields: []const DeclaredField,
 
-        pub fn get(self: View, id: TypeVarId) Content {
+        pub fn get(self: *const View, id: TypeVarId) Content {
             return contentOf(self.vars[@backingInt(id)], self.named_payloads, self.erased_payloads);
         }
 
-        pub fn root(self: View, id: TypeVarId) TypeVarId {
+        pub fn root(self: *const View, id: TypeVarId) TypeVarId {
             var current = id;
             while (true) {
                 switch (self.vars[@backingInt(current)]) {
                     .link => |target| current = target,
-                    .unbound, .forall, .primitive, .named, .record, .tuple, .tag_union, .list, .box, .func, .lambda_set, .erased, .zst, .hole, .mono => return current,
+                    .unbound, .primitive, .named, .record, .tuple, .tag_union, .list, .box, .func, .lambda_set, .erased, .zst, .hole, .mono => return current,
                 }
             }
         }
 
-        pub fn rootContent(self: View, id: TypeVarId) Content {
+        pub fn rootContent(self: *const View, id: TypeVarId) Content {
             return self.get(self.root(id));
         }
 
-        pub fn span(self: View, span_: Span) []const TypeVarId {
+        pub fn span(self: *const View, span_: Span) []const TypeVarId {
             return self.spans[span_.start..][0..span_.len];
         }
 
-        pub fn fieldSpan(self: View, span_: Span) []const Field {
+        pub fn fieldSpan(self: *const View, span_: Span) []const Field {
             return self.fields[span_.start..][0..span_.len];
         }
 
-        pub fn tagSpan(self: View, span_: Span) []const Tag {
+        pub fn tagSpan(self: *const View, span_: Span) []const Tag {
             return self.tags[span_.start..][0..span_.len];
         }
 
-        pub fn captureSpan(self: View, span_: Span) []const Capture {
+        pub fn captureSpan(self: *const View, span_: Span) []const Capture {
             return self.captures[span_.start..][0..span_.len];
         }
 
-        pub fn memberSpan(self: View, span_: Span) []const FnMember {
+        pub fn memberSpan(self: *const View, span_: Span) []const FnMember {
             return self.fn_members[span_.start..][0..span_.len];
         }
 
-        pub fn declaredFieldSpan(self: View, span_: Span) []const DeclaredField {
+        pub fn declaredFieldSpan(self: *const View, span_: Span) []const DeclaredField {
             return self.declared_fields[span_.start..][0..span_.len];
         }
     };
@@ -619,7 +686,7 @@ test "lambda solved empty spans use shared empty descriptor" {
     const nonempty_fields = try store.addFields(&.{.{ .name = @fromBackingInt(@intCast(1)), .ty = unit, .default = .none }});
     const nonempty_tags = try store.addTags(&.{.{ .name = @fromBackingInt(@intCast(2)), .checked_name = @fromBackingInt(@intCast(2)), .payloads = nonempty_span }});
     const nonempty_captures = try store.addCaptures(&.{.{ .local = @fromBackingInt(@intCast(3)), .symbol = @fromBackingInt(@intCast(4)), .binder = .none, .ty = unit }});
-    const nonempty_members = try store.addMembers(&.{.{ .lambda = @fromBackingInt(@intCast(5)), .captures = nonempty_captures }});
+    const nonempty_members = try store.addMembers(&.{.{ .lambda = @fromBackingInt(@intCast(5)), .captures = nonempty_captures, .inst = @import("ast.zig").Polymorphism.identity(0) }});
     try std.testing.expect(nonempty_span.len == 1);
     try std.testing.expect(nonempty_fields.len == 1);
     try std.testing.expect(nonempty_tags.len == 1);

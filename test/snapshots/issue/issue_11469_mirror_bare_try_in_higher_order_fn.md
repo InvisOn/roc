@@ -195,7 +195,7 @@ NO CHANGE
 					(e-match
 						(match
 							(cond
-								(e-call (constraint-fn-var 300)
+								(e-call (constraint-fn-var 285)
 									(e-lookup-local
 										(p-assign (ident "execute")))
 									(e-string
@@ -222,7 +222,7 @@ NO CHANGE
 													(args
 														(e-lookup-local
 															(p-assign (ident "#err")))))))))))))
-				(e-call (constraint-fn-var 335)
+				(e-call (constraint-fn-var 303)
 					(e-lookup-local
 						(p-assign (ident "operation")))
 					(e-empty_record)))))
@@ -231,7 +231,7 @@ NO CHANGE
 		(e-lambda
 			(args
 				(p-assign (ident "execute")))
-			(e-call (constraint-fn-var 406)
+			(e-call (constraint-fn-var 338)
 				(e-lookup-local
 					(p-assign (ident "mirror_transaction")))
 				(e-lookup-local
@@ -249,7 +249,7 @@ NO CHANGE
 								(e-match
 									(match
 										(cond
-											(e-call (constraint-fn-var 368)
+											(e-call (constraint-fn-var 318)
 												(e-lookup-local
 													(p-assign (ident "execute")))
 												(e-string
@@ -283,7 +283,7 @@ NO CHANGE
 									(e-empty_record)))))))))
 	(d-let
 		(p-assign (ident "mirror_main"))
-		(e-call (constraint-fn-var 428)
+		(e-call (constraint-fn-var 364)
 			(e-runtime-error (tag "erroneous_value_use"))
 			(e-lambda
 				(args
@@ -296,11 +296,11 @@ NO CHANGE
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "(a -> Try(ok, err)), ({} -> Try(ok, err)) -> Try(ok, err) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
+		(patt (type "(a -> Try(_ok, err)), ({} -> Try(ok, err)) -> Try(ok, err) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
 		(patt (type "Error"))
 		(patt (type "Error")))
 	(expressions
-		(expr (type "(a -> Try(ok, err)), ({} -> Try(ok, err)) -> Try(ok, err) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
+		(expr (type "(a -> Try(_ok, err)), ({} -> Try(ok, err)) -> Try(ok, err) where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)])]"))
 		(expr (type "Error"))
 		(expr (type "Error"))))
 ~~~

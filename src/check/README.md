@@ -9,6 +9,10 @@ mutate solver types or escape as solver blockers. Exact template dependencies
 allow irrelevant substitutions to share identity while private unknowns retain
 their application scope.
 
+Within a match, each resolved tag column shares its constructor family and
+payload slots. Constructor specialization visits its own arms and the wildcard
+arms in source order; guarded arms never establish coverage for later arms.
+
 Inhabitedness uses a greatest fixed point to preserve conservative recursive
 payload semantics without enumerating shared paths. Row-only cycles provide no
 constructor witness. General, constructor-payload, and known-absent queries retain
@@ -19,6 +23,14 @@ sharing, recursive identities, and display policy, but render only requested
 roots and tags. Cached checking outcomes retain this frozen evidence so warm and
 cold diagnostics follow the same presentation path.
 
+A rejected branch supplies no result type, but does not erase either a sibling's
+type or the effects of evaluating the selected branch. Diagnostics that depend
+on a join or on a `?` payload use those same producer relationships after deferred
+rejections settle. A Boolean eligible for compile-time evaluation does not justify
+a known-condition warning if obtaining it requires a rejected operand.
+
 Host-boundary validation uses the same scoped read-only views so generic user
 types cannot hide an unboxed callable or lose a parameter's boxing position.
-Only directly boxed functions and opaque iterator handles cross that boundary.
+Functions cross that boundary only inside a `Box`, either as its immediate
+payload or inside a boxed value the host only holds; `Iter` and `Stream` cross
+only as the immediate payload of their own `Box`.

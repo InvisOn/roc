@@ -144,28 +144,20 @@ pub const stack_overflow_longjmp_value: c_int = 2;
 /// return.
 pub const StackOverflowRecovery = struct {
     context: *anyopaque,
+    /// Runs on the fault path, before any escape. May only read live stack
+    /// records and immutable metadata, and write preallocated result storage.
+    capture: ?*const fn (*anyopaque, FaultFrame) void = null,
     escape: *const fn (*anyopaque) noreturn,
 };
 
 threadlocal var stack_overflow_recovery: ?*const StackOverflowRecovery = null;
 
-/// The program counter, frame pointer, and stack pointer a stack overflow
-/// interrupted.
+/// The interrupted frame pointer and the lowest readable address on that
+/// stack. Reserving a frame can put SP below the usable stack.
 pub const FaultFrame = struct {
-    pc: usize,
     fp: usize,
-    sp: usize,
+    low: usize,
 };
-
-threadlocal var overflow_frame: ?FaultFrame = null;
-
-/// The frame the last recovered stack overflow on this thread interrupted,
-/// once; null when the platform's fault context does not provide one.
-pub fn takeOverflowFrame() ?FaultFrame {
-    const frame = overflow_frame;
-    overflow_frame = null;
-    return frame;
-}
 
 fn faultFrame(cpu: anytype) ?FaultFrame {
     const sp: usize = if (comptime builtin.cpu.arch == .x86_64)
@@ -174,7 +166,11 @@ fn faultFrame(cpu: anytype) ?FaultFrame {
         @intCast(cpu.sp)
     else
         return null;
-    return .{ .pc = cpu.getPc(), .fp = cpu.getFp(), .sp = sp };
+    const stack_low = if (comptime builtin.os.tag == .windows)
+        @intFromPtr(std.os.windows.teb().NtTib.StackLimit)
+    else
+        (thread_stack_bounds orelse return null).low;
+    return .{ .fp = cpu.getFp(), .low = @max(sp, stack_low) };
 }
 
 fn posixFaultFrame(context: ?*anyopaque) ?FaultFrame {
@@ -297,7 +293,7 @@ fn redirectDarwinContextToEscape(context: ?*anyopaque, recovery: *const StackOve
 }
 
 /// The id of the thread writing a crash report, or 0 while no thread is.
-var crash_reporter: std.atomic.Value(u64) = .init(0);
+var crash_reporter: std.atomic.Value(std.Thread.Id) = .init(0);
 
 /// Claim the crash report for the calling thread, which then writes the
 /// report and ends the process. Returns only to the claiming thread. A fault
@@ -308,7 +304,7 @@ var crash_reporter: std.atomic.Value(u64) = .init(0);
 /// is neither interleaved nor cut short, and no thread runs the reporting
 /// code on top of another's run of it.
 fn claimCrashReport(exit_code: u8) void {
-    const me: u64 = std.Thread.getCurrentId();
+    const me = std.Thread.getCurrentId();
     const reporter = crash_reporter.cmpxchgStrong(0, me, .acq_rel, .acquire) orelse return;
     if (reporter == me) std.process.exit(exit_code);
     while (true) {
@@ -606,9 +602,10 @@ fn handleExceptionWindows(exception_info: *EXCEPTION_POINTERS) callconv(.winapi)
 
     if (is_stack_overflow) {
         if (takeStackOverflowRecovery()) |recovery| {
-            if (comptime std.debug.cpu_context.Native != noreturn) {
-                overflow_frame = faultFrame(std.debug.cpu_context.fromWindowsContext(@ptrCast(@alignCast(exception_info.ContextRecord))));
-            }
+            if (comptime std.debug.cpu_context.Native != noreturn) if (recovery.capture) |capture| {
+                if (faultFrame(std.debug.cpu_context.fromWindowsContext(@ptrCast(@alignCast(exception_info.ContextRecord))))) |frame|
+                    capture(recovery.context, frame);
+            };
             recovery.escape(recovery.context);
         }
         if (stack_overflow_callback) |callback| callback();
@@ -639,7 +636,9 @@ fn handleSegvSignal(_: posix.SIG, info: *const posix.siginfo_t, context: ?*anyop
     switch (memory_fault.classifyFault(fault_addr, stack_pointer, thread_stack_bounds)) {
         .stack_overflow => {
             if (takeStackOverflowRecovery()) |recovery| {
-                overflow_frame = posixFaultFrame(context);
+                if (recovery.capture) |capture| {
+                    if (posixFaultFrame(context)) |frame| capture(recovery.context, frame);
+                }
                 if (comptime is_darwin) {
                     if (redirectDarwinContextToEscape(context, recovery)) return;
                 }

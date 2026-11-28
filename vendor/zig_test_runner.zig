@@ -1,6 +1,11 @@
 //! Vendored Zig 0.17.1 test runner (MIT), with an explicit Roc summary output
-//! and Roc's death-test child mode (`--roc-death-test=<test name>`, see
-//! `src/base/death_test.zig`).
+//! Roc's death-test child mode (`--roc-death-test=<test name>`, see
+//! `src/base/death_test.zig`), Roc's suite selection
+//! (`--roc-test-suite=<namespace>`, for binaries that hold several suites),
+//! and Roc's scratch directory (`--roc-scratch-root=<dir>`, for tests that
+//! write files while reading their fixture tree from the working directory),
+//! and, in Debug builds, Roc's stale-borrow allocator wrapper
+//! (`src/stale_borrow_allocator.zig`) as the backing of `std.testing.allocator`.
 //! Default test runner for unit tests.
 const builtin = @import("builtin");
 
@@ -11,6 +16,16 @@ const testing = std.testing;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
 const fuzz_abi = std.Build.abi.fuzz;
+const stale_borrow = @import("stale_borrow_allocator");
+
+var stale_borrow_backing: if (stale_borrow.available) stale_borrow else void =
+    if (stale_borrow.available) stale_borrow.init(std.heap.page_allocator, .{}) else {};
+
+/// The backing allocator of each unit test's `std.testing.allocator`.
+fn testingBacking() std.mem.Allocator {
+    if (stale_borrow.available) return stale_borrow_backing.allocator();
+    return std.heap.page_allocator;
+}
 
 pub const std_options: std.Options = .{
     .logFn = log,
@@ -24,6 +39,16 @@ var report_status: []u8 = &.{};
 var selected_tests: []usize = &.{};
 var selected_count: usize = 0;
 var filters: std.ArrayList([]const u8) = .empty;
+/// Set by `--roc-test-suite=<namespace>`: only tests whose fully qualified
+/// name starts with the namespace are selected, and filters apply within them.
+var suite_namespace: ?[]const u8 = null;
+/// Set by `--roc-scratch-root=<dir>`.
+var scratch_root: ?[]const u8 = null;
+
+/// The absolute directory a test writes its scratch files under.
+pub fn scratchRoot() []const u8 {
+    return scratch_root orelse @panic("this test writes scratch files; run it with --roc-scratch-root=<dir>");
+}
 /// Set by `--roc-death-test=<test name>`: this process is a death-test child
 /// that runs exactly the named test.
 var death_test_name: ?[]const u8 = null;
@@ -37,6 +62,9 @@ pub fn isDeathTestChild() bool {
 
 fn matchesFilter(name: []const u8) bool {
     if (death_test_name) |death_test| return std.mem.eql(u8, name, death_test);
+    if (suite_namespace) |namespace| {
+        if (!std.mem.startsWith(u8, name, namespace)) return false;
+    }
     if (filters.items.len == 0) return true;
     for (filters.items) |filter| {
         if (std.mem.find(u8, name, filter) != null) return true;
@@ -117,6 +145,11 @@ pub fn main(init: std.process.Init.Minimal) void {
             filters.append(std.heap.page_allocator, args[arg_index]) catch @panic("test filter allocation failed");
         } else if (std.mem.startsWith(u8, arg, "--test-filter=")) {
             filters.append(std.heap.page_allocator, arg["--test-filter=".len..]) catch @panic("test filter allocation failed");
+        } else if (std.mem.startsWith(u8, arg, "--roc-scratch-root=")) {
+            scratch_root = arg["--roc-scratch-root=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--roc-test-suite=")) {
+            if (suite_namespace != null) @panic("--roc-test-suite given more than once");
+            suite_namespace = arg["--roc-test-suite=".len..];
         } else if (std.mem.startsWith(u8, arg, "--roc-death-test=")) {
             death_test_name = arg["--roc-death-test=".len..];
         } else if (std.mem.startsWith(u8, arg, "--roc-test-report=")) {
@@ -217,7 +250,7 @@ fn mainServer(init: std.process.Init.Minimal) !void {
 
             .run_test => {
                 testing.environ = init.environ;
-                testing.allocator_instance = .init(std.heap.page_allocator, .{
+                testing.allocator_instance = .init(testingBacking(), .{
                     .canary = 0xc3a701ba,
                     .check_write_after_free = true,
                 });
@@ -375,7 +408,7 @@ fn mainTerminal(init: std.process.Init.Minimal) void {
     var leaks: usize = 0;
     for (selected_tests[0..selected_count], 0..) |index, i| {
         const test_fn = test_fn_list[index];
-        testing.allocator_instance = .init(std.heap.page_allocator, .{
+        testing.allocator_instance = .init(testingBacking(), .{
             .canary = 0xc3a701ba,
             .check_write_after_free = true,
         });

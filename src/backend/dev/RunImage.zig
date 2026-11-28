@@ -397,8 +397,7 @@ pub fn writeToSharedMemory(
         if (location == .pool) continue;
 
         for (data_export.relocations) |relocation| {
-            if (relocation.offset > std.math.maxInt(usize)) return error.InvalidDevRunImage;
-            const relocation_offset: usize = @intCast(relocation.offset);
+            const relocation_offset = std.math.cast(usize, relocation.offset) orelse return error.InvalidDevRunImage;
             if (relocation_offset > data_export.bytes.len or @sizeOf(usize) > data_export.bytes.len - relocation_offset) {
                 return error.InvalidDevRunImage;
             }
@@ -651,8 +650,7 @@ pub fn requiredCapacityFromOffset(
         if (!std.math.isPowerOfTwo(StaticDataPool.exportAlignment(data_export))) return error.InvalidStaticDataAlignment;
         if (placement == .pooled) continue;
         for (data_export.relocations) |relocation| {
-            if (relocation.offset > std.math.maxInt(usize)) return error.InvalidDevRunImage;
-            const relocation_offset: usize = @intCast(relocation.offset);
+            const relocation_offset = std.math.cast(usize, relocation.offset) orelse return error.InvalidDevRunImage;
             if (relocation_offset > data_export.bytes.len or @sizeOf(usize) > data_export.bytes.len - relocation_offset) {
                 return error.InvalidDevRunImage;
             }
@@ -893,7 +891,7 @@ fn relocationKindForData(kind: DataRelocationKind) RelocationKind {
         .rel32 => .linked_data_rel32,
         .page21 => .linked_data_page21,
         .pageoff12 => .linked_data_pageoff12,
-        .abs32s, .abs64_field => base.invariant("run image invariant violated: an expect-site data relocation, which only a test unit emits, and no run image holds a test unit's code", .{}),
+        .abs32_field, .abs64_field => base.invariant("run image invariant violated: an expect-site data relocation, which only a test unit emits, and no run image holds a test unit's code", .{}),
     };
 }
 
@@ -914,7 +912,7 @@ const SymbolNames = struct {
         if (!entry.found_existing) {
             errdefer _ = self.refs.remove(name);
             const end = try addNoOverflow(self.byte_len, name.len);
-            if (end > std.math.maxInt(u32)) return error.InvalidDevRunImage;
+            if (std.math.cast(u32, end) == null) return error.InvalidDevRunImage;
             entry.value_ptr.* = .{ .ref = .{ .offset = @intCast(self.byte_len), .len = @intCast(name.len) }, .kinds = 0 };
             self.byte_len = end;
         }
@@ -955,13 +953,11 @@ fn countReservedFunctionStubs(
 }
 
 fn addNoOverflow(a: usize, b: usize) ImageError!usize {
-    if (b > std.math.maxInt(usize) - a) return error.InvalidDevRunImage;
-    return a + b;
+    return std.math.add(usize, a, b) catch error.InvalidDevRunImage;
 }
 
 fn mulNoOverflow(a: usize, b: usize) ImageError!usize {
-    if (a != 0 and b > std.math.maxInt(usize) / a) return error.InvalidDevRunImage;
-    return a * b;
+    return std.math.mul(usize, a, b) catch error.InvalidDevRunImage;
 }
 
 fn addAllocationCapacity(capacity: usize, alignment: usize, len: usize) ImageError!usize {
@@ -1003,15 +999,13 @@ fn sliceFromRef(comptime T: type, base_ptr: [*]align(1) u8, image_size: usize, r
 }
 
 fn asBoundedOffset(offset: u64, bound: usize) ImageError!usize {
-    if (offset > std.math.maxInt(usize)) return error.InvalidDevRunImage;
-    const result: usize = @intCast(offset);
+    const result = std.math.cast(usize, offset) orelse return error.InvalidDevRunImage;
     if (result > bound) return error.InvalidDevRunImage;
     return result;
 }
 
 fn asBoundedLen(len: u64) ImageError!usize {
-    if (len > std.math.maxInt(usize)) return error.InvalidDevRunImage;
-    return @intCast(len);
+    return std.math.cast(usize, len) orelse error.InvalidDevRunImage;
 }
 
 test "run image offsets reject values outside the host buffer" {
@@ -1340,6 +1334,43 @@ test "static pool plan places address cycles locally and pools what reaches none
         if (i < 2) try std.testing.expect(!seen_c);
     }
     for (plan.placements) |placement| try std.testing.expect(placement == .local);
+}
+
+test "static pool reuses an export whose pointer words point into itself" {
+    // A stored image is one block whose pointer words point into the block
+    // itself (design.md "Stored Images"): a string's descriptor at offset 0
+    // whose bytes follow it.
+    const page_size = std.heap.page_size_min;
+    const mapping = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(page_size), 64 * page_size);
+    defer std.testing.allocator.free(mapping);
+    @memset(mapping, 0);
+
+    var block = @as([3 * @sizeOf(usize)]u8, @splat(0)) ++ "image bytes, longer than 23 bytes".*;
+    block[@sizeOf(usize)] = 33;
+    block[2 * @sizeOf(usize)] = 33;
+    const first_relocations = [_]StaticDataRelocation{.{ .offset = 0, .target_symbol_name = "roc__image_a", .addend = 3 * @sizeOf(usize) }};
+    const first_exports = [_]StaticDataExport{.{ .symbol_name = "roc__image_a", .bytes = &block, .alignment = 8, .relocations = &first_relocations }};
+    var plan = try StaticDataPool.Plan.init(std.testing.allocator, &first_exports, true);
+    defer plan.deinit();
+    try std.testing.expectEqualSlices(bool, &.{true}, plan.poolable);
+
+    const first = try writePoolTestImage(mapping, page_size, page_size, &first_exports, .empty);
+    const pool = StaticDataPool.Pool{ .mapping = mapping, .head_offset = @intCast(first.header.static_pool.offset) };
+    const second_relocations = [_]StaticDataRelocation{.{ .offset = 0, .target_symbol_name = "roc__image_b", .addend = 3 * @sizeOf(usize) }};
+    const second_exports = [_]StaticDataExport{.{ .symbol_name = "roc__image_b", .bytes = &block, .alignment = 8, .relocations = &second_relocations }};
+    const second = try writePoolTestImage(mapping, @intCast(first.header.image_size), page_size, &second_exports, pool);
+    const reused = try poolTestSymbol(&second.view, "roc__image_b");
+    try std.testing.expectEqual(DataLocation.pool, try reused.dataLocation());
+    try std.testing.expectEqual(
+        @intFromPtr((try first.view.dataSymbolBytes(try poolTestSymbol(&first.view, "roc__image_a"))).ptr),
+        @intFromPtr((try second.view.dataSymbolBytes(reused)).ptr),
+    );
+
+    // The same bytes pointing at another offset of themselves are other content.
+    const shifted_relocations = [_]StaticDataRelocation{.{ .offset = 0, .target_symbol_name = "roc__image_c", .addend = 3 * @sizeOf(usize) + 1 }};
+    const shifted_exports = [_]StaticDataExport{.{ .symbol_name = "roc__image_c", .bytes = &block, .alignment = 8, .relocations = &shifted_relocations }};
+    const third = try writePoolTestImage(mapping, @intCast(second.header.image_size), page_size, &shifted_exports, pool);
+    try std.testing.expectEqual(DataLocation.image, try (try poolTestSymbol(&third.view, "roc__image_c")).dataLocation());
 }
 
 test "static pool reuse stays within code-to-data displacement range" {

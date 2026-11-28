@@ -10,13 +10,22 @@
 //! before connecting its edges. No runtime constructor is emitted.
 //!
 //! The recipe is bytes the constant store keeps opaque but for its first
-//! table: the modules it names, by checked key, each once, which the store
-//! reads to name a stored function in an identity by its modules' link names
-//! and to move it to the modules' current versions
-//! (`ConstStore.recipeModuleKeys`). Then come a table of the types the recipe
+//! two tables: the modules it names, by checked key, each once, which the
+//! store reads to name a stored function in an identity by its modules' link
+//! names and to move it to the modules' current versions
+//! (`ConstStore.recipeModuleKeys`), and the position of each template it
+//! names, which the store leaves out of what names the function
+//! (`ConstStore.recipeBody`). Then come a table of the types the recipe
 //! names, generic where the worker's own types are, then the worker, then
 //! the capture graph and its table-input and capture-descriptor roots. Every
-//! module reference is an index into the first table.
+//! module reference is an index into the first table. A worker is named as
+//! its identity names it (`Program.workerIdentity`), but for its module: a
+//! template by its name within its module (`Program.templateNameWithin`) and
+//! an index into the positions table, a lambda by its owner and its place
+//! among the owner's nested procedure sites, a default by its place among its
+//! module's defaults. Nothing after the module table names a module itself,
+//! as the lowering that stores a recipe and the one that reads it can name
+//! modules differently.
 
 const std = @import("std");
 const collections = @import("collections");
@@ -29,14 +38,15 @@ const types = @import("types.zig");
 const Tables = @import("tables.zig");
 const lower = @import("lower.zig");
 const const_schema = @import("const_schema.zig");
+const const_store = check.ConstStore;
 const Codec = @import("codec.zig");
 const body = @import("body.zig");
 const StaticDescs = @import("static_descs.zig").StaticDescs;
 
 const Allocator = std.mem.Allocator;
 const checked = check.CheckedModule;
-const ExprId = check.CheckedBodies.ExprId;
 const LIR = lir_core.LIR;
+const checked_names = check.CheckedNames;
 const LirProgram = lir_core.Program;
 const TypeDesc = boxy_runtime.desc.TypeDesc;
 const TypeId = types.TypeId;
@@ -45,47 +55,67 @@ const WorkerId = lower.WorkerId;
 const invariant = types.invariant;
 
 /// What a worker's erased callable captures: `values`, then its type
-/// table, whose inputs are `descs` descriptors, then `dicts` erased
-/// callables.
+/// table, which has `inputs` inputs, unless it has none.
 pub const CaptureShape = struct {
     values: []const TypeId,
-    descs: u32,
-    dicts: u32,
+    inputs: u32,
+    /// Where the descriptors of the variables `values` mention are: the
+    /// callable's table first, then each creator's table its scope is read
+    /// through (`Tables.InputLayout`).
+    scope: []const ScopeLevel,
     /// The callable is an immortal dictionary (`Builder.composeDictionary`).
     composed: bool,
 };
 
+/// One table of a captured table's chain: whether its first input is its
+/// creator's table, how many variables its creator's scope has, and how
+/// many inputs describe the variables its own scope adds, which follow the
+/// creator's table.
+pub const ScopeLevel = struct { scope_table: bool, inherited_descs: u32, own_descs: u32 };
+
 /// The capture shape of `id`, which is a worker some body packs as a
 /// function value.
-pub fn captureShape(program: *Program, id: WorkerId) CaptureShape {
+pub fn captureShape(program: *Program, id: WorkerId) Allocator.Error!CaptureShape {
     const worker = program.worker(id).*;
-    return switch (worker.key) {
-        .lambda => .{
-            .values = worker.capture_types,
-            .descs = @intCast(worker.scheme_vars.len - worker.own_descs),
-            .dicts = worker.capturedDictionaryCount() + worker.capturedLiteralCount(),
-            .composed = false,
-        },
-        .adapter => .{ .values = worker.capture_types, .descs = @intCast(worker.scheme_vars.len), .dicts = 0, .composed = false },
-        .method_entry => |target| blk: {
-            const target_worker = program.worker(target).*;
-            break :blk .{
-                .values = &.{},
-                .descs = @intCast(target_worker.scheme_vars.len),
-                .dicts = @intCast(target_worker.dictionary_params.len + target_worker.literal_params),
-                .composed = true,
-            };
-        },
-        .structural, .structural_map => .{ .values = &.{}, .descs = worker.structural_descs, .dicts = 0, .composed = true },
-        .crash_dictionary, .literal_thunk, .root_slot, .callable_eval_entry => .{ .values = &.{}, .descs = 0, .dicts = 0, .composed = true },
-        .codec => |index| .{
-            .values = worker.capture_types,
-            .descs = @intCast(worker.scheme_vars.len),
-            .dicts = 0,
-            .composed = program.codec.pieces.items[index].kind == .constructor,
-        },
-        .template, .default, .root, .static_data, .convert => invariant("a worker that is no function value reached a stored function"),
+    const values: []const TypeId, const composed = switch (worker.key) {
+        .lambda, .adapter => .{ worker.capture_types, false },
+        .codec => |index| .{ worker.capture_types, program.codec.pieces.items[index].kind == .constructor },
+        .method_entry, .structural, .structural_map, .crash_dictionary, .literal_thunk, .root_slot, .root_restore, .callable_eval_entry => .{ &.{}, true },
+        .template, .default, .root, .static_data, .inline_literal, .convert => invariant("a worker that is no function value reached a stored function"),
     };
+    // A procedure whose calls pass its table captures none.
+    if (program.perCall(id)) return .{ .values = values, .inputs = 0, .scope = &.{}, .composed = composed };
+    var scope: std.ArrayList(ScopeLevel) = .empty;
+    var current = id;
+    while (true) {
+        const inputs = program.inputLayout(current);
+        try scope.append(program.arena.allocator(), .{ .scope_table = inputs.scope_table, .inherited_descs = inputs.inherited.descs, .own_descs = inputs.own.descs });
+        if (!inputs.scope_table) break;
+        current = program.worker(current).key.lambda.outer;
+    }
+    return .{ .values = values, .inputs = program.inputCount(id), .scope = scope.items, .composed = composed };
+}
+
+/// The types the descriptors of a captured table's scope describe, by
+/// variable: `roots` are the table's inputs in `graph`, and `scope` says
+/// where each variable's descriptor is in them or in its creators' tables.
+fn captureBinding(allocator: Allocator, graph: []const CaptureNode, roots: []const u32, scope: []const ScopeLevel) Allocator.Error![]TypeId {
+    if (scope.len == 0) return try allocator.alloc(TypeId, 0);
+    const bound = try allocator.alloc(TypeId, scope[0].inherited_descs + scope[0].own_descs);
+    var refs = roots;
+    for (scope) |level| {
+        const first: u32 = @intFromBool(level.scope_table);
+        for (0..level.own_descs) |index| bound[level.inherited_descs + index] = captureType(graph, refs[first + index]);
+        if (!level.scope_table) {
+            if (level.inherited_descs != 0) invariant("a captured table inherits a scope through no table");
+            break;
+        }
+        refs = switch (graph[refs[0]]) {
+            .table => |table| table.inputs,
+            .desc, .callable, .zero => invariant("a captured lambda table's first input is not its creator's table"),
+        };
+    }
+    return bound;
 }
 
 /// One captured value of a stored function: read it at `ptr`, by `plan`,
@@ -93,6 +123,10 @@ pub fn captureShape(program: *Program, id: WorkerId) CaptureShape {
 pub const Capture = struct {
     plan: LirProgram.ConstPlanId,
     layout_idx: layout.Idx,
+    /// The captured value's type, which the const store writer steps into
+    /// the types of its parts (`partType`) and stores a part holding no
+    /// function at (`storedType`).
+    ty: TypeId,
     ptr: [*]u8,
 };
 
@@ -116,14 +150,14 @@ const CaptureNode = union(enum(u8)) {
 const CaptureOverride = struct { nominal: TypeId, methods: [3]?u32 };
 const CaptureWorker = union(enum) {
     local: WorkerId,
-    encoded: struct { bytes: []const u8, modules: []const [32]u8, types: []const TypeId, link_names: bool },
+    encoded: struct { bytes: []const u8, modules: []const [32]u8, types: []const TypeId, templates: []const u8, link_names: bool },
 
     fn reader(encoded: @FieldType(CaptureWorker, "encoded"), program: *Program) Decoder {
-        return .{ .program = program, .bytes = encoded.bytes, .modules = encoded.modules, .table = @constCast(encoded.types), .link_names = encoded.link_names };
+        return .{ .program = program, .bytes = encoded.bytes, .modules = encoded.modules, .table = @constCast(encoded.types), .templates = encoded.templates, .link_names = encoded.link_names };
     }
 
-    fn resolve(self: CaptureWorker, program: *Program) Allocator.Error!WorkerId {
-        return switch (self) {
+    fn resolve(self: *const CaptureWorker, program: *Program) Allocator.Error!WorkerId {
+        return switch (self.*) {
             .local => |id| id,
             .encoded => |encoded| blk: {
                 var input = reader(encoded, program);
@@ -245,7 +279,7 @@ fn decodeCaptureRefs(input: *Decoder) Allocator.Error![]const u32 {
 
 fn decodeCaptureWorker(input: *Decoder, type_table: []const TypeId) CaptureWorker {
     const len = input.word();
-    return .{ .encoded = .{ .bytes = input.take(len), .modules = input.modules, .types = type_table, .link_names = input.link_names } };
+    return .{ .encoded = .{ .bytes = input.take(len), .modules = input.modules, .types = type_table, .templates = input.templates, .link_names = input.link_names } };
 }
 
 fn decodeCaptureGraph(input: *Decoder) Allocator.Error![]const CaptureNode {
@@ -363,9 +397,9 @@ pub const Retained = struct {
         const program = self.program;
         program.result = result.*;
         defer result.* = program.result;
-        const worker_id = self.workers.get(result.store.getProcSpec(proc).identity) orelse
+        const worker_id = self.workers.get(result.store.getProcSpecImmediate(proc).identity) orelse
             invariant("a stored function value's code is no worker of its program");
-        return try self.describeCapture(allocator, program.moduleByKey(store_module).index, captureShape(program, worker_id), .{ .local = worker_id }, capture);
+        return try self.describeCapture(allocator, program.moduleByKey(store_module).index, try captureShape(program, worker_id), .{ .local = worker_id }, capture);
     }
 
     pub fn describeImported(self: *Retained, allocator: Allocator, result: *LirProgram.Result, store_module: checked.ModuleId, owner: [32]u8, identity: LIR.ProcIdentity, capture: [*]u8) Allocator.Error!Described {
@@ -374,6 +408,68 @@ pub const Retained = struct {
         const imported = try self.importMetadata(owner);
         const function = imported.functions.get(identity) orelse invariant("a cached function's metadata has no such worker");
         return try self.describeCapture(allocator, self.program.moduleByKey(store_module).index, function.shape, .{ .imported = .{ .metadata = imported, .function = function } }, capture);
+    }
+
+    /// The type of a captured value (`Capture.ty`) and of its parts.
+    pub const PartTypeId = TypeId;
+
+    /// How a part of a stored value is reached from the value holding it,
+    /// as the value's const plan reaches the part's plan
+    /// (`const_schema.constPlanOf`).
+    pub const PartStep = union(enum) {
+        list_item,
+        box_payload,
+        /// A record's field, as its storage slot, or a tuple's item.
+        component: u32,
+        /// Payload `index` of the tag at position `variant` among its
+        /// type's tags, the variant's discriminant in the type's plan.
+        tag_payload: struct { variant: u32, index: u32 },
+        nominal_backing,
+    };
+
+    /// The type of the part `step` reaches of a value of type `ty`.
+    pub fn partType(self: *Retained, result: *LirProgram.Result, ty: TypeId, step: PartStep) Allocator.Error!TypeId {
+        const program = self.program;
+        program.result = result.*;
+        defer result.* = program.result;
+        const store = &program.store;
+        return switch (step) {
+            .nominal_backing => try program.layouts.converter.backing(ty),
+            .list_item => switch (store.get(ty)) {
+                .list => |item| item,
+                .primitive, .empty_record, .record, .tuple, .tag_union, .box, .nominal, .function, .variable => invariant("a stored list's type is no list"),
+            },
+            .box_payload => switch (store.get(ty)) {
+                .box => |payload| payload,
+                .primitive, .empty_record, .record, .tuple, .tag_union, .list, .nominal, .function, .variable => invariant("a stored box's type is no box"),
+            },
+            .component => |index| switch (store.get(ty)) {
+                .tuple => |items| store.span(items)[index],
+                .record => |record| try program.layouts.fieldStorage(store.fieldSpan(record.fields)[index]),
+                .primitive, .empty_record, .tag_union, .list, .box, .nominal, .function, .variable => invariant("a stored product's type is no product"),
+            },
+            .tag_payload => |payload| switch (store.get(ty)) {
+                .tag_union => |tag_union| store.span(store.tagSpan(tag_union.tags)[payload.variant].payloads)[payload.index],
+                .primitive, .empty_record, .record, .tuple, .list, .box, .nominal, .function, .variable => invariant("a stored tag's type is no tag union"),
+            },
+        };
+    }
+
+    /// Whether `ty` holds no type variable.
+    pub fn typeIsClosed(self: *Retained, result: *LirProgram.Result, ty: TypeId) bool {
+        const program = self.program;
+        program.result = result.*;
+        defer result.* = program.result;
+        return program.store.isClosed(ty);
+    }
+
+    /// The stored type of a part of type `ty` holding no function, in
+    /// `result`'s types.
+    pub fn storedType(self: *Retained, result: *LirProgram.Result, ty: TypeId) Allocator.Error!const_store.ConstTypeId {
+        const program = self.program;
+        program.result = result.*;
+        defer result.* = program.result;
+        return try const_schema.constTypeOf(program, ty);
     }
 
     fn importMetadata(self: *Retained, owner: [32]u8) Allocator.Error!*ImportedMetadata {
@@ -392,7 +488,7 @@ pub const Retained = struct {
     fn describeCapture(self: *Retained, allocator: Allocator, store_module: types.ModuleIndex, shape: CaptureShape, source: Recipe, capture: [*]u8) Allocator.Error!Described {
         const program = self.program;
         const open = !try allClosed(program, shape.values);
-        const has_table = shape.descs + shape.dicts != 0;
+        const has_table = shape.inputs != 0;
         const word_count: u32 = @intFromBool(has_table);
 
         // Where each capture is: a closed record's order is values, then
@@ -420,7 +516,7 @@ pub const Retained = struct {
         // edge. Its scope is data, including override callables, not a type
         // from which the receiving body reads the recorded overrides.
         const table: ?[*]u8 = if (has_table) @ptrCast(@constCast(readWord(capture + offsets[shape.values.len]))) else null;
-        const bound = try allocator.alloc(TypeId, shape.descs);
+        var bound: []TypeId = &.{};
         defer allocator.free(bound);
         // Producer and selected edge arrays are consumed by recipe.finish;
         // only the independently allocated recipe and value captures escape.
@@ -444,16 +540,16 @@ pub const Retained = struct {
                 const tables = program.static_descs.unfilled_tables.items;
                 if (index >= tables.len) invariant("a captured table has no producer record");
                 const inputs = tables[index].inputs;
-                if (inputs.len != shape.descs + shape.dicts) invariant("a captured table has the wrong input arity");
+                if (inputs.len != shape.inputs) invariant("a captured table has the wrong input arity");
                 roots = try local_graph.span(inputs);
                 graph = local_graph.nodes.items;
             } else {
                 const metadata = try self.importMetadata(origin.*);
-                if (index >= metadata.tables.len or metadata.tables[index].len != shape.descs + shape.dicts) invariant("a cached table has no matching producer inputs");
+                if (index >= metadata.tables.len or metadata.tables[index].len != shape.inputs) invariant("a cached table has no matching producer inputs");
                 roots = metadata.tables[index];
                 graph = metadata.graph;
             }
-            for (bound, roots[0..shape.descs]) |*ty, ref| ty.* = captureType(graph, ref);
+            bound = try captureBinding(allocator, graph, roots, shape.scope);
         }
 
         var recipe = Encoder{ .allocator = allocator, .program = program, .store_module = store_module };
@@ -501,6 +597,7 @@ pub const Retained = struct {
             slot.* = .{
                 .plan = try const_schema.constPlanOf(program, concrete),
                 .layout_idx = try program.layouts.layoutOf(concrete),
+                .ty = concrete,
                 .ptr = capture + offset,
             };
         }
@@ -546,8 +643,14 @@ pub const MetadataView = struct {
             _ = try input.take(32);
             _ = try input.word(); // native image symbol
             try input.typeSpan();
-            _ = try input.word(); // descriptor count
-            _ = try input.word(); // dictionary count
+            _ = try input.word(); // table input count
+            const levels = try input.word();
+            if (levels > input.remaining() / 12) return error.InvalidMetadata;
+            for (0..levels) |_| {
+                _ = try input.word(); // whether the table reads its creator's
+                _ = try input.word(); // the creator's scope's variables
+                _ = try input.word(); // the variables the table's own inputs describe
+            }
             _ = try input.word(); // table words before its producer identity
             try input.boolean();
             const len = try input.word();
@@ -574,7 +677,10 @@ pub const MetadataView = struct {
             const symbol = self.input.word() catch unreachable; // MetadataView.init validated every function symbol word
             const values = self.input.word() catch unreachable; // MetadataView.init validated every capture-type count
             _ = self.input.takeProduct(values, 4) catch unreachable; // MetadataView.init validated the complete capture-type span
-            _ = self.input.take(13) catch unreachable; // MetadataView.init validated the three counts and composed flag
+            _ = self.input.take(4) catch unreachable; // MetadataView.init validated every table input count
+            const levels = self.input.word() catch unreachable; // MetadataView.init validated every scope level count
+            _ = self.input.takeProduct(levels, 12) catch unreachable; // MetadataView.init validated the complete scope levels
+            _ = self.input.take(5) catch unreachable; // MetadataView.init validated the table word count and composed flag
             const len = self.input.word() catch unreachable; // MetadataView.init validated every worker recipe length
             _ = self.input.take(len) catch unreachable; // MetadataView.init validated the complete worker recipe
             return .{ .identity = identity, .symbol = symbol };
@@ -616,8 +722,64 @@ const MetadataReader = struct {
         return error.InvalidMetadata;
     }
     fn name(self: *MetadataReader) error{InvalidMetadata}!void {
+        _ = try self.nameBytes();
+    }
+    fn nameBytes(self: *MetadataReader) error{InvalidMetadata}![]const u8 {
         const len = try self.word();
-        _ = try self.take(len);
+        return try self.take(len);
+    }
+    /// One field of a record's table entry, returning its label.
+    fn recordField(self: *MetadataReader) error{InvalidMetadata}![]const u8 {
+        const label = try self.nameBytes();
+        try self.typeRef();
+        _ = try self.tag(types.FieldKind);
+        _ = try self.word();
+        const has_default = try self.byte();
+        if (has_default > 1) return error.InvalidMetadata;
+        if (has_default == 1) {
+            try self.module();
+            _ = try self.word();
+        }
+        return label;
+    }
+    /// A padded record's declaration entries, which the type store derives
+    /// the record's slots from: every named entry is one of the record's
+    /// `field_count` fields, read from `fields_at`, every padding position
+    /// below `padding` appears, and no entry appears twice.
+    fn declaredEntries(self: *MetadataReader, fields_at: usize, field_count: u32, padding: u32) error{InvalidMetadata}!void {
+        const count = try self.word();
+        if (count > self.remaining() / 5) return error.InvalidMetadata;
+        const entries_at = self.at;
+        var paddings: u32 = 0;
+        for (0..count) |_| {
+            const entry_at = self.at;
+            switch (try self.tag(std.meta.Tag(types.DeclaredEntry))) {
+                .named => {
+                    const label = try self.nameBytes();
+                    var record_fields = self.*;
+                    record_fields.at = fields_at;
+                    const found = for (0..field_count) |_| {
+                        if (std.mem.eql(u8, try record_fields.recordField(), label)) break true;
+                    } else false;
+                    if (!found) return error.InvalidMetadata;
+                },
+                .padding => {
+                    if (try self.word() >= padding) return error.InvalidMetadata;
+                    paddings += 1;
+                },
+            }
+            const entry = self.bytes[entry_at..self.at];
+            var earlier = MetadataReader{ .bytes = self.bytes, .at = entries_at };
+            while (earlier.at < entry_at) {
+                const earlier_at = earlier.at;
+                switch (try earlier.tag(std.meta.Tag(types.DeclaredEntry))) {
+                    .named => _ = try earlier.nameBytes(),
+                    .padding => _ = try earlier.word(),
+                }
+                if (std.mem.eql(u8, self.bytes[earlier_at..earlier.at], entry)) return error.InvalidMetadata;
+            }
+        }
+        if (paddings != padding) return error.InvalidMetadata;
     }
     fn module(self: *MetadataReader) error{InvalidMetadata}!void {
         if (try self.word() >= self.modules) return error.InvalidMetadata;
@@ -667,8 +829,8 @@ const MetadataReader = struct {
         return count;
     }
     fn ext(self: *MetadataReader) error{InvalidMetadata}!void {
-        const id = try self.word();
-        if (id != no_type and id >= self.types) return error.InvalidMetadata;
+        const id = @as(OptionalTypeIndex, @fromBackingInt(try self.word())).get() orelse return;
+        if (id >= self.types) return error.InvalidMetadata;
     }
     fn typeEntry(self: *MetadataReader) error{InvalidMetadata}!void {
         switch (try self.tag(std.meta.Tag(types.Node))) {
@@ -679,25 +841,16 @@ const MetadataReader = struct {
             .record => {
                 const fields = try self.word();
                 if (fields > self.remaining() / 14) return error.InvalidMetadata;
-                for (0..fields) |_| {
-                    try self.name();
-                    try self.typeRef();
-                    _ = try self.tag(types.FieldKind);
-                    _ = try self.word();
-                    const has_default = try self.byte();
-                    if (has_default > 1) return error.InvalidMetadata;
-                    if (has_default == 1) {
-                        try self.module();
-                        _ = try self.word();
-                    }
-                }
+                const fields_at = self.at;
+                for (0..fields) |_| _ = try self.recordField();
                 try self.ext();
                 const declared = try self.byte();
                 if (declared > 1) return error.InvalidMetadata;
                 if (declared == 1) {
-                    try self.typeSpan();
-                    const slots = try self.word();
-                    _ = try self.takeProduct(slots, 4);
+                    const padding = try self.word();
+                    if (padding > self.remaining() / 4) return error.InvalidMetadata;
+                    for (0..padding) |_| try self.typeRef();
+                    try self.declaredEntries(fields_at, fields, padding);
                 }
             },
             .tuple => try self.typeSpan(),
@@ -739,18 +892,34 @@ const MetadataReader = struct {
     }
     fn worker(self: *MetadataReader) error{InvalidMetadata}!void {
         while (true) switch (try self.tag(Tag)) {
-            .template, .default => {
+            .template => {
+                try self.module();
+                _ = try self.take(32);
+                return;
+            },
+            .default => {
                 try self.module();
                 _ = try self.word();
                 return;
             },
             .template_list_int => {
                 try self.module();
-                _ = try self.word();
+                _ = try self.take(32);
                 _ = try self.tag(lower.ListIntItem);
                 return;
             },
             .lambda => {
+                switch (try self.byte()) {
+                    0 => {
+                        try self.module();
+                        _ = try self.take(32);
+                    },
+                    1 => {
+                        try self.module();
+                        _ = try self.word();
+                    },
+                    else => return error.InvalidMetadata,
+                }
                 _ = try self.word();
                 if (try self.word() > 1) return error.InvalidMetadata;
             },
@@ -763,7 +932,7 @@ const MetadataReader = struct {
                 try self.typeRef();
                 _ = try self.word();
             },
-            .root_slot => {
+            .root_slot, .root_restore => {
                 try self.module();
                 _ = try self.word();
                 try self.typeRef();
@@ -871,13 +1040,14 @@ const ImportedMetadata = struct {
             const identity: LIR.ProcIdentity = .{ .bytes = input.take(32)[0..32].* };
             _ = input.word(); // native symbol belongs to the loader
             const values = try input.typeSpan();
-            const descs = input.word();
-            const dicts = input.word();
+            const inputs = input.word();
+            const scope = try arena.alloc(ScopeLevel, input.word());
+            for (scope) |*level| level.* = .{ .scope_table = input.word() != 0, .inherited_descs = input.word(), .own_descs = input.word() };
             const table_words = input.word();
             const composed = input.byte() != 0;
             const worker_len = input.word();
             const worker = input.take(worker_len);
-            try result.functions.put(arena, identity, .{ .shape = .{ .values = values, .descs = descs, .dicts = dicts, .composed = composed }, .worker = worker, .table_words = table_words });
+            try result.functions.put(arena, identity, .{ .shape = .{ .values = values, .inputs = inputs, .scope = scope, .composed = composed }, .worker = worker, .table_words = table_words });
         }
         std.debug.assert(input.at == bytes.len);
         return result;
@@ -923,16 +1093,21 @@ pub fn encodeMetadata(retained: *Retained, result: *LirProgram.Result, compiled:
         const id = retained.workers.get(function.identity) orelse continue;
         const record = program.worker(id);
         switch (record.key) {
-            .template, .default, .root, .static_data, .convert => continue,
-            .lambda, .adapter, .method_entry, .structural, .structural_map, .crash_dictionary, .literal_thunk, .root_slot, .callable_eval_entry, .codec => {},
+            .template, .default, .root, .static_data, .inline_literal, .convert => continue,
+            .lambda, .adapter, .method_entry, .structural, .structural_map, .crash_dictionary, .literal_thunk, .root_slot, .root_restore, .callable_eval_entry, .codec => {},
         }
-        const shape = captureShape(program, id);
+        const shape = try captureShape(program, id);
         try encoder.bytes.appendSlice(allocator, &function.identity.bytes);
         try encoder.word(function.symbol);
         try encoder.typeSpan(shape.values);
-        try encoder.word(shape.descs);
-        try encoder.word(shape.dicts);
-        try encoder.word(if (shape.descs + shape.dicts == 0) 0 else (record.needs orelse invariant("a captured function table has no declared needs")).wordCount());
+        try encoder.word(shape.inputs);
+        try encoder.word(@intCast(shape.scope.len));
+        for (shape.scope) |level| {
+            try encoder.word(@intFromBool(level.scope_table));
+            try encoder.word(level.inherited_descs);
+            try encoder.word(level.own_descs);
+        }
+        try encoder.word(if (shape.inputs == 0) 0 else (record.needs orelse invariant("a captured function table has no declared needs")).wordCount());
         try encoder.bytes.append(allocator, @intFromBool(shape.composed));
         const size_at = encoder.bytes.items.len;
         try encoder.word(0);
@@ -952,7 +1127,7 @@ pub fn retain(allocator: Allocator, program: *Program) Allocator.Error!*Retained
     retained.* = .{ .allocator = allocator, .program = program };
     errdefer retained.workers.deinit(allocator);
     for (program.workers.items, 0..) |worker, index| {
-        try retained.workers.put(allocator, program.result.store.getProcSpec(worker.proc).identity, @fromBackingInt(@intCast(index)));
+        try retained.workers.put(allocator, program.result.store.getProcSpecImmediate(worker.proc).identity, @fromBackingInt(@intCast(index)));
     }
     return retained;
 }
@@ -1001,6 +1176,9 @@ const Tag = enum(u8) {
     /// the module and template, then one byte naming the item type
     /// (`lower.ListIntItem`).
     template_list_int,
+    /// A polymorphic constant instance's restore thunk
+    /// (`lower.WorkerKey.root_restore`): the module, the root, the type.
+    root_restore,
 };
 
 fn appendWord(allocator: Allocator, list: *std.ArrayList(u8), value: u32) Allocator.Error!void {
@@ -1009,7 +1187,11 @@ fn appendWord(allocator: Allocator, list: *std.ArrayList(u8), value: u32) Alloca
     try list.appendSlice(allocator, &buffer);
 }
 
-const no_type = std.math.maxInt(u32);
+/// A row extension's table word: an optional type table index.
+const OptionalTypeIndex = collections.OptionalU32;
+
+/// A nominal's builtin byte.
+const OptionalBuiltin = collections.OptionalEnum(checked.CheckedBuiltinNominal);
 
 const Encoder = struct {
     allocator: Allocator,
@@ -1030,6 +1212,14 @@ const Encoder = struct {
     table: std.ArrayList(u8) = .empty,
     table_len: u32 = 0,
     table_index: collections.DenseMapUnmanaged(TypeId, u32) = .empty,
+    /// For a recipe: the position of each template it names, which its
+    /// references index (`templateRef`).
+    template_positions: std.ArrayList(u32) = .empty,
+    template_slots: std.AutoHashMapUnmanaged(struct { module: types.ModuleIndex, template: checked_names.CheckedProcedureTemplateId }, u32) = .empty,
+    /// Whether the program's workers still name their own procedures, as
+    /// they do until its lowering finishes: a template's identity is then
+    /// read from its procedure rather than hashed again.
+    proc_identities: bool = false,
     bytes: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Encoder) void {
@@ -1037,6 +1227,8 @@ const Encoder = struct {
         self.module_index.deinit(self.allocator);
         self.table.deinit(self.allocator);
         self.table_index.deinit(self.allocator);
+        self.template_positions.deinit(self.allocator);
+        self.template_slots.deinit(self.allocator);
         self.bytes.deinit(self.allocator);
     }
 
@@ -1045,6 +1237,10 @@ const Encoder = struct {
         errdefer out.deinit(self.allocator);
         try appendWord(self.allocator, &out, @intCast(self.modules.items.len));
         for (self.modules.items) |key| try out.appendSlice(self.allocator, &key);
+        if (!self.link_names) {
+            try appendWord(self.allocator, &out, @intCast(self.template_positions.items.len));
+            for (self.template_positions.items) |position| try appendWord(self.allocator, &out, position);
+        }
         try appendWord(self.allocator, &out, self.table_len);
         try out.appendSlice(self.allocator, self.table.items);
         try out.appendSlice(self.allocator, self.bytes.items);
@@ -1072,6 +1268,50 @@ const Encoder = struct {
 
     fn module(self: *Encoder, index: types.ModuleIndex) Allocator.Error!void {
         try self.word(try self.moduleEntry(index));
+    }
+
+    /// Module `module_index`'s template worker for `template` at `binding`,
+    /// by what an edit elsewhere in the module leaves alone. A link's
+    /// encoding (a needs list, function metadata) is read against modules
+    /// built apart from it, so it names the worker by its identity, which a
+    /// reader resolves through the worker's export record
+    /// (`ExportInterface.template`); `identity` is that identity when the
+    /// caller already has it. A stored constant's recipe is read by
+    /// lowerings that name modules differently, so it names the template
+    /// within its module (`Program.templateNameWithin`), and since it is
+    /// read against the modules it was stored with, it also lists the
+    /// template's position, once per template, in a table after its module
+    /// table that the recipe's digest leaves out (`ConstStore.recipeBody`).
+    fn templateRef(self: *Encoder, module_index: types.ModuleIndex, template: checked_names.CheckedProcedureTemplateId, binding: lower.TemplateBinding, identity: ?[32]u8) Allocator.Error!void {
+        try self.module(module_index);
+        if (self.link_names) {
+            const bytes = identity orelse self.program.templateIdentity(module_index, template, binding).bytes;
+            try self.bytes.appendSlice(self.allocator, &bytes);
+            return;
+        }
+        try self.bytes.appendSlice(self.allocator, &self.program.templateNameWithin(module_index, template, binding));
+        const slot = try self.template_slots.getOrPut(self.allocator, .{ .module = module_index, .template = template });
+        if (!slot.found_existing) {
+            slot.value_ptr.* = @intCast(self.template_positions.items.len);
+            try self.template_positions.append(self.allocator, @backingInt(template));
+        }
+        try self.word(slot.value_ptr.*);
+    }
+
+    /// What owns a lambda's site: a template, or a default by its place
+    /// among its module's defaults.
+    fn siteOwner(self: *Encoder, owner: Program.SiteOwner) Allocator.Error!void {
+        switch (owner) {
+            .template => |template| {
+                try self.bytes.append(self.allocator, 0);
+                try self.templateRef(template.module, template.template, .generic, null);
+            },
+            .default => |default| {
+                try self.bytes.append(self.allocator, 1);
+                try self.module(default.module);
+                try self.word(self.program.defaultOrdinal(default.module, default.expr));
+            },
+        }
     }
 
     fn typeOf(self: *Encoder, ty: TypeId) Allocator.Error!void {
@@ -1148,16 +1388,22 @@ const Encoder = struct {
                     try self.table.append(self.allocator, @intFromBool(field.default.get() != null));
                     if (field.default.get()) |default| {
                         try self.tableWord(try self.moduleEntry(default.module));
-                        try self.tableWord(default.expr_node);
+                        try self.tableWord(default.ordinal);
                     }
                 }
                 try self.tableExt(record.ext.get());
                 try self.table.append(self.allocator, @intFromBool(record.declared.get() != null));
                 if (record.declared.get()) |declared| {
                     try self.tableTypes(store.span(declared.padding));
-                    const slots = store.declaredSlots(declared);
-                    try self.tableWord(@intCast(slots.len));
-                    for (slots) |slot| try self.tableWord(slot);
+                    const entries = store.declaredEntries(declared);
+                    try self.tableWord(@intCast(entries.len));
+                    for (entries) |entry| {
+                        try self.table.append(self.allocator, @backingInt(std.meta.activeTag(entry)));
+                        switch (entry) {
+                            .named => |label| try self.tableName(label),
+                            .padding => |ordinal| try self.tableWord(ordinal),
+                        }
+                    }
                 }
             },
             .tuple => |items| try self.tableTypes(store.span(items)),
@@ -1177,7 +1423,7 @@ const Encoder = struct {
                 try self.tableTypes(store.nominalArgs(nominal));
                 try self.tableName(nominal.name);
                 try self.table.append(self.allocator, @intFromBool(nominal.is_opaque));
-                try self.table.append(self.allocator, if (nominal.builtin) |builtin| @backingInt(builtin) + 1 else 0);
+                try self.table.append(self.allocator, @backingInt(OptionalBuiltin.of(nominal.builtin)));
                 try self.table.append(self.allocator, @intFromBool(nominal.has_backing));
             },
             .function => |function| {
@@ -1203,7 +1449,7 @@ const Encoder = struct {
     }
 
     fn tableExt(self: *Encoder, ext: ?TypeId) Allocator.Error!void {
-        try self.tableWord(if (ext) |ty| self.table_index.get(ty).? else no_type);
+        try self.tableWord(@backingInt(OptionalTypeIndex.of(if (ext) |ty| self.table_index.get(ty).? else null)));
     }
 
     fn tableName(self: *Encoder, id: types.NameId) Allocator.Error!void {
@@ -1218,16 +1464,22 @@ const Encoder = struct {
         const kind: Tag = @fromBackingInt(@intCast(input.byte()));
         try self.tag(kind);
         switch (kind) {
-            .template, .default => {
+            .template => {
+                const module_index = input.module();
+                try self.templateRef(module_index, input.template(module_index, .generic), .generic, null);
+            },
+            .default => {
                 try self.module(input.module());
                 try self.word(input.word());
             },
             .template_list_int => {
-                try self.module(input.module());
-                try self.word(input.word());
-                try self.bytes.append(self.allocator, input.byte());
+                const module_index = input.module();
+                const ref = input.listIntTemplate(module_index);
+                try self.templateRef(module_index, ref.id, .{ .list_int = ref.item }, null);
+                try self.bytes.append(self.allocator, @backingInt(ref.item));
             },
             .lambda => {
+                try self.siteOwner(try input.siteOwner());
                 try self.word(input.word());
                 try self.word(input.word());
                 try self.importWorker(input);
@@ -1243,7 +1495,7 @@ const Encoder = struct {
                 try self.word(input.word());
                 try self.importWorker(input);
             },
-            .root_slot => {
+            .root_slot, .root_restore => {
                 try self.module(input.module());
                 try self.word(input.word());
                 try self.typeOf(input.typeOf());
@@ -1300,8 +1552,9 @@ const Encoder = struct {
                     .generic => .template,
                     .list_int => .template_list_int,
                 });
-                try self.module(key.module);
-                try self.word(@backingInt(key.template));
+                // A finished program's procedures are compacted, so there
+                // the identity comes from the key, not the worker's procedure.
+                try self.templateRef(key.module, key.template, key.binding, if (self.proc_identities) record.identityBytes(program) else null);
                 switch (key.binding) {
                     .generic => {},
                     .list_int => |item| try self.bytes.append(self.allocator, @backingInt(item)),
@@ -1309,7 +1562,9 @@ const Encoder = struct {
             },
             .lambda => |key| {
                 try self.tag(.lambda);
-                try self.word(@backingInt(key.expr));
+                const site = try program.lambdaSite(key.module, key.expr);
+                try self.siteOwner(site.owner);
+                try self.word(site.ordinal);
                 try self.word(@intFromBool(key.captured_scheme));
                 try self.worker(key.outer);
             },
@@ -1322,7 +1577,7 @@ const Encoder = struct {
             .default => |key| {
                 try self.tag(.default);
                 try self.module(key.module);
-                try self.word(@backingInt(key.expr));
+                try self.word(program.defaultOrdinal(key.module, key.expr));
             },
             .method_entry => |target| {
                 try self.tag(.method_entry);
@@ -1336,6 +1591,12 @@ const Encoder = struct {
             },
             .root_slot => |key| {
                 try self.tag(.root_slot);
+                try self.module(key.module);
+                try self.word(@backingInt(key.root));
+                try self.typeOf(record.ret);
+            },
+            .root_restore => |key| {
+                try self.tag(.root_restore);
                 try self.module(key.module);
                 try self.word(@backingInt(key.root));
                 try self.typeOf(record.ret);
@@ -1373,7 +1634,7 @@ const Encoder = struct {
                     .{ record.module, Codec.pieceFamilyRoot(program, piece) };
                 try self.module(module_index);
                 try self.bytes.append(self.allocator, @backingInt(piece.kind));
-                try self.word(root);
+                try self.word(@backingInt(root));
                 switch (Codec.pieceOperands(piece.kind)) {
                     .none => {},
                     .types => {
@@ -1393,7 +1654,7 @@ const Encoder = struct {
                 try self.typeOf(record.ret);
                 try self.typeSpan(record.capture_types);
             },
-            .root, .static_data, .convert => invariant("a worker that is no function value reached a stored function"),
+            .root, .static_data, .inline_literal, .convert => invariant("a worker that is no function value reached a stored function"),
         }
     }
 };
@@ -1405,6 +1666,9 @@ const Decoder = struct {
     at: usize = 0,
     modules: []const [32]u8 = &.{},
     table: []TypeId = &.{},
+    /// For a recipe: the position of each template it names, as
+    /// little-endian words (`Encoder.templateRef`).
+    templates: []const u8 = &.{},
 
     fn take(self: *Decoder, len: usize) []const u8 {
         defer self.at += len;
@@ -1431,6 +1695,9 @@ const Decoder = struct {
         const count = self.word();
         const bytes = self.take(count * 32);
         self.modules = @as([*]const [32]u8, @ptrCast(bytes.ptr))[0..count];
+        if (self.link_names) return;
+        const template_count = self.word();
+        self.templates = self.take(template_count * 4);
     }
 
     fn typeOf(self: *Decoder) TypeId {
@@ -1444,8 +1711,8 @@ const Decoder = struct {
     }
 
     fn ext(self: *Decoder) ?TypeId {
-        const index = self.word();
-        return if (index == no_type) null else self.table[index];
+        const index = @as(OptionalTypeIndex, @fromBackingInt(self.word())).get() orelse return null;
+        return self.table[index];
     }
 
     fn readTable(self: *Decoder) Allocator.Error!void {
@@ -1473,16 +1740,22 @@ const Decoder = struct {
                     field.* = .{ .name = field_name, .ty = ty, .kind = kind, .slot_variable = self.word() };
                     if (self.byte() != 0) {
                         const module_index = self.module();
-                        field.default = .some(.{ .module = module_index, .expr_node = self.word() });
+                        field.default = .some(.{ .module = module_index, .ordinal = self.word() });
                     }
                 }
                 const remainder = self.ext();
                 var declared: ?types.DeclaredOrderInput = null;
                 if (self.byte() != 0) {
                     const padding = try self.typeSpan();
-                    const slots = try program.arena.allocator().alloc(u32, self.word());
-                    for (slots) |*slot| slot.* = self.word();
-                    declared = .{ .padding = padding, .slots = slots };
+                    const entries = try program.arena.allocator().alloc(types.DeclaredEntry, self.word());
+                    for (entries) |*entry| {
+                        const kind: std.meta.Tag(types.DeclaredEntry) = @fromBackingInt(@intCast(self.byte()));
+                        entry.* = switch (kind) {
+                            .named => .{ .named = try self.name() },
+                            .padding => .{ .padding = self.word() },
+                        };
+                    }
+                    declared = .{ .padding = padding, .entries = entries };
                 }
                 break :blk try store.intern(.{ .record = .{ .fields = fields, .ext = remainder, .declared = declared } });
             },
@@ -1503,7 +1776,7 @@ const Decoder = struct {
             .box => try store.intern(.{ .box = self.typeOf() }),
             .nominal => blk: {
                 const module_index = self.module();
-                const decl: checked.CheckedNominalDeclarationId = @fromBackingInt(self.word());
+                const decl: collections.OptionalId(checked.CheckedNominalDeclarationId) = @fromBackingInt(self.word());
                 const args = try self.typeSpan();
                 const nominal_name = try self.name();
                 const is_opaque = self.byte() != 0;
@@ -1513,7 +1786,7 @@ const Decoder = struct {
                     .args = args,
                     .name = nominal_name,
                     .is_opaque = is_opaque,
-                    .builtin = if (builtin == 0) null else @fromBackingInt(@intCast(builtin - 1)),
+                    .builtin = @as(OptionalBuiltin, @fromBackingInt(builtin)).get(),
                     .has_backing = self.byte() != 0,
                 } });
             },
@@ -1531,24 +1804,100 @@ const Decoder = struct {
         return try self.program.store.internName(self.take(len));
     }
 
+    /// The template of module `module_index` an encoding names at `binding`
+    /// (`Encoder.templateRef`): in a link's encoding, by its worker's
+    /// identity, at the position its export record gives it in the module's
+    /// current checked module; in a recipe, by its name within the module,
+    /// at the position the recipe lists.
+    fn template(self: *Decoder, module_index: types.ModuleIndex, binding: lower.TemplateBinding) checked_names.CheckedProcedureTemplateId {
+        const named = self.take(32)[0..32].*;
+        if (self.link_names) {
+            const unit = self.program.moduleUnit() orelse invariant("a link's encoding of a worker was read outside a module unit");
+            const interface = unit.imports.get(.{ .bytes = named }) orelse
+                invariant("a link's encoding names a template worker its module's object exports no record of");
+            const template_raw = interface.template.get() orelse invariant("a link's encoding names a template worker whose record locates no template");
+            const template_id: checked_names.CheckedProcedureTemplateId = @fromBackingInt(template_raw);
+            if (std.debug.runtime_safety and !std.mem.eql(u8, &self.program.templateIdentity(module_index, template_id, binding).bytes, &named))
+                invariant("a link's encoding of a template resolved to a template of another identity");
+            return template_id;
+        }
+        const slot = self.word();
+        if (slot >= self.templates.len / 4) invariant("a recipe names a template its table does not list");
+        const template_id: checked_names.CheckedProcedureTemplateId = @fromBackingInt(std.mem.readInt(u32, self.templates[slot * 4 ..][0..4], .little));
+        if (std.debug.runtime_safety and !std.mem.eql(u8, &self.program.templateNameWithin(module_index, template_id, binding), &named))
+            invariant("a recipe's template resolved to a template of another name");
+        return template_id;
+    }
+
+    /// An integer list worker's template and item type.
+    fn listIntTemplate(self: *Decoder, module_index: types.ModuleIndex) struct { id: checked_names.CheckedProcedureTemplateId, item: lower.ListIntItem } {
+        // The item follows the template's reference, whose name is of the
+        // item's worker.
+        const at = self.at;
+        self.at += 32;
+        if (!self.link_names) self.at += 4;
+        const item: lower.ListIntItem = @fromBackingInt(self.byte());
+        self.at = at;
+        const id = self.template(module_index, .{ .list_int = item });
+        _ = self.byte();
+        return .{ .id = id, .item = item };
+    }
+
+    /// What owns a lambda's site (`Encoder.siteOwner`).
+    fn siteOwner(self: *Decoder) Allocator.Error!Program.SiteOwner {
+        return switch (self.byte()) {
+            0 => blk: {
+                const module_index = self.module();
+                break :blk .{ .template = .{ .module = module_index, .template = self.template(module_index, .generic) } };
+            },
+            1 => blk: {
+                const module_index = self.module();
+                break :blk .{ .default = .{ .module = module_index, .expr = try self.program.defaultAt(module_index, self.word()) } };
+            },
+            else => invariant("a lambda's site owner is neither a template nor a default"),
+        };
+    }
+
     fn worker(self: *Decoder) Allocator.Error!WorkerId {
+        return try self.workerAs(.value);
+    }
+
+    /// How a decoded worker is used: as the value the encoding stands for,
+    /// or as the scope of another worker it names (an entry's or a thunk's
+    /// target, an adapter's outer worker), which nothing here calls
+    /// directly, so an imported one binds no interface, or as a stored
+    /// lambda's owner, whose scope alone the lambda reads: the owner's body
+    /// ran at compile time, and restoring the lambda lowers none of it (a
+    /// constant's entry wrapper owns the lambdas of its value).
+    const Role = enum { value, scope, lambda_owner };
+
+    fn workerAs(self: *Decoder, role: Role) Allocator.Error!WorkerId {
         const program = self.program;
         const tag: Tag = @fromBackingInt(@intCast(self.byte()));
         switch (tag) {
             .template => {
                 const module_index = self.module();
-                return try program.templateWorker(module_index, @fromBackingInt(self.word()));
+                const template_id = self.template(module_index, .generic);
+                return switch (role) {
+                    .value => try program.templateWorker(module_index, template_id),
+                    .scope => try program.templateScopeWorker(module_index, template_id),
+                    .lambda_owner => try program.templateScope(module_index, template_id),
+                };
             },
             .template_list_int => {
                 const module_index = self.module();
-                const template = self.word();
-                const item: lower.ListIntItem = @fromBackingInt(self.byte());
-                return try program.listIntTemplateWorker(module_index, @fromBackingInt(template), item);
+                const ref = self.listIntTemplate(module_index);
+                return switch (role) {
+                    .value => try program.listIntTemplateWorker(module_index, ref.id, ref.item),
+                    .scope => try program.listIntTemplateScopeWorker(module_index, ref.id, ref.item),
+                    .lambda_owner => try program.listIntTemplateScope(module_index, ref.id, ref.item),
+                };
             },
             .lambda => {
-                const expr: ExprId = @fromBackingInt(self.word());
+                const owner = try self.siteOwner();
+                const expr = try program.lambdaAt(owner, self.word());
                 const captured_scheme = self.word() != 0;
-                const outer = try self.worker();
+                const outer = try self.workerAs(.lambda_owner);
                 var builder = try body.Builder.init(program, outer);
                 defer builder.deinit();
                 return try builder.storedLambdaWorker(outer, expr, captured_scheme);
@@ -1556,13 +1905,13 @@ const Decoder = struct {
             .adapter => {
                 const from = self.typeOf();
                 const to = self.typeOf();
-                return try program.adapterWorker(try self.worker(), from, to);
+                return try program.adapterWorker(try self.workerAs(.scope), from, to);
             },
             .default => {
                 const module_index = self.module();
-                return try program.defaultWorker(module_index, @fromBackingInt(self.word()));
+                return try program.defaultWorker(module_index, try program.defaultAt(module_index, self.word()));
             },
-            .method_entry => return try program.methodEntryWorker(try self.worker()),
+            .method_entry => return try program.methodEntryWorker(try self.workerAs(.scope)),
             .literal_thunk => {
                 const bound_ty = self.typeOf();
                 const requirement = self.word();
@@ -1570,17 +1919,26 @@ const Decoder = struct {
                     .tuple => |items| program.store.span(items),
                     .primitive, .empty_record, .record, .tag_union, .list, .box, .nominal, .function, .variable => invariant("a stored literal thunk's types are not a tuple"),
                 };
-                return try program.literalThunkWorker(try self.worker(), try program.arena.allocator().dupe(TypeId, bound), requirement);
+                return try program.literalThunkWorker(try self.workerAs(.scope), try program.arena.allocator().dupe(TypeId, bound), requirement);
             },
             // The compile-time program read the root's slot; its value is
-            // stored now, and the root's wrapper restores it.
+            // stored now: a polymorphic constant's instance is restored by
+            // the reader's own thunk, any other root's by its wrapper.
             .root_slot => {
                 const module_index = self.module();
                 const root: checked.ComptimeRootId = @fromBackingInt(self.word());
-                _ = self.typeOf();
+                const ty = self.typeOf();
+                const compile_time_root = program.module(module_index).view.compile_time_roots.root(root);
+                const argument = compile_time_root.literal_argument orelse invariant("a root slot thunk's root records no literal argument");
+                if (argument.site.kind == .constant_instance) return try program.rootRestoreWorker(module_index, root, ty);
                 const wrapper = program.wrapper_by_root.get(.{ .module = module_index, .root = root }) orelse
                     invariant("a literal argument root has no entry wrapper");
-                return try program.methodEntryWorker(try program.templateRefWorker(wrapper));
+                return try program.methodEntryWorker(try program.templateRefScopeWorker(wrapper));
+            },
+            .root_restore => {
+                const module_index = self.module();
+                const root: checked.ComptimeRootId = @fromBackingInt(self.word());
+                return try program.rootRestoreWorker(module_index, root, self.typeOf());
             },
             .structural => {
                 const module_index = self.module();
@@ -1600,13 +1958,13 @@ const Decoder = struct {
             .callable_eval_entry => {
                 const module_index = self.module();
                 const binding_module = self.module();
-                const template: checked.CallableEvalTemplateId = @fromBackingInt(self.word());
-                return try program.callableEvalEntryWorker(module_index, .{ .module = binding_module, .template = template });
+                const binding_template: checked.CallableEvalTemplateId = @fromBackingInt(self.word());
+                return try program.callableEvalEntryWorker(module_index, .{ .module = binding_module, .template = binding_template });
             },
             .codec => {
                 const module_index = self.module();
                 const kind: Codec.PieceKind = @fromBackingInt(@intCast(self.byte()));
-                const root = self.word();
+                const root: collections.OptionalU32 = @fromBackingInt(self.word());
                 var a: u32 = 0;
                 var b_operand: u32 = 0;
                 switch (Codec.pieceOperands(kind)) {
@@ -1657,11 +2015,10 @@ pub fn decode(b: *body.Builder, recipe: []const u8) Allocator.Error!Decoded {
     const graph = try decodeCaptureGraph(&decoder);
     const inputs = try decodeCaptureRefs(&decoder);
     const capture_descs = try decodeCaptureRefs(&decoder);
-    const shape = captureShape(b.program, worker);
-    if (inputs.len != shape.descs + shape.dicts) invariant("a stored function's immutable inputs differ from its worker's");
+    const shape = try captureShape(b.program, worker);
+    if (inputs.len != shape.inputs) invariant("a stored function's immutable inputs differ from its worker's");
     const arena = b.program.arena.allocator();
-    const bound = try arena.alloc(TypeId, shape.descs);
-    for (bound, inputs[0..shape.descs]) |*ty, ref| ty.* = captureType(graph, ref);
+    const bound = try captureBinding(arena, graph, inputs, shape.scope);
     const words = try arena.alloc(Tables.Operand, graph.len);
     // Reserve before connecting any edge. Scoped descriptors can capture
     // overrides that capture those descriptors, and dictionaries can cycle.
@@ -1685,41 +2042,47 @@ pub fn decode(b: *body.Builder, recipe: []const u8) Allocator.Error!Decoded {
     return .{ .worker = worker, .bound = bound, .inputs = try captureOperands(arena, words, inputs), .capture_descs = try captureOperands(arena, words, capture_descs) };
 }
 
+/// Set up every worker stored function `recipe` names, exactly as restoring
+/// it does (`decode`): its own worker and the workers of its capture
+/// graph's callables and tables, appended to `out`. A unit whose module
+/// stored the value lowers them for the readers that restore it.
+pub fn recipeWorkers(program: *Program, recipe: []const u8, out: *std.ArrayList(WorkerId)) Allocator.Error!void {
+    var decoder = Decoder{ .program = program, .bytes = recipe };
+    decoder.readModules();
+    try decoder.readTable();
+    defer program.allocator.free(decoder.table);
+    try out.append(program.allocator, try decoder.worker());
+    for (try decodeCaptureGraph(&decoder)) |node| switch (node) {
+        .callable => |callable| try out.append(program.allocator, try callable.worker.resolve(program)),
+        .table => |table| try out.append(program.allocator, try table.worker.resolve(program)),
+        .desc, .zero => {},
+    };
+}
+
 test "stored type metadata preserves field defaults across module reindexing" {
     const allocator = std.testing.allocator;
-    var source: Program = undefined;
-    source.allocator = allocator;
-    source.modules = .{ .allocator = allocator };
-    defer source.modules.deinit();
-    source.store = types.Store.init(allocator);
-    defer source.store.deinit();
-    var destination: Program = undefined;
-    destination.allocator = allocator;
-    destination.modules = .{ .allocator = allocator };
-    defer destination.modules.deinit();
-    destination.store = types.Store.init(allocator);
-    defer destination.store.deinit();
-    destination.arena = std.heap.ArenaAllocator.init(allocator);
-    defer destination.arena.deinit();
+    var source_program: lower.TestProgram = undefined;
+    try source_program.init(allocator, .program);
+    defer source_program.deinit();
+    const source = source_program.program;
+    var destination_program: lower.TestProgram = undefined;
+    try destination_program.init(allocator, .program);
+    defer destination_program.deinit();
+    const destination = destination_program.program;
     var source_modules: [2]types.ModuleIndex = undefined;
     var destination_modules: [2]types.ModuleIndex = undefined;
     for (0..2) |index| {
-        var view: checked.ImportedModuleView = undefined;
-        view.key = .{ .bytes = @splat(@intCast(index + 1)) };
-        view.module_identity.stable_hash = view.key.bytes;
-        source_modules[index] = try source.modules.add(view);
-        view.key.bytes = @splat(@intCast(2 - index));
-        view.module_identity.stable_hash = view.key.bytes;
-        destination_modules[index] = try destination.modules.add(view);
+        source_modules[index] = try source.modules.add(&source_program.view(@intCast(index + 1)));
+        destination_modules[index] = try destination.modules.add(&destination_program.view(@intCast(2 - index)));
     }
     const name = try source.store.internName("count");
     const number = try source.store.primitive(.u8);
     var fields = [_]types.Field{.{ .name = name, .ty = number, .kind = .inline_slot }};
     const required = try source.store.intern(.{ .record = .{ .fields = &fields, .ext = null } });
-    fields[0].default = .some(.{ .module = source_modules[0], .expr_node = 10 });
+    fields[0].default = .some(.{ .module = source_modules[0], .ordinal = 10 });
     const defaulted = try source.store.intern(.{ .record = .{ .fields = &fields, .ext = null } });
     const root = try source.store.intern(.{ .tuple = &.{ required, defaulted } });
-    var encoder: Encoder = .{ .allocator = allocator, .program = &source };
+    var encoder: Encoder = .{ .allocator = allocator, .program = source };
     defer encoder.deinit();
     const root_index = try encoder.tableIndex(root);
     const bytes = try encoder.finish();
@@ -1743,7 +2106,7 @@ test "stored type metadata preserves field defaults across module reindexing" {
         try std.testing.expectError(error.InvalidMetadata, result);
     }
 
-    var decoder: Decoder = .{ .program = &destination, .bytes = bytes };
+    var decoder: Decoder = .{ .program = destination, .bytes = bytes };
     decoder.readModules();
     try decoder.readTable();
     defer allocator.free(decoder.table);
@@ -1752,18 +2115,19 @@ test "stored type metadata preserves field defaults across module reindexing" {
     try std.testing.expectEqual(@as(?types.FieldDefault, null), destination.store.fieldSpan(destination.store.get(restored[0]).record.fields)[0].default.get());
     const restored_default = destination.store.fieldSpan(destination.store.get(restored[1]).record.fields)[0].default.get().?;
     try std.testing.expectEqual(destination_modules[1], restored_default.module);
-    try std.testing.expectEqual(@as(u32, 10), restored_default.expr_node);
+    try std.testing.expectEqual(@as(u32, 10), restored_default.ordinal);
 }
 
 test "function unit metadata validates the integer list template tag, its single module reference, and its item type" {
     try std.testing.expectEqual(@as(u8, 11), @backingInt(Tag.callable_eval_entry));
     try std.testing.expectEqual(@as(u8, 12), @backingInt(Tag.template_list_int));
-    // An integer list template recipe has one module, a template ordinal,
-    // and an item type byte. Unlike the callable-entry recipe, it has no
-    // second module reference.
-    var bytes = [_]u8{ 12, 0, 0, 0, 0, 23, 0, 0, 0, @backingInt(lower.ListIntItem.u32) };
+    // An integer list template recipe has one module, the worker's
+    // identity, and an item type byte. Unlike the callable-entry recipe, it
+    // has no second module reference.
+    var bytes = [_]u8{ 12, 0, 0, 0, 0 } ++ @as([32]u8, @splat(23)) ++ [_]u8{@backingInt(lower.ListIntItem.u32)};
+    const item_at = bytes.len - 1;
     for (std.enums.values(lower.ListIntItem)) |item| {
-        bytes[9] = @backingInt(item);
+        bytes[item_at] = @backingInt(item);
         var reader = MetadataReader{ .bytes = &bytes, .modules = 1 };
         try reader.worker();
         try std.testing.expectEqual(@as(usize, 0), reader.remaining());
@@ -1772,13 +2136,91 @@ test "function unit metadata validates the integer list template tag, its single
         var truncated = MetadataReader{ .bytes = bytes[0..len], .modules = 1 };
         try std.testing.expectError(error.InvalidMetadata, truncated.worker());
     }
-    bytes[9] = @intCast(@typeInfo(lower.ListIntItem).@"enum".field_values.len);
+    bytes[item_at] = @intCast(@typeInfo(lower.ListIntItem).@"enum".field_values.len);
     var invalid_item = MetadataReader{ .bytes = &bytes, .modules = 1 };
     try std.testing.expectError(error.InvalidMetadata, invalid_item.worker());
-    bytes[9] = @backingInt(lower.ListIntItem.u32);
+    bytes[item_at] = @backingInt(lower.ListIntItem.u32);
     bytes[1] = 1;
     var invalid = MetadataReader{ .bytes = &bytes, .modules = 1 };
     try std.testing.expectError(error.InvalidMetadata, invalid.worker());
+}
+
+/// One declaration entry as `paddedRecordEntry` writes it: a named field by
+/// its label text, or an unnamed field by its position in the padding.
+const EncodedDeclaredEntry = union(enum) {
+    named: []const u8,
+    padding: u32,
+};
+
+/// The table entry of `Pad({ a : U64 })` for `Pad(r) := { z : U64, _ : U8, ..r }`,
+/// with its declaration entries written by `entries`.
+fn paddedRecordEntry(out: *std.ArrayList(u8), entries: []const EncodedDeclaredEntry) Allocator.Error!void {
+    const allocator = std.testing.allocator;
+    const Write = struct {
+        fn word(bytes: *std.ArrayList(u8), value: u32) Allocator.Error!void {
+            var encoded: [4]u8 = undefined;
+            std.mem.writeInt(u32, &encoded, value, .little);
+            try bytes.appendSlice(std.testing.allocator, &encoded);
+        }
+        fn name(bytes: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
+            try word(bytes, @intCast(text.len));
+            try bytes.appendSlice(std.testing.allocator, text);
+        }
+    };
+    try out.append(allocator, @backingInt(std.meta.Tag(types.Node).record));
+    try Write.word(out, 2);
+    for ([_][]const u8{ "a", "z" }) |field| {
+        try Write.name(out, field);
+        try Write.word(out, 0);
+        try out.append(allocator, @backingInt(types.FieldKind.inline_slot));
+        try Write.word(out, 0);
+        try out.append(allocator, 0); // no default
+    }
+    try Write.word(out, @backingInt(OptionalTypeIndex.none));
+    try out.append(allocator, 1);
+    try Write.word(out, 1); // one unnamed field
+    try Write.word(out, 0);
+    try Write.word(out, @intCast(entries.len));
+    const EntryTag = std.meta.Tag(types.DeclaredEntry);
+    for (entries) |entry| switch (entry) {
+        .named => |label| {
+            try out.append(allocator, @backingInt(EntryTag.named));
+            try Write.name(out, label);
+        },
+        .padding => |ordinal| {
+            try out.append(allocator, @backingInt(EntryTag.padding));
+            try Write.word(out, ordinal);
+        },
+    };
+}
+
+test "function unit metadata validates a padded record's declaration entries" {
+    const allocator = std.testing.allocator;
+    const Case = struct { entries: []const EncodedDeclaredEntry, valid: bool };
+    const cases = [_]Case{
+        .{ .entries = &.{ .{ .named = "z" }, .{ .padding = 0 } }, .valid = true },
+        .{ .entries = &.{ .{ .named = "z" }, .{ .padding = 0 }, .{ .named = "a" } }, .valid = true },
+        // A label the record does not have.
+        .{ .entries = &.{ .{ .named = "y" }, .{ .padding = 0 } }, .valid = false },
+        // A padding position past the unnamed fields.
+        .{ .entries = &.{ .{ .named = "z" }, .{ .padding = 1 } }, .valid = false },
+        // A field named twice.
+        .{ .entries = &.{ .{ .named = "z" }, .{ .padding = 0 }, .{ .named = "z" } }, .valid = false },
+        // An unnamed field with no entry.
+        .{ .entries = &.{.{ .named = "z" }}, .valid = false },
+    };
+    for (cases) |case| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try paddedRecordEntry(&bytes, case.entries);
+        var reader = MetadataReader{ .bytes = bytes.items, .types = 1 };
+        if (case.valid) {
+            try reader.typeEntry();
+            try std.testing.expectEqual(@as(usize, 0), reader.remaining());
+        } else {
+            try std.testing.expectError(error.InvalidMetadata, reader.typeEntry());
+        }
+    }
 }
 
 test "function unit metadata validates both callable eval entry module references" {
@@ -1882,15 +2324,14 @@ test "function unit metadata rejects truncated records and invalid type and modu
 /// by module link identities, never by this lowering's ids or a checked
 /// snapshot that can change while the native object stays reusable. Caller frees.
 pub fn encodeNeeds(allocator: Allocator, program: *Program, needs: Tables.Needs) Allocator.Error![]const u8 {
-    var encoder = Encoder{ .allocator = allocator, .program = program, .link_names = true };
+    var encoder = Encoder{ .allocator = allocator, .program = program, .link_names = true, .proc_identities = true };
     defer encoder.deinit();
     try encoder.word(needs.input_count);
-    try encoder.word(needs.desc_count);
     try encoder.word(@intCast(needs.recipes.len));
     for (needs.recipes) |recipe| {
         try encoder.bytes.append(allocator, @backingInt(std.meta.activeTag(recipe)));
         switch (recipe) {
-            .input => |index| try encoder.word(index),
+            .input, .inherited, .scope_table => |index| try encoder.word(index),
             .desc => |desc| {
                 try encoder.typeOf(desc.ty);
                 try encoder.bytes.append(allocator, @intFromBool(desc.substitute_inputs));
@@ -1939,6 +2380,11 @@ pub fn encodeNeeds(allocator: Allocator, program: *Program, needs: Tables.Needs)
     }
     try encoder.word(@intCast(needs.slots.len));
     for (needs.slots) |slot| try encoder.word(@backingInt(slot));
+    try encoder.word(@intCast(needs.demand.len));
+    for (needs.demand) |entry| {
+        try encoder.word(entry.word);
+        try encoder.bytes.append(allocator, @intCast(entry.ops.bits.mask));
+    }
     return try encoder.finish();
 }
 
@@ -1977,12 +2423,13 @@ pub fn decodeNeeds(program: *Program, bytes: []const u8) Allocator.Error!Tables.
     try decoder.readTable();
     defer program.allocator.free(decoder.table);
     const input_count = decoder.word();
-    const desc_count = decoder.word();
     const recipes = try arena.alloc(Tables.Recipe, decoder.word());
     for (recipes) |*recipe| {
         const tag: std.meta.Tag(Tables.Recipe) = @fromBackingInt(@intCast(decoder.byte()));
         recipe.* = switch (tag) {
             .input => .{ .input = decoder.word() },
+            .inherited => .{ .inherited = decoder.word() },
+            .scope_table => .{ .scope_table = decoder.word() },
             .desc => blk: {
                 const ty = decoder.typeOf();
                 const substitute_inputs = decoder.byte() != 0;
@@ -2030,7 +2477,14 @@ pub fn decodeNeeds(program: *Program, bytes: []const u8) Allocator.Error!Tables.
     }
     const slots = try arena.alloc(Tables.RecipeId, decoder.word());
     for (slots) |*slot| slot.* = @fromBackingInt(decoder.word());
-    return .{ .input_count = input_count, .desc_count = desc_count, .recipes = recipes, .slots = slots };
+    const demand = try arena.alloc(Tables.Demand, decoder.word());
+    for (demand) |*entry| {
+        const word = decoder.word();
+        var ops: StaticDescs.OpSet = .empty;
+        ops.bits.mask = @intCast(decoder.byte());
+        entry.* = .{ .word = word, .ops = ops };
+    }
+    return .{ .input_count = input_count, .recipes = recipes, .slots = slots, .demand = demand };
 }
 
 fn decodeOperands(decoder: *Decoder) Allocator.Error![]const Tables.Operand {
@@ -2066,7 +2520,7 @@ fn selectedCaptureMetadataForTest(allocator: Allocator, retained: *Retained) (Al
     try std.testing.expectEqual(@as(?u32, 1), selected.nodes.items[0].desc.scoped[0].methods[0]);
     try std.testing.expectEqualSlices(u32, &.{2}, selected.nodes.items[1].callable.captures);
     try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, selected.nodes.items[2].table.inputs);
-    var encoder = Encoder{ .allocator = allocator, .program = retained.program };
+    var encoder = Encoder{ .allocator = allocator, .program = retained.program, .link_names = true };
     defer encoder.deinit();
     try encodeCaptureGraph(&encoder, selected.nodes.items);
     try encoder.word(1);
@@ -2078,34 +2532,16 @@ fn selectedCaptureMetadataForTest(allocator: Allocator, retained: *Retained) (Al
 
 fn captureSerializationScratchCase(allocator: Allocator) (Allocator.Error || error{ InvalidMetadata, TestExpectedEqual })!void {
     const setup = std.testing.allocator;
-    // The test installs explicit producer records; no runtime code or
-    // checked module is needed to encode this graph.
-    var program: Program = undefined;
-    program.allocator = setup;
-    program.input = .{ .modules = undefined, .roots = undefined, .target_usize = .u64 };
-    program.modules = .{ .allocator = setup };
-    defer program.modules.deinit();
-    var view: checked.ImportedModuleView = undefined;
-    view.key = .{ .bytes = @splat(9) };
-    view.module_identity.stable_hash = @splat(9);
-    const module = try program.modules.add(view);
-    program.arena = std.heap.ArenaAllocator.init(setup);
-    defer program.arena.deinit();
-    program.store = types.Store.init(setup);
-    defer program.store.deinit();
-    program.result = try LirProgram.Result.init(setup, .u64);
-    defer program.result.deinit();
-    program.static_descs = StaticDescs.init(setup, &program.store, &program.layouts, &program.result, .u64);
-    defer program.static_descs.deinit();
-    program.workers = .empty;
-    defer program.workers.deinit(setup);
-    program.worker_ids = .empty;
-    defer program.worker_ids.deinit(setup);
-    program.worklist = .empty;
-    defer program.worklist.deinit(setup);
+    // The test installs explicit producer records; no runtime code is
+    // needed to encode this graph.
+    var test_program: lower.TestProgram = undefined;
+    try test_program.init(setup, .program);
+    defer test_program.deinit();
+    const program = test_program.program;
+    const module = try program.modules.add(&test_program.view(9));
     const worker_id = try program.crashDictionaryWorker(module, .checked_error);
-    const identity = program.result.store.getProcSpec(program.worker(worker_id).proc).identity;
-    var retained = Retained{ .allocator = allocator, .program = &program };
+    const identity = program.result.store.getProcSpecImmediate(program.worker(worker_id).proc).identity;
+    var retained = Retained{ .allocator = allocator, .program = program };
     defer retained.workers.deinit(setup);
     try retained.workers.put(setup, identity, worker_id);
     const ty = try program.store.emptyRecord();
@@ -2132,6 +2568,7 @@ fn captureSerializationScratchCase(allocator: Allocator) (Allocator.Error || err
 
     // Failure injection covers serialization, after producer setup completes.
     program.allocator = allocator;
+    defer program.allocator = setup;
     for (0..3) |_| {
         const bytes = encodeMetadata(&retained, &program.result, &.{}) catch |err| {
             try std.testing.expectEqual(@as(usize, 0), program.arena.queryCapacity());

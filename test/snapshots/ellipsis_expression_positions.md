@@ -879,7 +879,7 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-assign (ident "f")))
-			(e-call (constraint-fn-var 570)
+			(e-call (constraint-fn-var 562)
 				(e-lookup-local
 					(p-assign (ident "f")))
 				(e-not-implemented)
@@ -948,7 +948,7 @@ lambda_arg = |f| f(|_| ...)
 				(s-let
 					(p-assign (ident "#interp_0"))
 					(e-not-implemented))
-				(e-interpolation (constraint-fn-var 594) (dispatcher-var 98)
+				(e-interpolation (constraint-fn-var 581) (dispatcher-var 99)
 					(first
 						(e-literal (string "a ")))
 					(parts
@@ -1050,7 +1050,7 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-assign (ident "a")))
-			(e-dispatch-call (method "plus") (constraint-fn-var 649)
+			(e-dispatch-call (method "plus") (constraint-fn-var 619)
 				(receiver
 					(e-not-implemented))
 				(args
@@ -1061,7 +1061,7 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-assign (ident "a")))
-			(e-dispatch-call (method "plus") (constraint-fn-var 651)
+			(e-dispatch-call (method "plus") (constraint-fn-var 620)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "a"))))
@@ -1082,7 +1082,7 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-assign (ident "a")))
-			(e-dispatch-call (method "plus") (constraint-fn-var 656)
+			(e-dispatch-call (method "plus") (constraint-fn-var 623)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "a"))))
@@ -1134,8 +1134,8 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-underscore))
-			(e-call (constraint-fn-var 688)
-				(e-lookup-associated-resolved (source "Bool.not") (builtin) (target-node "18574") (target-def "18574"))
+			(e-call (constraint-fn-var 640)
+				(e-lookup-associated-resolved (source "Bool.not") (builtin) (target-node "19211") (target-def "19211"))
 				(e-not-implemented))))
 	(d-let
 		(p-assign (ident "question"))
@@ -1183,7 +1183,7 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-underscore))
-			(e-call (constraint-fn-var 733)
+			(e-call (constraint-fn-var 664)
 				(e-not-implemented)
 				(e-num (value "1")))))
 	(d-let
@@ -1191,7 +1191,7 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-underscore))
-			(e-dispatch-call (method "range_inclusive_to") (constraint-fn-var 746)
+			(e-dispatch-call (method "range_inclusive_to") (constraint-fn-var 676)
 				(receiver
 					(e-num (value "1")))
 				(args
@@ -1286,7 +1286,7 @@ lambda_arg = |f| f(|_| ...)
 		(e-lambda
 			(args
 				(p-assign (ident "f")))
-			(e-call (constraint-fn-var 855)
+			(e-call (constraint-fn-var 765)
 				(e-lookup-local
 					(p-assign (ident "f")))
 				(e-lambda
@@ -1310,27 +1310,27 @@ lambda_arg = |f| f(|_| ...)
 		(patt (type "_arg -> (_field, _field2)"))
 		(patt (type "_arg -> _ret"))
 		(patt (type "_arg -> [Ok(_c)]"))
-		(patt (type "_arg -> c where [c.from_interpolation : List(Str) -> Try(Iter(item) -> c, [InvalidInterpolation(Str)])]"))
+		(patt (type "_arg -> c where [c.from_interpolation : List(Str) -> Try(Iter(_item) -> c, [InvalidInterpolation(Str)])]"))
 		(patt (type "Bool -> _ret"))
 		(patt (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(patt (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(patt (type "[A, ..] -> _ret"))
 		(patt (type "c -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
-		(patt (type "c -> d where [d.plus : d, c -> d]"))
-		(patt (type "c -> c where [c.plus : c, d -> c]"))
+		(patt (type "c -> c where [c.plus : c, c -> c]"))
+		(patt (type "c -> c where [c.plus : c, c -> c]"))
 		(patt (type "_arg -> Bool"))
-		(patt (type "c -> c where [c.plus : c, d -> c]"))
-		(patt (type "Try(ok, err) -> ok"))
+		(patt (type "c -> c where [c.plus : c, c -> c]"))
+		(patt (type "Try(ok, _err) -> ok"))
 		(patt (type "Bool -> Bool"))
 		(patt (type "_arg -> Bool"))
-		(patt (type "_arg -> Try(ok, err)"))
+		(patt (type "_arg -> Try(_ok, _err)"))
 		(patt (type "_arg -> _ret"))
 		(patt (type "_arg -> _ret"))
 		(patt (type "_arg -> Range(num) where [num.from_numeral : Numeral -> Try(num, [InvalidNumeral(Str)]), num.range_inclusive_to : num, num -> Range(num)]"))
 		(patt (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(patt (type "Bool -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(patt (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
-		(patt (type "c -> d where [c.iter : c -> Iter(item), d.from_numeral : Numeral -> Try(d, [InvalidNumeral(Str)])]"))
+		(patt (type "c -> d where [c.iter : c -> Iter(_item), d.from_numeral : Numeral -> Try(d, [InvalidNumeral(Str)])]"))
 		(patt (type "Bool -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(patt (type "_arg -> (_arg2 -> _ret)"))
 		(patt (type "((_arg -> _ret) -> c) -> c")))
@@ -1347,27 +1347,27 @@ lambda_arg = |f| f(|_| ...)
 		(expr (type "_arg -> (_field, _field2)"))
 		(expr (type "_arg -> _ret"))
 		(expr (type "_arg -> [Ok(_c)]"))
-		(expr (type "_arg -> c where [c.from_interpolation : List(Str) -> Try(Iter(item) -> c, [InvalidInterpolation(Str)])]"))
+		(expr (type "_arg -> c where [c.from_interpolation : List(Str) -> Try(Iter(_item) -> c, [InvalidInterpolation(Str)])]"))
 		(expr (type "Bool -> _ret"))
 		(expr (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(expr (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(expr (type "[A, ..] -> _ret"))
 		(expr (type "c -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
-		(expr (type "c -> d where [d.plus : d, c -> d]"))
-		(expr (type "c -> c where [c.plus : c, d -> c]"))
+		(expr (type "c -> c where [c.plus : c, c -> c]"))
+		(expr (type "c -> c where [c.plus : c, c -> c]"))
 		(expr (type "_arg -> Bool"))
-		(expr (type "c -> c where [c.plus : c, d -> c]"))
-		(expr (type "Try(ok, err) -> ok"))
+		(expr (type "c -> c where [c.plus : c, c -> c]"))
+		(expr (type "Try(ok, _err) -> ok"))
 		(expr (type "Bool -> Bool"))
 		(expr (type "_arg -> Bool"))
-		(expr (type "_arg -> Try(ok, err)"))
+		(expr (type "_arg -> Try(_ok, _err)"))
 		(expr (type "_arg -> _ret"))
 		(expr (type "_arg -> _ret"))
 		(expr (type "_arg -> Range(num) where [num.from_numeral : Numeral -> Try(num, [InvalidNumeral(Str)]), num.range_inclusive_to : num, num -> Range(num)]"))
 		(expr (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(expr (type "Bool -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(expr (type "_arg -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
-		(expr (type "c -> d where [c.iter : c -> Iter(item), d.from_numeral : Numeral -> Try(d, [InvalidNumeral(Str)])]"))
+		(expr (type "c -> d where [c.iter : c -> Iter(_item), d.from_numeral : Numeral -> Try(d, [InvalidNumeral(Str)])]"))
 		(expr (type "Bool -> c where [c.from_numeral : Numeral -> Try(c, [InvalidNumeral(Str)])]"))
 		(expr (type "_arg -> (_arg2 -> _ret)"))
 		(expr (type "((_arg -> _ret) -> c) -> c"))))

@@ -173,7 +173,7 @@ const CheckOccurs = struct {
         // Push the first frame
         // Since we know that Scratch.init initializes capacity, we can append
         // assuming capacity here
-        std.debug.assert(self.scratch.stack.items.capacity > 0);
+        std.debug.assert(self.scratch.stack.capacity > 0);
         _ = self.scratch.stack.appendAssumeCapacity(Frame{ .process_var = .{ .var_ = var_, .edge = edge } });
 
         // Process frames
@@ -194,7 +194,7 @@ const CheckOccurs = struct {
     /// Process frames until the work stack is empty or an invalid cycle is
     /// found.
     fn occursFrames(self: *Self) std.mem.Allocator.Error!?Result {
-        while (self.scratch.stack.items.pop()) |frame| {
+        while (self.scratch.stack.pop()) |frame| {
             switch (frame) {
                 .process_var => |start| {
                     const root = self.types_store.resolveVar(start.var_);
@@ -230,7 +230,7 @@ const CheckOccurs = struct {
                         // var.
                         const seen_len: usize = @intCast(self.scratch.seen.len());
                         std.debug.assert(seen_len > 0);
-                        self.scratch.err_var = self.scratch.seen.items.items[seen_len - 1].var_;
+                        self.scratch.err_var = self.scratch.seen.items()[seen_len - 1].var_;
 
                         return classified;
                     } else {
@@ -361,7 +361,7 @@ const CheckOccurs = struct {
         var recursion_allowed = closing.recursion_allowed;
         var nominal = closing.nominal_backing;
 
-        const entries = self.scratch.seen.items.items;
+        const entries = self.scratch.seen.items();
         var k = match_idx + 1;
         while (k < entries.len) : (k += 1) {
             recursion_allowed = recursion_allowed or entries[k].edge.recursion_allowed;
@@ -434,7 +434,7 @@ const CheckOccurs = struct {
     /// Push a slice of sub vars onto the work stack to be processed later.
     fn pushVarsToProcess(self: *Self, sub_vars: []Var, edge: Edge) std.mem.Allocator.Error!void {
         if (self.cutsEdge(edge)) return self.scratch.cut_roots.appendSlice(self.scratch.gpa, sub_vars);
-        try self.scratch.stack.items.ensureUnusedCapacity(self.scratch.gpa, sub_vars.len);
+        try self.scratch.stack.ensureUnusedCapacity(self.scratch.gpa, sub_vars.len);
         for (sub_vars) |sub_var| {
             _ = self.scratch.stack.appendAssumeCapacity(Frame{ .process_var = .{
                 .var_ = sub_var,
@@ -537,8 +537,8 @@ pub const Scratch = struct {
     }
 
     pub fn reset(self: *Self) void {
-        self.stack.items.clearRetainingCapacity();
-        self.seen.items.clearRetainingCapacity();
+        self.stack.clearRetainingCapacity();
+        self.seen.clearRetainingCapacity();
         self.seen_positions.clearRetainingCapacity();
         self.visited.clearRetainingCapacity();
         self.cut_roots.clearRetainingCapacity();
@@ -564,7 +564,7 @@ pub const Scratch = struct {
     }
 
     fn popSeen(self: *Self) void {
-        const entry = self.seen.items.pop() orelse return;
+        const entry = self.seen.pop() orelse return;
         const removed = self.seen_positions.remove(entry.var_);
         std.debug.assert(removed);
     }
@@ -604,7 +604,7 @@ test "occurs: no recursion through two levels (v1 = Box(v2), v2 = Str)" {
     try types_store.setVarContent(v1, try types_store.mkNominal(
         undefined,
         &.{v2},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
     try types_store.setRootVarContent(v2, Content{ .structure = .empty_record });
@@ -672,7 +672,7 @@ test "occurs: recursive alias (v = Alias(List v))" {
         types.TypeIdent{ .ident_idx = undefined },
         backing_var,
         &.{arg},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
     ));
 
     const result = occurs(&types_store, &scratch, v);
@@ -697,7 +697,7 @@ test "occurs: alias with no recursion (v = Alias Str)" {
         types.TypeIdent{ .ident_idx = undefined },
         backing_var,
         &.{arg_var},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
     ));
 
     const result = occurs(&types_store, &scratch, alias_var);
@@ -748,7 +748,7 @@ test "occurs: nested recursive tag union (v = [ Cons(elem, Box(v)) ] )" {
     try types_store.setVarContent(boxed_linked_list, try types_store.mkNominal(
         undefined,
         &.{linked_list},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 
@@ -790,7 +790,7 @@ test "occurs: recursive tag union (v = List: [ Cons(Elem, List), Nil ])" {
     try types_store.setVarContent(nominal_type, try types_store.mkNominal(
         undefined,
         &.{},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 
@@ -829,7 +829,7 @@ test "occurs: recursive tag union with multiple nominals (TypeA := TypeB, TypeB 
     try types_store.setVarContent(type_b_nominal, try types_store.mkNominal(
         undefined,
         &.{},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 
@@ -837,7 +837,7 @@ test "occurs: recursive tag union with multiple nominals (TypeA := TypeB, TypeB 
     try types_store.setVarContent(type_a_nominal, try types_store.mkNominal(
         undefined,
         &.{},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 
@@ -875,7 +875,7 @@ test "occurs: valid nominal recursion does not hide later invalid recursion" {
     try types_store.setVarContent(list_nominal, try types_store.mkNominal(
         undefined,
         &.{},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 
@@ -909,7 +909,7 @@ test "occurs: valid nominal return recursion does not hide invalid argument recu
     try types_store.setVarContent(list_nominal, try types_store.mkNominal(
         undefined,
         &.{},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 
@@ -954,7 +954,7 @@ test "occurs: anonymous recursion in a nominal's type argument is not valid (reg
     try types_store.setVarContent(wrapper, try types_store.mkNominal(
         undefined,
         &.{inner},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 
@@ -991,7 +991,7 @@ test "occurs: value graph never traverses a nominal's backing (args only)" {
     try types_store.setVarContent(n, try types_store.mkNominal(
         undefined,
         &.{},
-        base.ModuleIdentity.Idx.NONE,
+        @as(base.ModuleIdentity.Idx, @fromBackingInt(1)),
         false,
     ));
 

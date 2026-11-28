@@ -514,7 +514,36 @@ const Overrides = struct {
         const value = @as(*align(1) const i64, @ptrCast(args.?)).*;
         @as(*align(1) RocStr, @ptrCast(ret.?)).* = RocStr.fromSliceSmall(if (value == 4) "four" else "other");
     }
+
+    const long_inspection = "an inspection long enough that it is stored on the heap";
+
+    fn inspectAsLong(ops: *RocOps, ret: ?[*]u8, _: ?[*]const u8, _: ?[*]u8, _: ?[*]u8, _: *?*const anyopaque) callconv(.c) void {
+        @as(*align(1) RocStr, @ptrCast(ret.?)).* = bigStr(long_inspection, ops);
+    }
 };
+
+test "a value whose inspection is its override's result alone allocates only the override's text" {
+    var env = Env.init();
+    defer env.deinit();
+    const ops = env.ops();
+    const long = erased_callable.allocate(&Overrides.inspectAsLong, null, 0, ops);
+    const methods: desc_mod.Methods = .{ .is_eq = null, .to_hash = null, .to_inspect = long };
+    const nominal = env.descs.nominal(desc_mod.scalarDesc(.i64), &methods, false);
+    var slot: Slot = .{};
+    slot.write(0, i64, 4);
+
+    const before = env.test_env.total_allocations;
+    try expectInspect(&env, nominal, slot.ptr(), Overrides.long_inspection);
+    try testing.expectEqual(before + 1, env.test_env.total_allocations);
+
+    // Text around the override's results is written into the output.
+    const list_desc = env.descs.list(nominal);
+    var list_slot: Slot = .{};
+    list_slot.write(0, RocList, i64List(&.{ 4, 5 }, ops));
+    try expectInspect(&env, list_desc, list_slot.ptr(), "[" ++ Overrides.long_inspection ++ ", " ++ Overrides.long_inspection ++ "]");
+    walk.decref(list_desc, list_slot.ptr(), ops);
+    erased_callable.decref(long, ops);
+}
 
 test "hashing feeds the hasher builtins in structural order" {
     var env = Env.init();
@@ -674,10 +703,9 @@ test "adapting follows a re-tag plan between a row holding False and True and Bo
         .{ .name = &name_maybe, .payloads = &.{} },
         .{ .name = &name_true, .payloads = &.{} },
     });
-    const absent = desc_mod.AdaptVariant.absent;
-    const to_false = [_]desc_mod.AdaptVariant{.{ .discriminant = 0, .plan = null }};
-    const to_true = [_]desc_mod.AdaptVariant{.{ .discriminant = 1, .plan = null }};
-    const wider_to_bool = [_]desc_mod.AdaptVariant{ .{ .discriminant = 0, .plan = null }, .{ .discriminant = absent, .plan = null }, .{ .discriminant = 1, .plan = null } };
+    const to_false = [_]desc_mod.AdaptVariant{.{ .discriminant = .of(0), .plan = null }};
+    const to_true = [_]desc_mod.AdaptVariant{.{ .discriminant = .of(1), .plan = null }};
+    const wider_to_bool = [_]desc_mod.AdaptVariant{ .{ .discriminant = .of(0), .plan = null }, .{ .discriminant = .absent, .plan = null }, .{ .discriminant = .of(1), .plan = null } };
     const from_false = retagPlan(just_false, desc_mod.boolDesc(), &to_false);
     const from_true = retagPlan(just_true, desc_mod.boolDesc(), &to_true);
     const from_wider = retagPlan(wider, desc_mod.boolDesc(), &wider_to_bool);
@@ -697,7 +725,7 @@ test "adapting follows a re-tag plan between a row holding False and True and Bo
         try testing.expectEqual(case.byte, target.bytes[0]);
     }
 
-    const bool_to_wider = [_]desc_mod.AdaptVariant{ .{ .discriminant = 0, .plan = null }, .{ .discriminant = 2, .plan = null } };
+    const bool_to_wider = [_]desc_mod.AdaptVariant{ .{ .discriminant = .of(0), .plan = null }, .{ .discriminant = .of(2), .plan = null } };
     const to_wider = retagPlan(desc_mod.boolDesc(), wider, &bool_to_wider);
     for ([_]struct { discriminant: u32, byte: u8 }{
         .{ .discriminant = 0, .byte = 0 },
@@ -959,6 +987,71 @@ test "record construction initializes gaps and omitted fields without touching s
     }
 }
 
+test "a field take releases its recursion box and leaves the moved value owned" {
+    var env = Env.init();
+    defer env.deinit();
+    const ops = env.ops();
+    const boxed = env.descs.recursiveBox(desc_mod.strDesc());
+    const desc = env.descs.nominal(env.descs.args(&.{ desc_mod.strDesc(), boxed }), null, false);
+    const baseline = env.allocations();
+    for ([_]bool{ false, true }) |shared| {
+        const plain = bigStr("a heap string stored directly in its record field", ops);
+        const inside = bigStr("a heap string stored behind a recursion box field", ops);
+        var record: Slot = .{};
+        compiled.buildRecord(desc, record.ptr(), &.{ @ptrCast(&plain), @ptrCast(&inside) }, ops);
+        try testing.expectEqual(baseline + 3, env.allocations());
+        if (shared) walk.incref(desc, record.ptr(), 1, ops);
+
+        // A slot that is the value itself holds nothing once it has moved.
+        const moved_plain: RocStr = @as(*const RocStr, @ptrCast(@alignCast(compiled.fieldAddr(desc, record.ptr(), 0, ops)))).*;
+        compiled.fieldReleaseBox(desc, record.ptr(), 0, ops);
+        try testing.expectEqual(baseline + 3, env.allocations());
+
+        const moved_inside: RocStr = @as(*const RocStr, @ptrCast(@alignCast(compiled.fieldAddr(desc, record.ptr(), 1, ops)))).*;
+        compiled.fieldReleaseBox(desc, record.ptr(), 1, ops);
+        // The last reference frees the box; another holder keeps it.
+        try testing.expectEqual(baseline + @as(usize, if (shared) 3 else 2), env.allocations());
+        try testing.expectEqualStrings("a heap string stored behind a recursion box field", moved_inside.asSlice());
+        moved_inside.decref(ops);
+        if (shared) {
+            // The other holder still reads both values, and releases them.
+            const kept: *const RocStr = @ptrCast(@alignCast(compiled.fieldAddr(desc, record.ptr(), 1, ops)));
+            try testing.expectEqualStrings("a heap string stored behind a recursion box field", kept.asSlice());
+            walk.decref(desc, record.ptr(), ops);
+        }
+        moved_plain.decref(ops);
+        try testing.expectEqual(baseline, env.allocations());
+    }
+}
+
+test "a tag payload take releases its recursion box and leaves the moved value owned" {
+    var env = Env.init();
+    defer env.deinit();
+    const ops = env.ops();
+    const payloads = [_]*const TypeDesc{env.descs.recursiveBox(desc_mod.strDesc())};
+    const desc = env.descs.nominal(env.descs.tagUnion(&.{
+        .{ .name = &name_a, .payloads = &.{} },
+        .{ .name = &name_b, .payloads = &payloads },
+    }), null, false);
+    const baseline = env.allocations();
+    for ([_]bool{ false, true }) |shared| {
+        const text = bigStr("a heap string stored behind a recursion box payload", ops);
+        var value: Slot = .{};
+        compiled.buildTag(desc, 1, value.ptr(), &.{@ptrCast(&text)}, ops);
+        try testing.expectEqual(baseline + 2, env.allocations());
+        if (shared) walk.incref(desc, value.ptr(), 1, ops);
+
+        const moved: RocStr = @as(*const RocStr, @ptrCast(@alignCast(compiled.tagPayloadAddr(desc, value.ptr(), 0, ops)))).*;
+        compiled.tagPayloadReleaseBox(desc, value.ptr(), ops);
+        // The last reference frees the box; another holder keeps it.
+        try testing.expectEqual(baseline + @as(usize, if (shared) 2 else 1), env.allocations());
+        try testing.expectEqualStrings("a heap string stored behind a recursion box payload", moved.asSlice());
+        moved.decref(ops);
+        if (shared) walk.decref(desc, value.ptr(), ops);
+        try testing.expectEqual(baseline, env.allocations());
+    }
+}
+
 test "record construction and updates preserve boxed fields and initialize all padding" {
     var env = Env.init();
     defer env.deinit();
@@ -1129,7 +1222,7 @@ test "an unsafe read of a zero-sized item or an empty list writes nothing" {
     defer env.deinit();
     const ops = env.ops();
     const empty = RocList.empty();
-    const zst_list: RocList = .{ .bytes = null, .length = 3, .capacity_or_alloc_ptr = 0 };
+    const zst_list = RocList.zeroSized(3, 3);
     for ([_]struct { elem: *const TypeDesc, list: *const RocList }{
         .{ .elem = desc_mod.zstDesc(), .list = &zst_list },
         .{ .elem = desc_mod.scalarDesc(.u64), .list = &empty },

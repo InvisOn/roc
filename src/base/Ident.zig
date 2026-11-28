@@ -124,8 +124,9 @@ pub const Idx = packed struct(u32) {
     attributes: Attributes,
     idx: u29,
 
-    /// Sentinel value representing no/unset ident
-    pub const NONE: Idx = .{ .attributes = .{ .effectful = true, .ignored = true, .reserved = true }, .idx = std.math.maxInt(u29) };
+    /// No identifier: the all-zero word. The interner reserves serial index
+    /// zero, so no interned identifier has it.
+    pub const NONE: Idx = .{ .attributes = .{ .effectful = false, .ignored = false }, .idx = 0 };
 
     pub fn eql(self: Idx, other: Idx) bool {
         if (comptime builtin.mode == .debug) {
@@ -264,23 +265,15 @@ pub const Store = struct {
     /// Insert a new identifier into the store.
     pub fn insert(self: *Store, gpa: std.mem.Allocator, ident: Ident) std.mem.Allocator.Error!Idx {
         const idx = try self.interner.insert(gpa, ident.raw_text);
-        // The 29-bit id space is the store's capacity; `maxInt(u29)` is the
-        // `NONE` sentinel.
-        if (@backingInt(idx) >= std.math.maxInt(u29)) return error.OutOfMemory;
+        // The 29-bit id space is the store's capacity.
+        const narrow = std.math.cast(u29, @backingInt(idx)) orelse return error.OutOfMemory;
 
         const result = Idx{
             .attributes = ident.attributes,
-            .idx = @intCast(@backingInt(idx)),
+            .idx = narrow,
         };
 
         return result;
-    }
-
-    /// Enable inserts on a deserialized store by copying its interner data into
-    /// growable allocations owned by the provided allocator.
-    pub fn enableRuntimeInserts(self: *Store, gpa: std.mem.Allocator) std.mem.Allocator.Error!void {
-        try self.enableTextRanks(gpa);
-        try self.interner.enableRuntimeInserts(gpa);
     }
 
     /// Give an owned view of frozen names reusable rank scratch without copying
@@ -341,7 +334,7 @@ pub const Store = struct {
         const name = str_buffer[digit_index + 1 ..];
 
         const idx = try self.interner.insert(gpa, name);
-        if (@backingInt(idx) >= std.math.maxInt(u29)) return error.OutOfMemory;
+        const narrow = std.math.cast(u29, @backingInt(idx)) orelse return error.OutOfMemory;
 
         const attributes = Attributes{
             .effectful = false,
@@ -351,7 +344,7 @@ pub const Store = struct {
 
         const result = Idx{
             .attributes = attributes,
-            .idx = @intCast(@backingInt(idx)),
+            .idx = narrow,
         };
 
         return result;
@@ -876,7 +869,7 @@ test "identifier text ranks preserve byte order and refresh after insertion" {
     try std.testing.expect(store.idxTextRank(first) < store.idxTextRank(ids[1]));
     const generation = store.text_rank.?.generation.load(.acquire);
     try std.testing.expectEqual(ids[0], try store.insert(gpa, Ident.for_text("ab")));
-    try std.testing.expectEqual(generation, store.rankLimit());
+    try std.testing.expectEqual(generation, store.rankLimit() + 1);
     const unique = try store.genUnique(gpa);
     _ = try store.textRanks(&scratch);
     try std.testing.expect(store.idxTextRank(unique) < store.idxTextRank(first));
@@ -914,8 +907,8 @@ test "identifier ranks are transient across serialization" {
     try std.testing.expect(loaded.idxTextLessThan(b, a));
     try std.testing.expect(loaded.text_rank == null);
 
-    // An owning frozen-module view can share one lazy rank generation across
-    // independent key builders, without reopening the interner for insertion.
+    // A loaded module can share one lazy rank generation across independent
+    // key builders without copying the interner's borrowed columns.
     try loaded.enableTextRanks(gpa);
     const shared = try loaded.textRanks(&scratch);
     const cache = loaded.text_rank.?;
@@ -923,5 +916,5 @@ test "identifier ranks are transient across serialization" {
     try std.testing.expectEqual(cache, loaded.text_rank.?);
     try std.testing.expectEqual(shared.ptr, (try loaded.textRanks(&scratch)).ptr);
     try std.testing.expect(loaded.idxTextRank(b) < loaded.idxTextRank(a));
-    try std.testing.expect(!loaded.interner.supports_inserts);
+    try std.testing.expectEqual(@as(u32, 0), loaded.interner.bytes.capacity);
 }

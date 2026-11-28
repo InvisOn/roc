@@ -83,6 +83,14 @@ pub const ResolvedFieldKind = union(enum) {
             .required, .optional => null,
         };
     }
+
+    /// Whether the field's runtime slot is its source value itself.
+    pub fn isInline(self: ResolvedFieldKind) bool {
+        return switch (self) {
+            .required, .defaulted => true,
+            .optional => false,
+        };
+    }
 };
 
 const FieldKindNode = struct {
@@ -97,8 +105,9 @@ comptime {
 }
 
 /// The exact cells whose representation is selected by one generalized field
-/// kind. Producers register these when they instantiate the field; relation
-/// freeze consumes them if no earlier specialization evidence selected a kind.
+/// kind. Producers register these when they instantiate the field. When the
+/// kind's class first resolves to an inline kind (required or defaulted), or
+/// relation freeze defaults it to required, the slot is related to the value.
 const FieldKindCells = struct {
     slot: NodeId,
     value: NodeId,
@@ -131,6 +140,14 @@ pub const InstVariableOrigin = enum(u8) {
     checked_variable,
     row_extension,
     placeholder,
+    /// The runtime slot of a record field whose kind is still undetermined.
+    /// It holds no representation of its own: committing the kind to
+    /// `required` makes it the field's source-value cell, and row
+    /// unification relates it to the matching field's slot. Joining it to a
+    /// class therefore never merges a checked-public representation into
+    /// that class, whatever representation the class holds. Relation freeze
+    /// commits every undetermined kind, so none survives to sealing.
+    field_slot,
     /// An explicit parameter of a detached interface relation, filled when
     /// that relation is joined to its requesting graph. Never defaulted.
     interface_parameter,
@@ -168,6 +185,10 @@ pub const InstVariable = struct {
     pub fn placeholder() InstVariable {
         return .{ .origin = .placeholder };
     }
+
+    pub fn fieldSlot() InstVariable {
+        return .{ .origin = .field_slot };
+    }
 };
 
 /// Backing of a named instantiation-graph node.
@@ -195,12 +216,6 @@ const InstNamed = struct {
     builtin_owner: collections.OptionalEnum(static_dispatch.BuiltinOwner),
     args: []NodeId,
     backing: OptionalInstBacking,
-    /// Graph-owned provenance for an iterator representation minted while
-    /// relations are still being produced. Its durable `generated` digest is
-    /// computed only when this graph is sealed, from the final component
-    /// types. Imported finished Monotypes have this null and already carry
-    /// their producer digest in `def.generated`.
-    generated_iterator: ?*const InstGeneratedIterator = null,
     /// Declared fields for a nominal/opaque record backing (empty otherwise).
     /// Padding field types are graph nodes so sealing maps them to immutable
     /// type ids with the rest of the named type.
@@ -208,7 +223,7 @@ const InstNamed = struct {
 };
 
 comptime {
-    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(InstNamed) == 176);
+    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(InstNamed) == 96);
 }
 
 /// Union-find node for nominal applications that an explicit relation proved
@@ -216,22 +231,6 @@ comptime {
 const RelatedNamedInstance = struct {
     parent: NodeId,
     rank: u8 = 0,
-};
-
-/// Graph-owned data for a private iterator representation before sealing.
-pub const InstGeneratedIterator = struct {
-    callable_evidence: ?names.TypeDigest,
-    public_source: InstIteratorPublicSource,
-};
-
-/// Exact checked public iterator definition refined by a generated iterator.
-pub const InstIteratorPublicSource = struct {
-    named_type: Type.NamedType,
-    def: Type.TypeDef,
-    kind: Type.NamedKind,
-    builtin_owner: static_dispatch.BuiltinOwner,
-    backing: InstBacking,
-    declared_order: []const InstDeclaredField,
 };
 
 /// A closed type whose structure no relation or inspection has read yet:
@@ -459,30 +458,14 @@ pub const InterfaceConstraints = struct {
     pub const OpenNode = struct {
         content: InstNode,
         source: MaybeNodeId = .none,
-        recursive_slot: bool = false,
-        forced_dynamic: bool = false,
         constructor_evidence: bool = false,
         related_group: MaybeRelatedGroup = .none,
         private_backing: bool = false,
         finished: Type.MaybeTypeId = .none,
     };
     /// A related group index or none. Groups are numbered densely among a
-    /// capture's open nodes, so an index never reaches `none`.
-    pub const MaybeRelatedGroup = enum(u32) {
-        none = std.math.maxInt(u32),
-        _,
-
-        fn of(group: ?u32) MaybeRelatedGroup {
-            const present = group orelse return .none;
-            std.debug.assert(present != std.math.maxInt(u32));
-            return @fromBackingInt(present);
-        }
-
-        fn get(self: MaybeRelatedGroup) ?u32 {
-            if (self == .none) return null;
-            return @backingInt(self);
-        }
-    };
+    /// capture's open nodes.
+    pub const MaybeRelatedGroup = collections.OptionalU32;
     pub const Kind = struct {
         resolved: ?ResolvedFieldKind,
         cells: ?FieldKindCells,
@@ -720,9 +703,9 @@ pub const InterfaceConstraints = struct {
         for (self.nodes, instance.nodes, 0..) |node, *id, index| {
             id.* = switch (node) {
                 // A summary is replayed into graphs with different histories.
-                // Each settled leaf enters as its own occurrence, so marks a
-                // graph accumulated on its shared import of the same type
-                // cannot reach what the summary relates.
+                // Each settled leaf enters as its own occurrence, so class
+                // metadata a graph accumulated on its shared import of the
+                // same type cannot reach what the summary relates.
                 .mono => |source_ty| blk: {
                     const ty = try domain.mapScalar(Type.TypeId, source_ty);
                     break :blk if (owned_backings.bit_length != 0 and owned_backings.isSet(index))
@@ -747,8 +730,6 @@ pub const InterfaceConstraints = struct {
             _ = try graph.replaceContentWithoutSnapshotInvalidation(id, try mapValue(&instance, InstNode, node.content));
             if (node.finished.get()) |ty| try graph.registerImportedMono(id, try domain.mapScalar(Type.TypeId, ty));
             graph.private_backing_roots.items[@backingInt(id)] = graph.private_backing_roots.items[@backingInt(id)] or node.private_backing;
-            if (node.recursive_slot) graph.markRecursiveValueSlot(id);
-            if (node.forced_dynamic) graph.markForcedDynamicIteratorRoot(id);
             if (node.constructor_evidence) graph.registerConstructorEvidenceRequest(id);
             if (node.source.get()) |source| graph.request_source_interfaces.items[@backingInt(id)] = .of(instance.nodes[@backingInt(source)]);
         }
@@ -836,304 +817,6 @@ pub const InterfaceConstraints = struct {
         return .{ .bytes = bytes, .leaves = try allocator.dupe(Type.TypeId, writer.leaves.items) };
     }
 
-    /// Identity of these constraints up to what a producing graph chooses
-    /// arbitrarily: local numbering, the order in which a row's members were
-    /// joined, and which open classes carry a finished-type witness. Two
-    /// expansions of one request constrain its interface identically exactly
-    /// when these bytes agree.
-    pub fn equivalenceIdentityInto(self: InterfaceConstraints, graph: *InstGraph, allocator: Allocator) Allocator.Error![]const u8 {
-        // An open class without a witness reads its settled type from an
-        // instance of these constraints. The instance lives in a graph of its
-        // own over `graph`'s stores: comparing two summaries must leave the
-        // graph they describe exactly as it was, or the nodes of the instance
-        // would join every later scan of that graph's classes.
-        const instance_graph = try InstGraph.create(graph.allocator, graph.types, graph.name_store);
-        defer instance_graph.destroy();
-        var arena = instance_graph.acquireArena();
-        defer instance_graph.releaseArena(arena);
-        const instance = try arena.allocator().alloc(NodeId, self.nodes.len);
-        try self.instantiateNodes(instance_graph, instance, GraphDomain{});
-        var renumberer = EquivalenceRenumberer{ .source = self, .graph = instance_graph, .instance = instance, .types = instance_graph.types, .name_store = instance_graph.name_store, .allocator = arena.allocator() };
-        const constraints = try renumberer.run();
-        var writer = IdentityWriter{
-            .graph = instance_graph,
-            .bytes = instance_graph.identity_bytes_scratch,
-            .leaves = instance_graph.identity_leaves_scratch,
-        };
-        defer {
-            writer.bytes.clearRetainingCapacity();
-            writer.leaves.clearRetainingCapacity();
-            instance_graph.identity_bytes_scratch = writer.bytes;
-            instance_graph.identity_leaves_scratch = writer.leaves;
-        }
-        try writer.write(InterfaceConstraints, constraints);
-        return try allocator.dupe(u8, writer.bytes.items);
-    }
-
-    /// Renumbers captured nodes and field kinds in breadth-first order from
-    /// the roots, visiting each row's members in label order. A related group
-    /// with one member relates nothing within the interface and is dropped,
-    /// and an open node whose content is settled and carries no other
-    /// evidence is that settled leaf, whichever form its capture chose.
-    /// Recursive-slot and forced-dynamic membership only decide iterator
-    /// representations, so they are no evidence on a class that settles as a
-    /// type containing no iterator interface. A finished-type witness records
-    /// which history reached a class, so it is no evidence either: a replayed
-    /// unchanged summary relates nothing back, while a fresh expansion relates
-    /// witnessed copies of its settled leaves.
-    const EquivalenceRenumberer = struct {
-        source: InterfaceConstraints,
-        graph: *InstGraph,
-        /// The graph node instantiating each captured node.
-        instance: []const NodeId,
-        types: *Type.Store,
-        name_store: *const names.NameStore,
-        allocator: Allocator,
-        settled: collections.DenseMapUnmanaged(NodeId, Type.TypeId) = .empty,
-        node_ids: collections.DenseMapUnmanaged(NodeId, NodeId) = .empty,
-        node_order: std.ArrayList(NodeId) = .empty,
-        kind_ids: collections.DenseMapUnmanaged(FieldKindId, FieldKindId) = .empty,
-        kind_order: std.ArrayList(FieldKindId) = .empty,
-        group_ids: std.AutoHashMapUnmanaged(u32, u32) = .empty,
-        group_sizes: std.AutoHashMapUnmanaged(u32, u32) = .empty,
-        numbered: bool = false,
-
-        fn run(self: *EquivalenceRenumberer) Allocator.Error!InterfaceConstraints {
-            try self.collapseSettled();
-            for (self.source.roots) |root| _ = try self.node(root);
-            var next: usize = 0;
-            while (next < self.node_order.items.len) : (next += 1) {
-                const id = self.node_order.items[next];
-                if (self.settled.contains(id)) continue;
-                switch (self.source.nodes[@backingInt(id)]) {
-                    .mono => {},
-                    .open => |index| _ = try mapValue(self, OpenNode, try self.sortedRows(self.source.open_nodes[index])),
-                }
-            }
-            self.numbered = true;
-
-            const roots = try self.allocator.alloc(NodeId, self.source.roots.len);
-            for (self.source.roots, roots) |root, *out| out.* = try self.node(root);
-            const nodes = try self.allocator.alloc(Node, self.node_order.items.len);
-            var open_nodes = std.ArrayList(OpenNode).empty;
-            for (self.node_order.items, nodes) |id, *out| switch (self.source.nodes[@backingInt(id)]) {
-                .mono => |ty| out.* = .{ .mono = ty },
-                .open => |index| {
-                    if (self.settled.get(id)) |ty| {
-                        out.* = .{ .mono = ty };
-                        continue;
-                    }
-                    var open = try mapValue(self, OpenNode, try self.sortedRows(self.source.open_nodes[index]));
-                    open.finished = .none;
-                    if (open.related_group.get()) |group| if (self.group_sizes.get(group).? == 1) {
-                        open.related_group = .none;
-                    };
-                    if (open.related_group.get()) |group| {
-                        const entry = try self.group_ids.getOrPut(self.allocator, group);
-                        if (!entry.found_existing) entry.value_ptr.* = self.group_ids.count() - 1;
-                        open.related_group = .of(entry.value_ptr.*);
-                    }
-                    out.* = .{ .open = @intCast(open_nodes.items.len) };
-                    try open_nodes.append(self.allocator, open);
-                },
-            };
-            const kinds = try self.allocator.alloc(Kind, self.kind_order.items.len);
-            for (self.kind_order.items, kinds) |id, *out| out.* = try mapValue(self, Kind, self.source.kinds[@backingInt(id)]);
-            return .{ .roots = roots, .nodes = nodes, .open_nodes = open_nodes.items, .kinds = kinds };
-        }
-
-        /// Collects the nodes and field kinds one open node refers to.
-        const Children = struct {
-            allocator: Allocator,
-            nodes: std.ArrayList(NodeId) = .empty,
-            kinds: usize = 0,
-
-            fn node(self: *Children, id: NodeId) Allocator.Error!NodeId {
-                try self.nodes.append(self.allocator, id);
-                return id;
-            }
-
-            fn kind(self: *Children, id: FieldKindId) Allocator.Error!FieldKindId {
-                self.kinds += 1;
-                return id;
-            }
-
-            fn scalar(_: *Children, comptime T: type, value: T) Allocator.Error!T {
-                return value;
-            }
-        };
-
-        /// The greatest set of open nodes whose content is settled, carry no
-        /// evidence beyond their content and refer only to settled leaves or
-        /// other members of the set, each with its settled type: its witness,
-        /// or the type its instance settles as.
-        fn collapseSettled(self: *EquivalenceRenumberer) Allocator.Error!void {
-            for (self.source.open_nodes) |open| if (open.related_group.get()) |group| {
-                const entry = try self.group_sizes.getOrPut(self.allocator, group);
-                entry.value_ptr.* = if (entry.found_existing) entry.value_ptr.* + 1 else 1;
-            };
-            const children = try self.allocator.alloc([]const NodeId, self.source.nodes.len);
-            var candidates: collections.DenseMapUnmanaged(NodeId, void) = .empty;
-            for (self.source.nodes, children, 0..) |captured, *out, index| {
-                out.* = &.{};
-                const open = switch (captured) {
-                    .mono => continue,
-                    .open => |open_index| self.source.open_nodes[open_index],
-                };
-                switch (open.content) {
-                    .unresolved => continue,
-                    .named => |named| if (named.generated_iterator != null) continue,
-                    .redirect, .leaf, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => {},
-                }
-                const vacuous_group = if (open.related_group.get()) |group| self.group_sizes.get(group).? == 1 else true;
-                if (open.source != .none or open.constructor_evidence or open.private_backing or !vacuous_group) continue;
-                var collected = Children{ .allocator = self.allocator };
-                _ = try mapValue(&collected, InstNode, open.content);
-                if (collected.kinds != 0) continue;
-                out.* = collected.nodes.items;
-                try candidates.put(self.allocator, @fromBackingInt(@intCast(index)), {});
-            }
-            try self.pruneUnsettled(&candidates, children);
-            // Every remaining candidate's content is settled, so its type is
-            // known; iterator membership may still be evidence.
-            var types: collections.DenseMapUnmanaged(NodeId, Type.TypeId) = .empty;
-            var iterator_evidence: std.ArrayList(NodeId) = .empty;
-            var it = candidates.keyIterator();
-            while (it.next()) |id| {
-                const open = self.source.open_nodes[self.source.nodes[@backingInt(id.*)].open];
-                const ty = open.finished.get() orelse try self.graph.activeTypeViewForNode(self.instance[@backingInt(id.*)]);
-                if ((open.recursive_slot or open.forced_dynamic) and try self.containsIterator(ty)) {
-                    try iterator_evidence.append(self.allocator, id.*);
-                }
-                try types.put(self.allocator, id.*, ty);
-            }
-            if (iterator_evidence.items.len != 0) {
-                for (iterator_evidence.items) |id| _ = candidates.remove(id);
-                try self.pruneUnsettled(&candidates, children);
-            }
-            var settled = candidates.keyIterator();
-            while (settled.next()) |id| try self.settled.put(self.allocator, id.*, types.get(id.*).?);
-        }
-
-        /// Remove each candidate that refers to an open node outside the set,
-        /// until none does.
-        fn pruneUnsettled(
-            self: *EquivalenceRenumberer,
-            candidates: *collections.DenseMapUnmanaged(NodeId, void),
-            children: []const []const NodeId,
-        ) Allocator.Error!void {
-            var changed = true;
-            while (changed) {
-                changed = false;
-                var it = candidates.keyIterator();
-                while (it.next()) |id| {
-                    for (children[@backingInt(id.*)]) |child| {
-                        if (self.source.nodes[@backingInt(child)] == .mono or candidates.contains(child)) continue;
-                        _ = candidates.remove(id.*);
-                        changed = true;
-                        break;
-                    }
-                    if (changed) break;
-                }
-            }
-        }
-
-        /// Whether a finished type reaches an iterator interface, following the
-        /// same positions as `Type.Store.containsIteratorInterface` without
-        /// writing its cache.
-        fn containsIterator(self: *EquivalenceRenumberer, root: Type.TypeId) Allocator.Error!bool {
-            var pending: std.ArrayList(Type.TypeId) = .empty;
-            var visited: collections.DenseMapUnmanaged(Type.TypeId, void) = .empty;
-            try pending.append(self.allocator, root);
-            while (pending.pop()) |ty| {
-                if ((try visited.getOrPut(self.allocator, ty)).found_existing) continue;
-                switch (self.types.get(ty)) {
-                    .primitive, .erased, .zst, .hole => {},
-                    .list, .box => |child| try pending.append(self.allocator, child),
-                    .tuple => |items| {
-                        const item_types = self.types.span(items);
-                        for (0..GuardedList.borrowLen(item_types)) |index| try pending.append(self.allocator, GuardedList.at(item_types, index));
-                    },
-                    .func => |function| {
-                        const arg_types = self.types.span(function.args);
-                        for (0..GuardedList.borrowLen(arg_types)) |index| try pending.append(self.allocator, GuardedList.at(arg_types, index));
-                        try pending.append(self.allocator, function.ret);
-                    },
-                    .tag_union => |tags| {
-                        const variants = self.types.tagSpan(tags);
-                        for (0..GuardedList.borrowLen(variants)) |variant_index| {
-                            const payloads = self.types.span(GuardedList.at(variants, variant_index).payloads);
-                            for (0..GuardedList.borrowLen(payloads)) |index| try pending.append(self.allocator, GuardedList.at(payloads, index));
-                        }
-                    },
-                    .record => |fields| {
-                        const record_fields = self.types.fieldSpan(fields);
-                        for (0..GuardedList.borrowLen(record_fields)) |index| {
-                            const field = GuardedList.at(record_fields, index);
-                            try pending.append(self.allocator, field.ty);
-                            if (field.value_ty.get()) |value_ty| try pending.append(self.allocator, value_ty);
-                        }
-                    },
-                    .named => |named| {
-                        if (named.builtin_owner.get()) |owner| if (static_dispatch.isIteratorOwner(owner)) return true;
-                        const args = self.types.span(named.args);
-                        for (0..GuardedList.borrowLen(args)) |index| try pending.append(self.allocator, GuardedList.at(args, index));
-                        if (named.backing.get()) |backing| try pending.append(self.allocator, backing.ty);
-                        const declared_fields = self.types.declaredFieldSpan(named.declared_order);
-                        for (0..GuardedList.borrowLen(declared_fields)) |index| switch (GuardedList.at(declared_fields, index)) {
-                            .named => {},
-                            .padding => |padding| try pending.append(self.allocator, padding),
-                        };
-                    },
-                }
-            }
-            return false;
-        }
-
-        fn sortedRows(self: *EquivalenceRenumberer, open: OpenNode) Allocator.Error!OpenNode {
-            var result = open;
-            switch (open.content) {
-                .record => |record| {
-                    const fields = try self.allocator.dupe(InstField, record.fields);
-                    std.mem.sortUnstable(InstField, fields, self.name_store, instFieldLessThan);
-                    result.content = .{ .record = .{ .fields = fields, .ext = record.ext } };
-                },
-                .tag_union => |row| {
-                    const tags = try self.allocator.dupe(InstTag, row.tags);
-                    std.mem.sortUnstable(InstTag, tags, self.name_store, instTagLessThan);
-                    result.content = .{ .tag_union = .{ .tags = tags, .ext = row.ext, .tags_sorted = true } };
-                },
-                .redirect, .leaf, .unresolved, .primitive, .list, .box, .tuple, .func, .empty_tag_union, .empty_record, .named, .erased, .zst, .hole => {},
-            }
-            return result;
-        }
-
-        fn node(self: *EquivalenceRenumberer, id: NodeId) Allocator.Error!NodeId {
-            if (self.numbered) return self.node_ids.get(id).?;
-            const entry = try self.node_ids.getOrPut(self.allocator, id);
-            if (!entry.found_existing) {
-                entry.value_ptr.* = @fromBackingInt(@intCast(self.node_order.items.len));
-                try self.node_order.append(self.allocator, id);
-            }
-            return id;
-        }
-
-        fn kind(self: *EquivalenceRenumberer, id: FieldKindId) Allocator.Error!FieldKindId {
-            if (self.numbered) return self.kind_ids.get(id).?;
-            const entry = try self.kind_ids.getOrPut(self.allocator, id);
-            if (!entry.found_existing) {
-                entry.value_ptr.* = @fromBackingInt(@intCast(self.kind_order.items.len));
-                try self.kind_order.append(self.allocator, id);
-                _ = try mapValue(self, Kind, self.source.kinds[@backingInt(id)]);
-            }
-            return id;
-        }
-
-        fn scalar(_: *EquivalenceRenumberer, comptime T: type, value: T) Allocator.Error!T {
-            return value;
-        }
-    };
-
     const IdentityWriter = struct {
         graph: *InstGraph,
         bytes: std.ArrayList(u8) = .empty,
@@ -1178,7 +861,6 @@ pub const InterfaceConstraints = struct {
             if (T == names.TagNameId) return self.text(ns.tagLabelText(value));
             if (T == MaybeNodeId) return self.write(?NodeId, value.get());
             if (T == Type.MaybeTypeId) return self.write(?Type.TypeId, value.get());
-            if (T == MaybeRelatedGroup) return self.write(?u32, value.get());
             if (comptime collections.CompactOptionalPayload(T)) |Payload| return self.write(?Payload, value.get());
             switch (@typeInfo(T)) {
                 .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, field_type| {
@@ -1342,14 +1024,14 @@ pub const InterfaceConstraints = struct {
                         const source = self.graph.field_kinds.items[@backingInt(root_kind)];
                         var refs: std.ArrayList(CaptureItem) = .empty;
                         defer refs.deinit(allocator);
-                        try collectCaptureRefs(allocator, Kind, .{ .resolved = source.resolved, .cells = source.cells.get() }, &refs);
+                        try collectCaptureRefs(allocator, Kind, .{ .resolved = source.resolved, .cells = self.graph.fieldKindClassCells(root_kind) }, &refs);
                         try refs.append(allocator, .{ .finish_kind = .{ .id = id, .root = root_kind } });
                         try top.items.insertSlice(allocator, top.next, refs.items);
                     },
                     .finish_kind => |finish| {
                         const source = self.graph.field_kinds.items[@backingInt(finish.root)];
                         var lookup = CaptureLookup{ .capture = self, .allocator = self.allocator };
-                        self.kinds.items[@backingInt(finish.id)] = try mapValue(&lookup, Kind, .{ .resolved = source.resolved, .cells = source.cells.get() });
+                        self.kinds.items[@backingInt(finish.id)] = try mapValue(&lookup, Kind, .{ .resolved = source.resolved, .cells = self.graph.fieldKindClassCells(finish.root) });
                     },
                     .source => |source| if (try self.beginNode(source)) |open| try self.pushCaptureFrame(frames, open),
                 }
@@ -1455,9 +1137,6 @@ pub const InterfaceConstraints = struct {
             const raw = frame.raw;
             var captured = frame.captured.?;
             if (self.graph.requestSourceInterface(raw)) |source| captured.source = .of(self.node_ids.get(self.graph.find(source)).?);
-            const membership = self.graph.representation_membership.items[@backingInt(root)];
-            captured.recursive_slot = membership.recursive_slot;
-            captured.forced_dynamic = membership.forced_dynamic;
             captured.constructor_evidence = self.graph.requestPropagatesConstructorEvidence(raw);
             captured.private_backing = self.graph.private_backing_roots.items[@backingInt(root)];
             switch (self.finished_witnesses) {
@@ -1558,7 +1237,7 @@ pub const InterfaceConstraints = struct {
 
         /// A hole stands for a class whose relation to the request is plain
         /// unification: nothing it reaches carries representation authority,
-        /// source-interface or constructor evidence, or iterator identity.
+        /// source-interface or constructor evidence.
         fn holeIsRepresentationNeutral(self: *Capture, raw: NodeId) Allocator.Error!bool {
             self.share_seen.clearRetainingCapacity();
             var scan = NeutralScan{ .graph = self.graph, .seen = &self.share_seen, .scratch = &self.scratch.neutral_scan };
@@ -1588,18 +1267,15 @@ pub const InterfaceConstraints = struct {
                 if ((try self.seen.getOrPut(root)).found_existing) return .{ .value = true };
                 if (graph.private_backing_roots.items[@backingInt(root)]) return .{ .value = false };
                 if (graph.requestSourceInterface(raw) != null or graph.requestPropagatesConstructorEvidence(raw)) return .{ .value = false };
-                if (graph.representation_membership.items[@backingInt(root)].forced_dynamic) return .{ .value = false };
-                // As for sharing, an unread leaf without iterator machinery or
-                // generated-private backing holds nothing below it that could
-                // stop neutrality, so it stays unread.
+                // As for sharing, an unread leaf without generated-private
+                // backing holds nothing below it that could stop neutrality,
+                // so it stays unread.
                 if (graph.leafType(root)) |ty| {
-                    if (!try graph.types.containsIteratorInterface(ty) and
-                        !try graph.types.containsGeneratedPrivateBacking(ty)) return .{ .value = true };
+                    if (!try graph.types.containsGeneratedPrivateBacking(ty)) return .{ .value = true };
                 }
                 const content = (try graph.content(root));
                 switch (content) {
                     .named => |named| {
-                        if (named.generated_iterator != null or named.def.generated != null or named.def.iterator_representation != .none or named.def.iterator_kind != .none) return .{ .value = false };
                         if (named.backing.get()) |backing| if (backing.authority == .generated_private) {
                             return .{ .value = false };
                         };
@@ -1738,7 +1414,7 @@ pub const InterfaceConstraints = struct {
                     return .{ .value = false };
                 }
                 // A leaf that is still unread after the local check holds no
-                // iterator machinery or generated-private backing, so nothing
+                // generated-private backing, so nothing
                 // below it can stop sharing.
                 if (graph.leafType(root) != null) return .{ .value = true };
                 try addScanLeaves(items, InstNode, (try graph.content(root)), .sealed_only);
@@ -1756,19 +1432,15 @@ pub const InterfaceConstraints = struct {
                 const graph = self.capture.graph;
                 if (graph.private_backing_roots.items[@backingInt(root)]) return false;
                 if (graph.requestSourceInterface(raw) != null or graph.requestPropagatesConstructorEvidence(raw) or graph.related_named_instances.contains(root)) return false;
-                const membership = graph.representation_membership.items[@backingInt(root)];
-                if (membership.recursive_slot or membership.forced_dynamic) return false;
-                // Iterator machinery and generated-private backings are what
-                // can make a finished named type unshareable; a finished type
-                // without either stays unread.
+                // A generated-private backing is what can make a finished
+                // named type unshareable; a finished type without one stays
+                // unread.
                 if (graph.leafType(root)) |ty| {
-                    if (!try graph.types.containsIteratorInterface(ty) and
-                        !try graph.types.containsGeneratedPrivateBacking(ty)) return true;
+                    if (!try graph.types.containsGeneratedPrivateBacking(ty)) return true;
                 }
                 switch ((try graph.content(root))) {
                     .unresolved => return false,
                     .named => |named| {
-                        if (named.generated_iterator != null or named.def.generated != null or named.def.iterator_representation != .none or named.def.iterator_kind != .none) return false;
                         if (named.backing.get()) |backing| if (backing.authority == .generated_private) {
                             return false;
                         };
@@ -1842,7 +1514,6 @@ pub const InterfaceConstraints = struct {
         if (T == FieldKindId) return context.kind(value);
         if (T == MaybeNodeId) return .of(try mapValue(context, ?NodeId, value.get()));
         if (T == Type.MaybeTypeId) return .of(try mapValue(context, ?Type.TypeId, value.get()));
-        if (T == MaybeRelatedGroup) return .of(try mapValue(context, ?u32, value.get()));
         if (comptime collections.CompactOptionalPayload(T)) |Payload| return .of(try mapValue(context, ?Payload, value.get()));
         return switch (@typeInfo(T)) {
             .@"struct" => |info| blk: {
@@ -1943,12 +1614,8 @@ pub const GraphDiagnostics = struct {
     mono_import_hits: u64 = 0,
     mono_import_misses: u64 = 0,
     leaf_expansions: u64 = 0,
-    iterator_interface_scans: u64 = 0,
-    iterator_interface_cache_hits: u64 = 0,
-    iterator_interface_nodes_visited: u64 = 0,
     generated_private_guard_returns: u64 = 0,
     generated_private_scans: u64 = 0,
-    generated_iterator_lookups: u64 = 0,
     generated_private_cache_hits: u64 = 0,
     generated_private_nodes_visited: u64 = 0,
     finished_mono_scans: u64 = 0,
@@ -2055,104 +1722,6 @@ const backing_component: u32 = 0;
 
 /// Exact iterator construction identity. Argument roots are maintained by
 /// union_, while declaration and callable evidence are producer-owned data.
-const GeneratedIteratorKey = struct {
-    kind: Type.IteratorKind,
-    named_kind: Type.NamedKind,
-    module: names.ModuleIdentityId,
-    type_name: names.TypeNameId,
-    source_decl: collections.OptionalU32,
-    callable_evidence: ?names.TypeDigest,
-    args: []NodeId,
-
-    fn fromNamed(named: *const InstNamed) ?GeneratedIteratorKey {
-        const provenance = named.generated_iterator orelse return null;
-        return .{
-            .kind = named.def.iterator_kind,
-            .named_kind = named.kind,
-            .module = named.def.module,
-            .type_name = named.def.type_name,
-            .source_decl = named.def.source_decl,
-            .callable_evidence = provenance.callable_evidence,
-            .args = named.args,
-        };
-    }
-};
-
-comptime {
-    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(GeneratedIteratorKey) == 64);
-}
-
-const GeneratedIteratorKeyContext = struct {
-    pub fn hash(_: @This(), key: GeneratedIteratorKey) u64 {
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHash(&hasher, key.kind);
-        std.hash.autoHash(&hasher, key.named_kind);
-        std.hash.autoHash(&hasher, key.module);
-        std.hash.autoHash(&hasher, key.type_name);
-        std.hash.autoHash(&hasher, key.source_decl);
-        std.hash.autoHash(&hasher, key.callable_evidence);
-        std.hash.autoHash(&hasher, key.args.len);
-        for (key.args) |arg| std.hash.autoHash(&hasher, arg);
-        return hasher.final();
-    }
-
-    pub fn eql(_: @This(), a: GeneratedIteratorKey, b: GeneratedIteratorKey) bool {
-        return a.kind == b.kind and a.named_kind == b.named_kind and
-            a.module == b.module and a.type_name == b.type_name and
-            a.source_decl == b.source_decl and
-            optionalInstDigestEql(a.callable_evidence, b.callable_evidence) and
-            std.mem.eql(NodeId, a.args, b.args);
-    }
-};
-
-const GeneratedIteratorIndex = collections.RekeyingHashMap(GeneratedIteratorKey, NodeId, GeneratedIteratorKeyContext, 80);
-const GeneratedIteratorEntry = struct {
-    key: GeneratedIteratorKey,
-    previous: ?NodeId = null,
-    next: ?NodeId = null,
-    indexed: bool = false,
-};
-const GeneratedIteratorOccurrence = struct { node: NodeId, arg_index: usize };
-
-/// Resolve a query's arguments without allocating a temporary root tuple.
-const GeneratedIteratorLookup = struct {
-    key: GeneratedIteratorKey,
-    item: NodeId,
-    components: []const NodeId,
-};
-const GeneratedIteratorLookupContext = struct {
-    graph: *InstGraph,
-
-    pub fn hash(self: @This(), lookup: GeneratedIteratorLookup) u64 {
-        var key = lookup.key;
-        key.args = &.{};
-        // Use the same scalar prefix as the resident key's hash.
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHash(&hasher, key.kind);
-        std.hash.autoHash(&hasher, key.named_kind);
-        std.hash.autoHash(&hasher, key.module);
-        std.hash.autoHash(&hasher, key.type_name);
-        std.hash.autoHash(&hasher, key.source_decl);
-        std.hash.autoHash(&hasher, key.callable_evidence);
-        std.hash.autoHash(&hasher, lookup.components.len + 1);
-        std.hash.autoHash(&hasher, self.graph.find(lookup.item));
-        for (lookup.components) |arg| std.hash.autoHash(&hasher, self.graph.find(arg));
-        return hasher.final();
-    }
-
-    pub fn eql(self: @This(), lookup: GeneratedIteratorLookup, stored: GeneratedIteratorKey) bool {
-        var prefix = stored;
-        prefix.args = &.{};
-        if (!GeneratedIteratorKeyContext.eql(.{}, lookup.key, prefix) or
-            stored.args.len != lookup.components.len + 1 or
-            stored.args[0] != self.graph.find(lookup.item)) return false;
-        for (lookup.components, stored.args[1..]) |arg, root| {
-            if (self.graph.find(arg) != root) return false;
-        }
-        return true;
-    }
-};
-
 const NominalBackingKey = struct {
     declaration: NominalBackingDeclaration,
     args: []const NodeId,
@@ -2333,14 +1902,12 @@ const InstGraphListPools = struct {
     snapshots: ListPool(Type.TypeId) = .{},
     leaf_origins: ListPool(LeafOrigin) = .{},
     backing_occurrences: ListPool(NominalBackingOccurrence) = .{},
-    iterator_occurrences: ListPool(GeneratedIteratorOccurrence) = .{},
     dependencies: ListPool(ContainmentDependency) = .{},
 
     fn deinit(self: *InstGraphListPools, allocator: Allocator) void {
         self.snapshots.deinit(allocator);
         self.leaf_origins.deinit(allocator);
         self.backing_occurrences.deinit(allocator);
-        self.iterator_occurrences.deinit(allocator);
         self.dependencies.deinit(allocator);
     }
 };
@@ -2366,52 +1933,9 @@ const ContainmentQueryCache = struct {
     dependencies: std.ArrayList(ContainmentDependency) = .empty,
 };
 
-const ContainmentCacheEntry = struct {
-    generated_private: ContainmentQueryCache = .{},
-    iterator_interface: ContainmentQueryCache = .{},
-
-    fn forQuery(self: *ContainmentCacheEntry, comptime query: ContainmentQuery) *ContainmentQueryCache {
-        return switch (query) {
-            .generated_private => &self.generated_private,
-            .iterator_interface => &self.iterator_interface,
-        };
-    }
-
-    fn deinit(self: *ContainmentCacheEntry, allocator: Allocator) void {
-        self.generated_private.dependencies.deinit(allocator);
-        self.iterator_interface.dependencies.deinit(allocator);
-    }
-
-    fn release(self: *ContainmentCacheEntry, allocator: Allocator, pool: *ListPool(ContainmentDependency)) void {
-        pool.give(allocator, &self.generated_private.dependencies);
-        pool.give(allocator, &self.iterator_interface.dependencies);
-    }
-};
-
-const ContainmentQuery = enum {
-    generated_private,
-    iterator_interface,
-};
-
 const RelationState = enum {
     producing,
     frozen,
-};
-
-const GeneratedIteratorDepthRule = union(enum) {
-    fixed: u8,
-    children: struct {
-        count: usize,
-        increment: u8,
-    },
-};
-
-const GeneratedIteratorDepthFrame = struct {
-    node: NodeId,
-    next_child: usize,
-    child_count: usize,
-    max_child_depth: u8,
-    increment: u8,
 };
 
 /// Per-specialization type solver. Checked types instantiate into union-find
@@ -2422,15 +1946,6 @@ const GeneratedIteratorDepthFrame = struct {
 /// structure, so a specialization that tries to exceed its requested type is a
 /// unification conflict, not a silent divergence.
 pub const InstGraph = struct {
-    const RepresentationMembership = packed struct {
-        /// Explicit recursive argument or loop feedback value flow. A later
-        /// join of distinct minted identities proves representation growth.
-        recursive_slot: bool = false,
-        /// A minted join on recursive value flow requires the finite dynamic
-        /// fixed point when iterator representations are finalized.
-        forced_dynamic: bool = false,
-    };
-
     allocator: Allocator,
     relation_state: RelationState,
     /// Sole owner domain for every `TypeId` retained by this graph, including
@@ -2446,6 +1961,11 @@ pub const InstGraph = struct {
     /// hop reads one id rather than a whole node.
     parents: std.ArrayList(NodeId),
     field_kinds: std.ArrayList(FieldKindNode),
+    /// Circular member list of each field-kind union-find class: every field
+    /// kind names the next member of its class, so a union splices two
+    /// circles in constant time and resolution visits each member's
+    /// registered cells exactly once.
+    field_kind_next: std.ArrayList(FieldKindId),
     versions: std.ArrayList(u32),
     /// Analysis observes content writes and order-sensitive row normalization.
     analysis_changes: @import("../proofs.zig").Changes(NodeId) = .{},
@@ -2471,8 +1991,7 @@ pub const InstGraph = struct {
     /// current class root; unions therefore never move or reindex snapshots.
     node_snapshots: collections.DenseMap(NodeId, std.ArrayList(Type.TypeId)),
     /// Emptied lists of the per-node list maps (`node_snapshots`,
-    /// `leaf_alias_origins`, `nominal_backings_by_root`,
-    /// `generated_iterators_by_root`, and the containment cache's
+    /// `leaf_alias_origins`, `nominal_backings_by_root`, and the containment cache's
     /// dependencies), reused across graph resets.
     list_pools: InstGraphListPools = .{},
     /// Latest immutable snapshot for a root. Any relation mutation clears this
@@ -2580,13 +2099,12 @@ pub const InstGraph = struct {
     private_backing_roots: std.ArrayList(bool),
     /// Exact producer-authored membership on union-find classes. Only the
     /// representative's bits are authoritative; union joins them with OR.
-    representation_membership: std.ArrayList(RepresentationMembership),
     /// Shared allocation-free scratch and cache for exact structural
     /// containment. The two queries share one conservative dependency list,
     /// while each walk can stop as soon as its requested property is found.
     containment_pending: std.ArrayList(NodeId),
     containment_visit_epochs: collections.EpochSet(u32, .stamps, .internal),
-    containment_cache: collections.DenseMap(NodeId, ContainmentCacheEntry),
+    containment_cache: collections.DenseMap(NodeId, ContainmentQueryCache),
     /// Pools for the visited sets the graph's walks create per query. Fresh
     /// maps re-allocate and re-zero sparse chunks across the node/type ID
     /// domains on every walk; pooled maps keep their chunks.
@@ -2651,11 +2169,6 @@ pub const InstGraph = struct {
     /// While zero, no class can reach one and the containment query answers
     /// at once.
     generated_private_nodes: u32,
-    /// Monotone provenance count: zero proves both finalization passes empty.
-    generated_iterator_nodes: u32,
-    generated_iterator_index: GeneratedIteratorIndex,
-    generated_iterator_entries: collections.DenseMap(NodeId, GeneratedIteratorEntry),
-    generated_iterators_by_root: collections.DenseMap(NodeId, std.ArrayList(GeneratedIteratorOccurrence)),
     /// Interned type per class root sealed in final mode, kept and dropped
     /// together with `current_snapshots`: the same relation changes that
     /// leave an active view current leave a committed type current.
@@ -2677,6 +2190,7 @@ pub const InstGraph = struct {
             .nodes = .empty,
             .parents = .empty,
             .field_kinds = .empty,
+            .field_kind_next = .empty,
             .versions = .empty,
             .class_member_next = .empty,
             .class_member_head = .empty,
@@ -2701,10 +2215,9 @@ pub const InstGraph = struct {
             .request_source_interfaces = .empty,
             .constructor_evidence_requests = .empty,
             .private_backing_roots = .empty,
-            .representation_membership = .empty,
             .containment_pending = .empty,
             .containment_visit_epochs = .{},
-            .containment_cache = collections.DenseMap(NodeId, ContainmentCacheEntry).init(allocator),
+            .containment_cache = collections.DenseMap(NodeId, ContainmentQueryCache).init(allocator),
             .node_set_pool = collections.DenseMapPool(NodeId, void).init(allocator),
             .capture_scratch = InterfaceConstraints.CaptureScratch.init(allocator),
             .resolved_roots = collections.DenseMap(NodeId, u32).init(allocator),
@@ -2713,10 +2226,6 @@ pub const InstGraph = struct {
             .structure_epoch = 0,
             .snapshot_free_types = collections.DenseMap(Type.TypeId, void).init(allocator),
             .generated_private_nodes = 0,
-            .generated_iterator_nodes = 0,
-            .generated_iterator_index = GeneratedIteratorIndex.init(allocator, .{}),
-            .generated_iterator_entries = collections.DenseMap(NodeId, GeneratedIteratorEntry).init(allocator),
-            .generated_iterators_by_root = collections.DenseMap(NodeId, std.ArrayList(GeneratedIteratorOccurrence)).init(allocator),
             .current_durable = collections.DenseMap(NodeId, Type.TypeId).init(allocator),
             .type_set_pool = collections.DenseMapPool(Type.TypeId, void).init(allocator),
         };
@@ -2736,6 +2245,7 @@ pub const InstGraph = struct {
         self.nodes.clearRetainingCapacity();
         self.parents.clearRetainingCapacity();
         self.field_kinds.clearRetainingCapacity();
+        self.field_kind_next.clearRetainingCapacity();
         self.versions.clearRetainingCapacity();
         self.analysis_changes.clearRetainingCapacity();
         self.class_member_next.clearRetainingCapacity();
@@ -2772,11 +2282,10 @@ pub const InstGraph = struct {
         self.request_source_interfaces.clearRetainingCapacity();
         self.constructor_evidence_requests.clearRetainingCapacity();
         self.private_backing_roots.clearRetainingCapacity();
-        self.representation_membership.clearRetainingCapacity();
         self.containment_pending.clearRetainingCapacity();
         self.containment_visit_epochs.clearRetainingCapacity();
         var containment_entries = self.containment_cache.valueIterator();
-        while (containment_entries.next()) |entry| entry.release(self.allocator, &self.list_pools.dependencies);
+        while (containment_entries.next()) |entry| self.list_pools.dependencies.give(self.allocator, &entry.dependencies);
         self.containment_cache.clearRetainingCapacity();
         self.resolved_roots.clearRetainingCapacity();
         self.pure_instances.clearRetainingCapacity();
@@ -2784,12 +2293,6 @@ pub const InstGraph = struct {
         self.resolved_epoch = 0;
         self.structure_epoch = 0;
         self.generated_private_nodes = 0;
-        self.generated_iterator_nodes = 0;
-        self.generated_iterator_index.clearRetainingUsedCapacity();
-        self.generated_iterator_entries.clearRetainingCapacity();
-        var iterator_occurrences = self.generated_iterators_by_root.valueIterator();
-        while (iterator_occurrences.next()) |occurrences| self.list_pools.iterator_occurrences.give(self.allocator, occurrences);
-        self.generated_iterators_by_root.clearRetainingCapacity();
         self.current_durable.clearRetainingCapacity();
         _ = self.arena_impl.reset(.retain_capacity);
     }
@@ -2832,15 +2335,9 @@ pub const InstGraph = struct {
         self.nominal_backing_affected.deinit(allocator);
         self.nominal_backing_instances.deinit(allocator);
         self.nominal_backing_index.deinit();
-        self.generated_iterator_index.deinit();
-        self.generated_iterator_entries.deinit();
-        var iterator_occurrences = self.generated_iterators_by_root.valueIterator();
-        while (iterator_occurrences.next()) |occurrences| occurrences.deinit(allocator);
-        self.generated_iterators_by_root.deinit();
         self.request_source_interfaces.deinit(allocator);
         self.constructor_evidence_requests.deinit(allocator);
         self.private_backing_roots.deinit(allocator);
-        self.representation_membership.deinit(allocator);
         self.containment_pending.deinit(allocator);
         self.containment_visit_epochs.deinit(allocator);
         self.current_durable.deinit();
@@ -2868,7 +2365,7 @@ pub const InstGraph = struct {
         self.type_set_pool.deinit();
         var containment_entries = self.containment_cache.valueIterator();
         while (containment_entries.next()) |entry| {
-            entry.deinit(allocator);
+            entry.dependencies.deinit(allocator);
         }
         self.containment_cache.deinit();
         self.imported_monos.deinit();
@@ -2912,19 +2409,13 @@ pub const InstGraph = struct {
         self.parents.deinit(allocator);
         self.nodes.deinit(allocator);
         self.field_kinds.deinit(allocator);
+        self.field_kind_next.deinit(allocator);
         self.arena_impl.deinit();
         allocator.destroy(self);
     }
 
     pub fn arena(self: *InstGraph) Allocator {
         return self.arena_impl.allocator();
-    }
-
-    /// Generated-iterator provenance, which lives in the graph arena.
-    pub fn generatedIterator(self: *InstGraph, provenance: InstGeneratedIterator) Allocator.Error!*const InstGeneratedIterator {
-        const stored = try self.arena().create(InstGeneratedIterator);
-        stored.* = provenance;
-        return stored;
     }
 
     /// Node content for a named payload, which lives in the graph arena.
@@ -2936,10 +2427,15 @@ pub const InstGraph = struct {
 
     pub fn newUndeterminedFieldKind(self: *InstGraph) Allocator.Error!FieldKindId {
         const id: FieldKindId = @fromBackingInt(@intCast(self.field_kinds.items.len));
+        try self.field_kind_next.ensureUnusedCapacity(self.allocator, 1);
         try self.field_kinds.append(self.allocator, .{ .parent = id });
+        self.field_kind_next.appendAssumeCapacity(id);
         return id;
     }
 
+    /// Record the slot and value cells of the field that introduced `raw`.
+    /// Each field kind registers its own cells once, before any relation has
+    /// selected an inline kind for its class, so the selection relates them.
     pub fn registerUndeterminedFieldKindCells(
         self: *InstGraph,
         raw: FieldKindId,
@@ -2947,10 +2443,12 @@ pub const InstGraph = struct {
         value: NodeId,
     ) void {
         self.requireRelationProduction();
-        const root = self.findFieldKind(raw);
-        const node = &self.field_kinds.items[@backingInt(root)];
+        const node = &self.field_kinds.items[@backingInt(raw)];
         if (node.cells.get() != null) {
             Common.invariant("instantiation field kind registered its representation cells more than once");
+        }
+        if (self.field_kinds.items[@backingInt(self.findFieldKind(raw))].resolved) |resolved| {
+            if (resolved.isInline()) Common.invariant("field kind registered cells after its class selected an inline kind");
         }
         node.cells = .some(.{ .slot = slot, .value = value });
     }
@@ -2991,16 +2489,70 @@ pub const InstGraph = struct {
         };
     }
 
-    fn constrainUndeterminedFieldKind(self: *InstGraph, raw: FieldKindId, resolved: ResolvedFieldKind) void {
+    /// Constrain the class of `raw` with `resolved`. When this first selects
+    /// an inline kind for the class, every member's slot is the same cell as
+    /// its value, so the slot/value pair of each member's registered cells is
+    /// queued on `commits` for the caller's unification to relate.
+    fn constrainUndeterminedFieldKind(
+        self: *InstGraph,
+        raw: FieldKindId,
+        resolved: ResolvedFieldKind,
+        commits: *std.ArrayList(NodePair),
+    ) Allocator.Error!void {
         const root = self.findFieldKind(raw);
         const node = &self.field_kinds.items[@backingInt(root)];
-        node.resolved = if (node.resolved) |existing|
-            mergeResolvedFieldKinds(existing, resolved)
-        else
-            resolved;
+        const previous = node.resolved;
+        const merged = if (previous) |existing| mergeResolvedFieldKinds(existing, resolved) else resolved;
+        node.resolved = merged;
+        if (merged.isInline() and !resolvedIsInline(previous)) {
+            try self.queueFieldKindClassCommits(root, commits);
+        }
     }
 
-    fn unionUndeterminedFieldKinds(self: *InstGraph, left_raw: FieldKindId, right_raw: FieldKindId) FieldKindId {
+    /// Constrain one field kind outside any unification and relate the
+    /// slot/value cells the selection commits.
+    pub fn selectUndeterminedFieldKind(self: *InstGraph, raw: FieldKindId, resolved: ResolvedFieldKind) Allocator.Error!void {
+        self.requireRelationProduction();
+        var scratch = self.acquireUnifyScratch();
+        defer self.releaseUnifyScratch(&scratch);
+        try self.constrainUndeterminedFieldKind(raw, resolved, &scratch.pending);
+        try self.drainUnifyScratch(&scratch, false, .relate);
+    }
+
+    fn resolvedIsInline(resolved: ?ResolvedFieldKind) bool {
+        return if (resolved) |kind| kind.isInline() else false;
+    }
+
+    /// Queue the slot/value pair of every member of the class rooted at
+    /// `root` that registered cells.
+    fn queueFieldKindClassCommits(self: *InstGraph, root: FieldKindId, commits: *std.ArrayList(NodePair)) Allocator.Error!void {
+        var member = root;
+        while (true) {
+            if (self.field_kinds.items[@backingInt(member)].cells.get()) |cells| {
+                try pushPair(commits, self.allocator, cells.slot, cells.value, .exact);
+            }
+            member = self.field_kind_next.items[@backingInt(member)];
+            if (member == root) return;
+        }
+    }
+
+    /// The registered cells of one member of the class rooted at `root`: the
+    /// first member in the class's circle that registered cells.
+    fn fieldKindClassCells(self: *InstGraph, root: FieldKindId) ?FieldKindCells {
+        var member = root;
+        while (true) {
+            if (self.field_kinds.items[@backingInt(member)].cells.get()) |cells| return cells;
+            member = self.field_kind_next.items[@backingInt(member)];
+            if (member == root) return null;
+        }
+    }
+
+    fn unionUndeterminedFieldKinds(
+        self: *InstGraph,
+        left_raw: FieldKindId,
+        right_raw: FieldKindId,
+        commits: *std.ArrayList(NodePair),
+    ) Allocator.Error!FieldKindId {
         var left = self.findFieldKind(left_raw);
         var right = self.findFieldKind(right_raw);
         if (left == right) return left;
@@ -3009,17 +2561,28 @@ pub const InstGraph = struct {
             left = right;
             right = temp;
         }
+        const left_state = self.field_kinds.items[@backingInt(left)].resolved;
         const right_state = self.field_kinds.items[@backingInt(right)].resolved;
-        const right_cells = self.field_kinds.items[@backingInt(right)].cells;
+        const merged: ?ResolvedFieldKind = if (left_state) |left_kind|
+            (if (right_state) |right_kind| mergeResolvedFieldKinds(left_kind, right_kind) else left_kind)
+        else
+            right_state;
+        // A side whose kind was not yet inline has uncommitted members; the
+        // other side's members were committed when it selected its kind.
+        if (resolvedIsInline(merged)) {
+            if (!resolvedIsInline(left_state)) try self.queueFieldKindClassCommits(left, commits);
+            if (!resolvedIsInline(right_state)) try self.queueFieldKindClassCommits(right, commits);
+        }
         self.field_kinds.items[@backingInt(right)].parent = left;
         if (self.field_kinds.items[@backingInt(left)].rank == self.field_kinds.items[@backingInt(right)].rank) {
             self.field_kinds.items[@backingInt(left)].rank += 1;
         }
-        if (self.field_kinds.items[@backingInt(left)].cells.get() == null) {
-            self.field_kinds.items[@backingInt(left)].cells = right_cells;
-        }
-        if (right_state) |resolved| self.constrainUndeterminedFieldKind(left, resolved);
-        return self.findFieldKind(left);
+        self.field_kinds.items[@backingInt(left)].resolved = merged;
+        // Splice the two member circles.
+        const left_next = self.field_kind_next.items[@backingInt(left)];
+        self.field_kind_next.items[@backingInt(left)] = self.field_kind_next.items[@backingInt(right)];
+        self.field_kind_next.items[@backingInt(right)] = left_next;
+        return left;
     }
 
     pub fn resolvedFieldKind(self: *InstGraph, kind: InstFieldKind) ?ResolvedFieldKind {
@@ -3063,53 +2626,72 @@ pub const InstGraph = struct {
         };
     }
 
+    /// The kind a sealed field's explicit metadata records: a default
+    /// identity is defaulted, a separate source value is optional, and an
+    /// inline source value is required.
+    fn sealedFieldKind(value_ty: MaybeNodeId, default: ?Type.FieldDefault) ResolvedFieldKind {
+        if (default) |identity| return .{ .defaulted = identity };
+        if (value_ty != .none) return .optional;
+        return .required;
+    }
+
+    /// Relate two matched fields' kinds. A field kind selected here commits
+    /// its class's slot/value cells onto `commits`.
     fn unifyFieldKinds(
         self: *InstGraph,
-        left: InstFieldKind,
-        left_default: ?Type.FieldDefault,
-        right: InstFieldKind,
-        right_default: ?Type.FieldDefault,
-    ) InstFieldKind {
-        if (left == .sealed and right == .sealed) {
+        left: InstField,
+        right: InstField,
+        commits: *std.ArrayList(NodePair),
+    ) Allocator.Error!InstFieldKind {
+        const left_default = left.default.get();
+        const right_default = right.default.get();
+        if (left.kind == .sealed and right.kind == .sealed) {
             if (!instFieldDefaultEql(left_default, right_default)) {
                 Common.invariant("instantiation unified sealed record fields with different defaults");
             }
             return .sealed;
         }
 
-        const left_resolved = self.resolvedFieldKind(left) orelse if (left_default) |default|
+        const left_resolved = self.resolvedFieldKind(left.kind) orelse if (left.kind == .sealed)
+            sealedFieldKind(left.value_ty, left_default)
+        else if (left_default) |default|
             ResolvedFieldKind{ .defaulted = default }
         else
             null;
-        const right_resolved = self.resolvedFieldKind(right) orelse if (right_default) |default|
+        const right_resolved = self.resolvedFieldKind(right.kind) orelse if (right.kind == .sealed)
+            sealedFieldKind(right.value_ty, right_default)
+        else if (right_default) |default|
             ResolvedFieldKind{ .defaulted = default }
         else
             null;
 
-        switch (left) {
-            .undetermined => |left_id| switch (right) {
+        switch (left.kind) {
+            .undetermined => |left_id| switch (right.kind) {
                 .undetermined => |right_id| {
-                    const root = self.unionUndeterminedFieldKinds(left_id, right_id);
-                    if (left_resolved) |resolved| self.constrainUndeterminedFieldKind(root, resolved);
-                    if (right_resolved) |resolved| self.constrainUndeterminedFieldKind(root, resolved);
+                    const root = try self.unionUndeterminedFieldKinds(left_id, right_id, commits);
+                    if (left_resolved) |resolved| try self.constrainUndeterminedFieldKind(root, resolved, commits);
+                    if (right_resolved) |resolved| try self.constrainUndeterminedFieldKind(root, resolved, commits);
                     return .{ .undetermined = root };
                 },
-                .sealed => {
-                    if (right_resolved) |resolved| self.constrainUndeterminedFieldKind(left_id, resolved);
-                    return left;
-                },
-                .required, .optional, .defaulted => {
-                    self.constrainUndeterminedFieldKind(left_id, right_resolved.?);
-                    return left;
+                .sealed, .required, .optional, .defaulted => {
+                    try self.constrainUndeterminedFieldKind(left_id, right_resolved.?, commits);
+                    return left.kind;
                 },
             },
-            .sealed => return right,
-            .required, .optional, .defaulted => switch (right) {
+            .sealed => switch (right.kind) {
                 .undetermined => |right_id| {
-                    self.constrainUndeterminedFieldKind(right_id, left_resolved.?);
-                    return right;
+                    try self.constrainUndeterminedFieldKind(right_id, left_resolved.?, commits);
+                    return right.kind;
                 },
-                .sealed => return left,
+                .sealed => unreachable, // both sealed returned above
+                .required, .optional, .defaulted => return right.kind,
+            },
+            .required, .optional, .defaulted => switch (right.kind) {
+                .undetermined => |right_id| {
+                    try self.constrainUndeterminedFieldKind(right_id, left_resolved.?, commits);
+                    return right.kind;
+                },
+                .sealed => return left.kind,
                 .required, .optional, .defaulted => return switch (mergeResolvedFieldKinds(left_resolved.?, right_resolved.?)) {
                     .required => .required,
                     .optional => .optional,
@@ -3127,9 +2709,12 @@ pub const InstGraph = struct {
         self: *InstGraph,
         left: InstField,
         right: InstField,
-    ) void {
+    ) Allocator.Error!void {
         self.requireRelationProduction();
-        _ = self.unifyFieldKinds(left.kind, left.default.get(), right.kind, right.default.get());
+        var scratch = self.acquireUnifyScratch();
+        defer self.releaseUnifyScratch(&scratch);
+        _ = try self.unifyFieldKinds(left, right, &scratch.pending);
+        try self.drainUnifyScratch(&scratch, false, .relate);
     }
 
     pub fn registerRequestSourceInterface(
@@ -3170,146 +2755,6 @@ pub const InstGraph = struct {
             self.constructor_evidence_requests.items[@backingInt(self.find(request_fn))];
     }
 
-    pub fn findGeneratedIterator(
-        self: *InstGraph,
-        public_node: NodeId,
-        kind: Type.IteratorKind,
-        components: []const NodeId,
-        callable_evidence: ?names.TypeDigest,
-    ) Allocator.Error!?NodeId {
-        const public_named = switch ((try self.content(public_node))) {
-            .named => |named| named,
-            .redirect, .leaf, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => return null,
-        };
-        if (public_named.args.len == 0) return null;
-        self.countDiagnostic("generated_iterator_lookups");
-        return self.generated_iterator_index.getAdapted(GeneratedIteratorLookup{
-            .key = .{
-                .kind = kind,
-                .named_kind = public_named.kind,
-                .module = public_named.def.module,
-                .type_name = public_named.def.type_name,
-                .source_decl = public_named.def.source_decl,
-                .callable_evidence = callable_evidence,
-                .args = &.{},
-            },
-            .item = public_named.args[0],
-            .components = components,
-        }, GeneratedIteratorLookupContext{ .graph = self });
-    }
-
-    /// Equal construction keys can coexist before an explicit relation joins
-    /// them. Keep every candidate and retain the old scan's lowest-node choice.
-    fn linkGeneratedIterator(self: *InstGraph, node: NodeId) void {
-        const entry = self.generated_iterator_entries.getPtr(node).?;
-        std.debug.assert(!entry.indexed);
-        var previous: ?NodeId = null;
-        var next = self.generated_iterator_index.get(entry.key);
-        while (next) |candidate| {
-            if (@backingInt(candidate) > @backingInt(node)) break;
-            previous = candidate;
-            next = self.generated_iterator_entries.get(candidate).?.next;
-        }
-        entry.previous = previous;
-        entry.next = next;
-        entry.indexed = true;
-        if (previous) |prev| {
-            self.generated_iterator_entries.getPtr(prev).?.next = node;
-        } else {
-            _ = self.generated_iterator_index.fetchRemove(entry.key);
-            self.generated_iterator_index.putAssumeCapacityNoClobber(entry.key, node);
-        }
-        if (next) |following| self.generated_iterator_entries.getPtr(following).?.previous = node;
-    }
-
-    fn unlinkGeneratedIterator(self: *InstGraph, node: NodeId) void {
-        const entry = self.generated_iterator_entries.getPtr(node).?;
-        if (!entry.indexed) return;
-        if (entry.previous) |previous| {
-            self.generated_iterator_entries.getPtr(previous).?.next = entry.next;
-        } else {
-            const removed = self.generated_iterator_index.fetchRemove(entry.key).?;
-            std.debug.assert(removed.value == node);
-            if (entry.next) |next| {
-                self.generated_iterator_index.putAssumeCapacityNoClobber(self.generated_iterator_entries.get(next).?.key, next);
-            }
-        }
-        if (entry.next) |next| self.generated_iterator_entries.getPtr(next).?.previous = entry.previous;
-        entry.indexed = false;
-    }
-
-    fn removeGeneratedIterator(self: *InstGraph, node: NodeId) void {
-        const entry = self.generated_iterator_entries.get(node) orelse return;
-        self.unlinkGeneratedIterator(node);
-        for (entry.key.args, 0..) |root, arg_index| {
-            const occurrences = self.generated_iterators_by_root.getPtr(root).?;
-            for (occurrences.items, 0..) |occurrence, index| {
-                if (occurrence.node == node and occurrence.arg_index == arg_index) {
-                    _ = occurrences.swapRemove(index);
-                    break;
-                }
-            } else unreachable; // updateGeneratedIterator and migrateGeneratedIteratorRoot register one occurrence per key argument
-        }
-        _ = self.generated_iterator_entries.remove(node);
-    }
-
-    fn updateGeneratedIterator(self: *InstGraph, node: NodeId, content_: InstNode) Allocator.Error!void {
-        const new_key = if (content_ == .named) GeneratedIteratorKey.fromNamed(content_.named) else null;
-        if (new_key) |key| {
-            if (self.generated_iterator_entries.get(node)) |existing| {
-                var lookup_key = key;
-                lookup_key.args = &.{};
-                if (GeneratedIteratorLookupContext.eql(.{ .graph = self }, .{
-                    .key = lookup_key,
-                    .item = key.args[0],
-                    .components = key.args[1..],
-                }, existing.key)) return;
-            }
-            var stored = key;
-            stored.args = try self.arena().alloc(NodeId, key.args.len);
-            for (stored.args, key.args) |*root, arg| root.* = self.find(arg);
-            try self.generated_iterator_index.ensureTotalCapacity(self.generated_iterator_index.count() + 1);
-            // Stage reverse occurrences before replacing a live key. Roll them
-            // back on allocation failure, including repeated argument roots.
-            var staged: usize = 0;
-            errdefer while (staged > 0) {
-                staged -= 1;
-                _ = self.generated_iterators_by_root.getPtr(stored.args[staged]).?.pop();
-            };
-            for (stored.args, 0..) |root, arg_index| {
-                const occurrences = try self.generated_iterators_by_root.getOrPut(root);
-                if (!occurrences.found_existing) occurrences.value_ptr.* = self.list_pools.iterator_occurrences.take();
-                try occurrences.value_ptr.append(self.allocator, .{ .node = node, .arg_index = arg_index });
-                staged += 1;
-            }
-            const entry = try self.generated_iterator_entries.getOrPut(node);
-            if (entry.found_existing) self.removeGeneratedIterator(node);
-            self.generated_iterator_entries.putAssumeCapacity(node, .{ .key = stored });
-            self.linkGeneratedIterator(node);
-        } else self.removeGeneratedIterator(node);
-    }
-
-    /// Only keys that explicitly reference the losing argument class move.
-    /// Unlink all affected keys before changing their shared argument storage.
-    fn migrateGeneratedIteratorRoot(self: *InstGraph, loser: NodeId, winner: NodeId) Allocator.Error!void {
-        const occurrences = self.generated_iterators_by_root.get(loser) orelse return;
-        if (occurrences.items.len == 0) return;
-        const winner_occurrences = try self.generated_iterators_by_root.getOrPut(winner);
-        if (!winner_occurrences.found_existing) winner_occurrences.value_ptr.* = self.list_pools.iterator_occurrences.take();
-        try winner_occurrences.value_ptr.ensureUnusedCapacity(self.allocator, occurrences.items.len);
-        try self.generated_iterator_index.ensureTotalCapacity(self.generated_iterator_index.count());
-        var moved = self.generated_iterators_by_root.fetchRemove(loser).?.value;
-        defer self.list_pools.iterator_occurrences.give(self.allocator, &moved);
-        for (moved.items) |occurrence| self.unlinkGeneratedIterator(occurrence.node);
-        for (moved.items) |occurrence| {
-            self.generated_iterator_entries.getPtr(occurrence.node).?.key.args[occurrence.arg_index] = winner;
-        }
-        self.generated_iterators_by_root.getPtr(winner).?.appendSliceAssumeCapacity(moved.items);
-        for (moved.items) |occurrence| {
-            if (!self.generated_iterator_entries.get(occurrence.node).?.indexed) self.linkGeneratedIterator(occurrence.node);
-        }
-    }
-
     pub fn acceptsRelationMutation(self: *const InstGraph) bool {
         return self.relation_state == .producing;
     }
@@ -3327,22 +2772,24 @@ pub const InstGraph = struct {
     }
 
     /// Commit every generalized field kind that received no concrete
-    /// specialization evidence. The field-kind producer recorded the exact
+    /// specialization evidence. Each field-kind producer recorded the exact
     /// runtime-slot/source-value pair, so required defaulting relates those
     /// cells directly without inspecting or reconstructing a row shape.
     fn finalizeUndeterminedFieldKinds(self: *InstGraph) Allocator.Error!void {
         self.requireRelationProduction();
+        var scratch = self.acquireUnifyScratch();
+        defer self.releaseUnifyScratch(&scratch);
         for (0..self.field_kinds.items.len) |raw_index| {
             const id: FieldKindId = @fromBackingInt(@intCast(raw_index));
             const root = self.findFieldKind(id);
             if (root != id) continue;
-            const node = &self.field_kinds.items[raw_index];
-            if (node.resolved != null) continue;
-            const cells = node.cells.get() orelse
+            if (self.field_kinds.items[raw_index].resolved != null) continue;
+            if (self.fieldKindClassCells(root) == null) {
                 Common.invariant("unresolved instantiation field kind had no registered representation cells");
-            node.resolved = .required;
-            try self.unify(cells.slot, cells.value);
+            }
+            try self.constrainUndeterminedFieldKind(root, .required, &scratch.pending);
         }
+        try self.drainUnifyScratch(&scratch, false, .relate);
     }
 
     /// Complete pending specialization defaults and prevent any later
@@ -3352,568 +2799,6 @@ pub const InstGraph = struct {
         self.requireRelationProduction();
         try self.finalizeUndeterminedFieldKinds();
         self.relation_state = .frozen;
-    }
-
-    /// An immutable segment of the append-only class-member list. Union only
-    /// links a class tail to another class head, so no link inside this saved
-    /// segment can change. Its last node remains the boundary after any union.
-    pub const ArgumentClassSnapshot = struct {
-        first: NodeId,
-        last: NodeId,
-
-        fn contains(self: ArgumentClassSnapshot, graph: *const InstGraph, node: NodeId) bool {
-            var member = self.first;
-            while (true) {
-                if (member == node) return true;
-                if (member == self.last) return false;
-                member = graph.class_member_next.items[@backingInt(member)].get() orelse
-                    Common.invariant("argument class snapshot lost an interior link");
-            }
-        }
-    };
-
-    /// Retain the exact initial membership without walking or copying the
-    /// class. Recursive growth tests permanent node identity against this
-    /// bounded segment, independently of later root choices and class joins.
-    pub fn snapshotFunctionArgumentClasses(
-        self: *InstGraph,
-        fn_node: NodeId,
-    ) Allocator.Error![]const ArgumentClassSnapshot {
-        const args = (try self.functionNodes(fn_node)).args;
-        const snapshots = try self.arena().alloc(ArgumentClassSnapshot, args.len);
-        for (args, snapshots) |arg, *snapshot| {
-            const root = @backingInt(self.find(arg));
-            snapshot.* = .{
-                .first = self.class_member_head.items[root],
-                .last = self.class_member_tail.items[root],
-            };
-            self.countDiagnosticBy("argument_class_members_snapshotted", 2);
-        }
-        return snapshots;
-    }
-
-    pub fn unifyRecursiveFunctionInterface(
-        self: *InstGraph,
-        active_fn: NodeId,
-        initial_active_arg_classes: []const ArgumentClassSnapshot,
-        recursive_request: NodeId,
-    ) Allocator.Error!void {
-        self.requireRelationProduction();
-        const request = try self.functionNodes(recursive_request);
-        if (initial_active_arg_classes.len != request.args.len) {
-            Common.invariant("recursive function interface changed argument arity");
-        }
-        for (initial_active_arg_classes, request.args) |initial_class, request_arg| {
-            if (!initial_class.contains(self, request_arg)) {
-                self.markRecursiveValueSlot(request_arg);
-            }
-        }
-        try self.unify(active_fn, recursive_request);
-    }
-
-    pub fn markRecursiveValueSlot(self: *InstGraph, slot: NodeId) void {
-        self.requireRelationProduction();
-        self.representation_membership.items[@backingInt(self.find(slot))].recursive_slot = true;
-    }
-
-    fn markForcedDynamicIteratorRoot(self: *InstGraph, node: NodeId) void {
-        self.requireRelationProduction();
-        self.representation_membership.items[@backingInt(self.find(node))].forced_dynamic = true;
-    }
-
-    const generated_iterator_mint_depth_limit: u8 = 16;
-    const generated_iterator_forced_depth: u8 = generated_iterator_mint_depth_limit + 1;
-
-    /// Decide every graph-owned iterator representation after relation
-    /// production has supplied its complete component graph, but before any
-    /// durable Monotype is sealed. The exact memoized graph walk follows values
-    /// only: function bodies and named backings cannot store an iterator value
-    /// and therefore do not contribute depth. A value cycle selects the finite
-    /// forced-dynamic fixed point.
-    pub fn finalizeGeneratedIteratorRepresentations(self: *InstGraph) Allocator.Error!void {
-        self.requireRelationProduction();
-        if (self.generated_iterator_nodes == 0) return;
-
-        const Pending = struct {
-            node: NodeId,
-            depth: u8,
-        };
-        var pending = std.ArrayList(Pending).empty;
-        defer pending.deinit(self.allocator);
-        var seen = self.node_set_pool.acquire();
-        defer self.node_set_pool.release(&seen);
-        var depths = collections.DenseMap(NodeId, u8).init(self.allocator);
-        defer depths.deinit();
-        var active = self.node_set_pool.acquire();
-        defer self.node_set_pool.release(&active);
-
-        var raw_index: usize = 0;
-        while (raw_index < self.nodes.items.len) : (raw_index += 1) {
-            const node = self.find(@fromBackingInt(@intCast(@as(u32, @intCast(raw_index)))));
-            const entry = try seen.getOrPut(node);
-            if (entry.found_existing) continue;
-            const node_content = try self.content(node);
-            if (node_content == .box) {
-                // A boxed sequence's step and every successor must use one
-                // fixed interface, independent of its private producer state.
-                var payload = node_content.box;
-                while (true) {
-                    const content_ = try self.content(payload);
-                    if (content_ != .named) break;
-                    const named_ = content_.named;
-                    if (named_.kind == .alias) {
-                        payload = (named_.backing.get() orelse Common.invariant("boxed alias has no backing")).node;
-                        continue;
-                    }
-                    if (named_.builtin_owner.get()) |owner| {
-                        if (static_dispatch.isIteratorOwner(owner)) self.markForcedDynamicIteratorRoot(payload);
-                    }
-                    break;
-                }
-                continue;
-            }
-            const named = switch (node_content) {
-                .named => |named| named,
-                .redirect, .leaf, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => continue,
-            };
-            if (named.generated_iterator == null) continue;
-
-            const depth = try self.generatedIteratorDepth(node, &depths, &active);
-            try pending.append(self.allocator, .{
-                .node = node,
-                .depth = depth,
-            });
-        }
-
-        for (pending.items) |item| {
-            const node = self.find(item.node);
-            var named = switch ((try self.content(node))) {
-                .named => |named| named.*,
-                .redirect, .leaf, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => Common.invariant("generated iterator representation target stopped being named"),
-            };
-            named.def.generated = null;
-            if (self.iteratorRootRequiresForcedDynamic(node) or item.depth > generated_iterator_mint_depth_limit) {
-                if (named.args.len == 0) {
-                    Common.invariant("generated iterator representation had no item argument");
-                }
-                if ((try self.findGeneratedIterator(node, .forced_dynamic, &.{}, null))) |existing| {
-                    if (self.find(existing) != node) {
-                        try self.unify(node, existing);
-                        continue;
-                    }
-                }
-                try self.rewriteGeneratedIteratorAsForcedDynamic(node, &named);
-            } else {
-                if (item.depth == 0) {
-                    Common.invariant("minted iterator representation had zero producer depth");
-                }
-                named.def.iterator_representation = .minted;
-                named.def.iterator_depth = item.depth;
-                try self.setContent(node, try self.namedContent(named));
-            }
-        }
-    }
-
-    fn iteratorRootRequiresForcedDynamic(self: *InstGraph, node: NodeId) bool {
-        return self.representation_membership.items[@backingInt(self.find(node))].forced_dynamic;
-    }
-
-    fn rewriteGeneratedIteratorAsForcedDynamic(
-        self: *InstGraph,
-        node: NodeId,
-        source_named: *const InstNamed,
-    ) Allocator.Error!void {
-        const provenance = source_named.generated_iterator orelse
-            Common.invariant("forced-dynamic iterator rewrite lacked producer provenance");
-        if (source_named.args.len == 0) {
-            Common.invariant("forced-dynamic iterator rewrite had no item argument");
-        }
-        const topology = source_named.def.iterator_topology.get() orelse
-            Common.invariant("forced-dynamic iterator rewrite lacked producer topology");
-        const item_node = source_named.args[0];
-        const dynamic_args = try self.arena().alloc(NodeId, 1);
-        dynamic_args[0] = item_node;
-        var def = provenance.public_source.def;
-        def.generated = null;
-        def.iterator_representation = .forced_dynamic;
-        def.iterator_kind = .forced_dynamic;
-        def.iterator_depth = 0;
-        def.iterator_topology = .some(topology);
-        try self.setContent(node, try self.namedContent(.{
-            .named_type = provenance.public_source.named_type,
-            .def = def,
-            .kind = provenance.public_source.kind,
-            .builtin_owner = .some(provenance.public_source.builtin_owner),
-            .args = dynamic_args,
-            .backing = .some(.{
-                .node = try self.forcedDynamicIteratorBackingNode(
-                    provenance.public_source.backing.node,
-                    node,
-                    item_node,
-                    topology,
-                ),
-                .use = provenance.public_source.backing.use,
-                .authority = .generated_private,
-            }),
-            .generated_iterator = try self.generatedIterator(.{
-                .callable_evidence = null,
-                .public_source = provenance.public_source,
-            }),
-            .declared_order = provenance.public_source.declared_order,
-        }));
-    }
-
-    fn forcedDynamicIteratorBackingNode(
-        self: *InstGraph,
-        public_backing: NodeId,
-        self_node: NodeId,
-        item_node: NodeId,
-        topology: Type.IteratorTopology,
-    ) Allocator.Error!NodeId {
-        const public_fields = (try self.recordNodes(public_backing)).fields;
-        const fields = try self.arena().alloc(InstField, public_fields.len);
-        for (public_fields, fields) |field, *out| {
-            out.* = .{
-                .name = field.name,
-                .ty = if (field.name == topology.step_field)
-                    try self.forcedDynamicIteratorStepFunctionNode(field.ty, self_node, item_node, topology)
-                else
-                    field.ty,
-                .value_ty = field.value_ty,
-                .kind = field.kind,
-                .default = field.default,
-            };
-        }
-        return try self.newNode(.{ .record = .{
-            .fields = fields,
-            .ext = try self.newNode(.empty_record),
-        } });
-    }
-
-    fn forcedDynamicIteratorStepFunctionNode(
-        self: *InstGraph,
-        public_step: NodeId,
-        self_node: NodeId,
-        item_node: NodeId,
-        topology: Type.IteratorTopology,
-    ) Allocator.Error!NodeId {
-        const step = try self.functionNodes(public_step);
-        return try self.newNode(.{ .func = .{
-            .args = try self.arena().dupe(NodeId, step.args),
-            .ret = try self.forcedDynamicIteratorStepResultNode(step.ret, self_node, item_node, topology),
-        } });
-    }
-
-    fn forcedDynamicIteratorStepResultNode(
-        self: *InstGraph,
-        public_result: NodeId,
-        self_node: NodeId,
-        item_node: NodeId,
-        topology: Type.IteratorTopology,
-    ) Allocator.Error!NodeId {
-        const public_tags = (try self.tagRowNodes(public_result)).tags;
-        const tags = try self.arena().alloc(InstTag, public_tags.len);
-        for (public_tags, tags) |tag, *out| {
-            const payloads = try self.arena().alloc(NodeId, tag.payloads.len);
-            for (tag.payloads, payloads) |payload, *payload_out| {
-                payload_out.* = try self.forcedDynamicIteratorStepPayloadNode(
-                    tag.name,
-                    payload,
-                    self_node,
-                    item_node,
-                    topology,
-                );
-            }
-            out.* = .{
-                .name = tag.name,
-                .checked_name = tag.checked_name,
-                .payloads = payloads,
-            };
-        }
-        return try self.newNode(.{ .tag_union = .{
-            .tags = tags,
-            .ext = try self.newNode(.empty_tag_union),
-        } });
-    }
-
-    fn forcedDynamicIteratorStepPayloadNode(
-        self: *InstGraph,
-        tag_name: names.TagNameId,
-        public_payload: NodeId,
-        self_node: NodeId,
-        item_node: NodeId,
-        topology: Type.IteratorTopology,
-    ) Allocator.Error!NodeId {
-        if (tag_name != topology.one_tag and tag_name != topology.skip_tag) return public_payload;
-        const public_fields = (try self.recordNodes(public_payload)).fields;
-        const fields = try self.arena().alloc(InstField, public_fields.len);
-        for (public_fields, fields) |field, *out| {
-            out.* = .{
-                .name = field.name,
-                .ty = if (field.name == topology.rest_field)
-                    self_node
-                else if (field.name == topology.item_field)
-                    item_node
-                else
-                    field.ty,
-                .value_ty = field.value_ty,
-                .kind = field.kind,
-                .default = field.default,
-            };
-        }
-        return try self.newNode(.{ .record = .{
-            .fields = fields,
-            .ext = try self.newNode(.empty_record),
-        } });
-    }
-
-    fn generatedIteratorDepth(
-        self: *InstGraph,
-        raw_node: NodeId,
-        depths: *collections.DenseMap(NodeId, u8),
-        active: *collections.DenseMap(NodeId, void),
-    ) Allocator.Error!u8 {
-        const root = self.find(raw_node);
-        if (depths.get(root)) |depth| return depth;
-        if (active.count() != 0) {
-            Common.invariant("generated iterator depth walk retained active nodes between roots");
-        }
-
-        var stack = std.ArrayList(GeneratedIteratorDepthFrame).empty;
-        defer stack.deinit(self.allocator);
-        try self.pushGeneratedIteratorDepthFrame(root, depths, active, &stack);
-
-        while (stack.items.len != 0) {
-            const frame_index = stack.items.len - 1;
-            if (stack.items[frame_index].max_child_depth <= generated_iterator_mint_depth_limit and
-                stack.items[frame_index].next_child < stack.items[frame_index].child_count)
-            {
-                const child_index = stack.items[frame_index].next_child;
-                stack.items[frame_index].next_child += 1;
-                const child = self.find(self.generatedIteratorDepthChild(
-                    stack.items[frame_index].node,
-                    child_index,
-                ));
-                if (depths.get(child)) |depth| {
-                    stack.items[frame_index].max_child_depth = @max(
-                        stack.items[frame_index].max_child_depth,
-                        depth,
-                    );
-                } else if (active.contains(child)) {
-                    stack.items[frame_index].max_child_depth = generated_iterator_forced_depth;
-                } else {
-                    try self.pushGeneratedIteratorDepthFrame(child, depths, active, &stack);
-                }
-                continue;
-            }
-
-            const frame = stack.pop().?;
-            _ = active.remove(frame.node);
-            const depth = if (frame.max_child_depth > generated_iterator_mint_depth_limit or
-                (frame.increment != 0 and frame.max_child_depth >= generated_iterator_mint_depth_limit))
-                generated_iterator_forced_depth
-            else
-                frame.max_child_depth + frame.increment;
-            try depths.put(frame.node, depth);
-            if (stack.items.len == 0) return depth;
-            stack.items[stack.items.len - 1].max_child_depth = @max(
-                stack.items[stack.items.len - 1].max_child_depth,
-                depth,
-            );
-        }
-        unreachable; // the root push leaves the stack nonempty, and the pop that empties it returns
-    }
-
-    fn pushGeneratedIteratorDepthFrame(
-        self: *InstGraph,
-        node: NodeId,
-        depths: *collections.DenseMap(NodeId, u8),
-        active: *collections.DenseMap(NodeId, void),
-        stack: *std.ArrayList(GeneratedIteratorDepthFrame),
-    ) Allocator.Error!void {
-        switch (try self.generatedIteratorDepthRule(node)) {
-            .fixed => |depth| {
-                try depths.put(node, depth);
-                if (stack.items.len == 0) {
-                    try stack.append(self.allocator, .{
-                        .node = node,
-                        .next_child = 0,
-                        .child_count = 0,
-                        .max_child_depth = depth,
-                        .increment = 0,
-                    });
-                    try active.put(node, {});
-                } else {
-                    stack.items[stack.items.len - 1].max_child_depth = @max(
-                        stack.items[stack.items.len - 1].max_child_depth,
-                        depth,
-                    );
-                }
-            },
-            .children => |children| {
-                try active.put(node, {});
-                try stack.append(self.allocator, .{
-                    .node = node,
-                    .next_child = 0,
-                    .child_count = children.count,
-                    .max_child_depth = 0,
-                    .increment = children.increment,
-                });
-            },
-        }
-    }
-
-    fn generatedIteratorDepthRule(self: *InstGraph, node: NodeId) Allocator.Error!GeneratedIteratorDepthRule {
-        return switch (try self.rootContent(node)) {
-            .redirect, .leaf => unreachable, // callers pass a find root, and rootContent of a find root expands a leaf, so it returns structure
-            .unresolved => |variable| switch (variable.origin) {
-                .checked_variable, .row_extension => .{ .fixed = 0 },
-                .placeholder, .interface_parameter => Common.invariant("placeholder reached generated iterator representation finalization"),
-            },
-            .primitive, .empty_tag_union, .empty_record, .erased, .zst, .hole, .func => .{ .fixed = 0 },
-            .list, .box => .{ .children = .{ .count = 1, .increment = 0 } },
-            .tuple => |items| .{ .children = .{ .count = items.len, .increment = 0 } },
-            .tag_union => |row| .{ .children = .{
-                .count = 1 + tagPayloadCount(row.tags),
-                .increment = 0,
-            } },
-            .record => |row| .{ .children = .{ .count = 1 + row.fields.len, .increment = 0 } },
-            .named => |named| blk: {
-                if (named.generated_iterator != null) {
-                    if (named.def.iterator_kind == .forced_dynamic) {
-                        break :blk .{ .fixed = generated_iterator_forced_depth };
-                    }
-                    const topology = named.def.iterator_kind.componentTopology() orelse
-                        Common.invariant("generated iterator had no producer kind");
-                    break :blk switch (topology) {
-                        .source_without_components, .source_with_components => .{ .fixed = 1 },
-                        .adapter => adapter: {
-                            if (named.args.len == 0) {
-                                Common.invariant("generated iterator adapter had no item argument");
-                            }
-                            break :adapter .{ .children = .{
-                                .count = named.args.len - 1,
-                                .increment = 1,
-                            } };
-                        },
-                    };
-                }
-                break :blk switch (named.def.iterator_representation) {
-                    .forced_dynamic => .{ .fixed = generated_iterator_forced_depth },
-                    .minted => if (named.def.iterator_depth == 0)
-                        Common.invariant("finished minted iterator had zero producer depth")
-                    else
-                        .{ .fixed = named.def.iterator_depth },
-                    .none => .{ .children = .{ .count = named.args.len, .increment = 0 } },
-                };
-            },
-        };
-    }
-
-    fn generatedIteratorDepthChild(
-        self: *InstGraph,
-        node: NodeId,
-        child_index: usize,
-    ) NodeId {
-        return switch (self.nodes.items[@backingInt(node)]) {
-            .list, .box => |child| child,
-            .tuple => |items| items[child_index],
-            .tag_union => |row| if (child_index == 0)
-                row.ext
-            else
-                tagPayloadAt(row.tags, child_index - 1),
-            .record => |row| if (child_index == 0)
-                row.ext
-            else
-                row.fields[child_index - 1].ty,
-            .named => |named| if (named.generated_iterator != null)
-                named.args[child_index + 1]
-            else
-                named.args[child_index],
-            .redirect, .leaf, .unresolved, .primitive, .func, .empty_tag_union, .empty_record, .erased, .zst, .hole => Common.invariant("generated iterator depth frame had no structural child"),
-        };
-    }
-
-    /// Generated-iterator identities are representation-level: a type
-    /// nickname over the same item type must produce the same generated
-    /// iterator machinery, or an alias could duplicate that machinery and
-    /// alter unification behavior. Type digests treat aliases as opaque
-    /// nodes, so peel aliases to their backing before digesting here.
-    fn peelAliasBacking(types: *const Type.Store, ty: Type.TypeId) Type.TypeId {
-        var current = ty;
-        // Alias chains in checked output are finite, so this terminates.
-        while (true) {
-            const node = types.get(current);
-            if (node != .named) return current;
-            const named = node.named;
-            if (named.kind != .alias) return current;
-            const backing = named.backing.get() orelse return current;
-            current = backing.ty;
-        }
-    }
-
-    /// Seal producer identities for graph-owned iterator representations only
-    /// after all type relations and representation decisions have been
-    /// applied. Immutable Type-shaped snapshots of resolved nodes are used
-    /// here; they remain graph-owned and never enter completed Monotype output.
-    /// All digests are computed before any node is stamped, so dependency
-    /// order cannot affect identity. `typeEql` compares the stamped digest, so
-    /// it digests the equivalence `typeEql` implements: requests that are
-    /// equal under it mint equal iterator types.
-    pub fn finalizeGeneratedIteratorIdentities(self: *InstGraph) Allocator.Error!void {
-        self.requireRelationProduction();
-        if (self.generated_iterator_nodes == 0) return;
-        const Pending = struct { node: NodeId, digest: names.TypeDigest };
-        var pending = std.ArrayList(Pending).empty;
-        defer pending.deinit(self.allocator);
-        var seen = self.node_set_pool.acquire();
-        defer self.node_set_pool.release(&seen);
-        // A retained import is the request's original representation witness.
-        // Producer identity instead describes the current graph after joins.
-        var current_shape = GraphTypeFinals.initProvisionalSnapshot(self);
-        defer current_shape.deinit();
-
-        for (self.nodes.items, 0..) |_, raw_index| {
-            const node = self.find(@fromBackingInt(@intCast(@as(u32, @intCast(raw_index)))));
-            const entry = try seen.getOrPut(node);
-            if (entry.found_existing) continue;
-            const named = switch ((try self.content(node))) {
-                .named => |named| named,
-                .redirect, .leaf, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => continue,
-            };
-            const provenance = named.generated_iterator orelse continue;
-            var hasher = TypeDigestHasher.init();
-            if (named.def.iterator_representation == .forced_dynamic) {
-                if (named.args.len != 1) {
-                    Common.invariant("forced-dynamic iterator identity did not have exactly one item argument");
-                }
-                const item = try current_shape.sealNode(named.args[0]);
-                const item_digest = self.types.equalityDigest(self.name_store, peelAliasBacking(self.types, item));
-                hasher.update("roc.generated_iterator.forced_dynamic_identity");
-                hasher.update(&item_digest.bytes);
-            } else {
-                const final = try current_shape.sealNode(node);
-                const shape = self.types.equalityDigest(self.name_store, peelAliasBacking(self.types, final));
-                hasher.update("roc.generated_iterator.final_identity");
-                hasher.update(&shape.bytes);
-                if (provenance.callable_evidence) |evidence| {
-                    hasher.update("callable_evidence");
-                    hasher.update(&evidence.bytes);
-                }
-            }
-            try pending.append(self.allocator, .{
-                .node = node,
-                .digest = .{ .bytes = hasher.finalResult() },
-            });
-        }
-        for (pending.items) |item| {
-            var named = switch ((try self.content(item.node))) {
-                .named => |named| named.*,
-                .redirect, .leaf, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => Common.invariant("generated iterator identity target stopped being named"),
-            };
-            named.def.generated = item.digest;
-            try self.setContent(item.node, try self.namedContent(named));
-        }
     }
 
     pub fn finalizesAsClosedEmptyTagUnion(self: *InstGraph, raw_node: NodeId) bool {
@@ -3930,7 +2815,7 @@ pub const InstGraph = struct {
                     return switch (variable.origin) {
                         .checked_variable => true,
                         .row_extension => Common.invariant("row extension reached final demand validation without row default"),
-                        .placeholder, .interface_parameter => Common.invariant("instantiation placeholder reached final demand validation"),
+                        .placeholder, .field_slot, .interface_parameter => Common.invariant("instantiation placeholder reached final demand validation"),
                     };
                 },
                 .named => |named| {
@@ -4057,7 +2942,6 @@ pub const InstGraph = struct {
         std.debug.assert(self.request_source_interfaces.items.len == self.nodes.items.len);
         std.debug.assert(self.constructor_evidence_requests.items.len == self.nodes.items.len);
         std.debug.assert(self.private_backing_roots.items.len == self.nodes.items.len);
-        std.debug.assert(self.representation_membership.items.len == self.nodes.items.len);
         std.debug.assert(self.class_finished_monos.items.len == self.nodes.items.len);
     }
 
@@ -4070,14 +2954,14 @@ pub const InstGraph = struct {
     /// leaf's structure after relations freeze adds nodes that denote parts
     /// of an already-imported finished type; that relates nothing.
     /// The per-node columns that grow with `nodes`, one entry per node.
-    const node_columns = .{ "parents", "versions", "analysis_changes", "class_member_next", "class_member_head", "class_member_tail", "containment_visit_epochs", "request_source_interfaces", "constructor_evidence_requests", "private_backing_roots", "representation_membership", "class_finished_monos" };
+    const node_columns = .{ "parents", "versions", "analysis_changes", "class_member_next", "class_member_head", "class_member_tail", "containment_visit_epochs", "request_source_interfaces", "constructor_evidence_requests", "private_backing_roots", "class_finished_monos" };
 
     /// Room for one more node in `nodes` and every per-node column. Each
     /// column's capacity is kept at least `nodes`'s, so a node fitting in
     /// `nodes` fits everywhere and costs one capacity check.
     fn reserveNode(self: *InstGraph) Allocator.Error!void {
-        // `MaybeNodeId` stores an id plus one, so `maxInt(u32)` is never an id.
-        if (self.nodes.items.len >= std.math.maxInt(u32)) return error.OutOfMemory;
+        // `MaybeNodeId` stores an id plus one.
+        if (std.math.cast(u32, self.nodes.items.len + 1) == null) return error.OutOfMemory;
         if (self.nodes.items.len < self.nodes.capacity) return;
         const capacity = std.math.add(usize, self.nodes.capacity, @max(self.nodes.capacity / 2, 8)) catch return error.OutOfMemory;
         // `nodes` grows last: a failed column growth leaves it within every
@@ -4090,7 +2974,6 @@ pub const InstGraph = struct {
         // Reserve every per-node column before appending a permanent identity.
         try self.reserveNode();
         const id: NodeId = @fromBackingInt(@as(u32, @intCast(self.nodes.items.len)));
-        try self.updateGeneratedIterator(id, node_content);
         if (contentHasGeneratedPrivateBacking(node_content)) self.generated_private_nodes += 1;
         self.nodes.appendAssumeCapacity(node_content);
         self.parents.appendAssumeCapacity(id);
@@ -4103,10 +2986,8 @@ pub const InstGraph = struct {
         self.request_source_interfaces.appendAssumeCapacity(.none);
         self.constructor_evidence_requests.appendAssumeCapacity(false);
         self.private_backing_roots.appendAssumeCapacity(false);
-        self.representation_membership.appendAssumeCapacity(.{});
         self.class_finished_monos.appendAssumeCapacity(.none);
         self.markPrivateBacking(node_content);
-        if (node_content == .named and node_content.named.generated_iterator != null) self.generated_iterator_nodes += 1;
         self.countDiagnostic("nodes_created");
         return id;
     }
@@ -4485,6 +3366,14 @@ pub const InstGraph = struct {
         try memo.put(ty, node);
         try self.queueLeafScopeCellJoins(scope, .{ .ty = ty, .node = node });
         return node;
+    }
+
+    /// A leaf of closed type `ty` in `scope` that is not `scope`'s cell for
+    /// `ty`: an occurrence distinct from every equal closed type in the
+    /// scope, like the leaf a nominal owns as its backing (see
+    /// `ImportComponent`). Its components are still the scope's cells.
+    pub fn ownedCheckedLeaf(self: *InstGraph, scope: LeafScopeId, ty: Type.TypeId) Allocator.Error!NodeId {
+        return try self.newLeaf(.{ .ty = ty, .origin = .{ .checked = scope } });
     }
 
     /// Make `node` the cell `scope` names for closed type `ty`, as binding a
@@ -5219,7 +4108,7 @@ pub const InstGraph = struct {
     /// requests remain graph-local until explicit recursive-edge identity or
     /// final body sealing resolves them.
     pub fn typeIsResolved(self: *InstGraph, root: NodeId) Allocator.Error!bool {
-        return try self.typeIsResolvedInner(root, false);
+        return try self.typeIsResolvedInner(root, .none);
     }
 
     /// Whether every unresolved part of a specialization request is an
@@ -5227,14 +4116,41 @@ pub const InstGraph = struct {
     /// required default at relation freeze, so specialization lookup may take
     /// a read-only view with that default without mutating the live graph.
     pub fn typeIsSpecializationDefaultable(self: *InstGraph, root: NodeId) Allocator.Error!bool {
-        return try self.typeIsResolvedInner(root, true);
+        return try self.typeIsResolvedInner(root, .field_kinds);
+    }
+
+    /// Whether every unresolved part of a type is a cell that relation freeze
+    /// closes to a default the cell itself declares: an undetermined
+    /// field-kind cell, or a variable carrying a row default and no numeric
+    /// default. Checking outputs an implicitly open row that nothing
+    /// widened as such a variable, so a type no specialization input reaches
+    /// can still hold one.
+    pub fn typeIsSpecializationChoiceDefaultable(self: *InstGraph, root: NodeId) Allocator.Error!bool {
+        return try self.typeIsResolvedInner(root, .field_kinds_and_row_defaults);
+    }
+
+    /// Which unresolved cells a walk reads as their relation-freeze default.
+    const FreezeDefaults = enum {
+        none,
+        /// An undetermined field kind reads as `required`.
+        field_kinds,
+        /// A variable carrying a row default reads as that default, too.
+        field_kinds_and_row_defaults,
+    };
+
+    /// Whether relation freeze closes an unresolved variable to a row
+    /// default it carries.
+    fn variableClosesToRowDefault(variable: InstVariable) bool {
+        return variable.row_default != null and variable.numeric_default_phase == null;
     }
 
     fn typeIsResolvedInner(
         self: *InstGraph,
         root: NodeId,
-        allow_field_kind_defaults: bool,
+        defaults: FreezeDefaults,
     ) Allocator.Error!bool {
+        const allow_field_kind_defaults = defaults != .none;
+        const allow_row_defaults = defaults == .field_kinds_and_row_defaults;
         if (self.rootStampedResolved(root)) return true;
         // The worklist is usually short, so it starts on this frame.
         var pending_buffer: [1024]u8 align(@alignOf(usize)) = undefined;
@@ -5256,7 +4172,7 @@ pub const InstGraph = struct {
                 .redirect => unreachable, // find returns a class root, which is never a redirect
                 // A finished Monotype is resolved throughout.
                 .leaf => {},
-                .unresolved => return false,
+                .unresolved => |variable| if (!allow_row_defaults or !variableClosesToRowDefault(variable)) return false,
                 .primitive, .empty_tag_union, .empty_record, .erased, .zst, .hole => {},
                 .list, .box => |child| try pending.append(pending_allocator, child),
                 .tuple => |items| try pending.appendSlice(pending_allocator, items),
@@ -5265,12 +4181,12 @@ pub const InstGraph = struct {
                     try pending.append(pending_allocator, function.ret);
                 },
                 .tag_union => |row| {
-                    if (!try self.rowExtensionChainResolved(node, .tag_union)) return false;
+                    if (!try self.rowExtensionChainResolved(node, .tag_union, allow_row_defaults)) return false;
                     for (row.tags) |tag| try pending.appendSlice(pending_allocator, tag.payloads);
                     try pending.append(pending_allocator, row.ext);
                 },
                 .record => |row| {
-                    if (!try self.rowExtensionChainResolved(node, .record)) return false;
+                    if (!try self.rowExtensionChainResolved(node, .record, allow_row_defaults)) return false;
                     for (row.fields) |field| {
                         if (field.kind == .undetermined and self.resolvedFieldKind(field.kind) == null) {
                             if (!allow_field_kind_defaults) return false;
@@ -5296,7 +4212,7 @@ pub const InstGraph = struct {
                 },
             }
         }
-        if (!allow_field_kind_defaults) {
+        if (defaults == .none) {
             // Every class the strict walk visited is resolved throughout.
             var visited = seen.keyIterator();
             while (visited.next()) |node| {
@@ -5387,7 +4303,9 @@ pub const InstGraph = struct {
         return true;
     }
 
-    fn rowExtensionChainResolved(self: *InstGraph, raw_root: NodeId, kind: RowKind) Allocator.Error!bool {
+    /// Whether a row's extension chain ends in the empty row of its kind,
+    /// or, with `row_defaults`, in a variable relation freeze closes to it.
+    fn rowExtensionChainResolved(self: *InstGraph, raw_root: NodeId, kind: RowKind, row_defaults: bool) Allocator.Error!bool {
         var seen = self.node_set_pool.acquire();
         defer self.node_set_pool.release(&seen);
         var current = self.find(raw_root);
@@ -5409,7 +4327,13 @@ pub const InstGraph = struct {
                 },
                 .empty_tag_union => return kind == .tag_union,
                 .empty_record => return kind == .record,
-                .unresolved => return false,
+                .unresolved => |variable| {
+                    if (!row_defaults or !variableClosesToRowDefault(variable)) return false;
+                    return switch (variable.row_default.?) {
+                        .empty_tag_union => kind == .tag_union,
+                        .empty_record => kind == .record,
+                    };
+                },
                 .redirect,
                 .leaf,
                 .primitive,
@@ -5424,24 +4348,6 @@ pub const InstGraph = struct {
                 => return false,
             }
         }
-    }
-
-    /// Whether this exact graph type contains the public iterator interface at
-    /// any structural depth. This consumes the checker-authored builtin owner
-    /// carried by each named node; callers do not derive iterator intent from
-    /// a backing shape.
-    ///
-    /// `Type.Store.containsIteratorInterface` answers the same question for
-    /// immutable Monotypes and must stay in step with this walk; see its doc
-    /// comment and the correspondence test at the bottom of this file.
-    pub fn containsIteratorInterface(self: *InstGraph, root: NodeId) Allocator.Error!bool {
-        self.countDiagnostic("iterator_interface_scans");
-        return try self.containmentResult(
-            root,
-            .iterator_interface,
-            "iterator_interface_nodes_visited",
-            "iterator_interface_cache_hits",
-        );
     }
 
     /// Whether this exact graph type contains compiler-generated private
@@ -5469,7 +4375,6 @@ pub const InstGraph = struct {
         if (copies.get(node)) |copied| return copied;
         if (!try self.containsGeneratedPrivate(node)) return node;
         const original = (try self.content(node));
-        const membership = self.representation_membership.items[@backingInt(node)];
         const reserved = try self.newNode(.{ .unresolved = InstVariable.placeholder() });
         try copies.put(node, reserved);
         const copied: InstNode = switch (original) {
@@ -5521,7 +4426,6 @@ pub const InstGraph = struct {
             },
         };
         try self.setContent(reserved, copied);
-        self.representation_membership.items[@backingInt(self.find(reserved))] = membership;
         return reserved;
     }
 
@@ -5535,34 +4439,65 @@ pub const InstGraph = struct {
         return copied;
     }
 
+    /// Whether `root` reaches a codec representation's checked-public named
+    /// type, at any structural depth, through arguments and backings alike:
+    /// a position whose value is a generated representation that only its
+    /// producer has related to it.
+    pub fn containsPublicCodecInterface(self: *InstGraph, root: NodeId) Allocator.Error!bool {
+        var pending = std.ArrayList(NodeId).empty;
+        defer pending.deinit(self.allocator);
+        var seen = self.node_set_pool.acquire();
+        defer self.node_set_pool.release(&seen);
+        try pending.append(self.allocator, root);
+        while (pending.pop()) |raw_node| {
+            const node = self.find(raw_node);
+            if ((try seen.getOrPut(node)).found_existing) continue;
+            switch (try self.rootContent(node)) {
+                .redirect, .leaf => unreachable, // rootContent of a find root expands a leaf
+                .unresolved, .primitive, .empty_tag_union, .empty_record, .erased, .zst, .hole => {},
+                .list, .box => |child| try pending.append(self.allocator, child),
+                .tuple => |items| try pending.appendSlice(self.allocator, items),
+                .func => |function| {
+                    try pending.appendSlice(self.allocator, function.args);
+                    try pending.append(self.allocator, function.ret);
+                },
+                .tag_union => |row| {
+                    for (row.tags) |tag| try pending.appendSlice(self.allocator, tag.payloads);
+                    try pending.append(self.allocator, row.ext);
+                },
+                .record => |row| {
+                    for (row.fields) |field| {
+                        try pending.append(self.allocator, field.ty);
+                        if (field.value_ty.get()) |value_ty| try pending.append(self.allocator, value_ty);
+                    }
+                    try pending.append(self.allocator, row.ext);
+                },
+                .named => |named| {
+                    if (named.backing.get()) |backing| {
+                        if (isCodecRepresentation(named) and backing.authority != .generated_private) return true;
+                        try pending.append(self.allocator, backing.node);
+                    }
+                    try pending.appendSlice(self.allocator, named.args);
+                },
+            }
+        }
+        return false;
+    }
+
     pub fn containsGeneratedPrivate(self: *InstGraph, root: NodeId) Allocator.Error!bool {
         if (self.generated_private_nodes == 0) {
             self.countDiagnostic("generated_private_guard_returns");
             return false;
         }
         self.countDiagnostic("generated_private_scans");
-        return try self.containmentResult(
-            root,
-            .generated_private,
-            "generated_private_nodes_visited",
-            "generated_private_cache_hits",
-        );
+        return try self.containmentResult(root);
     }
 
-    fn containmentResult(
-        self: *InstGraph,
-        root: NodeId,
-        comptime query: ContainmentQuery,
-        comptime nodes_visited_field: []const u8,
-        comptime cache_hits_field: []const u8,
-    ) Allocator.Error!bool {
+    fn containmentResult(self: *InstGraph, root: NodeId) Allocator.Error!bool {
         const query_root = self.find(root);
         const cache = try self.containment_cache.getOrPut(query_root);
-        if (!cache.found_existing) cache.value_ptr.* = .{
-            .generated_private = .{ .dependencies = self.list_pools.dependencies.take() },
-            .iterator_interface = .{ .dependencies = self.list_pools.dependencies.take() },
-        };
-        const entry = cache.value_ptr.forQuery(query);
+        if (!cache.found_existing) cache.value_ptr.* = .{ .dependencies = self.list_pools.dependencies.take() };
+        const entry = cache.value_ptr;
         if (entry.valid and entry.verified_epoch != self.structure_epoch) {
             if (self.containmentQueryCacheValid(entry)) {
                 entry.verified_epoch = self.structure_epoch;
@@ -5573,7 +4508,7 @@ pub const InstGraph = struct {
             }
         }
         if (entry.valid) {
-            self.countDiagnostic(cache_hits_field);
+            self.countDiagnostic("generated_private_cache_hits");
             return entry.result;
         }
         self.containment_pending.clearRetainingCapacity();
@@ -5590,15 +4525,12 @@ pub const InstGraph = struct {
                 .root = node,
                 .version = self.versions.items[node_index],
             });
-            self.countDiagnostic(nodes_visited_field);
+            self.countDiagnostic("generated_private_nodes_visited");
 
             switch (self.nodes.items[node_index]) {
                 .redirect => unreachable, // find returns a class root, which is never a redirect
                 // An unread finished type answers from the type store.
-                .leaf => |leaf| if (switch (query) {
-                    .iterator_interface => try self.types.containsIteratorInterface(leaf.ty),
-                    .generated_private => try self.types.containsGeneratedPrivateBacking(leaf.ty),
-                }) {
+                .leaf => |leaf| if (try self.types.containsGeneratedPrivateBacking(leaf.ty)) {
                     entry.result = true;
                     entry.valid = true;
                     entry.verified_epoch = self.structure_epoch;
@@ -5625,16 +4557,10 @@ pub const InstGraph = struct {
                     try self.containment_pending.append(self.allocator, row.ext);
                 },
                 .named => |named| {
-                    const found = switch (query) {
-                        .iterator_interface => if (named.builtin_owner.get()) |owner|
-                            static_dispatch.isIteratorOwner(owner)
-                        else
-                            false,
-                        .generated_private => if (named.backing.get()) |backing|
-                            backing.authority == .generated_private
-                        else
-                            false,
-                    };
+                    const found = if (named.backing.get()) |backing|
+                        backing.authority == .generated_private
+                    else
+                        false;
                     if (found) {
                         entry.result = true;
                         entry.valid = true;
@@ -5730,7 +4656,9 @@ pub const InstGraph = struct {
     /// opaque backing at every structural depth.
     /// `public_node` drives checked relations. A generated-private
     /// specialization lowers its callable body against `private_node`, which
-    /// also supplies the specialization identity.
+    /// also supplies the specialization identity. The two roles hold for the
+    /// roots; below them a pair whose public side is the generated-private
+    /// nominal relates with the roles exchanged.
     pub fn relateOpaqueInterface(self: *InstGraph, public_node: NodeId, private_node: NodeId) Allocator.Error!void {
         try self.relateOpaqueInterfaceAtWidth(public_node, private_node, .exact);
     }
@@ -5793,13 +4721,31 @@ pub const InstGraph = struct {
         row_width: RowWidthRelation,
     ) Allocator.Error!void {
         self.requireRelationProduction();
-        if (try self.containsGeneratedPrivate(public_node) or !try self.containsGeneratedPrivate(private_node)) {
+        if (!try self.isGeneratedPrivateSelectionDirection(public_node, private_node)) {
             Common.invariant("generated-private representation selection received incorrect public/private direction");
         }
         if (try self.containsFinishedMono(public_node) or try self.containsFinishedMono(private_node)) {
             Common.invariant("finished Monotype reached generated-private representation selection");
         }
         try self.unifyRootsTransitively(public_node, private_node, true, row_width);
+    }
+
+    /// Whether selecting `private_node` as the representation of
+    /// `public_node` goes from public to private. Selection joins class
+    /// roots, so the roots alone determine the direction: the private side's
+    /// root is generated-private evidence and the public side's is not. A
+    /// public root may still hold generated-private types among its
+    /// arguments, as when an earlier selection already gave one of its
+    /// argument classes that argument's representation, and those arguments
+    /// relate as the components they are.
+    /// Where neither root is generated-private, the private side holds a
+    /// generated-private component and the public side holds none.
+    fn isGeneratedPrivateSelectionDirection(self: *InstGraph, public_node: NodeId, private_node: NodeId) Allocator.Error!bool {
+        const public_root = self.nodes.items[@backingInt(self.find(public_node))];
+        const private_root = self.nodes.items[@backingInt(self.find(private_node))];
+        if (self.contentIsGeneratedPrivateRoot(private_root)) return !self.contentIsGeneratedPrivateRoot(public_root);
+        if (self.contentIsGeneratedPrivateRoot(public_root)) return false;
+        return !try self.containsGeneratedPrivate(public_node) and try self.containsGeneratedPrivate(private_node);
     }
 
     fn relateOpaqueInterfacePair(
@@ -5821,7 +4767,14 @@ pub const InstGraph = struct {
         const public_content = try self.rootContent(public_node);
         const private_content = try self.rootContent(private_node);
         if (isGeneratedPrivateRootContent(public_content) and isGeneratedPrivateRootContent(private_content)) {
+            if (std.debug.runtime_safety) assertSameGeneratedCodecRepresentation(public_content, private_content);
             try self.unifyAtRowWidth(public_node, private_node, pair.row_width);
+            return;
+        }
+        if (isGeneratedPrivateRootContent(public_content) and private_content != .unresolved) {
+            // The representation is on the public side of this pair. An
+            // unresolved private side joins it below instead.
+            try pending.append(self.allocator, .{ .left = private_node, .right = public_node, .row_width = pair.row_width });
             return;
         }
         const private_contains_generated = try self.containsGeneratedPrivate(private_node);
@@ -5831,19 +4784,11 @@ pub const InstGraph = struct {
                 if (backing.authority == .generated_private) {
                     if (public_content == .unresolved) {
                         const public_var = public_content.unresolved;
-                        if (private_named.generated_iterator != null) {
-                            try self.materializeGeneratedIteratorPublicInterface(public_node, public_var, private_named);
-                            try self.relateGeneratedOpaquePair(
-                                try self.content(public_node),
-                                private_named,
-                                pair.row_width,
-                                pending,
-                            );
-                            return;
-                        }
-                        if (try self.resolvePublicVariableToImportedGeneratedIterator(public_node, public_var, private_node, private_named)) {
-                            return;
-                        }
+                        try self.resolvePublicVariableToGeneratedRepresentation(public_node, public_var, private_node);
+                        return;
+                    } else if (public_content == .named and isCodecRepresentation(private_named)) {
+                        try self.resolvePublicNamedToCodecRepresentation(public_node, public_content.named, private_node, private_named, pair.row_width, pending);
+                        return;
                     }
                     try self.relateGeneratedOpaquePair(public_content, private_named, pair.row_width, pending);
                     return;
@@ -5851,6 +4796,18 @@ pub const InstGraph = struct {
             }
         } else if (private_content == .unresolved) {
             try self.unifyAtRowWidth(public_node, private_node, pair.row_width);
+            return;
+        }
+        if (private_content == .named and contentLiftsIntoNamed(public_content)) {
+            try self.relateLiftedPublicStructure(
+                public_node,
+                public_content,
+                private_node,
+                private_content.named,
+                private_contains_generated,
+                pair.row_width,
+                pending,
+            );
             return;
         }
 
@@ -5949,6 +4906,53 @@ pub const InstGraph = struct {
         }
     }
 
+    /// Whether checked structure of this content can be lifted into a named
+    /// type through that type's backing, as `unifyThroughBacking` does.
+    fn contentLiftsIntoNamed(node_content: InstNode) bool {
+        return switch (node_content) {
+            .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst => true,
+            .redirect, .leaf, .unresolved, .named, .hole => false,
+        };
+    }
+
+    /// A use that relates an anonymous structure to a nominal lifts the
+    /// structure into the nominal (design.md "Anonymous Structure Is Copied
+    /// Per Use"), so a template's checked root can hold a structure where the
+    /// request derived from the same use holds the nominal. Ordinary
+    /// instantiation replays that lift through `unifyThroughBacking`. When the
+    /// request's nominal carries generated-private evidence, the lift relates
+    /// the public structure to the nominal's backing through this opaque
+    /// relation, so no generated-private node merges with its public
+    /// counterpart, and the public class becomes the request's nominal.
+    fn relateLiftedPublicStructure(
+        self: *InstGraph,
+        public_node: NodeId,
+        public_content: InstNode,
+        private_node: NodeId,
+        private_named: *const InstNamed,
+        private_contains_generated: bool,
+        row_width: RowWidthRelation,
+        pending: *std.ArrayList(NodePair),
+    ) Allocator.Error!void {
+        if (!private_contains_generated) {
+            try self.unifyAtRowWidth(public_node, private_node, row_width);
+            return;
+        }
+        const declared = private_named.backing.get() orelse
+            Common.invariant("opaque interface relation lifted structure into a named type without backing");
+        const backing = try self.structuralBackingNode(declared.node, private_named);
+        if (backing.recursive) {
+            Common.invariant("opaque interface relation lifted structure into a named type whose backing is itself");
+        }
+        if (private_named.kind == .alias) {
+            try self.relateOpaqueChild(public_node, backing.node, row_width, pending);
+            return;
+        }
+        const moved = try self.newNode(public_content);
+        try self.union_(private_node, public_node);
+        try self.relateOpaqueChild(moved, backing.node, row_width, pending);
+    }
+
     /// Relate row-polymorphic structure of `kind` without merging a row that
     /// carries generated-private evidence into its checked-public counterpart.
     /// Labels present on only one side are ordinary checker-produced row
@@ -6004,12 +5008,9 @@ pub const InstGraph = struct {
                     }
                 },
                 .record => {
-                    _ = self.unifyFieldKinds(
-                        public_entry.kind,
-                        public_entry.default.get(),
-                        private_entry.kind,
-                        private_entry.default.get(),
-                    );
+                    // The kind relation commits each side's selected inline
+                    // slot to that side's own value before the slots relate.
+                    try self.relateRecordFieldKind(public_entry, private_entry);
                     try self.relateOpaqueChild(
                         public_entry.value_ty.get() orelse public_entry.ty,
                         private_entry.value_ty.get() orelse private_entry.ty,
@@ -6090,27 +5091,6 @@ pub const InstGraph = struct {
     ) Allocator.Error!void {
         if (public_content != .named) Common.invariant("opaque public interface relation received a non-named public node");
         const public_named = public_content.named;
-        const iterator_relation = Type.iteratorRelation(public_named, private_named);
-        if (iterator_relation == .public_minted or iterator_relation == .forced_dynamic) {
-            if (public_named.def.iterator_representation != .none or
-                (private_named.def.iterator_representation != .minted and
-                    private_named.def.iterator_representation != .forced_dynamic))
-            {
-                Common.invariant("iterator interface relation did not receive a checked-public/private pair");
-            }
-            const public_backing = public_named.backing.get() orelse
-                Common.invariant("iterator interface relation received a public type without backing");
-            const private_backing = private_named.backing.get() orelse
-                Common.invariant("iterator interface relation received a private type without backing");
-            if (public_backing.authority != .checked_public or private_backing.authority != .generated_private) {
-                Common.invariant("iterator interface relation received incorrect backing authority");
-            }
-            if (public_named.args.len == 0 or private_named.args.len == 0) {
-                Common.invariant("iterator interface relation received no public item argument");
-            }
-            try self.relateOpaqueChild(public_named.args[0], private_named.args[0], row_width, pending);
-            return;
-        }
         if (public_named.kind != .@"opaque" or private_named.kind != .@"opaque" or
             !std.meta.eql(public_named.def, private_named.def))
         {
@@ -6159,68 +5139,88 @@ pub const InstGraph = struct {
         }
     }
 
-    fn resolvePublicVariableToImportedGeneratedIterator(
+    /// A public variable states no structure of its own: a checked variable
+    /// the checker solved at this use to the type the request supplies (such
+    /// as a codec method's unannotated parameter constrained only by the
+    /// methods it calls), or an interface parameter standing for such a
+    /// variable's substitution cell. Related to a generated-private named
+    /// representation other than an iterator (a codec protocol argument such
+    /// as `FieldNames`, `FieldName` or `ParseTagUnionSpec`), the variable
+    /// denotes that representation itself, exactly as it would denote an
+    /// imported generated iterator; body lowering then relates the variable's
+    /// expressions to the representation's finished Monotype by ordinary
+    /// unification.
+    ///
+    /// Joining the variable cannot collapse two different representations.
+    /// The checker gives the variable one type, so every representation it
+    /// meets has that one named type at unified arguments, and a codec
+    /// representation's generated backing is built only from those arguments
+    /// and never changes afterwards (unlike an iterator's, which
+    /// representation selection may still join or force dynamic). Two such
+    /// representations are therefore equal, and their ordinary unification
+    /// is an identity; `assertSameGeneratedCodecRepresentation` checks the
+    /// declaration half of that, and unification checks the rest.
+    fn resolvePublicVariableToGeneratedRepresentation(
         self: *InstGraph,
         public_node: NodeId,
         public_var: InstVariable,
         private_node: NodeId,
-        private_named: *const InstNamed,
-    ) Allocator.Error!bool {
-        if (private_named.generated_iterator != null) return false;
-        if (private_named.def.generated == null) return false;
-        switch (private_named.def.iterator_representation) {
-            .minted, .forced_dynamic => {},
-            .none => return false,
-        }
-        const owner = private_named.builtin_owner.get() orelse return false;
-        if (!static_dispatch.isIteratorOwner(owner)) return false;
-        if (private_named.args.len == 0) {
-            Common.invariant("imported generated iterator relation received no item argument");
+    ) Allocator.Error!void {
+        switch (public_var.origin) {
+            .checked_variable, .interface_parameter => {},
+            .row_extension, .placeholder, .field_slot => Common.invariant("generated-private representation relation received an unfinished or row public variable"),
         }
         if (public_var.numeric_default_phase != null or public_var.row_default != null) {
-            Common.invariant("imported generated iterator relation received a defaultable public variable");
+            Common.invariant("generated-private representation relation received a defaultable public variable");
         }
         try self.union_(private_node, public_node);
-        return true;
     }
 
-    fn materializeGeneratedIteratorPublicInterface(
+    /// A codec representation's checked-public named type (such as the
+    /// `FieldNames(shape)` a codec contract gives the quantified variable of
+    /// an unannotated codec method parameter, or that parameter's
+    /// annotation) states no runtime structure of its own: its declared
+    /// backing is never a value's layout, because every value of the type is
+    /// the generated representation. Related to that representation, the
+    /// public type therefore denotes it at the same arguments, exactly as a
+    /// public variable does (`resolvePublicVariableToGeneratedRepresentation`
+    /// explains why the join never collapses two different representations).
+    fn resolvePublicNamedToCodecRepresentation(
         self: *InstGraph,
         public_node: NodeId,
-        public_var: InstVariable,
+        public_named: *const InstNamed,
+        private_node: NodeId,
         private_named: *const InstNamed,
+        row_width: RowWidthRelation,
+        pending: *std.ArrayList(NodePair),
     ) Allocator.Error!void {
-        if (public_var.numeric_default_phase != null or public_var.row_default != null) {
-            Common.invariant("generated iterator interface relation received a defaultable public variable");
-        }
-        if (private_named.args.len == 0) {
-            Common.invariant("generated iterator interface relation received no private item argument");
-        }
-        const generated = private_named.generated_iterator orelse
-            Common.invariant("generated iterator interface relation lacked producer provenance");
-        const public_source = generated.public_source;
-        if (!static_dispatch.isIteratorOwner(public_source.builtin_owner) or
-            public_source.def.iterator_representation != .none or
-            public_source.def.iterator_kind != .none)
+        if (public_named.kind != .@"opaque" or private_named.kind != .@"opaque" or
+            !std.meta.eql(public_named.def, private_named.def))
         {
-            Common.invariant("generated iterator interface relation received an invalid public iterator source");
+            Common.invariant("codec representation relation received different opaque definitions");
         }
-        if (public_source.backing.authority != .checked_public) {
-            Common.invariant("generated iterator interface relation received a non-public source backing");
+        const public_backing = public_named.backing.get() orelse
+            Common.invariant("codec representation relation received a public type without backing");
+        if (public_backing.authority != .checked_public) {
+            Common.invariant("codec representation relation received a public type with private backing");
         }
+        if (public_named.args.len != private_named.args.len) {
+            Common.invariant("codec representation relation received different type-argument arities");
+        }
+        for (public_named.args, private_named.args) |public_arg, private_arg| {
+            try self.relateOpaqueChild(public_arg, private_arg, row_width, pending);
+        }
+        try self.union_(private_node, public_node);
+    }
 
-        const args = try self.arena().alloc(NodeId, 1);
-        args[0] = try self.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-        try self.setContent(public_node, try self.namedContent(.{
-            .named_type = public_source.named_type,
-            .def = public_source.def,
-            .kind = public_source.kind,
-            .builtin_owner = .some(public_source.builtin_owner),
-            .args = args,
-            .backing = .some(public_source.backing),
-            .generated_iterator = null,
-            .declared_order = public_source.declared_order,
-        }));
+    /// Two generated-private codec representations related to each other
+    /// name one declaration (see `resolvePublicVariableToGeneratedRepresentation`).
+    fn assertSameGeneratedCodecRepresentation(left: InstNode, right: InstNode) void {
+        const left_named = left.named;
+        const right_named = right.named;
+        if (left_named.kind != right_named.kind or !std.meta.eql(left_named.def, right_named.def)) {
+            Common.invariant("one relation joined generated-private codec representations of different named types");
+        }
     }
 
     fn materializeNamedRequestPublicInterface(
@@ -6231,9 +5231,6 @@ pub const InstGraph = struct {
     ) Allocator.Error!*const InstNamed {
         if (public_var.numeric_default_phase != null or public_var.row_default != null) {
             Common.invariant("named request interface relation received a defaultable public variable");
-        }
-        if (private_named.generated_iterator != null) {
-            Common.invariant("named request interface relation received generated iterator provenance");
         }
         if (private_named.backing.get()) |backing| {
             if (backing.authority != .checked_public) {
@@ -6249,21 +5246,22 @@ pub const InstGraph = struct {
             .builtin_owner = private_named.builtin_owner,
             .args = args,
             .backing = private_named.backing,
-            .generated_iterator = null,
             .declared_order = private_named.declared_order,
         }));
         return (try self.content(public_node)).named;
     }
 
     /// A generated-private witness can sit behind a structural container—a
-    /// list literal element, a tuple slot, a record field, a tag payload—while
-    /// the checked request position is still an unstructured variable. The
-    /// public side then adopts the container shape with a fresh checked
-    /// variable in each child slot, and every generated-carrying child keeps
-    /// descending through the opaque relation. Keep the accepted set here
-    /// equal to the structural containers a constructor can mint a witness
-    /// for; private content this relation cannot structure returns false and
-    /// leaves the caller's invariant to report it.
+    /// list literal element, a tuple slot, a record field, a tag payload, a
+    /// lambda's result—while the checked request position is still an
+    /// unstructured variable, as a generic procedure's parameter is in its
+    /// fresh interface proof. The public side then adopts the container shape
+    /// with a fresh checked variable in each child slot, and every
+    /// generated-carrying child keeps descending through the opaque relation.
+    /// Keep the accepted set here equal to the structural containers a
+    /// constructor can mint a witness for; private content this relation
+    /// cannot structure returns false and leaves the caller's invariant to
+    /// report it.
     fn materializeStructuralRequestPublicInterface(
         self: *InstGraph,
         public_node: NodeId,
@@ -6273,8 +5271,8 @@ pub const InstGraph = struct {
         pending: *std.ArrayList(NodePair),
     ) Allocator.Error!bool {
         switch (private_content) {
-            .list, .box, .tuple, .record, .tag_union => {},
-            .redirect, .leaf, .unresolved, .primitive, .named, .func, .empty_tag_union, .empty_record, .erased, .zst, .hole => return false,
+            .list, .box, .tuple, .func, .record, .tag_union => {},
+            .redirect, .leaf, .unresolved, .primitive, .named, .empty_tag_union, .empty_record, .erased, .zst, .hole => return false,
         }
         if (public_var.numeric_default_phase != null or public_var.row_default != null) {
             Common.invariant("structural request interface relation received a defaultable public variable");
@@ -6299,6 +5297,18 @@ pub const InstGraph = struct {
                 for (items, private_items) |item, private_item| {
                     try self.relateOpaqueChild(item, private_item, row_width, pending);
                 }
+            },
+            .func => |private_fn| {
+                const args = try self.arena().alloc(NodeId, private_fn.args.len);
+                for (args) |*arg| {
+                    arg.* = try self.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
+                }
+                const ret = try self.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
+                try self.setContent(public_node, .{ .func = .{ .args = args, .ret = ret } });
+                for (args, private_fn.args) |arg, private_arg| {
+                    try self.relateOpaqueChild(arg, private_arg, row_width, pending);
+                }
+                try self.relateOpaqueChild(ret, private_fn.ret, row_width, pending);
             },
             .record => |private_row| {
                 const fields = try self.arena().alloc(InstField, private_row.fields.len);
@@ -6340,7 +5350,7 @@ pub const InstGraph = struct {
                 }
                 try self.relateOpaqueChild(ext, private_row.ext, row_width, pending);
             },
-            .redirect, .leaf, .unresolved, .primitive, .named, .func, .empty_tag_union, .empty_record, .erased, .zst, .hole => unreachable, // the switch above returned false for every other variant
+            .redirect, .leaf, .unresolved, .primitive, .named, .empty_tag_union, .empty_record, .erased, .zst, .hole => unreachable, // the switch above returned false for every other variant
         }
         return true;
     }
@@ -6704,11 +5714,14 @@ pub const InstGraph = struct {
                 .required, .defaulted => {},
                 .optional => Common.invariant("required access resolved an optional record field kind"),
             } else {
-                self.constrainUndeterminedFieldKind(id, .required);
+                try self.selectUndeterminedFieldKind(id, .required);
             },
         }
-        const value = field.value_ty.get() orelse field.ty;
-        try self.unify(field.ty, value);
+        if (std.debug.runtime_safety) {
+            if (!self.sameClass(field.ty, field.value_ty.get() orelse field.ty)) {
+                Common.invariant("required record field slot was not its value after its kind was selected");
+            }
+        }
         return self.find(field.ty);
     }
 
@@ -6724,7 +5737,13 @@ pub const InstGraph = struct {
     /// read through any named backing its receiver specializes to.
     pub fn optionalRecordFieldNodes(self: *InstGraph, raw_record: NodeId, name: names.RecordFieldNameId) Allocator.Error!OptionalFieldAccessNodes {
         const field = try self.recordFieldWithAccess(raw_record, name, .runtime_layout, "optional record field access");
-        _ = self.unifyFieldKinds(field.kind, field.default.get(), .optional, null);
+        try self.relateRecordFieldKind(field, .{
+            .name = field.name,
+            .ty = field.ty,
+            .value_ty = field.value_ty,
+            .kind = .optional,
+            .default = .none,
+        });
         return .{
             .slot = self.find(field.ty),
             .value = self.find(field.value_ty.get() orelse
@@ -6752,15 +5771,16 @@ pub const InstGraph = struct {
                 // Optional/defaulted caller evidence, when present, has
                 // already constrained this same identity; otherwise the
                 // construction itself is the explicit required evidence.
-                // Required means the runtime slot is exactly the source
-                // value cell, so commit that relation together with the
-                // kind instead of leaving an unrelated placeholder slot.
-                self.constrainUndeterminedFieldKind(id, .required);
-                try self.unify(
-                    field.ty,
-                    field.value_ty.get() orelse
-                        Common.invariant("undetermined constructor field carried no source value type"),
-                );
+                // Selecting required commits the runtime slot to the source
+                // value cell.
+                try self.selectUndeterminedFieldKind(id, .required);
+                if (std.debug.runtime_safety) {
+                    const value = field.value_ty.get() orelse
+                        Common.invariant("undetermined constructor field carried no source value type");
+                    if (!self.sameClass(field.ty, value)) {
+                        Common.invariant("constructed required field slot was not its value after its kind was selected");
+                    }
+                }
                 return .required;
             },
             .sealed, .required, .optional, .defaulted => Common.invariant("record constructor field kind carried no specialization evidence"),
@@ -6902,8 +5922,7 @@ pub const InstGraph = struct {
             try self.ensureRelatedNamedInstanceNode(loser);
             self.unionRelatedNamedInstanceNodes(winner, loser);
         }
-        try self.migrateGeneratedIteratorRoot(loser, winner);
-        self.removeGeneratedIterator(loser);
+        try self.forgetPublicCodecViews(winner, loser);
         const winner_tail = self.class_member_tail.items[@backingInt(winner)];
         const loser_head = self.class_member_head.items[@backingInt(loser)];
         self.class_member_next.items[@backingInt(winner_tail)] = .of(loser_head);
@@ -6916,14 +5935,10 @@ pub const InstGraph = struct {
         self.constructor_evidence_requests.items[@backingInt(winner)] =
             self.constructor_evidence_requests.items[@backingInt(winner)] or
             self.constructor_evidence_requests.items[@backingInt(loser)];
-        const winner_membership = &self.representation_membership.items[@backingInt(winner)];
-        const loser_membership = self.representation_membership.items[@backingInt(loser)];
-        winner_membership.recursive_slot = winner_membership.recursive_slot or loser_membership.recursive_slot;
-        winner_membership.forced_dynamic = winner_membership.forced_dynamic or loser_membership.forced_dynamic;
         const joins_nominal_with_structural = winner_content != .unresolved and loser_content != .unresolved and
             self.contentIsNamed(winner_content) != self.contentIsNamed(loser_content);
-        const joins_iterator_representations = winner_content == .named and loser_content == .named and
-            self.iteratorRelation(winner_content.named, loser_content.named) != .ordinary;
+        const joins_public_with_representation = winner_content != .unresolved and loser_content != .unresolved and
+            self.contentIsGeneratedPrivateRoot(winner_content) != self.contentIsGeneratedPrivateRoot(loser_content);
         self.nodes.items[@backingInt(loser)] = .{ .redirect = winner };
         self.parents.items[@backingInt(loser)] = winner;
         self.versions.items[@backingInt(winner)] +%= 1;
@@ -6934,9 +5949,10 @@ pub const InstGraph = struct {
         // An active snapshot exists only for a resolved class and reaches
         // only resolved classes. A variable never wins a join, and two
         // resolved classes ordinarily unify equal content. Nominal/structural
-        // joins and explicit iterator representation joins can instead select
-        // different content, invalidating snapshots through either class.
-        if (joins_nominal_with_structural or joins_iterator_representations) {
+        // joins and a public named type joining the generated representation
+        // it denotes (a codec representation's) can instead select different
+        // content, invalidating snapshots through either class.
+        if (joins_nominal_with_structural or joins_public_with_representation) {
             self.invalidateActiveSnapshots(winner);
         } else {
             // The joined class keeps its current view under its new root.
@@ -6949,6 +5965,30 @@ pub const InstGraph = struct {
             }
         }
         try self.drainNominalBackingCollisions();
+    }
+
+    /// A public named type joining the codec representation it denotes
+    /// stops being the finished Monotype it was imported as: the class's type
+    /// is the representation. Its nodes therefore give up their imported
+    /// views and their class its finished witness before the two classes
+    /// become one, so every later view of them reads the joined class.
+    fn forgetPublicCodecViews(self: *InstGraph, winner: NodeId, loser: NodeId) Allocator.Error!void {
+        const winner_content = self.nodes.items[@backingInt(winner)];
+        const loser_content = self.nodes.items[@backingInt(loser)];
+        if (winner_content == .unresolved or loser_content == .unresolved) return;
+        const winner_private = self.contentIsGeneratedPrivateRoot(winner_content);
+        if (winner_private == self.contentIsGeneratedPrivateRoot(loser_content)) return;
+        const private_content = if (winner_private) winner_content else loser_content;
+        const private_owner = switch (private_content) {
+            .named => |named| named.builtin_owner.get(),
+            .leaf => |leaf| self.types.get(leaf.ty).named.builtin_owner.get(),
+            .redirect, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => unreachable, // contentIsGeneratedPrivateRoot holds only for a named type or a leaf of one
+        };
+        if (!isCodecOwner(private_owner)) return;
+        const public_root = if (winner_private) loser else winner;
+        var members = self.classMemberIterator(public_root);
+        while (members.next()) |member| _ = self.imported_monos.remove(member);
+        self.class_finished_monos.items[@backingInt(public_root)] = .none;
     }
 
     /// Whether class content is a named type, including an unread leaf of one.
@@ -6973,8 +6013,6 @@ pub const InstGraph = struct {
     fn replaceContentWithoutSnapshotInvalidation(self: *InstGraph, raw_root: NodeId, new_content: InstNode) Allocator.Error!bool {
         const root = self.find(raw_root);
         if (instNodeEql(self.nodes.items[@backingInt(root)], new_content)) return false;
-        try self.updateGeneratedIterator(root, new_content);
-        if (new_content == .named and new_content.named.generated_iterator != null) self.generated_iterator_nodes += 1;
         if (contentHasGeneratedPrivateBacking(new_content)) self.generated_private_nodes += 1;
         self.nodes.items[@backingInt(root)] = new_content;
         self.markPrivateBacking(new_content);
@@ -7055,39 +6093,6 @@ pub const InstGraph = struct {
             .tags_sorted = true,
         } });
         try self.union_(closed, wider);
-    }
-
-    /// A new row carrying every label of `raw_wider`, a row that lists each of
-    /// the closed `raw_closed` row's labels at the same payload arity plus
-    /// others. The closed row's tags keep their own payload nodes; every other
-    /// tag and the extension are the wider row's. Neither row changes and no
-    /// payloads are related, so a closed row a generated-private
-    /// representation owns can be requested at a wider public row without its
-    /// private payloads meeting their public counterparts outside the opaque
-    /// interface relation (design.md "Closed Result Rows At Template
-    /// Boundaries").
-    pub fn closedTagRowAtWiderLabels(self: *InstGraph, raw_closed: NodeId, raw_wider: NodeId) Allocator.Error!NodeId {
-        self.requireRelationProduction();
-        const closed = self.find(raw_closed);
-        if (!try self.tagRowIsClosed(closed)) Common.invariant("row relabeling received an open row as its closed row");
-        if (try self.rootContent(closed) != .tag_union) Common.invariant("row relabeling received a non-tag-union closed row");
-        const closed_tags = (try self.flattenTagRow(closed)).tags;
-        const wide = try self.flattenTagRow(self.find(raw_wider));
-        const tags = try self.arena().dupe(InstTag, wide.tags);
-        for (closed_tags) |tag| {
-            const wide_tag = for (tags) |*candidate| {
-                if (candidate.name == tag.name) break candidate;
-            } else Common.invariant("row relabeling request lacked one of the closed row's labels");
-            if (tag.payloads.len != wide_tag.payloads.len) {
-                Common.invariant("row relabeling request changed a closed row's payload arity");
-            }
-            wide_tag.* = tag;
-        }
-        return try self.newNode(.{ .tag_union = .{
-            .tags = tags,
-            .ext = wide.ext,
-            .tags_sorted = true,
-        } });
     }
 
     /// Point payload `payload_index` of the tag named `name` in a row at
@@ -7247,23 +6252,43 @@ pub const InstGraph = struct {
         comptime join: UnifyJoin,
     ) Allocator.Error!void {
         self.countDiagnostic("unify_requests");
-        var scratch = self.unify_scratch_pool.pop() orelse UnifyScratch{ .related = NodePairSet.init(self.allocator) };
-        defer {
-            // Pooled scratch keeps only the capacity an ordinary call needs:
-            // clearing touches a map's whole capacity.
-            if (scratch.pending.capacity > UnifyScratch.retained_capacity) {
-                scratch.pending.clearAndFree(self.allocator);
-            } else {
-                scratch.pending.clearRetainingCapacity();
-            }
-            if (scratch.related.capacity() > UnifyScratch.retained_capacity) {
-                scratch.related.clearAndFree();
-            } else {
-                scratch.related.clearRetainingCapacity();
-            }
-            self.unify_scratch_pool.append(self.allocator, scratch) catch scratch.deinit(self.allocator);
-        }
+        var scratch = self.acquireUnifyScratch();
+        defer self.releaseUnifyScratch(&scratch);
         try pushPair(&scratch.pending, self.allocator, a, b, row_width);
+        try self.drainUnifyScratch(&scratch, allow_private_selection, join);
+    }
+
+    fn acquireUnifyScratch(self: *InstGraph) UnifyScratch {
+        return self.unify_scratch_pool.pop() orelse UnifyScratch{ .related = NodePairSet.init(self.allocator) };
+    }
+
+    fn releaseUnifyScratch(self: *InstGraph, scratch: *UnifyScratch) void {
+        // Pooled scratch keeps only the capacity an ordinary call needs:
+        // clearing touches a map's whole capacity.
+        if (scratch.pending.capacity > UnifyScratch.retained_capacity) {
+            scratch.pending.clearAndFree(self.allocator);
+        } else {
+            scratch.pending.clearRetainingCapacity();
+        }
+        if (scratch.related.capacity() > UnifyScratch.retained_capacity) {
+            scratch.related.clearAndFree();
+        } else if (scratch.related.count() != 0) {
+            // An empty set's metadata is already clear; a field-kind decision
+            // that queued no pairs leaves it so.
+            scratch.related.clearRetainingCapacity();
+        }
+        self.unify_scratch_pool.append(self.allocator, scratch.*) catch scratch.deinit(self.allocator);
+    }
+
+    /// Unify every pair queued on `scratch`, including the pairs that
+    /// unifying them queues.
+    fn drainUnifyScratch(
+        self: *InstGraph,
+        scratch: *UnifyScratch,
+        allow_private_selection: bool,
+        comptime join: UnifyJoin,
+    ) Allocator.Error!void {
+        if (scratch.pending.items.len == 0) return;
         {
             self.unify_depth += 1;
             defer self.unify_depth -= 1;
@@ -7315,7 +6340,9 @@ pub const InstGraph = struct {
         const right_generated_private = self.contentIsGeneratedPrivateRoot(right_content);
         if (left_generated_private != right_generated_private and
             !allow_private_selection and
-            !self.isIteratorRepresentationTierRelation(left_content, right_content))
+            !contentIsFieldSlot(left_content) and
+            !contentIsFieldSlot(right_content) and
+            !self.isCodecRepresentationRelation(left_content, right_content))
         {
             Common.invariant("generated-private representation reached ordinary public/private graph unification");
         }
@@ -7351,6 +6378,17 @@ pub const InstGraph = struct {
         };
     }
 
+    /// Whether class content is the still-unbound runtime slot of an
+    /// undetermined record field. Such a class holds no representation, so
+    /// joining it to a generated-private class selects nothing and merges
+    /// nothing.
+    fn contentIsFieldSlot(node_content: InstNode) bool {
+        return switch (node_content) {
+            .unresolved => |variable| variable.origin == .field_slot,
+            .redirect, .leaf, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .named, .erased, .zst, .hole => false,
+        };
+    }
+
     /// Whether class content is a named type whose backing is generated-
     /// private representation evidence, including an unread leaf of one.
     fn contentIsGeneratedPrivateRoot(self: *InstGraph, node_content: InstNode) bool {
@@ -7376,7 +6414,8 @@ pub const InstGraph = struct {
         if (a == .checked_variable or b == .checked_variable) return .checked_variable;
         if (a == .row_extension or b == .row_extension) return .row_extension;
         if (a == .interface_parameter or b == .interface_parameter) return .interface_parameter;
-        return .placeholder;
+        if (a == .placeholder or b == .placeholder) return .placeholder;
+        return .field_slot;
     }
 
     fn unifyConcrete(
@@ -7504,86 +6543,6 @@ pub const InstGraph = struct {
                         try self.unifyThroughBacking(right, right_content, left, row_width, pending);
                         return;
                     }
-                    switch (self.iteratorRelation(left_named, right_named)) {
-                        .ordinary => {},
-                        .public_minted => {
-                            if (left_named.args.len == 0 or right_named.args.len == 0) {
-                                Common.invariant("minted/public iterator pair reached Monotype instantiation without a public item argument");
-                            }
-                            try pushPair(pending, self.allocator, left_named.args[0], right_named.args[0], row_width);
-                            if (left_named.def.iterator_representation == .minted) {
-                                try self.union_(left, right);
-                            } else {
-                                try self.union_(right, left);
-                            }
-                            return;
-                        },
-                        .forced_dynamic => {
-                            if (left_named.args.len == 0 or right_named.args.len == 0) {
-                                Common.invariant("forced-dynamic iterator reached Monotype instantiation without a public item argument");
-                            }
-                            try pushPair(pending, self.allocator, left_named.args[0], right_named.args[0], row_width);
-                            if (left_named.def.iterator_representation == .forced_dynamic) {
-                                try self.union_(left, right);
-                            } else {
-                                try self.union_(right, left);
-                            }
-                            return;
-                        },
-                        .minted_join => {
-                            if (left_named.args.len == 0 or right_named.args.len == 0) {
-                                Common.invariant("minted iterator join reached Monotype instantiation without a public item argument");
-                            }
-                            try pushPair(pending, self.allocator, left_named.args[0], right_named.args[0], row_width);
-                            if (left_named.backing.get()) |left_backing| {
-                                const right_backing = right_named.backing.get() orelse
-                                    Common.invariant("minted iterator join found backing on only one side");
-                                if (left_backing.use != right_backing.use) {
-                                    Common.invariant("minted iterator join found different backing uses");
-                                }
-                                if (left_backing.authority != right_backing.authority) {
-                                    Common.invariant("minted iterator join found different backing authorities");
-                                }
-                                try pushPair(pending, self.allocator, left_backing.node, right_backing.node, row_width);
-                            } else if (right_named.backing.get() != null) {
-                                Common.invariant("minted iterator join found backing on only one side");
-                            }
-
-                            if (self.representation_membership.items[@backingInt(left)].recursive_slot or
-                                self.representation_membership.items[@backingInt(right)].recursive_slot)
-                            {
-                                self.markForcedDynamicIteratorRoot(left);
-                            }
-
-                            // A graph-owned producer still has the public-source
-                            // provenance required to finalize a newly joined
-                            // representation; an imported finished Monotype
-                            // deliberately does not. Preserve that explicit
-                            // authority when only one side owns it. This is
-                            // especially important for recursive joins, whose
-                            // selected root must still be rewritable to the
-                            // forced-dynamic fixed point below.
-                            const left_owns_provenance = left_named.generated_iterator != null;
-                            const right_owns_provenance = right_named.generated_iterator != null;
-                            if (left_owns_provenance != right_owns_provenance) {
-                                if (left_owns_provenance) {
-                                    try self.union_(left, right);
-                                } else {
-                                    try self.union_(right, left);
-                                }
-                            } else if (left_named.builtin_owner.get()) |left_owner| {
-                                // Close recursive `rest` references before the
-                                // backing pair is drained. Otherwise each
-                                // nominal unwrap creates another fresh
-                                // structural node.
-                                if (!static_dispatch.isIteratorOwner(left_owner)) unreachable; // iteratorRelation returns .minted_join only for an iterator-owner pair
-                                try self.union_(left, right);
-                            } else {
-                                try self.union_(right, left);
-                            }
-                            return;
-                        },
-                    }
                     if (std.meta.eql(left_named.def, right_named.def) and left_named.args.len == right_named.args.len) {
                         for (left_named.args, right_named.args) |left_arg, right_arg| {
                             try pushPair(pending, self.allocator, left_arg, right_arg, row_width);
@@ -7653,47 +6612,36 @@ pub const InstGraph = struct {
         }
     }
 
-    fn isIteratorRepresentationTierRelation(self: *InstGraph, left: InstNode, right: InstNode) bool {
-        if (left != .named or right != .named) return false;
-        const left_named = left.named;
-        const right_named = right.named;
-        return switch (self.iteratorRelation(left_named, right_named)) {
-            .public_minted, .forced_dynamic => true,
-            .ordinary, .minted_join => false,
+    /// Whether a generated-private codec representation meets a public type
+    /// that denotes it: a variable, or the representation's own named type.
+    /// A codec representation is the only runtime representation of its
+    /// named type at its arguments, so ordinary unification joins them and
+    /// the representation becomes the class's content. Either side may be an
+    /// unread leaf.
+    fn isCodecRepresentationRelation(self: *InstGraph, left: InstNode, right: InstNode) bool {
+        const private_content, const public_content = if (self.contentIsGeneratedPrivateRoot(left))
+            .{ left, right }
+        else
+            .{ right, left };
+        const private_def, const private_owner = switch (private_content) {
+            .named => |named| .{ named.def, named.builtin_owner.get() },
+            .leaf => |leaf| leaf: {
+                const named = self.types.get(leaf.ty).named;
+                break :leaf .{ named.def, named.builtin_owner.get() };
+            },
+            .redirect, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => return false,
         };
-    }
-
-    fn iteratorRelation(self: *InstGraph, left: *const InstNamed, right: *const InstNamed) Type.IteratorRelation {
-        const base_relation = Type.iteratorRelation(left, right);
-        if (base_relation != .ordinary) return base_relation;
-        if (left.def.iterator_representation == .forced_dynamic and
-            right.def.iterator_representation == .forced_dynamic and
-            !optionalInstDigestEql(left.def.generated, right.def.generated))
-        {
-            return .forced_dynamic;
-        }
-        if (left.def.iterator_representation != .minted or right.def.iterator_representation != .minted) {
-            return .ordinary;
-        }
-        if (left.kind != right.kind or
-            left.def.module != right.def.module or
-            left.def.type_name != right.def.type_name or
-            left.def.source_decl != right.def.source_decl or
-            !instIteratorOwnerPair(left.builtin_owner.get(), right.builtin_owner.get()))
-        {
-            return .ordinary;
-        }
-        if (left.generated_iterator != null or right.generated_iterator != null) {
-            if (left.generated_iterator == null or right.generated_iterator == null) return .minted_join;
-            if (!optionalInstDigestEql(
-                left.generated_iterator.?.callable_evidence,
-                right.generated_iterator.?.callable_evidence,
-            )) return .minted_join;
-            if (left.def.iterator_kind != right.def.iterator_kind or
-                !self.sameNamedArgs(left.args, right.args)) return .minted_join;
-            return .ordinary;
-        }
-        return Type.iteratorRelation(left, right);
+        if (!isCodecOwner(private_owner)) return false;
+        const public_def = switch (public_content) {
+            .unresolved => return true,
+            .named => |named| named.def,
+            .leaf => |leaf| switch (self.types.get(leaf.ty)) {
+                .named => |named| named.def,
+                .primitive, .zst, .hole, .erased, .func, .record, .tuple, .tag_union, .list, .box => return false,
+            },
+            .redirect, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst, .hole => return false,
+        };
+        return std.meta.eql(public_def, private_def);
     }
 
     /// A named type met a structurally different type. Aliases are transparent
@@ -7751,6 +6699,15 @@ pub const InstGraph = struct {
         const other_content = try self.rootContent(other);
         if (other_content == .named) {
             try pushPair(pending, self.allocator, backing_node, other, row_width);
+            return;
+        }
+        // A record of no fields over the backing's own node is that backing:
+        // `{ ..row }` is `row`. Relating a copy of it to the backing would make
+        // the backing its own extension.
+        if (other_content == .record and other_content.record.fields.len == 0 and
+            self.find(other_content.record.ext) == self.find(backing_node))
+        {
+            try self.union_(named_node, other);
             return;
         }
         const moved = try self.newNode(other_content);
@@ -8437,12 +7394,7 @@ pub const InstGraph = struct {
             const left_slot = @backingInt(left_field.name);
             if (self.row_label_right.get(left_slot)) |right_index| {
                 const right_field = flat_right.fields[right_index];
-                const merged_kind = self.unifyFieldKinds(
-                    left_field.kind,
-                    left_field.default.get(),
-                    right_field.kind,
-                    right_field.default.get(),
-                );
+                const merged_kind = try self.unifyFieldKinds(left_field, right_field, pending);
                 try pushPair(pending, self.allocator, left_field.value_ty.get() orelse left_field.ty, right_field.value_ty.get() orelse right_field.ty, row_width);
                 try pushPair(pending, self.allocator, left_field.ty, right_field.ty, row_width);
                 const resolved_default = if (self.resolvedFieldKind(merged_kind)) |resolved|
@@ -8755,6 +7707,21 @@ pub const InstGraph = struct {
         return try snapshot.sealNode(self.find(node));
     }
 
+    /// Materialize the one type a use of a constant no specialization input
+    /// reaches selects for it. Besides the cells
+    /// `specializationTypeViewForNode` defaults, a variable carrying a row
+    /// default reads as that default, which is what relation freeze closes
+    /// it to. The live cells remain open for the caller to relate.
+    pub fn specializationChoiceTypeViewForNode(self: *InstGraph, node: NodeId) Allocator.Error!Type.TypeId {
+        if (try self.settledTypeViewForNode(node)) |settled| return settled;
+        if (!try self.typeIsSpecializationChoiceDefaultable(node)) {
+            Common.invariant("specialization choice requested for a graph type with unresolved evidence that declares no relation-freeze default");
+        }
+        var snapshot = GraphTypeFinals.initSpecializationSnapshot(self);
+        defer snapshot.deinit();
+        return try snapshot.sealNode(self.find(node));
+    }
+
     /// Materialize a read-only Monotype-shaped view of a fully resolved graph
     /// node. Open rows and unresolved checked variables have no TypeId view:
     /// callers must continue to use their graph nodes until explicit evidence
@@ -8912,6 +7879,20 @@ pub const InstGraph = struct {
         for (0..children.len) |index| try out.append(self.allocator, GuardedList.at(children, index));
     }
 
+    /// Whether a named type with generated-private backing is a codec
+    /// representation: the `FieldNames`, `FieldName` or `ParseTagUnionSpec`
+    /// value a derived parser builds for a format's methods.
+    fn isCodecRepresentation(named: *const InstNamed) bool {
+        return isCodecOwner(named.builtin_owner.get());
+    }
+
+    fn isCodecOwner(owner: ?static_dispatch.BuiltinOwner) bool {
+        return switch (owner orelse return false) {
+            .fields, .field, .parse_tag_union_spec => true,
+            .list, .box, .dict, .set, .bool, .str, .u8, .i8, .u16, .i16, .u32, .i32, .u64, .i64, .u128, .i128, .f32, .f64, .dec, .u8x16, .i8x16, .u16x8, .i16x8, .u32x4, .i32x4, .u64x2, .i64x2, .crypto_sha256_digest, .crypto_sha256_hasher, .crypto_blake3_digest, .crypto_blake3_hasher, .iter, .stream => false,
+        };
+    }
+
     fn isGeneratedPrivateRootContent(node_content: InstNode) bool {
         if (node_content != .named) return false;
         return if (node_content.named.backing.get()) |backing|
@@ -8983,7 +7964,7 @@ const GraphUninhabitedScan = struct {
                     break :blk switch (variable.origin) {
                         .checked_variable => .{ .value = true },
                         .row_extension => Common.invariant("row extension reached final inhabitance validation without row default"),
-                        .placeholder, .interface_parameter => Common.invariant("instantiation placeholder reached final inhabitance validation"),
+                        .placeholder, .field_slot, .interface_parameter => Common.invariant("instantiation placeholder reached final inhabitance validation"),
                     };
                 },
             },
@@ -9928,25 +8909,6 @@ pub const GraphTypeFinals = struct {
     }
 };
 
-fn instIteratorOwnerPair(
-    left: ?static_dispatch.BuiltinOwner,
-    right: ?static_dispatch.BuiltinOwner,
-) bool {
-    const owner = left orelse right orelse return false;
-    if (!static_dispatch.isIteratorOwner(owner)) return false;
-    if (left) |left_owner| if (left_owner != owner) return false;
-    if (right) |right_owner| if (right_owner != owner) return false;
-    return true;
-}
-
-fn optionalInstDigestEql(left: ?names.TypeDigest, right: ?names.TypeDigest) bool {
-    if (left) |left_digest| {
-        const right_digest = right orelse return false;
-        return std.mem.eql(u8, &left_digest.bytes, &right_digest.bytes);
-    }
-    return right == null;
-}
-
 const OpenFunctionInterfaceShapeWriter = struct {
     graph: *InstGraph,
     buf: std.ArrayList(u8) = .empty,
@@ -10064,8 +9026,6 @@ const OpenFunctionInterfaceShapeWriter = struct {
         if (self.composed.get(node)) |digest| return try self.writeComposedReference(digest);
         const leave: Leave = .{ .node = node, .start = self.buf.items.len, .context_tokens = self.context_tokens };
         const content = try self.graph.rootContent(node);
-        try self.writeU8(if (self.hasRecursiveValueSlot(node)) 1 else 0);
-        try self.writeU8(if (self.hasForcedDynamicIteratorRoot(node)) 1 else 0);
         if (content == .redirect) unreachable; // find returns a class root, which is never a redirect
         if (content == .unresolved) {
             self.context_tokens += 1;
@@ -10158,20 +9118,6 @@ const OpenFunctionInterfaceShapeWriter = struct {
                         try actions.append(allocator, .{ .byte = 0 });
                     }
                     try self.planDeclaredFieldSpan(actions, named.declared_order);
-                    if (named.generated_iterator) |generated| {
-                        try actions.appendSlice(allocator, &.{
-                            .{ .byte = 1 },
-                            .{ .optional_digest = generated.callable_evidence },
-                            .{ .bytes = &generated.public_source.named_type.module.bytes },
-                            .{ .type_def = generated.public_source.def },
-                            .{ .bytes = @tagName(generated.public_source.kind) },
-                            .{ .bytes = @tagName(generated.public_source.builtin_owner) },
-                        });
-                        try self.planBacking(actions, generated.public_source.backing);
-                        try self.planDeclaredFieldSpan(actions, generated.public_source.declared_order);
-                    } else {
-                        try actions.append(allocator, .{ .byte = 0 });
-                    }
                 }
             },
             .erased => |digest| {
@@ -10219,14 +9165,6 @@ const OpenFunctionInterfaceShapeWriter = struct {
         }
     }
 
-    fn hasRecursiveValueSlot(self: *OpenFunctionInterfaceShapeWriter, node: NodeId) bool {
-        return self.graph.representation_membership.items[@backingInt(node)].recursive_slot;
-    }
-
-    fn hasForcedDynamicIteratorRoot(self: *OpenFunctionInterfaceShapeWriter, node: NodeId) bool {
-        return self.graph.representation_membership.items[@backingInt(node)].forced_dynamic;
-    }
-
     fn writeVariable(self: *OpenFunctionInterfaceShapeWriter, variable: InstVariable) Allocator.Error!void {
         try self.writeBytes(@tagName(variable.origin));
         try self.writeOptionalTagName(variable.numeric_default_phase);
@@ -10239,32 +9177,6 @@ const OpenFunctionInterfaceShapeWriter = struct {
         if (def.source_decl.get() == null) {
             try self.writeBytes(self.graph.name_store.typeNameText(def.type_name));
         }
-        try self.writeOptionalDigest(def.generated);
-        try self.writeBytes(@tagName(def.iterator_representation));
-        try self.writeBytes(@tagName(def.iterator_kind));
-        try self.writeU8(def.iterator_depth);
-        try self.writeOptionalIteratorTopology(def.iterator_topology.get());
-    }
-
-    fn writeOptionalIteratorTopology(
-        self: *OpenFunctionInterfaceShapeWriter,
-        topology: ?Type.IteratorTopology,
-    ) Allocator.Error!void {
-        const value = topology orelse {
-            try self.writeU8(0);
-            return;
-        };
-        try self.writeU8(1);
-        try self.writeBytes(self.graph.name_store.recordFieldLabelText(value.len_field));
-        try self.writeBytes(self.graph.name_store.recordFieldLabelText(value.step_field));
-        try self.writeBytes(self.graph.name_store.tagLabelText(value.ok_tag));
-        try self.writeBytes(self.graph.name_store.tagLabelText(value.err_tag));
-        try self.writeBytes(self.graph.name_store.tagLabelText(value.unknown_tag));
-        try self.writeBytes(self.graph.name_store.tagLabelText(value.done_tag));
-        try self.writeBytes(self.graph.name_store.tagLabelText(value.one_tag));
-        try self.writeBytes(self.graph.name_store.tagLabelText(value.skip_tag));
-        try self.writeBytes(self.graph.name_store.recordFieldLabelText(value.item_field));
-        try self.writeBytes(self.graph.name_store.recordFieldLabelText(value.rest_field));
     }
 
     /// Write whether `value` (an optional enum) is present, then its tag name.
@@ -10333,7 +9245,7 @@ fn materializeUnresolved(variable: InstVariable) Type.Content {
     return switch (variable.origin) {
         .checked_variable => .{ .tag_union = Type.Span.empty() },
         .row_extension => Common.invariant("row extension reached Monotype materialization without row default"),
-        .placeholder, .interface_parameter => Common.invariant("instantiation placeholder reached Monotype materialization"),
+        .placeholder, .field_slot, .interface_parameter => Common.invariant("instantiation placeholder reached Monotype materialization"),
     };
 }
 
@@ -10347,27 +9259,8 @@ pub fn tagLessThan(name_store: *const names.NameStore, lhs: Type.Tag, rhs: Type.
     return name_store.tagLabelTextLessThan(lhs.name, rhs.name);
 }
 
-fn instFieldLessThan(name_store: *const names.NameStore, lhs: InstField, rhs: InstField) bool {
-    return name_store.recordFieldLabelTextLessThan(lhs.name, rhs.name);
-}
-
 fn instTagLessThan(name_store: *const names.NameStore, lhs: InstTag, rhs: InstTag) bool {
     return name_store.tagLabelTextLessThan(lhs.name, rhs.name);
-}
-
-fn tagPayloadCount(tags: []const InstTag) usize {
-    var count: usize = 0;
-    for (tags) |tag| count += tag.payloads.len;
-    return count;
-}
-
-fn tagPayloadAt(tags: []const InstTag, raw_index: usize) NodeId {
-    var index = raw_index;
-    for (tags) |tag| {
-        if (index < tag.payloads.len) return tag.payloads[index];
-        index -= tag.payloads.len;
-    }
-    Common.invariant("generated iterator depth tag payload index was out of bounds");
 }
 
 fn contentHasGeneratedPrivateBacking(content: InstNode) bool {
@@ -10432,18 +9325,6 @@ fn instFieldDefaultEql(left: ?Type.FieldDefault, right: ?Type.FieldDefault) bool
     return left_default.module == right_default.module and left_default.expr_node == right_default.expr_node;
 }
 
-fn instGeneratedIteratorEql(left: ?*const InstGeneratedIterator, right: ?*const InstGeneratedIterator) bool {
-    const a = left orelse return right == null;
-    const b = right orelse return false;
-    return optionalInstDigestEql(a.callable_evidence, b.callable_evidence) and
-        std.meta.eql(a.public_source.named_type, b.public_source.named_type) and
-        std.meta.eql(a.public_source.def, b.public_source.def) and
-        a.public_source.kind == b.public_source.kind and
-        a.public_source.builtin_owner == b.public_source.builtin_owner and
-        backingEql(a.public_source.backing, b.public_source.backing) and
-        instDeclaredFieldSliceEql(a.public_source.declared_order, b.public_source.declared_order);
-}
-
 fn instNamedEql(left: *const InstNamed, right: *const InstNamed) bool {
     return std.meta.eql(left.named_type, right.named_type) and
         std.meta.eql(left.def, right.def) and
@@ -10451,7 +9332,6 @@ fn instNamedEql(left: *const InstNamed, right: *const InstNamed) bool {
         left.builtin_owner == right.builtin_owner and
         nodeSliceEql(left.args, right.args) and
         backingEql(left.backing.get(), right.backing.get()) and
-        instGeneratedIteratorEql(left.generated_iterator, right.generated_iterator) and
         instDeclaredFieldSliceEql(left.declared_order, right.declared_order);
 }
 
@@ -10527,173 +9407,6 @@ test "graph diagnostics count authoritative operations" {
     try std.testing.expectEqual(@as(u64, 1), diagnostics.finished_mono_nodes_visited);
 }
 
-test "issue 11362: iterator-free finalization does no graph traversal" {
-    const gpa = std.testing.allocator;
-    var types = Type.Store.init(gpa);
-    defer types.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &types, &name_store);
-    defer graph.destroy();
-    _ = try graph.newNode(.empty_record);
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-    try graph.finalizeGeneratedIteratorRepresentations();
-    try graph.finalizeGeneratedIteratorIdentities();
-    try std.testing.expectEqual(@as(u64, 0), diagnostics.union_find_resolutions);
-}
-
-test "issue 11362: generated iterator index follows roots provenance and duplicate keys" {
-    try testGeneratedIteratorMigration(std.testing.allocator);
-}
-
-test "issue 11362: generated iterator index releases allocations on failure" {
-    var deterministic = base.DeterministicAllocator.init(std.testing.allocator);
-    try std.testing.checkAllAllocationFailures(deterministic.allocator(), testGeneratedIteratorMigration, .{});
-}
-
-fn assertGeneratedIteratorIndexConsistent(graph: *InstGraph) void {
-    std.debug.assert(graph.nodes.items.len == graph.request_source_interfaces.items.len);
-    std.debug.assert(graph.nodes.items.len == graph.constructor_evidence_requests.items.len);
-    var entries = graph.generated_iterator_entries.iterator();
-    while (entries.next()) |entry| {
-        const node = entry.key_ptr.*;
-        const key = entry.value_ptr.key;
-        std.debug.assert(entry.value_ptr.indexed);
-        std.debug.assert(@backingInt(node) < graph.nodes.items.len);
-        const named = graph.nodes.items[@backingInt(node)].named;
-        var expected = GeneratedIteratorKey.fromNamed(named).?;
-        expected.args = key.args;
-        std.debug.assert(GeneratedIteratorKeyContext.eql(.{}, expected, key));
-        for (key.args, named.args, 0..) |root, arg, arg_index| {
-            std.debug.assert(root == graph.find(arg));
-            var occurrences: usize = 0;
-            for (graph.generated_iterators_by_root.get(root).?.items) |occurrence| {
-                if (occurrence.node == node and occurrence.arg_index == arg_index) occurrences += 1;
-            }
-            std.debug.assert(occurrences == 1);
-        }
-        var next: ?NodeId = graph.generated_iterator_index.get(key).?;
-        while (next) |candidate| {
-            if (candidate == node) break;
-            next = graph.generated_iterator_entries.get(candidate).?.next;
-        } else Common.invariant("generated iterator entry missing from its key's index chain");
-    }
-    var roots = graph.generated_iterators_by_root.iterator();
-    while (roots.next()) |entry| {
-        for (entry.value_ptr.items) |occurrence| {
-            const key = graph.generated_iterator_entries.get(occurrence.node).?.key;
-            std.debug.assert(key.args[occurrence.arg_index] == entry.key_ptr.*);
-        }
-    }
-}
-
-fn testGeneratedIteratorMigration(gpa: Allocator) (Allocator.Error || error{ TestUnexpectedResult, TestExpectedEqual })!void {
-    var types = Type.Store.init(gpa);
-    defer types.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &types, &name_store);
-    defer graph.destroy();
-    defer assertGeneratedIteratorIndexConsistent(graph);
-    const item = try graph.newNode(.{ .primitive = .str });
-    const component = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
-    const backing = try graph.newNode(.empty_record);
-    const source: InstIteratorPublicSource = .{
-        .named_type = .{ .module = .{} },
-        .def = .{
-            .module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x62)))),
-            .type_name = try name_store.internTypeName("Iter"),
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .iter,
-        .backing = .{ .node = backing, .use = .runtime_layout_only },
-        .declared_order = &.{},
-    };
-    const public = try graph.newNode(try graph.namedContent(.{
-        .named_type = source.named_type,
-        .def = source.def,
-        .kind = source.kind,
-        .builtin_owner = .some(source.builtin_owner),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(source.backing),
-    }));
-    var named = (try graph.content(public)).named.*;
-    named.def.iterator_kind = .list;
-    named.def.iterator_representation = .minted;
-    named.generated_iterator = try graph.generatedIterator(.{ .public_source = source, .callable_evidence = null });
-    // Repeated component roots exercise deduplication of reverse dependencies.
-    named.args = try graph.arena().dupe(NodeId, &.{ item, component, component });
-    const first = try graph.newNode(try graph.namedContent(named));
-    const duplicate = try graph.newNode(try graph.namedContent(named));
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{ component, component }, null)).?);
-    const resolved = try graph.newNode(.empty_record);
-    try graph.unify(component, resolved);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{ resolved, resolved }, null)).?);
-    try std.testing.expect(!graph.sameClass(first, duplicate));
-    // The representative key must not keep borrowing the removed node's roots.
-    var changed = named;
-    changed.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = .{ .bytes = @splat(0xA1) }, .public_source = changed.generated_iterator.?.public_source });
-    try graph.setContent(first, try graph.namedContent(changed));
-    try std.testing.expectEqual(duplicate, (try graph.findGeneratedIterator(public, .list, &.{ component, component }, null)).?);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{ component, component }, changed.generated_iterator.?.callable_evidence)).?);
-    // Replacements can attach provenance to a reserved recursive node.
-    const reserved = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
-    changed.def.iterator_kind = .forced_dynamic;
-    changed.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = null, .public_source = changed.generated_iterator.?.public_source });
-    changed.args = try graph.arena().dupe(NodeId, &.{item});
-    try graph.setContent(reserved, try graph.namedContent(changed));
-    try std.testing.expectEqual(reserved, (try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, null)).?);
-    try graph.setContent(reserved, .empty_record);
-    try std.testing.expect((try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, null)) == null);
-    try graph.setContent(first, try graph.namedContent(named));
-    try graph.union_(duplicate, first);
-    try std.testing.expectEqual(duplicate, (try graph.findGeneratedIterator(public, .list, &.{ component, component }, null)).?);
-    const other_component = try graph.newNode(.empty_record);
-    var converging = named;
-    converging.args = try graph.arena().dupe(NodeId, &.{ item, other_component, other_component });
-    const other = try graph.newNode(try graph.namedContent(converging));
-    try std.testing.expectEqual(other, (try graph.findGeneratedIterator(public, .list, &.{ other_component, other_component }, null)).?);
-    try graph.union_(resolved, other_component);
-    try std.testing.expectEqual(duplicate, (try graph.findGeneratedIterator(public, .list, &.{ other_component, other_component }, null)).?);
-    try std.testing.expect(!graph.sameClass(duplicate, other));
-    // Distinct source keys converge onto an occupied target bucket. Many
-    // duplicate members force destination growth during allocation preflight.
-    const merging = try graph.newNode(.empty_record);
-    const merging_args = [_][3]NodeId{
-        .{ item, merging, resolved },
-        .{ item, resolved, merging },
-        .{ item, merging, merging },
-    };
-    for (merging_args) |args| {
-        var generated_source = named;
-        generated_source.args = try graph.arena().dupe(NodeId, &args);
-        for (0..16) |_| _ = try graph.newNode(try graph.namedContent(generated_source));
-    }
-    try graph.union_(resolved, merging);
-    const merged_key = graph.generated_iterator_entries.get(duplicate).?.key;
-    var chain_length: usize = 0;
-    var chain: ?NodeId = graph.generated_iterator_index.get(merged_key);
-    while (chain) |node| : (chain = graph.generated_iterator_entries.get(node).?.next) chain_length += 1;
-    try std.testing.expectEqual(@as(usize, 50), chain_length);
-    try std.testing.expectEqual(duplicate, (try graph.findGeneratedIterator(public, .list, &.{ merging, merging }, null)).?);
-    // A miss among many iterators of the same declaration and kind must probe
-    // the complete key, rather than scanning nodes or a declaration bucket.
-    for (0..32) |_| {
-        const independent = try graph.newNode(.empty_record);
-        var unrelated = named;
-        unrelated.args = try graph.arena().dupe(NodeId, &.{ item, independent, independent });
-        _ = try graph.newNode(try graph.namedContent(unrelated));
-    }
-    const absent = try graph.newNode(.empty_record);
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-    try std.testing.expectEqual(duplicate, (try graph.findGeneratedIterator(public, .list, &.{ resolved, resolved }, null)).?);
-    try std.testing.expect((try graph.findGeneratedIterator(public, .list, &.{ absent, absent }, null)) == null);
-    try std.testing.expectEqual(@as(u64, 2), diagnostics.generated_iterator_lookups);
-    try std.testing.expect(diagnostics.union_find_resolutions < 20);
-}
-
 test "issue 10941: row extension class unions remain linear" {
     const gpa = std.testing.allocator;
 
@@ -10764,58 +9477,6 @@ test "resolved graph type detection does not default open cells" {
     try graph.unify(unresolved, str);
     try std.testing.expect(try graph.typeIsResolved(open_list));
     try std.testing.expect(try graph.typeCanSealFromExplicitEvidence(open_list));
-}
-
-test "argument class snapshots preserve entry membership through unions on both sides" {
-    const gpa = std.testing.allocator;
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    // Both outsiders predate the snapshot: node age cannot stand in for
-    // membership, and either side may become the representative later.
-    const before = try graph.newNode(.empty_record);
-    const after = try graph.newNode(.empty_record);
-    const first = try graph.newNode(.empty_record);
-    const last = try graph.newNode(.empty_record);
-    try graph.union_(first, last);
-    const ret = try graph.newNode(.{ .primitive = .bool });
-    const active = try graph.newNode(.{ .func = .{
-        .args = try graph.arena().dupe(NodeId, &.{first}),
-        .ret = ret,
-    } });
-    const initial = try graph.snapshotFunctionArgumentClasses(active);
-    try graph.union_(before, first);
-    try graph.union_(before, after);
-    const new_node = try graph.newNode(.empty_record);
-    try graph.union_(new_node, before);
-    const later = try graph.snapshotFunctionArgumentClasses(active);
-
-    for ([_]NodeId{ first, last }) |member| {
-        try std.testing.expect(initial[0].contains(graph, member));
-        const request = try graph.newNode(.{ .func = .{
-            .args = try graph.arena().dupe(NodeId, &.{member}),
-            .ret = ret,
-        } });
-        try graph.unifyRecursiveFunctionInterface(active, initial, request);
-    }
-    try std.testing.expect(!graph.representation_membership.items[@backingInt(graph.find(first))].recursive_slot);
-    for ([_]NodeId{ before, after, new_node }) |member| {
-        try std.testing.expect(!initial[0].contains(graph, member));
-        try std.testing.expect(later[0].contains(graph, member));
-        const request = try graph.newNode(.{ .func = .{
-            .args = try graph.arena().dupe(NodeId, &.{member}),
-            .ret = ret,
-        } });
-        try graph.unifyRecursiveFunctionInterface(active, initial, request);
-    }
-    try std.testing.expect(graph.representation_membership.items[@backingInt(graph.find(first))].recursive_slot);
-    // Re-reading a snapshot after another snapshot and recursive relations
-    // must still stop at its original tail.
-    try std.testing.expect(!initial[0].contains(graph, after));
 }
 
 test "structural backing traversal preserves cycle entry and clears only visited scratch" {
@@ -11075,11 +9736,6 @@ test "open function interface shape includes producer-owned graph evidence" {
     const initial_right_shape = try graph.openFunctionInterfaceShape(right);
     try std.testing.expectEqualSlices(u8, initial_left_shape.bytes, initial_right_shape.bytes);
 
-    graph.markRecursiveValueSlot(left_arg);
-    const recursive_left_shape = try graph.openFunctionInterfaceShape(left);
-    const unmarked_right_shape = try graph.openFunctionInterfaceShape(right);
-    try std.testing.expect(!std.mem.eql(u8, recursive_left_shape.bytes, unmarked_right_shape.bytes));
-
     const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xA7))));
     const type_name = try name_store.internTypeName("PrivateShape");
     const named_type: Type.NamedType = .{ .module = .{} };
@@ -11196,7 +9852,7 @@ test "provisional Monotype view preserves an undetermined record field" {
 
     const field_name = try name_store.internRecordFieldLabel("value");
     const value_ty = try graph.newNode(.{ .primitive = .u64 });
-    const slot = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
+    const slot = try graph.newNode(.{ .unresolved = InstVariable.fieldSlot() });
     const kind = try graph.newUndeterminedFieldKind();
     const fields = try graph.arena().alloc(InstField, 1);
     fields[0] = .{
@@ -11260,7 +9916,7 @@ test "retained provisional view preserves content across later graph refinement"
     const graph = try InstGraph.create(gpa, &type_store, &name_store);
     defer graph.destroy();
     const value = try graph.newNode(.{ .primitive = .u64 });
-    const slot = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
+    const slot = try graph.newNode(.{ .unresolved = InstVariable.fieldSlot() });
     const kind = try graph.newUndeterminedFieldKind();
     graph.registerUndeterminedFieldKindCells(kind, slot, value);
     const record = try graph.newNode(.{ .record = .{
@@ -11305,7 +9961,7 @@ test "issue 11303: reading a field value preserves its undetermined storage unti
         .args = try graph.arena().dupe(NodeId, &.{arg}),
         .ret = try graph.newNode(.{ .primitive = .str }),
     } });
-    const slot = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
+    const slot = try graph.newNode(.{ .unresolved = InstVariable.fieldSlot() });
     const kind = try graph.newUndeterminedFieldKind();
     graph.registerUndeterminedFieldKindCells(kind, slot, value);
     const record = try graph.newNode(.{ .record = .{
@@ -11331,6 +9987,137 @@ test "issue 11303: reading a field value preserves its undetermined storage unti
     try std.testing.expect(graph.resolvedFieldKind(.{ .undetermined = kind }).? == .required);
     try std.testing.expect(graph.sameClass(slot, value));
     try std.testing.expectEqual(try graph.recordFieldNode(record, field_name), try graph.recordFieldValueNode(record, field_name));
+}
+
+/// A record whose one field has an undetermined kind, and whose source-value
+/// cell is a checked-public named type that a producer then selects a
+/// generated-private representation for.
+const UndeterminedPrivateFieldFixture = struct {
+    record: NodeId,
+    field: InstField,
+    slot: NodeId,
+    value: NodeId,
+    private: NodeId,
+
+    fn init(graph: *InstGraph, name_store: *names.NameStore, def_byte: u8) Allocator.Error!UndeterminedPrivateFieldFixture {
+        const named_type: Type.NamedType = .{ .module = .{} };
+        const def: Type.TypeDef = .{
+            .module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(def_byte)))),
+            .type_name = try name_store.internTypeName("PrivateEvidence"),
+        };
+        const value = try graph.newNode(try graph.namedContent(.{
+            .named_type = named_type,
+            .def = def,
+            .kind = .@"opaque",
+            .builtin_owner = .some(.fields),
+            .args = &.{},
+            .backing = .some(.{ .node = try graph.newNode(.empty_record), .use = .runtime_layout_only }),
+        }));
+        const private = try graph.newNode(try graph.namedContent(.{
+            .named_type = named_type,
+            .def = def,
+            .kind = .@"opaque",
+            .builtin_owner = .some(.fields),
+            .args = &.{},
+            .backing = .some(.{
+                .node = try graph.newNode(.empty_record),
+                .use = .runtime_layout_only,
+                .authority = .generated_private,
+            }),
+        }));
+        const slot = try graph.newNode(.{ .unresolved = InstVariable.fieldSlot() });
+        const kind = try graph.newUndeterminedFieldKind();
+        graph.registerUndeterminedFieldKindCells(kind, slot, value);
+        const field: InstField = .{
+            .name = try name_store.internRecordFieldLabel("evidence"),
+            .ty = slot,
+            .value_ty = .of(value),
+            .kind = .{ .undetermined = kind },
+            .default = .none,
+        };
+        const record = try graph.newNode(.{ .record = .{
+            .fields = try graph.arena().dupe(InstField, &.{field}),
+            .ext = try graph.newNode(.empty_record),
+        } });
+        try graph.selectGeneratedPrivateRepresentation(value, private);
+        return .{ .record = record, .field = field, .slot = slot, .value = value, .private = private };
+    }
+
+    fn expectSlotIsPrivateValue(self: UndeterminedPrivateFieldFixture, graph: *InstGraph) (Allocator.Error || error{ TestUnexpectedResult, TestExpectedEqual })!void {
+        try std.testing.expect(graph.resolvedFieldKind(self.field.kind).? == .required);
+        try std.testing.expect(graph.sameClass(self.slot, self.value));
+        try std.testing.expect(graph.sameClass(self.slot, self.private));
+        try std.testing.expectEqual(Type.BackingAuthority.generated_private, (try graph.content(self.slot)).named.backing.get().?.authority);
+    }
+};
+
+test "constructing an undetermined field commits its slot to the private representation selected for its value" {
+    const gpa = std.testing.allocator;
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    const fixture = try UndeterminedPrivateFieldFixture.init(graph, &name_store, 0xB1);
+    try std.testing.expect((try graph.content(fixture.slot)) == .unresolved);
+    try std.testing.expect(!graph.sameClass(fixture.slot, fixture.value));
+
+    try std.testing.expect((try graph.recordConstructionFieldKindOf(fixture.field)) == .required);
+    try fixture.expectSlotIsPrivateValue(graph);
+}
+
+test "a required access commits an undetermined field's slot to the private representation selected for its value" {
+    const gpa = std.testing.allocator;
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    const fixture = try UndeterminedPrivateFieldFixture.init(graph, &name_store, 0xB2);
+    const accessed = try graph.requiredRecordFieldNode(fixture.record, fixture.field.name);
+    try std.testing.expect(graph.sameClass(accessed, fixture.private));
+    try fixture.expectSlotIsPrivateValue(graph);
+}
+
+test "relation freeze commits an undetermined field's slot to the private representation selected for its value" {
+    const gpa = std.testing.allocator;
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    const fixture = try UndeterminedPrivateFieldFixture.init(graph, &name_store, 0xB3);
+    try graph.freezeRelations();
+    try fixture.expectSlotIsPrivateValue(graph);
+}
+
+test "row unification joins an undetermined field's slot to a committed private slot" {
+    const gpa = std.testing.allocator;
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    // Two records of one shape, as two call sites of one procedure produce:
+    // the first is constructed, so its slot is its private value cell, and
+    // the second's kind is still undetermined when their requests join.
+    const committed = try UndeterminedPrivateFieldFixture.init(graph, &name_store, 0xB4);
+    _ = try graph.recordConstructionFieldKindOf(committed.field);
+    const pending = try UndeterminedPrivateFieldFixture.init(graph, &name_store, 0xB4);
+    try std.testing.expect((try graph.content(pending.slot)) == .unresolved);
+
+    try graph.unify(committed.record, pending.record);
+
+    try std.testing.expect(graph.sameClass(committed.slot, pending.slot));
+    try pending.expectSlotIsPrivateValue(graph);
 }
 
 test "issue 11303: field value reads preserve optional tagged storage and sealed metadata" {
@@ -12021,7 +10808,7 @@ test "relation mutation invalidates active snapshots before freezing" {
 /// Leave every node visited in the last epoch before the wrap, so the next
 /// containment walk must wrap and may trust no existing stamp.
 fn stampEveryNodeAtLastContainmentEpoch(graph: *InstGraph) void {
-    graph.containment_visit_epochs.epoch.current = std.math.maxInt(u32) - 1;
+    graph.containment_visit_epochs.epoch.current = std.math.maxInt(u32);
     for (0..graph.containment_visit_epochs.len()) |node| graph.containment_visit_epochs.insert(@intCast(node));
 }
 
@@ -12123,200 +10910,6 @@ test "generated-private containment follows optional field value types" {
     } });
 
     try std.testing.expect(try graph.containsGeneratedPrivate(record));
-}
-
-test "iterator-interface containment caches exact graph dependencies" {
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-
-    const child = try graph.newNode(.{ .primitive = .u64 });
-    const root = try graph.newNode(.{ .box = child });
-    stampEveryNodeAtLastContainmentEpoch(graph);
-
-    try std.testing.expect(!try graph.containsIteratorInterface(root));
-    try std.testing.expectEqual(@as(u32, 1), graph.containment_visit_epochs.epoch.current);
-    try std.testing.expectEqual(@as(u64, 2), diagnostics.iterator_interface_nodes_visited);
-
-    try std.testing.expect(!try graph.containsIteratorInterface(root));
-    try std.testing.expectEqual(@as(u64, 1), diagnostics.iterator_interface_cache_hits);
-
-    const unrelated = try graph.newNode(.{ .primitive = .u64 });
-    try graph.setContent(unrelated, .{ .primitive = .str });
-    try std.testing.expect(!try graph.containsIteratorInterface(root));
-    try std.testing.expectEqual(@as(u64, 2), diagnostics.iterator_interface_cache_hits);
-    try std.testing.expectEqual(@as(u64, 2), diagnostics.iterator_interface_nodes_visited);
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x42))));
-    const type_name = try name_store.internTypeName("Iter");
-    try graph.setContent(child, try graph.namedContent(.{
-        .named_type = .{ .module = .{} },
-        .def = .{ .module = module_identity, .type_name = type_name },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = &.{},
-        .backing = .none,
-    }));
-    try std.testing.expect(try graph.containsIteratorInterface(root));
-    try std.testing.expectEqual(@as(u64, 2), diagnostics.iterator_interface_cache_hits);
-    try std.testing.expectEqual(@as(u64, 4), diagnostics.iterator_interface_nodes_visited);
-}
-
-test "iterator-interface containment agrees between Monotype and graph" {
-    // `Type.Store.containsIteratorInterface` and
-    // `InstGraph.containsIteratorInterface` are separate walks over separate
-    // representations, and the Monotype walk gates skipping graph
-    // construction entirely. A structural position one descends into and the
-    // other does not would silently drop a producer's minted representation,
-    // so every container position is checked in both, with an iterator leaf
-    // and a plain leaf.
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x51))));
-    const iter_name = try name_store.internTypeName("Iter");
-    const wrapper_name = try name_store.internTypeName("Wrapper");
-    const field_name = try name_store.internRecordFieldLabel("it");
-    const tag_name = try name_store.internTagLabel("Holds");
-
-    const Shapes = struct {
-        graph: *InstGraph,
-        module_identity: names.ModuleIdentityId,
-        wrapper_name: names.TypeNameId,
-        field_name: names.RecordFieldNameId,
-        tag_name: names.TagNameId,
-
-        fn wrap(self: @This(), leaf: NodeId, position: usize) (Allocator.Error || error{TestUnexpectedResult})!NodeId {
-            const u64_node = try self.graph.newNode(.{ .primitive = .u64 });
-            return switch (position) {
-                0 => leaf,
-                1 => try self.graph.newNode(.{ .list = leaf }),
-                2 => try self.graph.newNode(.{ .box = leaf }),
-                3 => try self.graph.newNode(.{ .tuple = try self.graph.arena().dupe(NodeId, &.{ u64_node, leaf }) }),
-                4 => blk: {
-                    const fields = try self.graph.arena().dupe(InstField, &.{.{ .name = self.field_name, .ty = leaf, .default = .none }});
-                    break :blk try self.graph.newNode(.{ .record = .{
-                        .fields = fields,
-                        .ext = try self.graph.newNode(.empty_record),
-                    } });
-                },
-                5 => blk: {
-                    const payloads = try self.graph.arena().dupe(NodeId, &.{leaf});
-                    const tags = try self.graph.arena().dupe(InstTag, &.{.{
-                        .name = self.tag_name,
-                        .checked_name = self.tag_name,
-                        .payloads = payloads,
-                    }});
-                    break :blk try self.graph.newNode(.{ .tag_union = .{
-                        .tags = tags,
-                        .ext = try self.graph.newNode(.empty_tag_union),
-                    } });
-                },
-                6 => try self.graph.newNode(.{ .func = .{
-                    .args = try self.graph.arena().dupe(NodeId, &.{leaf}),
-                    .ret = u64_node,
-                } }),
-                // A nominal wrapper reaching the leaf through its backing.
-                7 => try self.graph.newNode(try self.graph.namedContent(.{
-                    .named_type = .{ .module = .{} },
-                    .def = .{ .module = self.module_identity, .type_name = self.wrapper_name },
-                    .kind = .nominal,
-                    .builtin_owner = .none,
-                    .args = try self.graph.arena().dupe(NodeId, &.{}),
-                    .backing = .some(.{ .node = leaf, .use = .inspectable }),
-                })),
-                // A nominal wrapper reaching the leaf through a type argument.
-                8 => try self.graph.newNode(try self.graph.namedContent(.{
-                    .named_type = .{ .module = .{} },
-                    .def = .{ .module = self.module_identity, .type_name = self.wrapper_name },
-                    .kind = .nominal,
-                    .builtin_owner = .none,
-                    .args = try self.graph.arena().dupe(NodeId, &.{leaf}),
-                    .backing = .some(.{ .node = u64_node, .use = .inspectable }),
-                })),
-                // An optional record slot reaching the leaf only through its
-                // retained source value type.
-                9 => blk: {
-                    const fields = try self.graph.arena().dupe(InstField, &.{.{
-                        .name = self.field_name,
-                        .ty = u64_node,
-                        .value_ty = .of(leaf),
-                        .kind = .optional,
-                        .default = .none,
-                    }});
-                    break :blk try self.graph.newNode(.{ .record = .{
-                        .fields = fields,
-                        .ext = try self.graph.newNode(.empty_record),
-                    } });
-                },
-                else => error.TestUnexpectedResult,
-            };
-        }
-    };
-    const shapes = Shapes{
-        .graph = graph,
-        .module_identity = module_identity,
-        .wrapper_name = wrapper_name,
-        .field_name = field_name,
-        .tag_name = tag_name,
-    };
-
-    const position_count = 10;
-    const case_count = position_count * 2;
-    var roots: [case_count]NodeId = undefined;
-    var graph_answers: [case_count]bool = undefined;
-
-    for (0..position_count) |position| {
-        for ([_]bool{ true, false }, 0..) |iterator_leaf, leaf_index| {
-            const leaf = if (iterator_leaf) try graph.newNode(try graph.namedContent(.{
-                .named_type = .{ .module = .{} },
-                .def = .{ .module = module_identity, .type_name = iter_name },
-                .kind = .@"opaque",
-                .builtin_owner = .some(.iter),
-                .args = try graph.arena().dupe(NodeId, &.{try graph.newNode(.{ .primitive = .u64 })}),
-                .backing = .some(.{
-                    .node = try graph.newNode(.{ .primitive = .u64 }),
-                    .use = .runtime_layout_only,
-                }),
-            })) else try graph.newNode(.{ .primitive = .str });
-
-            const case_index = position * 2 + leaf_index;
-            roots[case_index] = try shapes.wrap(leaf, position);
-            graph_answers[case_index] = try graph.containsIteratorInterface(roots[case_index]);
-        }
-    }
-
-    // Sealing is only allowed once relation production has finished, so every
-    // shape is built and asked of the graph first, then compared.
-    try graph.freezeRelations();
-    for (roots, graph_answers, 0..) |root, graph_answer, case_index| {
-        const iterator_leaf = case_index % 2 == 0;
-        const sealed = try graph.sealNode(root);
-        const mono_answer = try type_store.containsIteratorInterface(sealed);
-        if (graph_answer != mono_answer) {
-            std.debug.print(
-                "position {d} iterator_leaf={} graph={} mono={}\n",
-                .{ case_index / 2, iterator_leaf, graph_answer, mono_answer },
-            );
-        }
-        try std.testing.expectEqual(graph_answer, mono_answer);
-        try std.testing.expectEqual(iterator_leaf, graph_answer);
-    }
 }
 
 test "final type sealing remains allowed after instantiation relations freeze" {
@@ -12630,6 +11223,79 @@ test "opaque interface relation preserves distinct public and generated-private 
     defer graph.destroy();
 
     const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xAD))));
+    const type_name = try name_store.internTypeName("OpaqueEvidence");
+    const named_type: Type.NamedType = .{ .module = .{} };
+    const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
+    const public_args = try graph.arena().alloc(NodeId, 1);
+    public_args[0] = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
+    const private_args = try graph.arena().alloc(NodeId, 1);
+    private_args[0] = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
+    const public_backing = try graph.newNode(.empty_record);
+    const private_backing = try graph.newNode(.{ .record = .{
+        .fields = try graph.arena().alloc(InstField, 0),
+        .ext = try graph.newNode(.{ .unresolved = InstVariable.row(.empty_record) }),
+    } });
+    const public = try graph.newNode(try graph.namedContent(.{
+        .named_type = named_type,
+        .def = def,
+        .kind = .@"opaque",
+        .builtin_owner = .none,
+        .args = public_args,
+        .backing = .some(.{ .node = public_backing, .use = .runtime_layout_only }),
+    }));
+    const private = try graph.newNode(try graph.namedContent(.{
+        .named_type = named_type,
+        .def = def,
+        .kind = .@"opaque",
+        .builtin_owner = .none,
+        .args = private_args,
+        .backing = .some(.{
+            .node = private_backing,
+            .use = .runtime_layout_only,
+            .authority = .generated_private,
+        }),
+    }));
+
+    try graph.relateOpaqueInterface(public, private);
+
+    const public_content = (try graph.content(public));
+    if (public_content != .named) return error.TestUnexpectedResult;
+    const retained_public = public_content.named;
+    const private_content = (try graph.content(private));
+    if (private_content != .named) return error.TestUnexpectedResult;
+    const retained_private = private_content.named;
+    try std.testing.expect(!graph.sameClass(public, private));
+    try std.testing.expectEqual(Type.BackingAuthority.checked_public, retained_public.backing.get().?.authority);
+    try std.testing.expectEqual(Type.BackingAuthority.generated_private, retained_private.backing.get().?.authority);
+    try std.testing.expect(!graph.sameClass(public_backing, private_backing));
+    try std.testing.expect(graph.sameClass(public_args[0], private_args[0]));
+    try std.testing.expectEqual(@as(usize, 0), (try graph.recordConstructionNodes(public)).fields.len);
+
+    const field_name = try name_store.internRecordFieldLabel("value");
+    const fields = try graph.arena().alloc(InstField, 1);
+    fields[0] = .{ .name = field_name, .ty = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) }), .default = .none };
+    const structural_record = try graph.newNode(.{ .record = .{
+        .fields = fields,
+        .ext = try graph.newNode(.{ .unresolved = InstVariable.row(.empty_record) }),
+    } });
+    const projected = try graph.recordNodes(structural_record);
+    try std.testing.expectEqual(@as(usize, 1), projected.fields.len);
+    try std.testing.expectEqual(field_name, projected.fields[0].name);
+}
+
+test "opaque interface relation gives a codec representation's public type the representation" {
+    const gpa = std.testing.allocator;
+
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xAE))));
     const type_name = try name_store.internTypeName("FieldNames");
     const named_type: Type.NamedType = .{ .module = .{} };
     const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
@@ -12665,29 +11331,122 @@ test "opaque interface relation preserves distinct public and generated-private 
 
     try graph.relateOpaqueInterface(public, private);
 
-    const public_content = (try graph.content(public));
-    if (public_content != .named) return error.TestUnexpectedResult;
-    const retained_public = public_content.named;
-    const private_content = (try graph.content(private));
-    if (private_content != .named) return error.TestUnexpectedResult;
-    const retained_private = private_content.named;
-    try std.testing.expect(!graph.sameClass(public, private));
-    try std.testing.expectEqual(Type.BackingAuthority.checked_public, retained_public.backing.get().?.authority);
-    try std.testing.expectEqual(Type.BackingAuthority.generated_private, retained_private.backing.get().?.authority);
+    try std.testing.expect(graph.sameClass(public, private));
+    const joined = (try graph.content(public));
+    if (joined != .named) return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Type.BackingAuthority.generated_private, joined.named.backing.get().?.authority);
+    try std.testing.expect(graph.sameClass(joined.named.backing.get().?.node, private_backing));
     try std.testing.expect(!graph.sameClass(public_backing, private_backing));
     try std.testing.expect(graph.sameClass(public_args[0], private_args[0]));
-    try std.testing.expectEqual(@as(usize, 0), (try graph.recordConstructionNodes(public)).fields.len);
+}
 
-    const field_name = try name_store.internRecordFieldLabel("value");
-    const fields = try graph.arena().alloc(InstField, 1);
-    fields[0] = .{ .name = field_name, .ty = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) }), .default = .none };
-    const structural_record = try graph.newNode(.{ .record = .{
-        .fields = fields,
+test "a finished public named type joined into its codec representation reads as the representation" {
+    const gpa = std.testing.allocator;
+
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xB0))));
+    const type_name = try name_store.internTypeName("FieldNames");
+    const public_backing = try type_store.add(.{ .record = Type.Span.empty() });
+    const private_backing = try type_store.add(.{ .tuple = Type.Span.empty() });
+    const public_ty = try type_store.add(.{ .named = .{
+        .named_type = .{ .module = .{} },
+        .def = .{ .module = module_identity, .type_name = type_name },
+        .kind = .@"opaque",
+        .builtin_owner = .some(.fields),
+        .args = Type.Span.empty(),
+        .backing = .some(.{ .ty = public_backing, .use = .runtime_layout_only }),
+    } });
+    const private_ty = try type_store.add(.{ .named = .{
+        .named_type = .{ .module = .{} },
+        .def = .{ .module = module_identity, .type_name = type_name },
+        .kind = .@"opaque",
+        .builtin_owner = .some(.fields),
+        .args = Type.Span.empty(),
+        .backing = .some(.{ .ty = private_backing, .use = .runtime_layout_only, .authority = .generated_private }),
+    } });
+
+    const public = try graph.importMonoIndependent(public_ty);
+    const private = try graph.importMonoIndependent(private_ty);
+    // A list of the public type holds an active snapshot that reaches it,
+    // and the public node reads as the type it was imported as.
+    const list = try graph.newNode(.{ .list = public });
+    const list_before = try graph.activeTypeViewForNode(list);
+    try std.testing.expect(try type_store.typeEql(&name_store, public_ty, type_store.get(list_before).list));
+    try std.testing.expectEqual(public_ty, try graph.activeTypeViewForNode(public));
+
+    try graph.relateOpaqueInterface(public, private);
+    try std.testing.expect(graph.sameClass(public, private));
+
+    // Neither view outlives the join.
+    const view = try graph.activeTypeViewForNode(public);
+    try std.testing.expect(try type_store.typeEql(&name_store, private_ty, view));
+    try std.testing.expectEqual(Type.BackingAuthority.generated_private, type_store.get(view).named.backing.get().?.authority);
+    const list_after = try graph.activeTypeViewForNode(list);
+    try std.testing.expect(try type_store.typeEql(&name_store, private_ty, type_store.get(list_after).list));
+}
+
+test "ordinary unification gives a codec representation's public type the representation" {
+    const gpa = std.testing.allocator;
+
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xAF))));
+    const type_name = try name_store.internTypeName("FieldNames");
+    const named_type: Type.NamedType = .{ .module = .{} };
+    const def: Type.TypeDef = .{ .module = module_identity, .type_name = type_name };
+    const public_args = try graph.arena().alloc(NodeId, 1);
+    public_args[0] = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
+    const private_args = try graph.arena().alloc(NodeId, 1);
+    private_args[0] = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
+    const public_backing = try graph.newNode(.empty_record);
+    const private_backing = try graph.newNode(.{ .record = .{
+        .fields = try graph.arena().alloc(InstField, 0),
         .ext = try graph.newNode(.{ .unresolved = InstVariable.row(.empty_record) }),
     } });
-    const projected = try graph.recordNodes(structural_record);
-    try std.testing.expectEqual(@as(usize, 1), projected.fields.len);
-    try std.testing.expectEqual(field_name, projected.fields[0].name);
+    const public = try graph.newNode(try graph.namedContent(.{
+        .named_type = named_type,
+        .def = def,
+        .kind = .@"opaque",
+        .builtin_owner = .some(.fields),
+        .args = public_args,
+        .backing = .some(.{ .node = public_backing, .use = .runtime_layout_only }),
+    }));
+    const private = try graph.newNode(try graph.namedContent(.{
+        .named_type = named_type,
+        .def = def,
+        .kind = .@"opaque",
+        .builtin_owner = .some(.fields),
+        .args = private_args,
+        .backing = .some(.{
+            .node = private_backing,
+            .use = .runtime_layout_only,
+            .authority = .generated_private,
+        }),
+    }));
+
+    try graph.unify(public, private);
+
+    try std.testing.expect(graph.sameClass(public, private));
+    const joined = (try graph.content(public));
+    if (joined != .named) return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Type.BackingAuthority.generated_private, joined.named.backing.get().?.authority);
+    try std.testing.expect(!graph.sameClass(public_backing, private_backing));
+    try std.testing.expect(graph.sameClass(public_args[0], private_args[0]));
 }
 
 test "construction selection preserves private evidence while absorbing optional width" {
@@ -12851,7 +11610,7 @@ test "record row follows an inspectable nominal record extension" {
     try std.testing.expectEqual(empty, flattened.ext);
 }
 
-test "opaque interface relation preserves forced-dynamic iterator identity" {
+test "opaque interface relation exchanges roles at a pair whose public side is the representation" {
     const gpa = std.testing.allocator;
 
     var type_store = Type.Store.init(gpa);
@@ -12863,641 +11622,63 @@ test "opaque interface relation preserves forced-dynamic iterator identity" {
     const graph = try InstGraph.create(gpa, &type_store, &name_store);
     defer graph.destroy();
 
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xFE))));
-    const type_name = try name_store.internTypeName("Iter");
+    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x53))));
+    const type_name = try name_store.internTypeName("Holder");
     const named_type: Type.NamedType = .{ .module = .{} };
-    const public_item = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const private_item = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const public_backing = try graph.newNode(.empty_record);
-    const private_backing = try graph.newNode(.empty_record);
-    const public = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{ .module = module_identity, .type_name = type_name },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{public_item}),
-        .backing = .some(.{ .node = public_backing, .use = .runtime_layout_only }),
-    }));
-    const private = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = type_name,
-            .iterator_representation = .forced_dynamic,
-            .iterator_kind = .forced_dynamic,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{private_item}),
-        .backing = .some(.{
-            .node = private_backing,
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-    }));
-
-    try graph.relateOpaqueInterface(public, private);
-
-    try std.testing.expect(!graph.sameClass(public, private));
-    try std.testing.expect(graph.sameClass(public_item, private_item));
-    try std.testing.expectEqual(Type.BackingAuthority.checked_public, (try graph.content(public)).named.backing.get().?.authority);
-    try std.testing.expectEqual(Type.BackingAuthority.generated_private, (try graph.content(private)).named.backing.get().?.authority);
-    try std.testing.expectEqual(Type.IteratorRepresentation.none, (try graph.content(public)).named.def.iterator_representation);
-    try std.testing.expectEqual(Type.IteratorRepresentation.forced_dynamic, (try graph.content(private)).named.def.iterator_representation);
-}
-
-test "opaque iterator relation materializes unresolved public interface from provenance" {
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x51))));
-    const type_name = try name_store.internTypeName("Iter");
-    const named_type: Type.NamedType = .{ .module = .{} };
-    const public_backing = try graph.newNode(.empty_record);
-    const public_source: InstIteratorPublicSource = .{
-        .named_type = named_type,
-        .def = .{ .module = module_identity, .type_name = type_name },
-        .kind = .@"opaque",
-        .builtin_owner = .iter,
-        .backing = .{ .node = public_backing, .use = .runtime_layout_only },
-        .declared_order = &.{},
-    };
-    const public = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const private_item = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const private = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = type_name,
-            .iterator_representation = .minted,
-            .iterator_kind = .list,
-            .iterator_depth = 1,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{ private_item, try graph.newNode(.empty_record) }),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-        .generated_iterator = try graph.generatedIterator(.{
-            .callable_evidence = null,
-            .public_source = public_source,
-        }),
-    }));
-
-    try graph.relateOpaqueInterface(public, private);
-
-    const retained_public = (try graph.content(public)).named;
-    try std.testing.expect(!graph.sameClass(public, private));
-    try std.testing.expectEqual(Type.BackingAuthority.checked_public, retained_public.backing.get().?.authority);
-    try std.testing.expectEqual(Type.IteratorRepresentation.none, retained_public.def.iterator_representation);
-    try std.testing.expectEqual(@as(usize, 1), retained_public.args.len);
-    try std.testing.expect(graph.sameClass(retained_public.args[0], private_item));
-}
-
-test "opaque iterator relation resolves unresolved public variable to imported generated iterator" {
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x71))));
-    const type_name = try name_store.internTypeName("Iter");
-    const named_type: Type.NamedType = .{ .module = .{} };
-    const public = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const private = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = type_name,
-            .generated = .{ .bytes = @as([32]u8, @splat(0x72)) },
-            .iterator_representation = .minted,
-            .iterator_kind = .list,
-            .iterator_depth = 1,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-    }));
-
-    try graph.relateOpaqueInterface(public, private);
-
-    const retained = (try graph.content(public)).named;
-    try std.testing.expect(graph.sameClass(public, private));
-    try std.testing.expectEqual(Type.BackingAuthority.generated_private, retained.backing.get().?.authority);
-    try std.testing.expectEqual(Type.IteratorRepresentation.minted, retained.def.iterator_representation);
-    try std.testing.expectEqual(@as(usize, 1), retained.args.len);
-    try std.testing.expect(graph.sameClass(retained.args[0], item));
-}
-
-test "opaque interface relation delegates nested private iterator requests to unification" {
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x73))));
-    const type_name = try name_store.internTypeName("Iter");
-    const named_type: Type.NamedType = .{ .module = .{} };
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const left_component = try graph.newNode(.empty_record);
-    const right_component = try graph.newNode(.empty_record);
-    const left_iter = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = type_name,
-            .generated = .{ .bytes = @as([32]u8, @splat(0x74)) },
-            .iterator_representation = .minted,
-            .iterator_kind = .concat,
-            .iterator_depth = 2,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{ item, left_component }),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-    }));
-    const right_iter = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = type_name,
-            .generated = .{ .bytes = @as([32]u8, @splat(0x75)) },
-            .iterator_representation = .minted,
-            .iterator_kind = .concat,
-            .iterator_depth = 2,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{ item, right_component }),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-    }));
-    const public_fn = try graph.newNode(.{ .func = .{
-        .args = try graph.arena().dupe(NodeId, &.{left_iter}),
-        .ret = try graph.newNode(.empty_record),
-    } });
-    const private_fn = try graph.newNode(.{ .func = .{
-        .args = try graph.arena().dupe(NodeId, &.{right_iter}),
-        .ret = try graph.newNode(.empty_record),
-    } });
-
-    try graph.relateOpaqueInterface(public_fn, private_fn);
-
-    try std.testing.expect(graph.sameClass(left_iter, right_iter));
-    try std.testing.expectEqual(Type.BackingAuthority.generated_private, (try graph.content(left_iter)).named.backing.get().?.authority);
-    try std.testing.expectEqual(Type.IteratorRepresentation.minted, (try graph.content(left_iter)).named.def.iterator_representation);
-}
-
-test "opaque relation materializes unresolved public named shell from request" {
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x52))));
-    const shell_type_name = try name_store.internTypeName("ShellEvidence");
-    const iter_type_name = try name_store.internTypeName("Iter");
-    const shell_named_type: Type.NamedType = .{ .module = .{} };
-    const iter_named_type: Type.NamedType = .{ .module = .{} };
-    const shell_def: Type.TypeDef = .{ .module = module_identity, .type_name = shell_type_name };
-    const iter_def: Type.TypeDef = .{ .module = module_identity, .type_name = iter_type_name };
-    const public = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const public_source: InstIteratorPublicSource = .{
-        .named_type = iter_named_type,
-        .def = iter_def,
-        .kind = .@"opaque",
-        .builtin_owner = .iter,
-        .backing = .{ .node = try graph.newNode(.empty_record), .use = .runtime_layout_only },
-        .declared_order = &.{},
-    };
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const private_arg = try graph.newNode(try graph.namedContent(.{
-        .named_type = iter_named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = iter_type_name,
-            .iterator_representation = .minted,
-            .iterator_kind = .list,
-            .iterator_depth = 1,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{ item, try graph.newNode(.empty_record) }),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-        .generated_iterator = try graph.generatedIterator(.{
-            .callable_evidence = null,
-            .public_source = public_source,
-        }),
-    }));
-    const request = try graph.newNode(try graph.namedContent(.{
-        .named_type = shell_named_type,
-        .def = shell_def,
-        .kind = .@"opaque",
-        .builtin_owner = .some(.fields),
-        .args = try graph.arena().dupe(NodeId, &.{private_arg}),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-        }),
-    }));
-
-    try graph.relateOpaqueInterface(public, request);
-
-    const retained_public = (try graph.content(public)).named;
-    try std.testing.expect(graph.sameClass(public, request));
-    try std.testing.expectEqual(Type.BackingAuthority.checked_public, retained_public.backing.get().?.authority);
-    try std.testing.expectEqual(@as(usize, 1), retained_public.args.len);
-    try std.testing.expect(graph.sameClass(retained_public.args[0], private_arg));
-}
-
-test "generated iterator index reset discards replaced and rekeyed producers" {
-    const gpa = std.testing.allocator;
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-    const module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x62))));
-    const type_name = try name_store.internTypeName("Iter");
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const component = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
-    const backing = try graph.newNode(.empty_record);
-    const public_named: InstNamed = .{
-        .named_type = .{ .module = .{} },
-        .def = .{ .module = module, .type_name = type_name },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(.{ .node = backing, .use = .runtime_layout_only }),
-    };
-    const public = try graph.newNode(try graph.namedContent(public_named));
-    var minted = public_named;
-    minted.def.iterator_kind = .list;
-    minted.def.iterator_representation = .minted;
-    minted.args = try graph.arena().dupe(NodeId, &.{ item, component });
-    {
-        var updated = minted.backing.get().?;
-        updated.authority = .generated_private;
-        minted.backing = .some(updated);
-    }
-    minted.generated_iterator = try graph.generatedIterator(.{
-        .callable_evidence = null,
-        .public_source = .{
-            .named_type = public_named.named_type,
-            .def = public_named.def,
-            .kind = public_named.kind,
-            .builtin_owner = .iter,
-            .backing = public_named.backing.get().?,
-            .declared_order = &.{},
-        },
-    });
-    const first = try graph.newNode(try graph.namedContent(minted));
-    const RecursiveMinted = struct { graph: *InstGraph, named: InstNamed };
-    const second = try graph.addRecursiveNode(RecursiveMinted{ .graph = graph, .named = minted }, struct {
-        fn fill(context: RecursiveMinted, _: NodeId) Allocator.Error!InstNode {
-            return context.graph.namedContent(context.named);
-        }
-    }.fill);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-    try std.testing.expectEqual(@as(u32, 1), graph.generated_iterator_index.count());
-    try std.testing.expect(graph.generated_iterator_nodes > 0);
-    try std.testing.expectEqual(@as(?NodeId, null), (try graph.findGeneratedIterator(public, .single, &.{component}, null)));
-    try std.testing.expectEqual(@as(?NodeId, null), (try graph.findGeneratedIterator(public, .list, &.{}, null)));
-
-    // Arguments are compared by their current class, not their minted id.
-    const resolved = try graph.newNode(.{ .primitive = .str });
-    try graph.unify(component, resolved);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{resolved}, null)).?);
-    try graph.union_(second, first);
-    try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-
-    // Changing callable evidence moves the live node to a different bucket.
-    minted.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = .{ .bytes = @splat(0x62) }, .public_source = minted.generated_iterator.?.public_source });
-    try graph.setContent(second, try graph.namedContent(minted));
-    try std.testing.expectEqual(@as(?NodeId, null), (try graph.findGeneratedIterator(public, .list, &.{component}, null)));
-    try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{component}, minted.generated_iterator.?.callable_evidence)).?);
-    try std.testing.expectEqual(@as(u32, 1), graph.generated_iterator_index.count());
-
-    // Removing provenance removes membership; permanent request identities live on.
-    graph.registerConstructorEvidenceRequest(second);
-    try graph.registerRequestSourceInterface(second, public);
-    try graph.setContent(second, try graph.namedContent(public_named));
-    try std.testing.expectEqual(@as(u32, 0), graph.generated_iterator_index.count());
-    try std.testing.expect(graph.requestPropagatesConstructorEvidence(second));
-    try std.testing.expectEqual(public, graph.requestSourceInterface(second).?);
-    try std.testing.expect(graph.generated_iterator_nodes > 0);
-
-    // The next job may reuse these node ids without inheriting a producer.
-    try graph.setContent(second, try graph.namedContent(minted));
-    graph.reset();
-    const next_item = try graph.newNode(.{ .primitive = .u64 });
-    const next_component = try graph.newNode(.{ .primitive = .str });
-    const next_backing = try graph.newNode(.empty_record);
-    var next_public = public_named;
-    next_public.args = try graph.arena().dupe(NodeId, &.{next_item});
-    {
-        var updated = next_public.backing.get().?;
-        updated.node = next_backing;
-        next_public.backing = .some(updated);
-    }
-    const next_public_node = try graph.newNode(try graph.namedContent(next_public));
-    try std.testing.expectEqual(@as(?NodeId, null), (try graph.findGeneratedIterator(
-        next_public_node,
-        .list,
-        &.{next_component},
-        minted.generated_iterator.?.callable_evidence,
-    )));
-    try std.testing.expectEqual(@as(u32, 0), graph.generated_iterator_nodes);
-    try std.testing.expectEqual(@as(usize, 0), graph.generated_iterator_entries.count());
-    try std.testing.expectEqual(@as(usize, 0), graph.generated_iterators_by_root.count());
-    try std.testing.expectEqual(@as(usize, 0), graph.generated_iterator_index.count());
-}
-
-test "generated iterator depth visits wide graphs without a size cutoff" {
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x64))));
-    const type_name = try name_store.internTypeName("Iter");
-    const named_type: Type.NamedType = .{ .module = .{} };
-    const public_backing = try graph.newNode(.empty_record);
-    const public_source: InstIteratorPublicSource = .{
-        .named_type = named_type,
-        .def = .{ .module = module_identity, .type_name = type_name },
-        .kind = .@"opaque",
-        .builtin_owner = .iter,
-        .backing = .{ .node = public_backing, .use = .runtime_layout_only },
-        .declared_order = &.{},
-    };
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const source = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = type_name,
-            .iterator_kind = .single,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-        .generated_iterator = try graph.generatedIterator(.{
-            .callable_evidence = null,
-            .public_source = public_source,
-        }),
-    }));
-
-    // Put the only iterator-bearing child after the former 64-node walk
-    // budget. Graph width must not change the adapter's representation.
-    const wide_children = try graph.arena().alloc(NodeId, 65);
-    for (wide_children[0..64]) |*child| {
-        child.* = try graph.newNode(.{ .primitive = .u64 });
-    }
-    wide_children[64] = source;
-    const wide_component = try graph.newNode(.{ .tuple = wide_children });
-    const adapter = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = .{
-            .module = module_identity,
-            .type_name = type_name,
-            .iterator_kind = .concat,
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{ item, wide_component }),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-        .generated_iterator = try graph.generatedIterator(.{
-            .callable_evidence = null,
-            .public_source = public_source,
-        }),
-    }));
-
-    try graph.finalizeGeneratedIteratorRepresentations();
-
-    const finalized = (try graph.content(adapter)).named.def;
-    try std.testing.expectEqual(Type.IteratorRepresentation.minted, finalized.iterator_representation);
-    try std.testing.expectEqual(@as(u8, 2), finalized.iterator_depth);
-}
-
-test "generated iterator identity uses current graph content rather than an imported witness" {
-    const gpa = std.testing.allocator;
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x82))));
-    const type_name = try name_store.internTypeName("Iter");
-    const item_ty = try type_store.add(.{ .primitive = .u64 });
-    const backing_ty = try type_store.add(.{ .record = .empty() });
-    const source_ty = try type_store.add(.{ .named = .{
-        .named_type = .{ .module = .{} },
-        .def = .{ .module = module, .type_name = type_name, .iterator_representation = .minted, .iterator_kind = .list, .iterator_depth = 1 },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try type_store.addSpan(&.{item_ty}),
-        .backing = .some(.{ .ty = backing_ty, .use = .runtime_layout_only, .authority = .generated_private }),
-    } });
-    var identities: [3]names.TypeDigest = undefined;
-    for (&identities, 0..) |*identity, index| {
-        const graph = try InstGraph.create(gpa, &type_store, &name_store);
-        defer graph.destroy();
-        const item = try graph.newNode(.{ .primitive = .u64 });
-        const backing = try graph.newNode(.empty_record);
-        const public_def: Type.TypeDef = .{ .module = module, .type_name = type_name };
-        const owned: InstNode = try graph.namedContent(.{
-            .named_type = .{ .module = .{} },
-            .def = .{ .module = module, .type_name = type_name, .iterator_representation = .minted, .iterator_kind = .numeric_to, .iterator_depth = 1 },
-            .kind = .@"opaque",
-            .builtin_owner = .some(.iter),
-            .args = try graph.arena().dupe(NodeId, &.{item}),
-            .backing = .some(.{ .node = backing, .use = .runtime_layout_only, .authority = .generated_private }),
-            .generated_iterator = try graph.generatedIterator(.{ .callable_evidence = null, .public_source = .{
-                .named_type = .{ .module = .{} },
-                .def = public_def,
-                .kind = .@"opaque",
-                .builtin_owner = .iter,
-                .backing = .{ .node = backing, .use = .runtime_layout_only },
-                .declared_order = &.{},
-            } }),
-        });
-        const node = if (index == 0) try graph.newNode(owned) else blk: {
-            const imported = try graph.importMono(source_ty);
-            const current = if (index == 1) replaced: {
-                try graph.setContent(imported, owned);
-                break :replaced imported;
-            } else joined: {
-                // A cached losing representation must not become the winner's view.
-                _ = try graph.monoFor(imported);
-                const producer = try graph.newNode(owned);
-                try graph.unify(producer, imported);
-                break :joined producer;
+    const Pair = struct { public: NodeId, private: NodeId };
+    const holders = struct {
+        fn pair(g: *InstGraph, module: names.ModuleIdentityId, name: names.TypeNameId, ty: Type.NamedType, public_arg: NodeId, private_arg: NodeId) Allocator.Error!Pair {
+            return .{
+                .public = try g.newNode(try g.namedContent(.{
+                    .named_type = ty,
+                    .def = .{ .module = module, .type_name = name },
+                    .kind = .@"opaque",
+                    .builtin_owner = .none,
+                    .args = try g.arena().dupe(NodeId, &.{public_arg}),
+                    .backing = .some(.{ .node = try g.newNode(.empty_record), .use = .runtime_layout_only }),
+                })),
+                .private = try g.newNode(try g.namedContent(.{
+                    .named_type = ty,
+                    .def = .{ .module = module, .type_name = name },
+                    .kind = .@"opaque",
+                    .builtin_owner = .none,
+                    .args = try g.arena().dupe(NodeId, &.{private_arg}),
+                    .backing = .some(.{
+                        .node = try g.newNode(.empty_record),
+                        .use = .runtime_layout_only,
+                        .authority = .generated_private,
+                    }),
+                })),
             };
-            // The original request remains available as its exact witness.
-            try std.testing.expectEqual(source_ty, try graph.provisionalTypeViewForNode(imported));
-            break :blk current;
-        };
-        try graph.finalizeGeneratedIteratorIdentities();
-        identity.* = (try graph.content(node)).named.def.generated.?;
-    }
-    try std.testing.expectEqual(identities[0], identities[1]);
-    try std.testing.expectEqual(identities[0], identities[2]);
-}
-
-test "recursive join keeps graph-owned iterator provenance over a finished Monotype" {
-    const gpa = std.testing.allocator;
-
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-
-    const module_identity = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x65))));
-    const type_name = try name_store.internTypeName("Iter");
-    const named_type: Type.NamedType = .{ .module = .{} };
-    const public_def: Type.TypeDef = .{
-        .module = module_identity,
-        .type_name = type_name,
-        .iterator_topology = .some(.{
-            .len_field = try name_store.internRecordFieldLabel("len"),
-            .step_field = try name_store.internRecordFieldLabel("step"),
-            .ok_tag = try name_store.internTagLabel("Ok"),
-            .err_tag = try name_store.internTagLabel("Err"),
-            .unknown_tag = try name_store.internTagLabel("Unknown"),
-            .done_tag = try name_store.internTagLabel("Done"),
-            .one_tag = try name_store.internTagLabel("One"),
-            .skip_tag = try name_store.internTagLabel("Skip"),
-            .item_field = try name_store.internRecordFieldLabel("item"),
-            .rest_field = try name_store.internRecordFieldLabel("rest"),
-        }),
-    };
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const public_backing = try graph.newNode(.empty_record);
-    const public_source: InstIteratorPublicSource = .{
-        .named_type = named_type,
-        .def = public_def,
-        .kind = .@"opaque",
-        .builtin_owner = .iter,
-        .backing = .{ .node = public_backing, .use = .runtime_layout_only },
-        .declared_order = &.{},
+        }
     };
 
-    var finished_def = public_def;
-    finished_def.generated = .{ .bytes = @as([32]u8, @splat(0xA5)) };
-    finished_def.iterator_representation = .minted;
-    finished_def.iterator_kind = .list;
-    finished_def.iterator_depth = 1;
-    const finished = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = finished_def,
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-    }));
+    // An opaque holder whose argument is itself a private holder: the public
+    // view of the outer one holds private evidence too, so both sides of the
+    // outer pair do and only the roots tell them apart.
+    const inner = try holders.pair(
+        graph,
+        module_identity,
+        type_name,
+        named_type,
+        try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) }),
+        try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) }),
+    );
+    const outer = try holders.pair(graph, module_identity, type_name, named_type, inner.private, inner.private);
+    const left = try graph.newNode(.{ .list = outer.private });
+    const right = try graph.newNode(.{ .list = outer.public });
 
-    var owned_def = public_def;
-    owned_def.iterator_representation = .minted;
-    owned_def.iterator_kind = .list;
-    owned_def.iterator_depth = 1;
-    const owned = try graph.newNode(try graph.namedContent(.{
-        .named_type = named_type,
-        .def = owned_def,
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(.{
-            .node = try graph.newNode(.empty_record),
-            .use = .runtime_layout_only,
-            .authority = .generated_private,
-        }),
-        .generated_iterator = try graph.generatedIterator(.{
-            .callable_evidence = null,
-            .public_source = public_source,
-        }),
-    }));
+    try graph.relateOpaqueInterface(left, right);
 
-    // This order is significant: the finished type is the left side of the
-    // recursive join, but only the graph-owned side can author the final
-    // forced-dynamic representation.
-    graph.markRecursiveValueSlot(finished);
-    try graph.unify(finished, owned);
-    try graph.finalizeGeneratedIteratorRepresentations();
-
-    const finalized = (try graph.content(finished)).named;
-    try std.testing.expect(finalized.generated_iterator != null);
-    try std.testing.expectEqual(Type.IteratorRepresentation.forced_dynamic, finalized.def.iterator_representation);
-    try std.testing.expectEqual(Type.IteratorKind.forced_dynamic, finalized.def.iterator_kind);
+    try std.testing.expect(!graph.sameClass(outer.public, outer.private));
+    try std.testing.expectEqual(
+        Type.BackingAuthority.generated_private,
+        (try graph.content(outer.private)).named.backing.get().?.authority,
+    );
+    try std.testing.expectEqual(
+        Type.BackingAuthority.checked_public,
+        (try graph.content(outer.public)).named.backing.get().?.authority,
+    );
 }
 
 test "opaque interface relation preserves nested generated-private backing" {
@@ -13525,7 +11706,7 @@ test "opaque interface relation preserves nested generated-private backing" {
         .named_type = inner_named_type,
         .def = inner_def,
         .kind = .@"opaque",
-        .builtin_owner = .some(.fields),
+        .builtin_owner = .none,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .some(.{ .node = public_inner_backing, .use = .runtime_layout_only }),
     }));
@@ -13533,7 +11714,7 @@ test "opaque interface relation preserves nested generated-private backing" {
         .named_type = inner_named_type,
         .def = inner_def,
         .kind = .@"opaque",
-        .builtin_owner = .some(.fields),
+        .builtin_owner = .none,
         .args = try graph.arena().alloc(NodeId, 0),
         .backing = .some(.{
             .node = private_inner_backing,
@@ -13547,7 +11728,7 @@ test "opaque interface relation preserves nested generated-private backing" {
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
-        .builtin_owner = .some(.fields),
+        .builtin_owner = .none,
         .args = try graph.arena().dupe(NodeId, &.{public_arg}),
         .backing = .some(.{ .node = public_backing, .use = .runtime_layout_only }),
     }));
@@ -13555,7 +11736,7 @@ test "opaque interface relation preserves nested generated-private backing" {
         .named_type = named_type,
         .def = def,
         .kind = .@"opaque",
-        .builtin_owner = .some(.fields),
+        .builtin_owner = .none,
         .args = try graph.arena().dupe(NodeId, &.{private_arg}),
         .backing = .some(.{
             .node = private_backing,
@@ -14221,437 +12402,6 @@ test "recursive nominal backing can meet an alias to that nominal" {
     try std.testing.expectEqual(alias, graph.find(alias));
 }
 
-test "issue 11362: iterator-free finalization performs no graph walks" {
-    const gpa = std.testing.allocator;
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-    const leaf = try graph.newNode(.{ .primitive = .str });
-    _ = try graph.newNode(.{ .box = leaf });
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-    try graph.finalizeGeneratedIteratorRepresentations();
-    try graph.finalizeGeneratedIteratorIdentities();
-    try std.testing.expectEqual(@as(u64, 0), diagnostics.union_find_resolutions);
-    try std.testing.expectEqual(@as(u32, 0), graph.generated_iterator_nodes);
-}
-
-test "issue 11362: iterator index tracks argument unions collisions and provenance replacement" {
-    try testGeneratedIteratorIndex(std.testing.allocator);
-    // The graph's per-node columns grow by in-place remaps whose success
-    // depends on the heap's layout, so the failure check runs over an
-    // allocator that refuses in-place growth.
-    var deterministic = base.DeterministicAllocator.init(std.testing.allocator);
-    try std.testing.checkAllAllocationFailures(deterministic.allocator(), testGeneratedIteratorIndex, .{});
-}
-
-fn testGeneratedIteratorIndex(gpa: Allocator) (Allocator.Error || error{ TestUnexpectedResult, TestExpectedEqual })!void {
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-    const source: InstIteratorPublicSource = .{
-        .named_type = .{ .module = .{} },
-        .def = .{
-            .module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x62)))),
-            .type_name = try name_store.internTypeName("Iter"),
-            .source_decl = .some(1),
-        },
-        .kind = .@"opaque",
-        .builtin_owner = .iter,
-        .backing = .{ .node = try graph.newNode(.empty_record), .use = .runtime_layout_only },
-        .declared_order = &.{},
-    };
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const component = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const other = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const public = try graph.newNode(try graph.namedContent(.{
-        .named_type = source.named_type,
-        .def = source.def,
-        .kind = source.kind,
-        .builtin_owner = .some(source.builtin_owner),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(source.backing),
-    }));
-    var named = (try graph.content(public)).named.*;
-    named.def.iterator_kind = .list;
-    named.def.iterator_representation = .minted;
-    named.def.iterator_depth = 1;
-    named.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = null, .public_source = source });
-    named.args = try graph.arena().dupe(NodeId, &.{ item, component, component });
-    const first = try graph.newNode(try graph.namedContent(named));
-    named.args = try graph.arena().dupe(NodeId, &.{ item, other, other });
-    const second = try graph.newNode(try graph.namedContent(named));
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{ component, component }, null)).?);
-    try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{ other, other }, null)).?);
-    try graph.unify(component, other);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{ other, component }, null)).?);
-    // Changing the first candidate's evidence must reveal the equal second
-    // candidate, without joining their classes merely because keys coincide.
-    const evidence: names.TypeDigest = .{ .bytes = @splat(7) };
-    var changed = (try graph.content(first)).named.*;
-    changed.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = evidence, .public_source = changed.generated_iterator.?.public_source });
-    try graph.setContent(first, try graph.namedContent(changed));
-    try std.testing.expect(!graph.sameClass(first, second));
-    try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{ component, other }, null)).?);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{ component, other }, evidence)).?);
-    // Content replacement changes the exact construction key, including tier.
-    changed.def.iterator_kind = .forced_dynamic;
-    changed.def.iterator_representation = .forced_dynamic;
-    changed.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = null, .public_source = changed.generated_iterator.?.public_source });
-    changed.args = try graph.arena().dupe(NodeId, &.{item});
-    try graph.setContent(first, try graph.namedContent(changed));
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, null)).?);
-    try std.testing.expect((try graph.findGeneratedIterator(public, .list, &.{ component, other }, evidence)) == null);
-    try std.testing.expect((try graph.findGeneratedIterator(public, .map, &.{ component, other }, null)) == null);
-    // A probe's work is independent of unrelated graph nodes.
-    for (0..100) |_| _ = try graph.newNode(.empty_record);
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-    try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{ component, other }, null)).?);
-    try std.testing.expect(diagnostics.union_find_resolutions < 15);
-    const alias = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
-    try graph.unify(alias, second);
-    try std.testing.expectEqual(graph.find(second), (try graph.findGeneratedIterator(public, .list, &.{ component, other }, null)).?);
-}
-
-test "issue 11362: iterator-free finalization performs no graph traversal" {
-    var type_store = Type.Store.init(std.testing.allocator);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(std.testing.allocator);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(std.testing.allocator, &type_store, &name_store);
-    defer graph.destroy();
-    _ = try graph.newNode(.{ .primitive = .str });
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-    try graph.finalizeGeneratedIteratorRepresentations();
-    try graph.finalizeGeneratedIteratorIdentities();
-    try std.testing.expectEqual(@as(u64, 0), diagnostics.union_find_resolutions);
-}
-
-test "issue 11362: generated iterator index follows root unions and producer replacement" {
-    const gpa = std.testing.allocator;
-    var type_store = Type.Store.init(gpa);
-    defer type_store.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &type_store, &name_store);
-    defer graph.destroy();
-    const module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x62))));
-    const type_name = try name_store.internTypeName("Iter");
-    const item = try graph.newNode(.{ .primitive = .u64 });
-    const component = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
-    const backing = try graph.newNode(.empty_record);
-    const public_named: InstNamed = .{
-        .named_type = .{ .module = .{} },
-        .def = .{ .module = module, .type_name = type_name },
-        .kind = .@"opaque",
-        .builtin_owner = .some(.iter),
-        .args = try graph.arena().dupe(NodeId, &.{item}),
-        .backing = .some(.{ .node = backing, .use = .runtime_layout_only }),
-    };
-    const public = try graph.newNode(try graph.namedContent(public_named));
-    var minted = public_named;
-    minted.def.iterator_kind = .list;
-    minted.def.iterator_representation = .minted;
-    minted.args = try graph.arena().dupe(NodeId, &.{ item, component });
-    {
-        var updated = minted.backing.get().?;
-        updated.authority = .generated_private;
-        minted.backing = .some(updated);
-    }
-    minted.generated_iterator = try graph.generatedIterator(.{
-        .callable_evidence = null,
-        .public_source = .{
-            .named_type = public_named.named_type,
-            .def = public_named.def,
-            .kind = public_named.kind,
-            .builtin_owner = .iter,
-            .backing = public_named.backing.get().?,
-            .declared_order = &.{},
-        },
-    });
-    const first = try graph.newNode(try graph.namedContent(minted));
-    const RecursiveMinted = struct { graph: *InstGraph, named: InstNamed };
-    const second = try graph.addRecursiveNode(RecursiveMinted{ .graph = graph, .named = minted }, struct {
-        fn fill(context: RecursiveMinted, _: NodeId) Allocator.Error!InstNode {
-            return context.graph.namedContent(context.named);
-        }
-    }.fill);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-    try std.testing.expectEqual(@as(u32, 1), graph.generated_iterator_index.count());
-    try std.testing.expect(graph.generated_iterator_nodes > 0);
-    try std.testing.expectEqual(@as(?NodeId, null), (try graph.findGeneratedIterator(public, .single, &.{component}, null)));
-    try std.testing.expectEqual(@as(?NodeId, null), (try graph.findGeneratedIterator(public, .list, &.{}, null)));
-
-    // Arguments are compared by their current class, not their minted id.
-    const resolved = try graph.newNode(.{ .primitive = .str });
-    try graph.unify(component, resolved);
-    try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{resolved}, null)).?);
-    try graph.union_(second, first);
-    try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-
-    // Changing callable evidence moves the live node to a different bucket.
-    minted.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = .{ .bytes = @splat(0x62) }, .public_source = minted.generated_iterator.?.public_source });
-    try graph.setContent(second, try graph.namedContent(minted));
-    try std.testing.expectEqual(@as(?NodeId, null), (try graph.findGeneratedIterator(public, .list, &.{component}, null)));
-    try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{component}, minted.generated_iterator.?.callable_evidence)).?);
-    try std.testing.expectEqual(@as(u32, 1), graph.generated_iterator_index.count());
-
-    // Removing provenance removes membership; permanent request identities live on.
-    graph.registerConstructorEvidenceRequest(second);
-    try graph.registerRequestSourceInterface(second, public);
-    try graph.setContent(second, try graph.namedContent(public_named));
-    try std.testing.expectEqual(@as(u32, 0), graph.generated_iterator_index.count());
-    try std.testing.expect(graph.requestPropagatesConstructorEvidence(second));
-    try std.testing.expectEqual(public, graph.requestSourceInterface(second).?);
-    try std.testing.expect(graph.generated_iterator_nodes > 0);
-}
-
-test "iterator finalization guards perform no graph walks without provenance" {
-    const gpa = std.testing.allocator;
-    var types = Type.Store.init(gpa);
-    defer types.deinit();
-    var name_store = names.NameStore.init(gpa);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(gpa, &types, &name_store);
-    defer graph.destroy();
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-    for (0..100) |_| _ = try graph.newNode(.empty_record);
-    try graph.finalizeGeneratedIteratorRepresentations();
-    try graph.finalizeGeneratedIteratorIdentities();
-    try std.testing.expectEqual(@as(u64, 0), diagnostics.union_find_resolutions);
-}
-
-test "generated iterator index preserves evidence, argument classes, unions and replacements" {
-    const Scenario = struct {
-        fn run(allocator: Allocator) (Allocator.Error || error{ TestUnexpectedResult, TestExpectedEqual })!void {
-            var types = Type.Store.init(allocator);
-            defer types.deinit();
-            var name_store = names.NameStore.init(allocator);
-            defer name_store.deinit();
-            const graph = try InstGraph.create(allocator, &types, &name_store);
-            defer graph.destroy();
-            const module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x62))));
-            const type_name = try name_store.internTypeName("Iter");
-            const item = try graph.newNode(.{ .primitive = .bool });
-            const component = try graph.newNode(.empty_record);
-            const other_component = try graph.newNode(.empty_record);
-            const public_source: InstIteratorPublicSource = .{
-                .named_type = .{ .module = .{} },
-                .def = .{ .module = module, .type_name = type_name },
-                .kind = .@"opaque",
-                .builtin_owner = .iter,
-                .backing = .{ .node = component, .use = .runtime_layout_only },
-                .declared_order = &.{},
-            };
-            const public = try graph.newNode(try graph.namedContent(.{
-                .named_type = public_source.named_type,
-                .def = public_source.def,
-                .kind = public_source.kind,
-                .builtin_owner = .some(.iter),
-                .args = try graph.arena().dupe(NodeId, &.{item}),
-                .backing = .some(public_source.backing),
-            }));
-            var generated = (try graph.content(public)).named.*;
-            generated.def.iterator_kind = .list;
-            generated.def.iterator_representation = .minted;
-            generated.def.iterator_depth = 1;
-            generated.args = try graph.arena().dupe(NodeId, &.{ item, component });
-            {
-                var updated = generated.backing.get().?;
-                updated.authority = .generated_private;
-                generated.backing = .some(updated);
-            }
-            generated.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = null, .public_source = public_source });
-            var without_provenance = generated;
-            without_provenance.generated_iterator = null;
-            const first = try graph.newNode(try graph.namedContent(without_provenance));
-            try std.testing.expectEqual(@as(u32, 0), graph.generated_iterator_nodes);
-            try graph.setContent(first, try graph.namedContent(generated));
-            try std.testing.expectEqual(@as(u32, 1), graph.generated_iterator_nodes);
-            const second = try graph.newNode(try graph.namedContent(generated));
-            try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-            try std.testing.expect((try graph.findGeneratedIterator(public, .map, &.{component}, null)) == null);
-            try std.testing.expect((try graph.findGeneratedIterator(public, .list, &.{other_component}, null)) == null);
-            const evidence: names.TypeDigest = .{ .bytes = @splat(7) };
-            try std.testing.expect((try graph.findGeneratedIterator(public, .list, &.{component}, evidence)) == null);
-            generated.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = evidence, .public_source = generated.generated_iterator.?.public_source });
-            const with_evidence = try graph.newNode(try graph.namedContent(generated));
-            try std.testing.expectEqual(with_evidence, (try graph.findGeneratedIterator(public, .list, &.{component}, evidence)).?);
-            generated.def.source_decl = .some(17);
-            const other_decl = try graph.newNode(try graph.namedContent(generated));
-            try std.testing.expectEqual(other_decl, (try graph.findGeneratedIterator(other_decl, .list, &.{component}, evidence)).?);
-            try std.testing.expectEqual(with_evidence, (try graph.findGeneratedIterator(public, .list, &.{component}, evidence)).?);
-
-            var rekeyed = (try graph.content(first)).named.*;
-            rekeyed.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = evidence, .public_source = rekeyed.generated_iterator.?.public_source });
-            try graph.setContent(first, try graph.namedContent(rekeyed));
-            try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{component}, evidence)).?);
-            rekeyed.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = null, .public_source = rekeyed.generated_iterator.?.public_source });
-            try graph.setContent(first, try graph.namedContent(rekeyed));
-            try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-            try std.testing.expectEqual(with_evidence, (try graph.findGeneratedIterator(public, .list, &.{component}, evidence)).?);
-
-            try graph.unify(other_component, component);
-            try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{other_component}, null)).?);
-            const request = try graph.newNode(.{ .func = .{
-                .args = try graph.arena().dupe(NodeId, &.{first}),
-                .ret = item,
-            } });
-            const source = try graph.newNode(.{ .func = .{
-                .args = try graph.arena().dupe(NodeId, &.{public}),
-                .ret = item,
-            } });
-            try graph.registerRequestSourceInterface(request, source);
-            graph.registerConstructorEvidenceRequest(request);
-            try graph.union_(second, first);
-            try std.testing.expectEqual(source, graph.requestSourceInterface(request).?);
-            try std.testing.expect(graph.requestPropagatesConstructorEvidence(request));
-            try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-
-            var dynamic = (try graph.content(second)).named.*;
-            dynamic.def.iterator_kind = .forced_dynamic;
-            dynamic.def.iterator_representation = .forced_dynamic;
-            dynamic.def.iterator_depth = 0;
-            dynamic.args = try graph.arena().dupe(NodeId, &.{item});
-            graph.setContent(second, try graph.namedContent(dynamic)) catch |err| {
-                // Failed index growth must preserve both old content and key.
-                try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .list, &.{component}, null)).?);
-                return err;
-            };
-            try std.testing.expect((try graph.findGeneratedIterator(public, .list, &.{component}, null)) == null);
-            try std.testing.expectEqual(second, (try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, null)).?);
-            try graph.setContent(second, .zst);
-            try std.testing.expect((try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, null)) == null);
-            try std.testing.expectEqual(@as(u32, 2), graph.generated_iterator_index.count());
-        }
-    };
-    // Heap-layout dependent remaps would vary the allocation count between runs.
-    var deterministic = base.DeterministicAllocator.init(std.testing.allocator);
-    try std.testing.checkAllAllocationFailures(deterministic.allocator(), Scenario.run, .{});
-}
-
-test "iterator-free finalization performs no graph resolutions" {
-    var types = Type.Store.init(std.testing.allocator);
-    defer types.deinit();
-    var name_store = names.NameStore.init(std.testing.allocator);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(std.testing.allocator, &types, &name_store);
-    defer graph.destroy();
-    _ = try graph.newNode(.{ .primitive = .str });
-    var diagnostics: GraphDiagnostics = .{};
-    graph.setDiagnostics(&diagnostics);
-    try graph.finalizeGeneratedIteratorRepresentations();
-    try graph.finalizeGeneratedIteratorIdentities();
-    try std.testing.expectEqual(@as(u64, 0), diagnostics.union_find_resolutions);
-}
-
-test "generated iterator index follows content replacement and argument unions" {
-    const Test = struct {
-        fn run(gpa: Allocator) (Allocator.Error || error{ TestUnexpectedResult, TestExpectedEqual })!void {
-            var types = Type.Store.init(gpa);
-            defer types.deinit();
-            var name_store = names.NameStore.init(gpa);
-            defer name_store.deinit();
-            const graph = try InstGraph.create(gpa, &types, &name_store);
-            defer graph.destroy();
-            // Every failed insertion/replacement must leave all previously created
-            // nodes in their exact buckets, with no dangling candidate ids.
-            errdefer {
-                for (graph.generated_iterator_index.slots) |entry| {
-                    if (!entry.occupied()) continue;
-                    var next: ?NodeId = entry.value;
-                    while (next) |node| {
-                        std.debug.assert(@backingInt(node) < graph.nodes.items.len);
-                        const named = graph.nodes.items[@backingInt(node)].named;
-                        var key = GeneratedIteratorKey.fromNamed(named).?;
-                        key.args = &.{};
-                        std.debug.assert(GeneratedIteratorLookupContext.eql(.{ .graph = graph }, .{
-                            .key = key,
-                            .item = named.args[0],
-                            .components = named.args[1..],
-                        }, entry.key));
-                        next = graph.generated_iterator_entries.get(node).?.next;
-                    }
-                }
-                for (graph.nodes.items, 0..) |content, i| {
-                    if (content == .named and GeneratedIteratorKey.fromNamed(content.named) != null) {
-                        const key = graph.generated_iterator_entries.get(@fromBackingInt(@intCast(i))).?.key;
-                        var next: ?NodeId = graph.generated_iterator_index.get(key).?;
-                        while (next) |node| {
-                            if (@backingInt(node) == i) break;
-                            next = graph.generated_iterator_entries.get(node).?.next;
-                        } else @panic("generated iterator entry missing from its key's index chain");
-                    }
-                }
-            }
-            const backing = try graph.newNode(.empty_record);
-            const item = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-            const other_item = try graph.newNode(.{ .primitive = .str });
-            const component = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-            const other_component = try graph.newNode(.{ .primitive = .u8 });
-            const source: InstIteratorPublicSource = .{
-                .named_type = .{ .module = .{} },
-                .def = .{
-                    .module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0x62)))),
-                    .type_name = try name_store.internTypeName("Iter"),
-                },
-                .kind = .@"opaque",
-                .builtin_owner = .iter,
-                .backing = .{ .node = backing, .use = .runtime_layout_only },
-                .declared_order = &.{},
-            };
-            const public = try graph.newNode(try graph.namedContent(.{
-                .named_type = source.named_type,
-                .def = source.def,
-                .kind = source.kind,
-                .builtin_owner = .some(.iter),
-                .args = try graph.arena().dupe(NodeId, &.{other_item}),
-                .backing = .some(source.backing),
-            }));
-            var generated = (try graph.content(public)).named.*;
-            generated.def.iterator_kind = .list;
-            generated.def.iterator_representation = .minted;
-            generated.def.iterator_depth = 1;
-            generated.args = try graph.arena().dupe(NodeId, &.{ item, component });
-            generated.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = null, .public_source = source });
-            const first = try graph.newNode(try graph.namedContent(generated));
-            const second = try graph.newNode(try graph.namedContent(generated));
-            try std.testing.expect((try graph.findGeneratedIterator(public, .list, &.{other_component}, null)) == null);
-            try graph.unify(item, other_item);
-            try graph.unify(component, other_component);
-            try std.testing.expectEqual(first, (try graph.findGeneratedIterator(public, .list, &.{other_component}, null)).?);
-            try graph.unify(second, first);
-            try std.testing.expectEqual(graph.find(first), (try graph.findGeneratedIterator(public, .list, &.{other_component}, null)).?);
-            const root = graph.find(first);
-            generated.def.iterator_kind = .forced_dynamic;
-            generated.def.iterator_representation = .forced_dynamic;
-            generated.args = try graph.arena().dupe(NodeId, &.{item});
-            try graph.setContent(root, try graph.namedContent(generated));
-            try std.testing.expect((try graph.findGeneratedIterator(public, .list, &.{other_component}, null)) == null);
-            try std.testing.expectEqual(root, (try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, null)).?);
-            generated.generated_iterator = try graph.generatedIterator(.{ .callable_evidence = .{ .bytes = @splat(7) }, .public_source = generated.generated_iterator.?.public_source });
-            try graph.setContent(root, try graph.namedContent(generated));
-            try std.testing.expect((try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, null)) == null);
-            try std.testing.expectEqual(root, (try graph.findGeneratedIterator(public, .forced_dynamic, &.{}, generated.generated_iterator.?.callable_evidence)).?);
-            try graph.setContent(root, .zst);
-            try std.testing.expectEqual(@as(u32, 0), graph.generated_iterator_index.count());
-            try std.testing.expect(graph.generated_iterator_nodes > 0);
-        }
-    };
-    try Test.run(std.testing.allocator);
-    var deterministic = base.DeterministicAllocator.init(std.testing.allocator);
-    try std.testing.checkAllAllocationFailures(deterministic.allocator(), Test.run, .{});
-}
-
 test "interface constraints preserve open rows and independent request variables" {
     const allocator = std.testing.allocator;
     var types = Type.Store.init(allocator);
@@ -14779,7 +12529,7 @@ test "interface constraints preserve recursive and field-presence topology" {
     const graph = try InstGraph.create(allocator, &types, &name_store);
     defer graph.destroy();
     const value = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-    const slot = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
+    const slot = try graph.newNode(.{ .unresolved = InstVariable.fieldSlot() });
     const kind = try graph.newUndeterminedFieldKind();
     graph.registerUndeterminedFieldKindCells(kind, slot, value);
     const row = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
@@ -14796,14 +12546,14 @@ test "interface constraints preserve recursive and field-presence topology" {
     const second_field = (try graph.content(second)).record.fields[0];
     try std.testing.expectEqual(first, (try graph.content(first_field.value_ty.get().?)).list);
     try std.testing.expect(first_field.kind.undetermined != second_field.kind.undetermined);
-    graph.constrainUndeterminedFieldKind(first_field.kind.undetermined, .optional);
+    try graph.selectUndeterminedFieldKind(first_field.kind.undetermined, .optional);
     try std.testing.expect(graph.resolvedFieldKind(second_field.kind) == null);
     const cells = graph.field_kinds.items[@backingInt(second_field.kind.undetermined)].cells.get().?;
     try std.testing.expectEqual(second_field.ty, cells.slot);
     try std.testing.expectEqual(second_field.value_ty.get().?, cells.value);
 }
 
-test "interface constraints retain settled producer evidence and exact leaf collision authority" {
+test "interface constraints keep exact leaf collision authority" {
     const allocator = std.testing.allocator;
     var types = Type.Store.init(allocator);
     defer types.deinit();
@@ -14811,15 +12561,6 @@ test "interface constraints retain settled producer evidence and exact leaf coll
     defer name_store.deinit();
     const graph = try InstGraph.create(allocator, &types, &name_store);
     defer graph.destroy();
-    const child = try graph.newNode(.{ .primitive = .str });
-    graph.markRecursiveValueSlot(child);
-    const parent = try graph.newNode(.{ .list = child });
-    const constraints = try InterfaceConstraints.capture(graph, graph.arena(), &.{parent});
-    const copied = (try constraints.instantiate(graph))[0];
-    const copied_child = (try graph.content(copied)).list;
-    try std.testing.expect(!graph.sameClass(child, copied_child));
-    try std.testing.expect(graph.representation_membership.items[@backingInt(graph.find(copied_child))].recursive_slot);
-
     const str_node = try graph.newNode(.{ .primitive = .str });
     const bool_node = try graph.newNode(.{ .primitive = .bool });
     const str_constraints = try InterfaceConstraints.capture(graph, graph.arena(), &.{str_node});
@@ -14902,7 +12643,7 @@ test "interface constraints distinguish variable sharing defaults and field-kind
     const kind = try graph.newUndeterminedFieldKind();
     const str = try graph.newNode(.{ .primitive = .str });
     graph.registerUndeterminedFieldKindCells(kind, str, str);
-    graph.constrainUndeterminedFieldKind(kind, .required);
+    try graph.selectUndeterminedFieldKind(kind, .required);
     const row = try graph.newNode(.{ .record = .{
         .fields = try graph.arena().dupe(InstField, &.{.{ .name = field, .ty = str, .value_ty = .of(str), .kind = .{ .undetermined = kind }, .default = .none }}),
         .ext = try graph.newNode(.empty_record),
@@ -15021,85 +12762,6 @@ test "interface request identity omits finished witnesses of open classes" {
     try std.testing.expect(!try (try produced.identity(graph)).eql(try imported_request.identity(graph), &types, &name_store));
 }
 
-test "interface agreement ignores finished witnesses of open classes" {
-    const allocator = std.testing.allocator;
-    var types = Type.Store.init(allocator);
-    defer types.deinit();
-    var name_store = names.NameStore.init(allocator);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(allocator, &types, &name_store);
-    defer graph.destroy();
-    const def: Type.TypeDef = .{
-        .module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xC5)))),
-        .type_name = try name_store.internTypeName("Agreed"),
-    };
-    const Instances = struct {
-        fn new(g: *InstGraph, d: Type.TypeDef) Allocator.Error!NodeId {
-            return try g.newNode(try g.namedContent(.{
-                .named_type = .{ .module = .{} },
-                .def = d,
-                .kind = .nominal,
-                .builtin_owner = .none,
-                .args = &.{},
-                .backing = .some(.{ .node = try g.newNode(.empty_record), .use = .inspectable }),
-            }));
-        }
-    };
-    const settled = try Instances.new(graph, def);
-    var retained = GraphTypeFinals.initRetainedTypeView(graph);
-    defer retained.deinit();
-    const durable = try retained.sealType(try graph.activeTypeViewForNode(settled));
-
-    // Each class is related to a named instance outside the interface, so
-    // capture keeps it open; one of them also carries a finished witness.
-    const live = try Instances.new(graph, def);
-    try graph.relateNamedInstances(live, try Instances.new(graph, def));
-    const witnessed = try graph.importMono(durable);
-    try graph.relateNamedInstances(witnessed, try Instances.new(graph, def));
-
-    const live_capture = try InterfaceConstraints.capture(graph, graph.arena(), &.{live});
-    const witnessed_capture = try InterfaceConstraints.capture(graph, graph.arena(), &.{witnessed});
-    const settled_capture = try InterfaceConstraints.capture(graph, graph.arena(), &.{settled});
-    try std.testing.expect(live_capture.nodes[0] == .open and live_capture.open_nodes[0].finished == .none);
-    try std.testing.expect(witnessed_capture.nodes[0] == .open and witnessed_capture.open_nodes[0].finished != .none);
-    try std.testing.expect(settled_capture.nodes[0] == .mono);
-    const expected = try settled_capture.equivalenceIdentityInto(graph, graph.arena());
-    try std.testing.expectEqualSlices(u8, expected, try live_capture.equivalenceIdentityInto(graph, graph.arena()));
-    try std.testing.expectEqualSlices(u8, expected, try witnessed_capture.equivalenceIdentityInto(graph, graph.arena()));
-}
-
-test "comparing interface summaries leaves the graph they describe unchanged" {
-    const allocator = std.testing.allocator;
-    var types = Type.Store.init(allocator);
-    defer types.deinit();
-    var name_store = names.NameStore.init(allocator);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(allocator, &types, &name_store);
-    defer graph.destroy();
-    const def: Type.TypeDef = .{
-        .module = try name_store.internModuleIdentity(&(@as([32]u8, @splat(0xC6)))),
-        .type_name = try name_store.internTypeName("Compared"),
-    };
-    var args = [_]NodeId{try graph.newNode(.{ .unresolved = InstVariable.placeholder() })};
-    const instance = try graph.newNode(try graph.namedContent(.{
-        .named_type = .{ .module = .{} },
-        .def = def,
-        .kind = .nominal,
-        .builtin_owner = .none,
-        .args = &args,
-        .backing = .some(.{ .node = try graph.newNode(.empty_record), .use = .inspectable }),
-    }));
-    const capture = try InterfaceConstraints.capture(graph, graph.arena(), &.{instance});
-    try std.testing.expect(capture.nodes[0] == .open);
-    const nodes_before = graph.nodes.items.len;
-    _ = try capture.equivalenceIdentityInto(graph, graph.arena());
-    // A comparison that instantiated its constraints here would leave a
-    // second named instance with an unfilled argument in the graph, which a
-    // later scan of every class, such as generated iterator finalization,
-    // would seal.
-    try std.testing.expectEqual(nodes_before, graph.nodes.items.len);
-}
-
 test "interface constraints keep cycles open when a later edge reaches a variable" {
     const allocator = std.testing.allocator;
     var types = Type.Store.init(allocator);
@@ -15160,104 +12822,6 @@ test "interface constraints separate declarations sharing a related backing grou
     }
 }
 
-test "interface constraints capture work is independent of unrelated representation marks" {
-    const allocator = std.testing.allocator;
-    for ([_]usize{ 1, 32, 128 }) |root_count| {
-        var expected_work: ?u64 = null;
-        for ([_]usize{ 0, 32, 256 }) |unrelated_count| {
-            var types = Type.Store.init(allocator);
-            defer types.deinit();
-            var name_store = names.NameStore.init(allocator);
-            defer name_store.deinit();
-            const graph = try InstGraph.create(allocator, &types, &name_store);
-            defer graph.destroy();
-            const roots = try allocator.alloc(NodeId, root_count);
-            defer allocator.free(roots);
-            for (roots) |*root| root.* = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-            for (0..unrelated_count) |_| {
-                const recursive = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-                graph.markRecursiveValueSlot(recursive);
-                const dynamic = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-                graph.markForcedDynamicIteratorRoot(dynamic);
-            }
-            var diagnostics: GraphDiagnostics = .{};
-            graph.setDiagnostics(&diagnostics);
-            const captured = try InterfaceConstraints.capture(graph, graph.arena(), roots);
-            try std.testing.expectEqual(root_count, captured.open_nodes.len);
-            for (captured.open_nodes) |node| {
-                try std.testing.expect(!node.recursive_slot);
-                try std.testing.expect(!node.forced_dynamic);
-            }
-            const work = diagnostics.union_find_resolutions;
-            if (expected_work) |expected| try std.testing.expectEqual(expected, work);
-            expected_work = work;
-            try std.testing.expect(work <= 10 * root_count);
-        }
-    }
-}
-
-test "interface constraints representation membership survives unions replay and reset" {
-    const allocator = std.testing.allocator;
-    var types = Type.Store.init(allocator);
-    defer types.deinit();
-    var name_store = names.NameStore.init(allocator);
-    defer name_store.deinit();
-    const graph = try InstGraph.create(allocator, &types, &name_store);
-    defer graph.destroy();
-    for ([_]InstGraph.RepresentationMembership{
-        .{},
-        .{ .recursive_slot = true },
-        .{ .forced_dynamic = true },
-        .{ .recursive_slot = true, .forced_dynamic = true },
-    }) |membership| {
-        const node = try graph.newNode(.{ .unresolved = InstVariable.checkedVariable(null, null) });
-        if (membership.recursive_slot) graph.markRecursiveValueSlot(node);
-        if (membership.forced_dynamic) graph.markForcedDynamicIteratorRoot(node);
-        const captured = try InterfaceConstraints.capture(graph, graph.arena(), &.{node});
-        try std.testing.expectEqual(membership.recursive_slot, captured.open_nodes[0].recursive_slot);
-        try std.testing.expectEqual(membership.forced_dynamic, captured.open_nodes[0].forced_dynamic);
-        const copied = (try captured.instantiate(graph))[0];
-        try std.testing.expectEqual(membership, graph.representation_membership.items[@backingInt(graph.find(copied))]);
-    }
-    for ([_]bool{ false, true }) |marked_wins| {
-        const recursive = try graph.newNode(.{ .primitive = .str });
-        const dynamic = try graph.newNode(.{ .primitive = .str });
-        const alias = try graph.newNode(.{ .primitive = .str });
-        try graph.union_(recursive, alias);
-        // Mark through a redirected permanent identity, including repeated marks.
-        graph.markRecursiveValueSlot(alias);
-        graph.markRecursiveValueSlot(alias);
-        graph.markForcedDynamicIteratorRoot(dynamic);
-        if (marked_wins) {
-            try graph.union_(recursive, dynamic);
-        } else {
-            try graph.union_(dynamic, recursive);
-        }
-        const winner = try graph.newNode(.{ .primitive = .str });
-        try graph.union_(winner, recursive);
-        const constraints = try InterfaceConstraints.capture(graph, graph.arena(), &.{ alias, dynamic });
-        try std.testing.expectEqual(@as(usize, 1), constraints.open_nodes.len);
-        try std.testing.expect(constraints.open_nodes[0].recursive_slot);
-        try std.testing.expect(constraints.open_nodes[0].forced_dynamic);
-        const copied = try constraints.instantiate(graph);
-        try std.testing.expect(graph.sameClass(copied[0], copied[1]));
-        try std.testing.expect(!graph.sameClass(copied[0], winner));
-        try std.testing.expect(graph.iteratorRootRequiresForcedDynamic(copied[0]));
-        const recaptured = try InterfaceConstraints.capture(graph, graph.arena(), copied);
-        try std.testing.expectEqual(@as(usize, 1), recaptured.open_nodes.len);
-        try std.testing.expect(recaptured.open_nodes[0].recursive_slot);
-        try std.testing.expect(recaptured.open_nodes[0].forced_dynamic);
-        const fresh = try graph.newNode(.{ .primitive = .str });
-        const unmarked = try InterfaceConstraints.capture(graph, graph.arena(), &.{fresh});
-        try std.testing.expectEqual(@as(usize, 0), unmarked.open_nodes.len);
-    }
-    graph.reset();
-    const fresh = try graph.newNode(.{ .primitive = .str });
-    graph.assertPermanentNode(fresh);
-    try std.testing.expect(!graph.iteratorRootRequiresForcedDynamic(fresh));
-    try std.testing.expect(!graph.representation_membership.items[@backingInt(fresh)].recursive_slot);
-}
-
 test "finished witness capture work is independent of permanent class history" {
     const allocator = std.testing.allocator;
     for ([_]bool{ false, true }) |with_witness| {
@@ -15283,7 +12847,9 @@ test "finished witness capture work is independent of permanent class history" {
                     const representative = graph.find(root);
                     try graph.setContent(representative, .{ .primitive = .str });
                     try graph.union_(representative, imported);
-                    graph.markRecursiveValueSlot(root);
+                    // Constructor evidence keeps the settled class open in
+                    // the capture, so its witness is what the capture records.
+                    graph.registerConstructorEvidenceRequest(root);
                 }
                 var diagnostics: GraphDiagnostics = .{};
                 graph.setDiagnostics(&diagnostics);
@@ -15342,7 +12908,9 @@ test "finished witnesses preserve member order and original occurrence views thr
                 break;
             }
         } else return error.TestExpectedEqual;
-        graph.markRecursiveValueSlot(second);
+        // Constructor evidence keeps the settled class open in the capture.
+        graph.registerConstructorEvidenceRequest(first);
+        graph.registerConstructorEvidenceRequest(second);
         const captured = try InterfaceConstraints.capture(graph, graph.arena(), &.{ first, second });
         try std.testing.expectEqual(@as(usize, 1), captured.open_nodes.len);
         try std.testing.expect(captured.open_nodes[0].finished != .none);
@@ -15364,7 +12932,8 @@ test "finished witness absence updates after registration and import and resets 
     const graph = try InstGraph.create(allocator, &types, &name_store);
     defer graph.destroy();
     const slot = try graph.newNode(.{ .primitive = .str });
-    graph.markRecursiveValueSlot(slot);
+    // Constructor evidence keeps each settled class open in the capture.
+    graph.registerConstructorEvidenceRequest(slot);
     const parent = try graph.newNode(.{ .list = slot });
     const before = try InterfaceConstraints.capture(graph, graph.arena(), &.{slot});
     try std.testing.expect(before.open_nodes[0].finished == .none);
@@ -15377,7 +12946,7 @@ test "finished witness absence updates after registration and import and resets 
     try std.testing.expect(before.open_nodes[0].finished == .none);
 
     const plain = try graph.newNode(.{ .primitive = .str });
-    graph.markRecursiveValueSlot(plain);
+    graph.registerConstructorEvidenceRequest(plain);
     try std.testing.expect(!try graph.containsFinishedMono(plain));
     try graph.unify(plain, try graph.importMonoIndependent(ty));
     try std.testing.expect(try graph.containsFinishedMono(plain));
@@ -15387,7 +12956,7 @@ test "finished witness absence updates after registration and import and resets 
     graph.reset();
     const fresh = try graph.newNode(.{ .primitive = .str });
     graph.assertPermanentNode(fresh);
-    graph.markRecursiveValueSlot(fresh);
+    graph.registerConstructorEvidenceRequest(fresh);
     try std.testing.expect(!try graph.containsFinishedMono(fresh));
     const reset_capture = try InterfaceConstraints.capture(graph, graph.arena(), &.{fresh});
     try std.testing.expect(reset_capture.open_nodes[0].finished == .none);

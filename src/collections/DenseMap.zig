@@ -54,6 +54,8 @@ pub fn DenseMap(comptime K: type, comptime V: type) type {
         /// with large IDs costs a few slots rather than a slot for every
         /// chunk between ID zero and the highest touched ID.
         chunk_base: usize = 0,
+        /// The number of chunks the chunk-pointer array holds.
+        allocated_chunks: usize = 0,
         /// Live keys, parallel to `values`. Keys are stored as given rather
         /// than as computed positions, which keeps a 32-bit ID at 4 bytes.
         active_keys: std.ArrayList(K) = .empty,
@@ -117,12 +119,18 @@ pub fn DenseMap(comptime K: type, comptime V: type) type {
 
         pub fn getOrPut(self: *Self, key: K) Allocator.Error!GetOrPutResult {
             const index = keyIndex(key);
-            if (self.densePosition(index)) |existing| return .{
-                .value_ptr = &self.values.items[existing],
-                .found_existing = true,
-            };
-
-            const slot = try self.ensureSparseSlot(index);
+            // One page lookup serves both the hit and an insertion into a
+            // page that already exists; only a missing page takes the
+            // allocating path.
+            const slot = if (self.sparseSlotPtr(index)) |existing_slot| blk: {
+                if (existing_slot.* != empty_position) {
+                    const existing: usize = existing_slot.* - 1;
+                    std.debug.assert(existing < self.active_keys.items.len);
+                    std.debug.assert(keyIndex(self.active_keys.items[existing]) == index);
+                    return .{ .value_ptr = &self.values.items[existing], .found_existing = true };
+                }
+                break :blk existing_slot;
+            } else try self.ensureSparseSlot(index);
             try self.active_keys.ensureUnusedCapacity(self.allocator, 1);
             try self.values.ensureUnusedCapacity(self.allocator, 1);
             const position: u32 = @intCast(self.active_keys.items.len);
@@ -189,6 +197,7 @@ pub fn DenseMap(comptime K: type, comptime V: type) type {
             for (self.sparse_chunks.items) |chunk| {
                 const copied: ?*SparseChunk = if (chunk) |source| blk: {
                     const fresh = try self.allocator.create(SparseChunk);
+                    copy.allocated_chunks += 1;
                     fresh.* = source.*;
                     break :blk fresh;
                 } else null;
@@ -354,6 +363,7 @@ pub fn DenseMap(comptime K: type, comptime V: type) type {
                 const chunk = try self.allocator.create(SparseChunk);
                 chunk.* = @splat(empty_position);
                 self.sparse_chunks.items[slot_index] = chunk;
+                self.allocated_chunks += 1;
             }
 
             return &self.sparse_chunks.items[slot_index].?[index & chunk_mask];
@@ -390,10 +400,29 @@ pub fn DenseMap(comptime K: type, comptime V: type) type {
             self.sparseSlotPtr(index).?.* = empty_position;
         }
 
+        /// Free every chunk, emptying the chunk-pointer array. A chunk holding
+        /// a live key is found through that key, so a map whose keys spread
+        /// over a wide range costs its live keys rather than the array's
+        /// span; only chunks whose keys were all removed are found by walking
+        /// the array.
         fn freeChunks(self: *Self) void {
-            for (self.sparse_chunks.items) |maybe_chunk| {
-                if (maybe_chunk) |chunk| self.allocator.destroy(chunk);
+            var remaining = self.allocated_chunks;
+            for (self.active_keys.items) |key| {
+                if (remaining == 0) break;
+                const slot = &self.sparse_chunks.items[(keyIndex(key) >> chunk_shift) - self.chunk_base];
+                const chunk = slot.* orelse continue;
+                self.allocator.destroy(chunk);
+                slot.* = null;
+                remaining -= 1;
             }
+            if (remaining != 0) {
+                for (self.sparse_chunks.items) |*slot| {
+                    const chunk = slot.* orelse continue;
+                    self.allocator.destroy(chunk);
+                    slot.* = null;
+                }
+            }
+            self.allocated_chunks = 0;
         }
     };
 }
@@ -796,4 +825,37 @@ test "DenseMapUnmanaged starts empty and takes its allocator per call" {
     var copy = try map.clone(std.testing.allocator);
     defer copy.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), copy.count());
+}
+
+test "DenseMap getOrPut finds, fills an existing page, and opens a missing one" {
+    var map = DenseMap(u32, void).init(std.testing.allocator);
+    defer map.deinit();
+    try std.testing.expect(!(try map.getOrPut(3)).found_existing);
+    try std.testing.expectEqual(@as(usize, 1), map.allocated_chunks);
+    try std.testing.expect((try map.getOrPut(3)).found_existing);
+    // Same page as key 3: no new page.
+    try std.testing.expect(!(try map.getOrPut(60)).found_existing);
+    try std.testing.expectEqual(@as(usize, 1), map.allocated_chunks);
+    try std.testing.expect(!(try map.getOrPut(64)).found_existing);
+    try std.testing.expectEqual(@as(usize, 2), map.allocated_chunks);
+    try std.testing.expectEqual(@as(usize, 3), map.count());
+    map.clearRetainingCapacity();
+    try std.testing.expect(!(try map.getOrPut(60)).found_existing);
+    try std.testing.expect((try map.getOrPut(60)).found_existing);
+    try std.testing.expectEqual(@as(usize, 1), map.count());
+}
+
+fn exerciseGetOrPutAllocationFailures(gpa: Allocator) (Allocator.Error || error{TestUnexpectedResult})!void {
+    var map = DenseMap(u32, u64).init(gpa);
+    defer map.deinit();
+    for ([_]u32{ 5, 70, 6, 5000, 70 }) |key| {
+        const result = try map.getOrPut(key);
+        if (!result.found_existing) result.value_ptr.* = key;
+    }
+    try std.testing.expect(map.get(5000) == 5000);
+    try std.testing.expect(map.count() == 4);
+}
+
+test "DenseMap getOrPut leaves the map consistent when an allocation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseGetOrPutAllocationFailures, .{});
 }

@@ -17,14 +17,14 @@ const type_roles = .{ "source_constructor_ty", "source_runtime_ty", "source_shap
 /// select candidates; exact comparison of the proof graph is the equality
 /// authority. A nested contract interned earlier in the order is reached
 /// through its identity, so a comparison never walks a nested chain again.
-pub fn intern(allocator: Allocator, types: checked.CheckedTypeStoreView, table: *dispatch.StaticDispatchPlanTable) Allocator.Error!void {
+pub fn intern(allocator: Allocator, types: *const checked.CheckedTypeStoreView, table: *dispatch.StaticDispatchPlanTable) Allocator.Error!void {
     var buckets = std.AutoHashMap(u64, u32).init(allocator);
     defer buckets.deinit();
-    const next = try allocator.alloc(?u32, table.generated_codec_derivations.len);
+    const next = try allocator.alloc(?u32, table.generated_codec_derivations.items().len);
     defer allocator.free(next);
     var comparer = Comparer{ .allocator = allocator, .types = types, .table = table, .type_scratch = .init(allocator) };
     defer comparer.deinit();
-    for (table.generated_codec_derivations, 0..) |*derivation, index| {
+    for (table.generated_codec_derivations.items(), 0..) |*derivation, index| {
         const raw: u32 = @intCast(index);
         comparer.interned_len = raw;
         // Bucket selector only: the derivation's own types and method names
@@ -66,7 +66,7 @@ pub fn digestContents(
     names: *const canonical.CanonicalNameStore,
     table: *dispatch.StaticDispatchPlanTable,
 ) Allocator.Error!void {
-    const derivations = table.generated_codec_derivations;
+    const derivations = table.generated_codec_derivations.items();
     const own = try allocator.alloc(dispatch.GeneratedCodecContentDigest, derivations.len);
     defer allocator.free(own);
     const component = try allocator.alloc(u32, derivations.len);
@@ -221,24 +221,25 @@ const ContentDigester = struct {
         self.nested_seen.clearRetainingCapacity();
         self.evidence_ordinals.clearRetainingCapacity();
         self.tasks.clearRetainingCapacity();
-        for (self.table.generated_codec_derivations[codec].callsSlice(self.table)) |call| switch (call.resolution) {
+        for (self.table.generated_codec_derivations.items()[codec].callsSlice(self.table)) |call| switch (call.resolution) {
             .pending => unreachable, // every codec call is resolved before identities are digested
             .checked_error => {},
             .callable => |node| try self.tasks.append(self.allocator, .{ .evidence = @backingInt(node) }),
             .structural => |nested| try self.appendNestedCodec(@backingInt(nested)),
+            .forwarded => {},
         };
         while (self.tasks.pop()) |task| switch (task) {
             .codec => unreachable, // this walk queues only evidence and refs tasks; nested codecs go through appendNestedCodec
             .evidence => |id| {
                 if ((try self.evidence_ordinals.getOrPut(self.allocator, id)).found_existing) continue;
-                const node = self.table.evidence_nodes[id];
+                const node = self.table.evidence_nodes.items()[id];
                 if (node.generated_codec_derivation.get()) |nested| try self.appendNestedCodec(@backingInt(nested));
                 switch (node.nested) {
                     .from_callable => {},
                     .resolved, .through_alias => |span| try self.tasks.append(self.allocator, .{ .refs = span }),
                 }
             },
-            .refs => |span| for (self.table.evidence_refs[span.start..][0..span.len]) |ref| {
+            .refs => |span| for (self.table.evidence_refs.items()[span.start..][0..span.len]) |ref| {
                 switch (ref.resolution) {
                     .direct => |node| try self.tasks.append(self.allocator, .{ .evidence = @backingInt(node) }),
                     .structural => |structural| if (structural.generated_codec_derivation) |nested| try self.appendNestedCodec(@backingInt(nested)),
@@ -300,7 +301,7 @@ const ContentDigester = struct {
 
     fn writeCodec(self: *ContentDigester, id: u32) Allocator.Error!void {
         if (!try self.firstVisit(&self.codec_ordinals, id)) return;
-        const derivation = self.table.generated_codec_derivations[id];
+        const derivation = self.table.generated_codec_derivations.items()[id];
         self.writeU8(@backingInt(derivation.kind));
         inline for (type_roles) |role| try self.writeType(@field(derivation, role));
         const calls = derivation.callsSlice(self.table);
@@ -317,13 +318,14 @@ const ContentDigester = struct {
                 .checked_error => {},
                 .callable => |node| try self.children.append(self.allocator, .{ .evidence = @backingInt(node) }),
                 .structural => |nested| try self.children.append(self.allocator, .{ .codec = @backingInt(nested) }),
+                .forwarded => |ref_index| try self.children.append(self.allocator, .{ .refs = .{ .start = ref_index, .len = 1 } }),
             }
         }
     }
 
     fn writeEvidence(self: *ContentDigester, id: u32) Allocator.Error!void {
         if (!try self.firstVisit(&self.evidence_ordinals, id)) return;
-        const node = self.table.evidence_nodes[id];
+        const node = self.table.evidence_nodes.items()[id];
         self.writeTarget(node.target);
         try self.writeOptionalType(node.dispatcher_ty.get());
         self.writeU8(@backingInt(std.meta.activeTag(node.instantiation)));
@@ -331,7 +333,7 @@ const ContentDigester = struct {
             .monomorphic => {},
             .callable, .alias, .derived_from_callable => |ty| try self.writeType(ty),
         }
-        const subst = self.table.site_substitutions[node.subst.start..][0..node.subst.len];
+        const subst = self.table.site_substitutions.items()[node.subst.start..][0..node.subst.len];
         self.writeU32(@intCast(subst.len));
         for (subst) |ty| try self.writeType(ty);
         self.writeU8(@intFromBool(node.generated_codec_derivation != .none));
@@ -391,7 +393,7 @@ const ContentDigester = struct {
     }
 
     fn writeRefs(self: *ContentDigester, span: Span) Allocator.Error!void {
-        const refs = self.table.evidence_refs[span.start..][0..span.len];
+        const refs = self.table.evidence_refs.items()[span.start..][0..span.len];
         self.writeU32(@intCast(refs.len));
         for (refs) |ref| {
             try self.writeType(ref.dispatcher_ty);
@@ -483,7 +485,7 @@ const ContentDigester = struct {
 /// allocations with the same content.
 pub fn callsEquivalent(
     allocator: Allocator,
-    types: checked.CheckedTypeStoreView,
+    types: *const checked.CheckedTypeStoreView,
     table: *const dispatch.StaticDispatchPlanTable,
     left: dispatch.GeneratedCodecCall,
     right: dispatch.GeneratedCodecCall,
@@ -499,6 +501,7 @@ pub fn callsEquivalent(
         .checked_error => {},
         .callable => |id| try comparer.work.append(allocator, .{ .kind = .evidence, .left = @backingInt(id), .right = @backingInt(right.resolution.callable) }),
         .structural => |id| if (!try comparer.codecs(id, right.resolution.structural)) return false,
+        .forwarded => |index| if (!comparer.forwardedEql(index, right.resolution.forwarded)) return false,
     }
     return try comparer.run();
 }
@@ -506,7 +509,7 @@ pub fn callsEquivalent(
 const Pair = struct { kind: enum { codec, evidence }, left: u32, right: u32 };
 const Comparer = struct {
     allocator: Allocator,
-    types: checked.CheckedTypeStoreView,
+    types: *const checked.CheckedTypeStoreView,
     table: *const dispatch.StaticDispatchPlanTable,
     /// Specialization identity is exact; agreement between repeated
     /// occurrences of one role is modulo transparent aliases, like the role.
@@ -546,7 +549,7 @@ const Comparer = struct {
         const right_index = @backingInt(right.?);
         const left_index = @backingInt(left_id);
         if (left_index < self.interned_len and right_index < self.interned_len) {
-            const derivations = self.table.generated_codec_derivations;
+            const derivations = self.table.generated_codec_derivations.items();
             return derivations[left_index].identity == derivations[right_index].identity;
         }
         try self.work.append(self.allocator, .{ .kind = .codec, .left = left_index, .right = right_index });
@@ -569,8 +572,8 @@ const Comparer = struct {
     /// each reference carries are queued.
     fn refsSpan(self: *Comparer, left: Span, right: Span, pending: *std.ArrayList([2]Span)) Allocator.Error!bool {
         if (left.len != right.len) return false;
-        const left_refs = self.table.evidence_refs[left.start..][0..left.len];
-        const right_refs = self.table.evidence_refs[right.start..][0..right.len];
+        const left_refs = self.table.evidence_refs.items()[left.start..][0..left.len];
+        const right_refs = self.table.evidence_refs.items()[right.start..][0..right.len];
         for (left_refs, right_refs) |a, b| {
             try pending.append(self.allocator, .{ a.callable_contracts, b.callable_contracts });
             if (std.meta.activeTag(a.resolution) != std.meta.activeTag(b.resolution)) return false;
@@ -598,6 +601,15 @@ const Comparer = struct {
         self.right_types.clearRetainingCapacity();
     }
 
+    /// Two forwarded calls are equal when they name the same enclosing
+    /// evidence parameter the same way.
+    fn forwardedEql(self: *const Comparer, left: u32, right: u32) bool {
+        return std.meta.eql(
+            self.table.evidence_refs.items()[left].resolution.constraint,
+            self.table.evidence_refs.items()[right].resolution.constraint,
+        );
+    }
+
     fn equal(self: *Comparer, left: u32, right: u32) Allocator.Error!bool {
         self.reset();
         try self.work.append(self.allocator, .{ .kind = .codec, .left = left, .right = right });
@@ -610,8 +622,8 @@ const Comparer = struct {
             if (visited.found_existing) continue;
             switch (pair.kind) {
                 .codec => {
-                    const a = self.table.generated_codec_derivations[pair.left];
-                    const b = self.table.generated_codec_derivations[pair.right];
+                    const a = self.table.generated_codec_derivations.items()[pair.left];
+                    const b = self.table.generated_codec_derivations.items()[pair.right];
                     if (a.kind != b.kind or a.calls.len != b.calls.len) return false;
                     inline for (type_roles) |field| {
                         try self.typesPair(@field(a, field), @field(b, field));
@@ -626,12 +638,13 @@ const Comparer = struct {
                             .checked_error => {},
                             .callable => |id| try self.work.append(self.allocator, .{ .kind = .evidence, .left = @backingInt(id), .right = @backingInt(bc.resolution.callable) }),
                             .structural => |id| if (!try self.codecs(id, bc.resolution.structural)) return false,
+                            .forwarded => |index| if (!self.forwardedEql(index, bc.resolution.forwarded)) return false,
                         }
                     }
                 },
                 .evidence => {
-                    const a = self.table.evidence_nodes[pair.left];
-                    const b = self.table.evidence_nodes[pair.right];
+                    const a = self.table.evidence_nodes.items()[pair.left];
+                    const b = self.table.evidence_nodes.items()[pair.right];
                     if (!std.meta.eql(a.target, b.target) or std.meta.activeTag(a.instantiation) != std.meta.activeTag(b.instantiation) or std.meta.activeTag(a.nested) != std.meta.activeTag(b.nested) or a.subst.len != b.subst.len) return false;
                     if (!try self.optionalTypes(a.dispatcher_ty.get(), b.dispatcher_ty.get())) return false;
                     if (!try self.codecs(a.generated_codec_derivation.get(), b.generated_codec_derivation.get())) return false;
@@ -641,8 +654,8 @@ const Comparer = struct {
                         .alias => |ty| try self.typesPair(ty, b.instantiation.alias),
                         .derived_from_callable => |ty| try self.typesPair(ty, b.instantiation.derived_from_callable),
                     }
-                    const left_subst = self.table.site_substitutions[a.subst.start..][0..a.subst.len];
-                    const right_subst = self.table.site_substitutions[b.subst.start..][0..b.subst.len];
+                    const left_subst = self.table.site_substitutions.items()[a.subst.start..][0..a.subst.len];
+                    const right_subst = self.table.site_substitutions.items()[b.subst.start..][0..b.subst.len];
                     for (left_subst, right_subst) |at, bt| try self.typesPair(at, bt);
                     switch (a.nested) {
                         .from_callable => {},
@@ -710,10 +723,10 @@ test "codec identity preserves cross-root sharing, method roles, and recursive s
     calls[3].method_role = 1;
     calls[4].resolution = .checked_error;
     var table = dispatch.StaticDispatchPlanTable{
-        .generated_codec_derivations = &derivations,
-        .generated_codec_calls = &calls,
+        .generated_codec_derivations = .fromBorrowedSlice(&derivations),
+        .generated_codec_calls = .fromBorrowedSlice(&calls),
     };
-    try intern(gpa, types.view(), &table);
+    try intern(gpa, &types.view(), &table);
     try std.testing.expectEqual(derivations[0].identity, derivations[1].identity);
     for (derivations[2..], 2..) |derivation, i| try std.testing.expectEqual(@as(CodecId, @fromBackingInt(@intCast(@as(u32, @intCast(i))))), derivation.identity);
 }
@@ -768,10 +781,10 @@ fn digestTestContract(padding: usize, shared: bool) (Allocator.Error || error{No
         .resolution = .checked_error,
     }};
     var table = dispatch.StaticDispatchPlanTable{
-        .generated_codec_derivations = &derivations,
-        .generated_codec_calls = &calls,
+        .generated_codec_derivations = .fromBorrowedSlice(&derivations),
+        .generated_codec_calls = .fromBorrowedSlice(&calls),
     };
-    try intern(gpa, types.view(), &table);
+    try intern(gpa, &types.view(), &table);
     try digestContents(gpa, .{}, &types, &names, &table);
     return derivations[0].content;
 }
@@ -839,8 +852,8 @@ fn digestTestChain(order: []const u32, comptime method: []const u8, cyclic: bool
         };
     }
     var table = dispatch.StaticDispatchPlanTable{
-        .generated_codec_derivations = &derivations,
-        .generated_codec_calls = &calls,
+        .generated_codec_derivations = .fromBorrowedSlice(&derivations),
+        .generated_codec_calls = .fromBorrowedSlice(&calls),
     };
     try digestContents(gpa, .{}, &types, &names, &table);
     return derivations[order[0]].content;

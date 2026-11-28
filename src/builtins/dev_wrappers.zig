@@ -253,6 +253,7 @@ const listAppendSublist = list.listAppendSublist;
 const listPrepend = list.listPrepend;
 const listSublist = list.listSublist;
 const listSublistBorrowed = list.listSublistBorrowed;
+const listClear = list.listClear;
 const listDropAt = list.listDropAt;
 const listReplace = list.listReplace;
 const listSet = list.listSet;
@@ -264,6 +265,7 @@ const listWithCapacity = list.listWithCapacity;
 const listAppendUnsafe = list.listAppendUnsafe;
 const listDecref = list.listDecref;
 const RcDropFn = rc_callback_abi.RcDecrefFn;
+const RcQueuedDropFn = rc_callback_abi.RcQueuedDropFn;
 const RcIncFn = rc_callback_abi.RcIncrefFn;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -383,6 +385,12 @@ pub fn roc_builtins_str_substring_unsafe(out: *RocStr, str_bytes: ?[*]u8, str_le
     const roc_ops = in_process_host.ops();
     const s = RocStr{ .bytes = str_bytes, .length = str_len, .capacity_or_alloc_ptr = str_cap };
     out.* = str.substringUnsafeC(s, start, length, roc_ops);
+}
+
+/// Search borrowed bytes with the literal's compiled Two-Way plan.
+pub fn roc_builtins_str_find_delimiter(bytes: [*]const u8, len: usize, start: usize, needle: [*]const u8, needle_len: usize, cut: usize, period: usize) callconv(.c) usize {
+    const plan = @import("delimiter.zig").Plan{ .cut = cut, .period = period };
+    return plan.find(bytes[0..len], start, needle[0..needle_len]);
 }
 
 /// Wrapper: splitFirst(RocStr, RocStr, *RocOps) -> { before, found, after }
@@ -713,105 +721,6 @@ pub fn roc_builtins_roc_crashed(msg_bytes: [*]const u8, msg_len: usize) callconv
     roc_ops.crash(msg_bytes[0..msg_len]);
 }
 
-/// Which local a dev-backend Debug invariant check found invalid.
-pub const InvalidLocalKind = enum(u8) {
-    str,
-    box,
-};
-
-/// Why a dev-backend Debug invariant check failed.
-pub const InvalidLocalReason = enum(u8) {
-    null_bytes_pointer,
-    null_allocation_pointer,
-    misaligned_allocation_pointer,
-    misaligned_bytes_pointer,
-    length_exceeds_capacity,
-    non_aligned_pointer,
-
-    fn describe(self: InvalidLocalReason) []const u8 {
-        return switch (self) {
-            .null_bytes_pointer => "an invalid RocStr (null bytes pointer)",
-            .null_allocation_pointer => "an invalid RocStr (null allocation pointer)",
-            .misaligned_allocation_pointer => "an invalid RocStr (misaligned allocation pointer)",
-            .misaligned_bytes_pointer => "an invalid RocStr (misaligned bytes pointer)",
-            .length_exceeds_capacity => "an invalid RocStr (length exceeds capacity)",
-            .non_aligned_pointer => "a non-aligned pointer",
-        };
-    }
-};
-
-/// Render the message for a failed invariant check into `buffer`. The
-/// values arrive as integers from generated code; one outside its enum
-/// is reported as such rather than trusted. The procedure is named by the
-/// two halves of the 128 bits its `roc__p` symbol spells, and the local by
-/// its position in that procedure's frame, so the message means the same
-/// thing in every program that links the procedure's code.
-pub fn formatInvalidLocal(buffer: *[192]u8, kind: u8, reason: u8, frame_index: u32, proc_high: u64, proc_low: u64) []const u8 {
-    const kind_name: []const u8 = if (std.enums.fromInt(InvalidLocalKind, kind)) |k| @tagName(k) else "unknown";
-    const received: []const u8 = if (std.enums.fromInt(InvalidLocalReason, reason)) |r| r.describe() else "an invalid value (unknown reason)";
-    var index_buffer: [10]u8 = undefined;
-    var proc_buffer: [32]u8 = undefined;
-    for ([_]u64{ proc_high, proc_low }, 0..) |half, half_index| {
-        for (0..16) |digit| {
-            const shift: u6 = @intCast(60 - 4 * digit);
-            proc_buffer[half_index * 16 + digit] = "0123456789abcdef"[@as(usize, @intCast((half >> shift) & 0xf))];
-        }
-    }
-    const parts = [_][]const u8{
-        "LIR/codegen invariant violated: ",
-        kind_name,
-        " local ",
-        if (frame_index == std.math.maxInt(u32)) "outside the frame" else unsignedIntToStr(u32, &index_buffer, frame_index),
-        " of roc__p",
-        &proc_buffer,
-        " received ",
-        received,
-    };
-    var len: usize = 0;
-    for (parts) |part| {
-        @memcpy(buffer[len..][0..part.len], part);
-        len += part.len;
-    }
-    return buffer[0..len];
-}
-
-/// Report a failed dev-backend Debug invariant check on a local. Generated
-/// code passes the check's identity as integers and this formats the
-/// message, so a check site carries no message bytes of its own.
-pub fn roc_builtins_debug_invalid_local(kind: u8, reason: u8, frame_index: u32, proc_high: u64, proc_low: u64) callconv(.c) void {
-    const roc_ops = in_process_host.ops();
-    var buffer: [192]u8 = undefined;
-    roc_ops.crash(formatInvalidLocal(&buffer, kind, reason, frame_index, proc_high, proc_low));
-}
-
-test "formatInvalidLocal renders the check identity and reason" {
-    var buffer: [192]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "LIR/codegen invariant violated: str local 7 of roc__p0dd5e7903b5a4e63af0a004f1598b1ae received an invalid RocStr (null bytes pointer)",
-        formatInvalidLocal(&buffer, @backingInt(InvalidLocalKind.str), @backingInt(InvalidLocalReason.null_bytes_pointer), 7, 0x0dd5e7903b5a4e63, 0xaf0a004f1598b1ae),
-    );
-    try std.testing.expectEqualStrings(
-        "LIR/codegen invariant violated: box local 3 of roc__p00000000000000090000000000000002 received a non-aligned pointer",
-        formatInvalidLocal(&buffer, @backingInt(InvalidLocalKind.box), @backingInt(InvalidLocalReason.non_aligned_pointer), 3, 9, 2),
-    );
-    try std.testing.expectEqualStrings(
-        "LIR/codegen invariant violated: unknown local 1 of roc__p00000000000000020000000000000003 received an invalid value (unknown reason)",
-        formatInvalidLocal(&buffer, 200, 200, 1, 2, 3),
-    );
-}
-
-test "formatInvalidLocal fits maximum identifiers and the longest reason" {
-    var buffer: [192]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "LIR/codegen invariant violated: unknown local outside the frame of roc__pffffffffffffffffffffffffffffffff received an invalid RocStr (misaligned allocation pointer)",
-        formatInvalidLocal(&buffer, 200, @backingInt(InvalidLocalReason.misaligned_allocation_pointer), std.math.maxInt(u32), std.math.maxInt(u64), std.math.maxInt(u64)),
-    );
-    try std.testing.expectEqualStrings(
-        "LIR/codegen invariant violated: str local 0 of roc__p00000000000000000000000000000000 received an invalid RocStr (null bytes pointer)",
-        formatInvalidLocal(&buffer, @backingInt(InvalidLocalKind.str), @backingInt(InvalidLocalReason.null_bytes_pointer), 0, 0, 0),
-    );
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // List Wrappers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1030,6 +939,19 @@ pub fn roc_builtins_list_sublist_borrowed(out: *RocList, list_bytes: ?[*]u8, lis
     out.* = listSublistBorrowed(l, element_width, start, len, elements_refcounted, roc_ops);
 }
 
+/// Wrapper: listClear(list) -> List. The update mode is forwarded to the
+/// builtin's uniqueness check; `.InPlace` skips it.
+pub fn roc_builtins_list_clear(out: *RocList, list_bytes: ?[*]u8, list_len: usize, list_cap: usize, alignment: u32, element_width: usize, elements_refcounted: bool, element_decref: ?RcDropFn, update_mode: utils.UpdateMode) callconv(.c) void {
+    const roc_ops = in_process_host.ops();
+    const l = RocList{ .bytes = list_bytes, .length = list_len, .capacity_or_alloc_ptr = list_cap };
+    if (elements_refcounted) {
+        const dec_ctx = elementDecrefContext(requireElementDecref(element_decref, roc_ops));
+        out.* = listClear(l, alignment, element_width, true, dec_ctx, &callbackListElementDecref, update_mode, roc_ops);
+    } else {
+        out.* = listClear(l, alignment, element_width, false, null, @ptrCast(&rcNone), update_mode, roc_ops);
+    }
+}
+
 /// Wrapper: listDropAt(list, index) -> List. The update mode is forwarded to
 /// the builtin's uniqueness check; `.InPlace` skips it.
 pub fn roc_builtins_list_drop_at(out: *RocList, list_bytes: ?[*]u8, list_len: usize, list_cap: usize, alignment: u32, element_width: usize, index: u64, elements_refcounted: bool, element_incref: ?RcIncFn, element_decref: ?RcDropFn, update_mode: utils.UpdateMode) callconv(.c) void {
@@ -1194,7 +1116,7 @@ pub fn roc_builtins_list_incref_single_thread(list_bytes: ?[*]u8, list_len: usiz
     l.increfWithAtomicity(amount, elements_refcounted, .single_thread, roc_ops);
 }
 
-/// Wrapper: decref a List(Str), including decref of each string element when unique
+/// Wrapper: decref a List(Str), including decref of each string element when this releases the last reference
 pub fn roc_builtins_list_decref_str(list_bytes: ?[*]u8, list_len: usize, list_cap: usize) callconv(.c) void {
     const roc_ops = in_process_host.ops();
     const l = RocList{ .bytes = list_bytes, .length = list_len, .capacity_or_alloc_ptr = list_cap };
@@ -1209,7 +1131,7 @@ pub fn roc_builtins_list_decref_str(list_bytes: ?[*]u8, list_len: usize, list_ca
     );
 }
 
-/// Decref a Roc list and optionally run an element decref callback when unique.
+/// Decref a Roc list and optionally run an element decref callback when this releases the last reference.
 pub fn roc_builtins_list_decref_with(list_bytes: ?[*]u8, list_len: usize, list_cap: usize, alignment: u32, element_width: usize, element_decref: ?RcDropFn) callconv(.c) void {
     const roc_ops = in_process_host.ops();
     const l = RocList{ .bytes = list_bytes, .length = list_len, .capacity_or_alloc_ptr = list_cap };
@@ -1240,16 +1162,15 @@ pub fn roc_builtins_list_decref_with_single_thread(list_bytes: ?[*]u8, list_len:
     const roc_ops = in_process_host.ops();
     const l = RocList{ .bytes = list_bytes, .length = list_len, .capacity_or_alloc_ptr = list_cap };
     if (element_decref) |callback| {
-        if (l.isUnique(roc_ops)) {
-            if (l.getAllocationDataPtr(roc_ops)) |source| {
-                const count = l.getAllocationElementCount(true, roc_ops);
-                var i: usize = 0;
-                while (i < count) : (i += 1) {
-                    callback(source + i * element_width);
-                }
+        if (!l.releaseAllocation(.single_thread, roc_ops)) return;
+        if (l.getAllocationDataPtr(roc_ops)) |source| {
+            const count = l.getAllocationElementCount(true, roc_ops);
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                callback(source + i * element_width);
             }
         }
-        utils.decref(l.getAllocationDataPtr(roc_ops), l.capacity_or_alloc_ptr, alignment, true, .single_thread, roc_ops);
+        l.freeAllocation(alignment, true, roc_ops);
     } else {
         decrefDataPtrSingleThreadC(l.getAllocationDataPtr(roc_ops), alignment, false, roc_ops);
     }
@@ -1343,6 +1264,21 @@ pub fn roc_builtins_list_free_with(list_bytes: ?[*]u8, list_len: usize, list_cap
     }
 }
 
+/// Drop a list whose elements hold more lists of its own teardown (a list
+/// on a cycle of its type), visiting the dying lists it reaches in a loop
+/// instead of nesting a native frame per list (see `utils.DropQueue`).
+///
+/// `queue` is the queue of the teardown this call runs inside, or null when
+/// it runs inside none. `element_drop` releases what one element holds and
+/// receives the queue to pass on.
+pub fn roc_builtins_list_drop_queued(list_ptr: *const RocList, alignment: u32, element_width: usize, element_drop: RcQueuedDropFn, queue: ?*utils.DropQueue, mode: utils.DropMode) callconv(.c) void {
+    list_ptr.dropQueued(alignment, element_width, @intFromPtr(element_drop), queue, mode, element_drop, callQueuedDrop, in_process_host.ops());
+}
+
+fn callQueuedDrop(callback: RcQueuedDropFn, value: [*]u8, queue: *utils.DropQueue) void {
+    callback(value, queue);
+}
+
 /// Prepare a boxed payload allocation for replacement.
 ///
 /// The returned pointer is unique for the caller. It is either the original
@@ -1375,17 +1311,17 @@ pub fn roc_builtins_box_prepare_update(payload_ptr: ?[*]u8, payload_size: usize,
     return fresh;
 }
 
-/// Decref a boxed payload and optionally run payload teardown when unique.
+/// Decref a boxed payload, running payload teardown when this releases the
+/// box's last reference.
 pub fn roc_builtins_box_decref_with(payload_ptr: ?[*]u8, payload_alignment: u32, payload_decref: ?RcDropFn) callconv(.c) void {
-    const roc_ops = in_process_host.ops();
-    const payload_has_refcounted_children = payload_decref != null;
-    if (payload_decref) |callback| {
-        if (utils.isUnique(payload_ptr, roc_ops)) {
-            callback(payload_ptr);
-        }
-    }
+    boxDecrefWith(payload_ptr, payload_alignment, payload_decref, .atomic);
+}
 
-    decrefDataPtrC(payload_ptr, payload_alignment, payload_has_refcounted_children, roc_ops);
+fn boxDecrefWith(payload_ptr: ?[*]u8, payload_alignment: u32, payload_decref: ?RcDropFn, atomicity: utils.RcAtomicity) void {
+    const roc_ops = in_process_host.ops();
+    if (!utils.releaseDataPtr(payload_ptr, atomicity, roc_ops)) return;
+    if (payload_decref) |callback| callback(payload_ptr);
+    freeDataPtrC(payload_ptr, payload_alignment, payload_decref != null, roc_ops);
 }
 
 /// Decref a boxed payload whose allocation is proven thread-confined: the box's
@@ -1394,16 +1330,7 @@ pub fn roc_builtins_box_decref_with(payload_ptr: ?[*]u8, payload_alignment: u32,
 /// parameter; the caller passes a callback whose body already matches the
 /// single-thread statement (see roc_builtins_list_decref_with_single_thread).
 pub fn roc_builtins_box_decref_with_single_thread(payload_ptr: ?[*]u8, payload_alignment: u32, payload_decref: ?RcDropFn) callconv(.c) void {
-    const roc_ops = in_process_host.ops();
-    const payload_has_refcounted_children = payload_decref != null;
-
-    if (payload_decref) |callback| {
-        if (utils.isUnique(payload_ptr, roc_ops)) {
-            callback(payload_ptr);
-        }
-    }
-
-    decrefDataPtrSingleThreadC(payload_ptr, payload_alignment, payload_has_refcounted_children, roc_ops);
+    boxDecrefWith(payload_ptr, payload_alignment, payload_decref, .single_thread);
 }
 
 /// Free a boxed payload and optionally run payload teardown first.
@@ -1418,10 +1345,24 @@ pub fn roc_builtins_box_free_with(payload_ptr: ?[*]u8, payload_alignment: u32, p
     freeDataPtrC(payload_ptr, payload_alignment, payload_has_refcounted_children, roc_ops);
 }
 
+/// Drop a box whose payload holds more boxes of its own teardown (a box on a
+/// cycle of its type), visiting the dying boxes it reaches in a loop instead
+/// of nesting a native frame per box (see `utils.DropQueue` and
+/// `roc_builtins_list_drop_queued`).
+pub fn roc_builtins_box_drop_queued(payload_ptr: ?[*]u8, payload_alignment: u32, payload_drop: RcQueuedDropFn, queue: ?*utils.DropQueue, mode: utils.DropMode) callconv(.c) void {
+    utils.boxDropQueued(payload_ptr, payload_alignment, @intFromPtr(payload_drop), queue, mode, payload_drop, callQueuedDrop, in_process_host.ops());
+}
+
 /// Incref a boxed erased callable payload pointer.
 pub fn roc_builtins_erased_callable_incref(payload_ptr: ?[*]u8, amount: isize) callconv(.c) void {
     const roc_ops = in_process_host.ops();
     erased_callable.incref(payload_ptr, amount, roc_ops);
+}
+
+/// Incref a boxed erased callable whose allocation is proven
+/// thread-confined, with a plain count update.
+pub fn roc_builtins_erased_callable_incref_single_thread(payload_ptr: ?[*]u8, amount: isize) callconv(.c) void {
+    erased_callable.increfWithAtomicity(payload_ptr, amount, .single_thread, in_process_host.ops());
 }
 
 /// Decref a boxed erased callable payload pointer, running the payload's
@@ -1437,21 +1378,7 @@ pub fn roc_builtins_erased_callable_decref(payload_ptr: ?[*]u8) callconv(.c) voi
 /// makes no thread-confinement claim, so capture-level count updates behind it
 /// stay atomic (atomic is always sound).
 pub fn roc_builtins_erased_callable_decref_single_thread(payload_ptr: ?[*]u8) callconv(.c) void {
-    const roc_ops = in_process_host.ops();
-    if (payload_ptr) |ptr| {
-        if (utils.isUnique(ptr, roc_ops)) {
-            const payload = erased_callable.payloadPtr(ptr);
-            if (payload.on_drop) |on_drop| {
-                on_drop(erased_callable.capturePtr(ptr), roc_ops);
-            }
-        }
-    }
-    decrefDataPtrSingleThreadC(
-        payload_ptr,
-        erased_callable.payload_alignment,
-        erased_callable.allocation_has_refcounted_children,
-        roc_ops,
-    );
+    erased_callable.decrefWithAtomicity(payload_ptr, .single_thread, in_process_host.ops());
 }
 
 /// Repack a consumed boxed erased callable allocation for a same-layout
@@ -1474,16 +1401,6 @@ pub fn roc_builtins_erased_callable_repack(reuse: ?[*]u8, callable_fn_ptr: erase
 pub fn roc_builtins_erased_callable_free(payload_ptr: ?[*]u8) callconv(.c) void {
     const roc_ops = in_process_host.ops();
     erased_callable.free(payload_ptr, roc_ops);
-}
-
-/// Consume an erased step into one opaque iterator/stream allocation.
-pub fn roc_builtins_boxed_sequence_pack(record: [*]const u8, record_size: usize, step_offset: usize) callconv(.c) [*]u8 {
-    return @import("boxed_sequence.zig").pack(record, record_size, step_offset, in_process_host.ops());
-}
-
-/// Read the private record view of an opaque iterator/stream allocation.
-pub fn roc_builtins_boxed_sequence_unpack(out: [*]u8, step: [*]u8, record_size: usize) callconv(.c) void {
-    @import("boxed_sequence.zig").unpack(out, step, record_size);
 }
 
 /// Enter the loaded dev-shim code image that contains the generated callsite.
@@ -1602,12 +1519,6 @@ fn writeRocStrFromSlice(out: *RocStr, slice: []const u8, roc_ops: *RocOps) void 
             .length = slice.len,
         };
     }
-}
-
-/// Build a RocStr from static literal bytes owned by generated code.
-pub fn roc_builtins_str_from_literal(out: *RocStr, bytes: [*]const u8, len: usize) callconv(.c) void {
-    const roc_ops = in_process_host.ops();
-    writeRocStrFromSlice(out, bytes[0..len], roc_ops);
 }
 
 /// Wrapper: decToStrC (decomposed i128)
@@ -1894,6 +1805,9 @@ fn int128BinaryWrapper(comptime T: type, comptime op: anytype) fn (*u64, *u64, u
 
 /// Dec multiply (decomposed)
 pub const roc_builtins_dec_mul = decBinaryWrapper(dec.mulOrPanicC);
+
+/// Dec saturating multiply (decomposed)
+pub const roc_builtins_dec_mul_saturated = decBinaryWrapper(dec.mulSaturatedC);
 
 /// Dec divide (decomposed)
 pub const roc_builtins_dec_div = decBinaryWrapper(dec.divC);

@@ -195,7 +195,7 @@ pub fn incref(desc: *const TypeDesc, ptr: [*]u8, count: isize, ops: *RocOps) voi
                 if (d.child.?.size != 0) utils.increfDataPtr(value.word(), count, .atomic, ops);
                 return;
             },
-            .erased_callable => return utils.increfDataPtr(value.word(), count, .atomic, ops),
+            .erased_callable => return erased_callable.incref(value.word(), count, ops),
             .nominal => d = d.child.?,
             .record, .tuple, .tag_union => return increfComposite(d, ptr, count, ops),
         }
@@ -218,7 +218,7 @@ noinline fn increfComposite(desc: *const TypeDesc, ptr: [*]u8, count: isize, ops
                 .str => value.rocStr().incref(@intCast(count), ops),
                 .list => value.rocList().incref(count, d.child.?.flags.contains_refcounted, ops),
                 .box, .recursive_box => if (d.child.?.size != 0) utils.increfDataPtr(value.word(), count, .atomic, ops),
-                .erased_callable => utils.increfDataPtr(value.word(), count, .atomic, ops),
+                .erased_callable => erased_callable.incref(value.word(), count, ops),
                 .record, .tuple => {
                     const fields = d.fields();
                     const slots = d.refcountedFieldSlots();
@@ -250,10 +250,10 @@ noinline fn increfComposite(desc: *const TypeDesc, ptr: [*]u8, count: isize, ops
 
 const DecrefWork = union(enum) {
     value: Value,
-    /// Release a unique box whose payload was released before it.
-    release_box: struct { alloc: ?[*]u8, alignment: u32 },
-    /// Release a unique list whose elements were released before it.
-    release_list: struct { list: RocList, alignment: u32 },
+    /// Free a box whose last reference was released, after its payload.
+    free_box: struct { alloc: ?[*]u8, alignment: u32 },
+    /// Free a list whose last reference was released, after its elements.
+    free_list: struct { list: RocList, alignment: u32 },
 };
 
 const DecrefWalker = struct {
@@ -310,8 +310,8 @@ noinline fn decrefComposite(desc: *const TypeDesc, ptr: [*]u8, ops: *RocOps) voi
     defer walker.stack.deinit(ops);
     walker.stack.push(.{ .value = .at(desc, ptr) }, ops);
     while (walker.stack.pop()) |work| switch (work) {
-        .release_box => |box| utils.decrefDataPtr(box.alloc, box.alignment, true, .atomic, ops),
-        .release_list => |list| utils.decref(list.list.getAllocationDataPtr(ops), list.list.capacity_or_alloc_ptr, list.alignment, true, .atomic, ops),
+        .free_box => |box| utils.freeDataPtrC(box.alloc, box.alignment, true, ops),
+        .free_list => |list| list.list.freeAllocation(list.alignment, true, ops),
         .value => |pending| {
             var value = pending;
             // Keep cleanup sentinels and siblings pending while following a child.
@@ -324,25 +324,29 @@ noinline fn decrefComposite(desc: *const TypeDesc, ptr: [*]u8, ops: *RocOps) voi
                         const elem = d.child.?;
                         const list = value.rocList().*;
                         const alignment: u32 = if (elem.size == 0) 1 else elem.alignment;
-                        if (elem.flags.contains_refcounted and list.isUnique(ops)) {
-                            walker.stack.push(.{ .release_list = .{ .list = list, .alignment = alignment } }, ops);
-                            walker.element_desc = elem;
-                            const start = walker.stack.len;
-                            list.decrefElements(elem.size, @ptrCast(&walker), &DecrefWalker.pushElement, ops);
-                            walker.stack.reverseFrom(start);
-                        } else {
-                            list.decref(alignment, elem.size, elem.flags.contains_refcounted, null, &builtins.list.rcNone, ops);
+                        if (list.releaseAllocation(.atomic, ops)) {
+                            if (elem.flags.contains_refcounted) {
+                                walker.stack.push(.{ .free_list = .{ .list = list, .alignment = alignment } }, ops);
+                                walker.element_desc = elem;
+                                const start = walker.stack.len;
+                                list.decrefElements(elem.size, @ptrCast(&walker), &DecrefWalker.pushElement, ops);
+                                walker.stack.reverseFrom(start);
+                            } else {
+                                list.freeAllocation(alignment, false, ops);
+                            }
                         }
                     },
                     .box, .recursive_box => {
                         const payload = d.child.?;
                         if (payload.size == 0) break;
                         const alloc = value.word();
-                        if (payload.flags.contains_refcounted and alloc != null and utils.isUnique(alloc, ops)) {
-                            walker.stack.push(.{ .release_box = .{ .alloc = alloc, .alignment = payload.alignment } }, ops);
-                            walker.stack.push(.{ .value = value.boxPayload() }, ops);
-                        } else {
-                            utils.decrefDataPtr(alloc, payload.alignment, payload.flags.contains_refcounted, .atomic, ops);
+                        if (utils.releaseDataPtr(alloc, .atomic, ops)) {
+                            if (payload.flags.contains_refcounted) {
+                                walker.stack.push(.{ .free_box = .{ .alloc = alloc, .alignment = payload.alignment } }, ops);
+                                walker.stack.push(.{ .value = value.boxPayload() }, ops);
+                            } else {
+                                utils.freeDataPtrC(alloc, payload.alignment, false, ops);
+                            }
                         }
                     },
                     .erased_callable => erased_callable.decref(value.word(), ops),
@@ -781,9 +785,7 @@ const InspectCtx = struct {
             .record => .{ .record = named },
             .tuple => .{ .tuple = named },
             .tag_union => if (d.flags.presence_slot) .{ .presence_slot = named } else .{ .tag_union = named },
-            // Boxed sequences and functions share the erased allocation but
-            // only sequences carry a separate record view.
-            .erased_callable => if (d.child) |child_desc| .{ .box = .at(child_desc, if (child_desc.flags.sequence) builtins.boxed_sequence.recordPtr(value.word().?) else value.ptr, null) } else .function,
+            .erased_callable => if (d.child) |child_desc| .{ .box = .at(child_desc, value.ptr, null) } else .function,
             .nominal => .{ .nominal = .{
                 .override = if (override(d, .to_inspect) != null) named else null,
                 .backing = if (d.flags.inspect_opaque) null else .at(d.child.?, value.ptr, named.childNames()),
@@ -859,20 +861,33 @@ const PartsSink = struct {
 /// operations.
 const Output = struct {
     str: RocStr = RocStr.empty(),
+    /// Whether `str` is storage the output built itself, so bytes can be
+    /// written into it. A string taken whole from an override may be
+    /// shared, static, or a slice of another string's bytes.
+    built: bool = true,
 
     fn append(self: *Output, bytes: []const u8, ops: *RocOps) void {
         if (bytes.len == 0) return;
         const len = self.str.len();
         const capacity = self.str.getCapacity();
-        if (len + bytes.len > capacity) {
-            self.str = builtins.str.reserve(self.str, @max(bytes.len, capacity), .InPlace, ops);
+        if (len + bytes.len > capacity or !self.built) {
+            self.str = builtins.str.reserve(self.str, @max(bytes.len, capacity), if (self.built) .InPlace else .Immutable, ops);
+            self.built = true;
         }
         @memcpy(self.str.asU8ptrMut()[len .. len + bytes.len], bytes);
         self.str.setLen(len + bytes.len);
     }
 
-    /// Append a string the output takes ownership of.
+    /// Append a string the output takes ownership of. Into an empty output
+    /// the string itself becomes the text, so a value whose inspection is
+    /// its override's result alone allocates only what the override does.
     fn appendOwned(self: *Output, owned: RocStr, ops: *RocOps) void {
+        if (self.str.len() == 0) {
+            self.str.decref(ops);
+            self.str = owned;
+            self.built = false;
+            return;
+        }
         self.append(owned.asSlice(), ops);
         owned.decref(ops);
     }

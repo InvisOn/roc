@@ -10,10 +10,10 @@ const std = @import("std");
 pub const types = @import("types.zig");
 pub const numeral = @import("numeral.zig");
 pub const literal_defaulting = @import("literal_defaulting.zig");
+pub const effect_solver = @import("effect_solver.zig");
 pub const store = @import("store.zig");
 pub const instantiate = @import("instantiate.zig");
 pub const generalize = @import("generalize.zig");
-pub const use_absorbers = @import("use_absorbers.zig");
 pub const import_mapping = @import("import_mapping.zig");
 pub const debug = @import("debug.zig");
 
@@ -49,6 +49,7 @@ pub const VarMap = types.VarMap;
 pub const StaticDispatchConstraint = types.StaticDispatchConstraint;
 pub const InterpolationPartMetadata = types.InterpolationPartMetadata;
 pub const DerivedMapPlan = types.DerivedMapPlan;
+pub const TagTailClosing = types.TagTailClosing;
 pub const TwoStaticDispatchConstraints = types.TwoStaticDispatchConstraints;
 pub const Int = types.Int;
 pub const Frac = types.Frac;
@@ -57,6 +58,7 @@ pub const Slot = store.Slot;
 pub const ResolvedVarDesc = store.ResolvedVarDesc;
 pub const ResolvedVarDescs = store.ResolvedVarDescs;
 pub const Store = store.Store;
+pub const LoadedAccess = store.LoadedAccess;
 pub const DescStoreIdx = store.DescStoreIdx;
 
 pub const Polarity = types.Polarity;
@@ -64,9 +66,11 @@ pub const polarity_var_text = types.polarity_var_text;
 
 test {
     std.testing.refAllDecls(@import("test/test_rigid_instantiation.zig"));
+    std.testing.refAllDecls(@import("test/test_backing_openings.zig"));
     std.testing.refAllDecls(@import("generalize.zig"));
     std.testing.refAllDecls(@import("numeral.zig"));
     std.testing.refAllDecls(@import("literal_defaulting.zig"));
+    std.testing.refAllDecls(effect_solver);
     // A file's tests are collected only once some analyzed declaration
     // evaluates its import. `pub const TypeWriter` above is lazily analyzed
     // and nothing inside this module references it, so naming the file here

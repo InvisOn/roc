@@ -114,7 +114,7 @@ main = {
 		(e-lambda
 			(args
 				(p-assign (ident "list")))
-			(e-dispatch-call (method "len") (constraint-fn-var 267)
+			(e-dispatch-call (method "len") (constraint-fn-var 258)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "list"))))
@@ -133,7 +133,7 @@ main = {
 		(e-block
 			(s-let
 				(p-assign (ident "int_list"))
-				(e-call (constraint-fn-var 308)
+				(e-call (constraint-fn-var 270)
 					(e-lookup-local
 						(p-assign (ident "shorthand")))
 					(e-list
@@ -143,7 +143,7 @@ main = {
 							(e-num (value "3"))))))
 			(s-let
 				(p-assign (ident "string_list"))
-				(e-call (constraint-fn-var 340)
+				(e-call (constraint-fn-var 274)
 					(e-lookup-local
 						(p-assign (ident "shorthand")))
 					(e-list
@@ -169,13 +169,13 @@ main = {
 (inferred-types
 	(defs
 		(patt (type "List(a) -> U64"))
-		(patt (type "List(a) -> U64"))
+		(patt (type "List(_a) -> U64"))
 		(patt (type "(U64, U64)")))
 	(type_decls
 		(nominal (type "FooBar")
 			(ty-header (name "FooBar"))))
 	(expressions
 		(expr (type "List(a) -> U64"))
-		(expr (type "List(a) -> U64"))
+		(expr (type "List(_a) -> U64"))
 		(expr (type "(U64, U64)"))))
 ~~~

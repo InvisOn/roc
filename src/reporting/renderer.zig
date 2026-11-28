@@ -18,6 +18,7 @@ const UnderlineRegion = @import("document.zig").UnderlineRegion;
 const ColorPalette = @import("style.zig").ColorPalette;
 const ColorUtils = @import("style.zig").ColorUtils;
 pub const ReportingConfig = @import("config.zig").ReportingConfig;
+const SourcePathBase = @import("config.zig").SourcePathBase;
 
 /// TODO find a better solution this is temporary to make CI happy
 ///
@@ -39,12 +40,15 @@ pub fn sanitisePathForSnapshots(path: []const u8) []const u8 {
 }
 
 /// Spell a file path the way every report shows it: relative to the caller's
-/// absolute working directory `working_dir`. Relative paths and virtual source
-/// names already have their display spelling.
-pub fn displayPath(gpa: Allocator, path: []const u8, working_dir: ?[]const u8) Allocator.Error![]u8 {
+/// working directory `working_dir`, comparing the canonical spellings of both.
+/// An absolute path that cannot be resolved is shown as given. Relative paths
+/// and virtual source names already have their display spelling.
+pub fn displayPath(gpa: Allocator, path: []const u8, working_dir: ?SourcePathBase) Allocator.Error![]u8 {
     if (working_dir) |base| {
         if (std.fs.path.isAbsolute(path)) {
-            return std.fs.path.relative(gpa, base, null, base, path);
+            const canonical = try base.canonicalize(base.ctx, path, gpa) orelse return gpa.dupe(u8, path);
+            defer gpa.free(canonical);
+            return std.fs.path.relative(gpa, base.dir, null, base.dir, canonical);
         }
         return gpa.dupe(u8, path);
     }
@@ -193,15 +197,17 @@ fn getSeverityIcon(severity: @import("severity.zig").Severity, title: []const u8
         .{ .icon = "●", .color = palette.warning, .width = 1 };
 }
 
-/// A source region pulled out of a document, normalized for rendering.
+/// Source selection retains the excerpt separately from its diagnostic spans.
 const PrimaryRegion = struct {
     index: usize,
-    filename: ?[]const u8,
-    start_line: u32,
-    start_column: u32,
-    end_line: u32,
-    end_column: u32,
-    line_text: []const u8,
+    display: SourceCodeDisplayRegion,
+    /// Only document-owned spans may escape the source-layout walker. A plain
+    /// region's temporary underline is represented by an empty slice instead.
+    underlines: []const UnderlineRegion,
+
+    fn focus(self: PrimaryRegion) UnderlineRegion {
+        return if (self.underlines.len > 0) self.underlines[0] else regionUnderline(self.display)[0];
+    }
 };
 
 /// The report chooses its first top-level source block. Selection is a walker
@@ -230,13 +236,14 @@ fn findPrimaryRegion(elements: []const DocumentElement, gpa: Allocator) (Allocat
     return null;
 }
 
-/// The report's primary and secondary blocks both use the first explicit
-/// underline for their focused span, or the display span when none is present.
+/// Preserve document-owned underlines without retaining the temporary underline
+/// synthesized for a plain source region.
 fn reportRegion(layout: source_region.Layout, index: usize) PrimaryRegion {
-    const display = layout.display;
-    const start_column = if (layout.underlines.len > 0) layout.underlines[0].start_column else display.start_column;
-    const end_column = if (layout.underlines.len > 0) layout.underlines[0].end_column else display.end_column;
-    return .{ .index = index, .filename = display.filename, .start_line = display.start_line, .start_column = start_column, .end_line = display.end_line, .end_column = end_column, .line_text = display.line_text };
+    return .{
+        .index = index,
+        .display = layout.display,
+        .underlines = if (layout.highlight_source) &.{} else layout.underlines,
+    };
 }
 
 /// Source-block hook for report prose below the summary. Nested document
@@ -262,11 +269,10 @@ const BelowContent = struct {
     }
 
     fn writeSource(self: *BelowContent, palette: ColorPalette, layout: source_region.Layout) (Allocator.Error || error{WriteFailed})!void {
-        const region = reportRegion(layout, 0);
         try self.flushText();
-        if (region.line_text.len == 0) return;
+        if (layout.display.line_text.len == 0) return;
         try self.writer.writeByte('\n');
-        try writeReportSnippet(self.writer, palette, self.highlight_color, region.start_line, region.start_column, region.end_line, region.end_column, region.line_text, self.gpa);
+        try writeReportSnippet(self.writer, palette, self.highlight_color, layout.display, layout.underlines, self.gpa);
     }
 };
 
@@ -516,9 +522,10 @@ fn renderReportToTerminalLayout(report: *const Report, writer: *std.Io.Writer, p
     const title = report.title;
     const icon_info = getSeverityIcon(report.severity, title, palette);
 
-    const path = if (region.filename) |filename| try displayPath(gpa, filename, config.source_path_base) else null;
+    const path = if (region.display.filename) |filename| try displayPath(gpa, filename, config.source_path_base) else null;
     defer if (path) |p| gpa.free(p);
-    const location: HeaderLocation = if (path) |p| .{ .position = .{ .path = p, .line = region.start_line, .column = region.start_column } } else .none;
+    const focus = region.focus();
+    const location: HeaderLocation = if (path) |p| .{ .position = .{ .path = p, .line = focus.start_line, .column = focus.start_column } } else .none;
     try renderHeaderLine(writer, palette, config, icon_info, title, location);
 
     if (summary.len > 0) {
@@ -535,7 +542,7 @@ fn renderReportToTerminalLayout(report: *const Report, writer: *std.Io.Writer, p
 
     try writer.writeByte('\n');
 
-    try writeReportSnippet(writer, palette, icon_info.color, region.start_line, region.start_column, region.end_line, region.end_column, region.line_text, gpa);
+    try writeReportSnippet(writer, palette, icon_info.color, region.display, region.underlines, gpa);
 
     try renderBelowContent(writer, palette, config, icon_info.color, elements, below_start, region.index, gpa);
 }
@@ -568,9 +575,11 @@ fn renderBelowContent(
 }
 
 /// Report framing consumes the shared dedented source layout.
-fn writeReportSnippet(writer: *std.Io.Writer, palette: ColorPalette, highlight_color: []const u8, start_line: u32, start_column: u32, end_line: u32, end_column: u32, text: []const u8, gpa: Allocator) (Allocator.Error || error{WriteFailed})!void {
-    var snippet = try source_region.Snippet.init(gpa, text, start_column, end_column);
+fn writeReportSnippet(writer: *std.Io.Writer, palette: ColorPalette, highlight_color: []const u8, display: SourceCodeDisplayRegion, underlines: []const UnderlineRegion, gpa: Allocator) (Allocator.Error || error{WriteFailed})!void {
+    var snippet = try source_region.Snippet.init(gpa, display.line_text);
     defer snippet.deinit();
+    const default_underline = regionUnderline(display);
+    const spans = if (underlines.len > 0) underlines else &default_underline;
     for (snippet.rows, 0..) |row, index| {
         const line = snippet.line(row);
         var i: usize = 0;
@@ -584,14 +593,20 @@ fn writeReportSnippet(writer: *std.Io.Writer, palette: ColorPalette, highlight_c
             }
         }
         try writer.writeByte('\n');
-        if (source_region.underlineAppliesToLine(start_line, end_line, start_line + @as(u32, @intCast(index)))) {
-            const caret = snippet.caret(line);
-            try source_region.printSpaces(writer, caret.padding);
+        var column: usize = 0;
+        var has_carets = false;
+        for (spans) |span| {
+            if (!source_region.underlineAppliesToLine(span.start_line, span.end_line, display.start_line + @as(u32, @intCast(index)))) continue;
+            const caret = snippet.caret(row, span.start_column, span.end_column);
+            try source_region.printSpaces(writer, @intCast(caret.padding -| column));
             try writer.writeAll(highlight_color);
-            try writer.splatBytesAll("^", caret.length);
+            const end = caret.padding + caret.length;
+            try writer.splatBytesAll("^", end -| @max(column, caret.padding));
             try writer.writeAll(palette.reset);
-            try writer.writeByte('\n');
+            column = @max(column, end);
+            has_carets = true;
         }
+        if (has_carets) try writer.writeByte('\n');
     }
 }
 
@@ -1544,8 +1559,50 @@ test "report source selection uses only top-level source blocks and explicit foc
     try testing.expect((try findPrimaryRegion(elements[0..2], testing.allocator)) == null);
     const selected = (try findPrimaryRegion(&elements, testing.allocator)).?;
     try testing.expectEqual(@as(usize, 2), selected.index);
-    try testing.expectEqual(@as(u32, 7), selected.start_column);
-    try testing.expectEqual(@as(u32, 11), selected.end_column);
+    try testing.expectEqual(@as(u32, 7), selected.focus().start_column);
+    try testing.expectEqual(@as(u32, 11), selected.focus().end_column);
+}
+
+test "issue 13070: focused report location and carets use the pattern inside its context" {
+    // https://github.com/roc-lang/roc/issues/13070
+    // The excerpt starts at `match`, but the diagnostic belongs to `Gren`.
+    var report = try Report.init(testing.allocator, "Type Mismatch", "These can never match.", .runtime_error);
+    defer report.deinit();
+    try report.document.addSourceCodeWithUnderlines(.{
+        .line_text = "    match color {\n        Red => \"red\"\n        Gren => \"green\"\n    }",
+        .start_line = 7,
+        .start_column = 5,
+        .end_line = 10,
+        .end_column = 6,
+        .region_annotation = .dimmed,
+        .filename = "pattern.roc",
+    }, &.{.{
+        .start_line = 9,
+        .start_column = 9,
+        .end_line = 9,
+        .end_column = 13,
+        .annotation = .error_highlight,
+    }});
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var config = ReportingConfig.initColorTerminal();
+    config.color_preference = .never;
+    try renderReportWithConfig(&report, &out.writer, config);
+    const header_end = std.mem.findScalar(u8, out.written(), '\n').?;
+    const location_start = std.mem.find(u8, out.written()[0..header_end], "pattern.roc:").?;
+    try testing.expectEqualStrings("pattern.roc:9:9", out.written()[location_start..header_end]);
+    try testing.expectEqualStrings(
+        \\
+        \\These can never match.
+        \\
+        \\match color {
+        \\    Red => "red"
+        \\    Gren => "green"
+        \\    ^^^^
+        \\}
+        \\
+        \\
+    , out.written()[header_end + 1 ..]);
 }
 
 test "terminal source locations are relative to the configured working directory" {
@@ -1563,7 +1620,7 @@ test "terminal source locations are relative to the configured working directory
     };
     inline for (cases) |case| {
         var config = ReportingConfig.initColorTerminal();
-        config.source_path_base = base;
+        config.source_path_base = canonicalTestPathBase(base);
         config.color_preference = .never;
         var report = try Report.init(gpa, "Type Mismatch", "The types do not match.", .runtime_error);
         defer report.deinit();
@@ -1585,6 +1642,42 @@ test "terminal source locations are relative to the configured working directory
     }
 }
 
+test "focused primary and secondary snippets preserve all underlines and row indentation" {
+    const display = SourceCodeDisplayRegion{
+        .line_text = "    match color {\n\t\tRed | Gren => ...\n        Blue => ...\n    }",
+        .start_line = 7,
+        .start_column = 5,
+        .end_line = 10,
+        .end_column = 6,
+        .region_annotation = .dimmed,
+        .filename = "patterns.roc",
+    };
+    const underlines = [_]UnderlineRegion{
+        .{ .start_line = 8, .start_column = 3, .end_line = 8, .end_column = 6, .annotation = .error_highlight },
+        .{ .start_line = 8, .start_column = 9, .end_line = 8, .end_column = 13, .annotation = .error_highlight },
+        .{ .start_line = 9, .start_column = 9, .end_line = 9, .end_column = 13, .annotation = .error_highlight },
+    };
+    const expected =
+        \\match color {
+        \\    Red | Gren => ...
+        \\    ^^^   ^^^^
+        \\    Blue => ...
+        \\    ^^^^
+        \\}
+        \\
+    ;
+    var report = try Report.init(testing.allocator, "Type Mismatch", "These patterns cannot match.", .runtime_error);
+    defer report.deinit();
+    try report.document.addSourceCodeWithUnderlines(display, &underlines);
+    try report.document.addText("Another occurrence.");
+    try report.document.addSourceCodeWithUnderlines(display, &underlines);
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    try renderReportToPlain(&report, &out.writer, ReportingConfig.initColorTerminal());
+    try testing.expect(std.mem.find(u8, out.written(), "patterns.roc:8:3\n") != null);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), expected));
+}
+
 test "every target shows annotated paths relative to the working directory" {
     const gpa = testing.allocator;
     const sep = std.fs.path.sep_str;
@@ -1593,7 +1686,7 @@ test "every target shows annotated paths relative to the working directory" {
     const relative = "src" ++ sep ++ "main.roc";
     inline for (.{ ReportingConfig.initColorTerminal(), ReportingConfig.initMarkdown(), ReportingConfig.initHtml(), ReportingConfig.initLsp() }) |initial| {
         var config = initial;
-        config.source_path_base = base;
+        config.source_path_base = canonicalTestPathBase(base);
         config.color_preference = .never;
         var report = try Report.initWithPath(gpa, "File Not Found", "I could not find the file ", path, ".", .fatal);
         defer report.deinit();
@@ -1606,6 +1699,45 @@ test "every target shows annotated paths relative to the working directory" {
         try renderReportWithConfig(&report, &out.writer, config);
         try testing.expect(std.mem.find(u8, out.written(), base) == null);
         try testing.expectEqual(@as(usize, 3), std.mem.count(u8, out.written(), relative));
+    }
+}
+
+/// A working directory for tests whose absolute paths are already spelled
+/// canonically.
+fn canonicalTestPathBase(dir: []const u8) SourcePathBase {
+    const Identity = struct {
+        const ctx: u8 = 0;
+        fn canonicalize(_: *const anyopaque, path: []const u8, gpa: Allocator) Allocator.Error!?[]const u8 {
+            return try gpa.dupe(u8, path);
+        }
+    };
+    return .{ .dir = dir, .ctx = &Identity.ctx, .canonicalize = Identity.canonicalize };
+}
+
+test "a path spelled through a symlink is shown relative to the canonical working directory" {
+    if (builtin.os.tag == .windows) return;
+    // `/link` is a symlink to `/real/deep/tree`; the working directory is
+    // `/real/deep/tree/app`, spelled canonically.
+    const Resolver = struct {
+        const ctx: u8 = 0;
+        fn canonicalize(_: *const anyopaque, path: []const u8, gpa: Allocator) Allocator.Error!?[]const u8 {
+            const link = "/link/";
+            if (std.mem.startsWith(u8, path, link)) return try std.mem.concat(gpa, u8, &.{ "/real/deep/tree/", path[link.len..] });
+            if (std.mem.startsWith(u8, path, "/missing/")) return null;
+            return try gpa.dupe(u8, path);
+        }
+    };
+    const base: SourcePathBase = .{ .dir = "/real/deep/tree/app", .ctx = &Resolver.ctx, .canonicalize = Resolver.canonicalize };
+    const cases = .{
+        .{ "/link/out/bundle.tar.zst", "../out/bundle.tar.zst" },
+        .{ "/link/app/main.roc", "main.roc" },
+        .{ "/real/deep/tree/out/bundle.tar.zst", "../out/bundle.tar.zst" },
+        .{ "/missing/out/bundle.tar.zst", "/missing/out/bundle.tar.zst" },
+    };
+    inline for (cases) |case| {
+        const displayed = try displayPath(testing.allocator, case[0], base);
+        defer testing.allocator.free(displayed);
+        try testing.expectEqualStrings(case[1], displayed);
     }
 }
 

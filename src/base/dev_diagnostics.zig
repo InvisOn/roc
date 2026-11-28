@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const ConcurrentU64 = @import("ConcurrentU64.zig").ConcurrentU64;
 
 /// Whether this compiler reads the developer-diagnostic variables at all: it
 /// was built with developer diagnostics (every Debug compiler, and any other
@@ -24,7 +25,8 @@ pub const Var = enum {
     /// which part an edit changed. Hashing the parts separately costs more
     /// than the digests themselves, so the work trace leaves it out.
     trace_boxy_digests,
-    /// Rebuild every restored Boxy object and compare it with the cached one.
+    /// Rebuild every restored or embedded Boxy object and compare it with the
+    /// cached or embedded one.
     verify_boxy_object_reuse,
     /// Separate coordinator request-resolution costs into exclusive phases.
     spec_resolution_profile,
@@ -43,6 +45,9 @@ pub const Var = enum {
     ctfe_demand_trace,
     /// Check every object compile against one assembled from its artifacts.
     dev_excerpt_roundtrip,
+    /// Check every unit image built from a composition's object contents
+    /// against the image read back from the encoded object.
+    dev_unit_image_roundtrip,
     /// Append one record to the named file per in-process LLVM object compile.
     test_llvm_object_compile_count_file,
     /// Run the independent ARC certifier in a diagnostics-enabled compiler.
@@ -71,6 +76,21 @@ pub const Var = enum {
     /// readable name a lowering of the process recorded (`notePerfName`),
     /// otherwise by symbol.
     perf_map,
+    /// Print one line of deterministic work counts for every procedure the
+    /// range prover walks: its proof rounds and restarts, its loop guards,
+    /// its loop-invariant assumptions, and its walks and sum refreshes.
+    range_prove_stats,
+    /// Print when `roc` starts a program it built and when it has released
+    /// the build's state, so the order of the two is visible.
+    trace_run_order,
+    /// Print, for every module whose compile-time roots are published, how
+    /// many roots hoisting selected and how publication split them: roots
+    /// an evaluator completes, roots the checked-value writer completes, and
+    /// value-form expressions their bodies keep.
+    hoist_root_stats,
+    /// Print, for every module the type checker checks, how many of each
+    /// probe site's probes were kept and how many were discarded.
+    checker_speculation_stats,
 
     /// The variable's name in the environment.
     pub fn envName(comptime self: Var) [:0]const u8 {
@@ -86,6 +106,7 @@ pub const Var = enum {
             .fresh_type_analysis => "ROC_FRESH_TYPE_ANALYSIS",
             .ctfe_demand_trace => "ROC_CTFE_DEMAND_TRACE",
             .dev_excerpt_roundtrip => "ROC_DEV_EXCERPT_ROUNDTRIP",
+            .dev_unit_image_roundtrip => "ROC_DEV_UNIT_IMAGE_ROUNDTRIP",
             .test_llvm_object_compile_count_file => "ROC_TEST_LLVM_OBJECT_COMPILE_COUNT_FILE",
             .verify_arc => "ROC_VERIFY_ARC",
             .test_command_work => "ROC_TEST_COMMAND_WORK",
@@ -95,6 +116,10 @@ pub const Var = enum {
             .dump_wasm_unit_images => "ROC_DUMP_WASM_UNIT_IMAGES",
             .storage_work => "ROC_STORAGE_WORK",
             .perf_map => "ROC_PERF_MAP",
+            .range_prove_stats => "ROC_RANGE_PROVE_STATS",
+            .trace_run_order => "ROC_TRACE_RUN_ORDER",
+            .hoist_root_stats => "ROC_HOIST_ROOT_STATS",
+            .checker_speculation_stats => "ROC_CHECKER_SPECULATION_STATS",
         };
     }
 };
@@ -122,17 +147,17 @@ pub const TestWork = enum {
     native_test_procedures,
     test_root_execution,
 };
-var test_work: [@typeInfo(TestWork).@"enum".field_names.len]std.atomic.Value(u64) = @splat(.init(0));
+var test_work: [@typeInfo(TestWork).@"enum".field_names.len]ConcurrentU64 = @splat(.init(0));
 
 /// Add `amount` to a test-work counter when test command work tracing is on.
 pub fn countTestWork(counter: TestWork, amount: usize) void {
     if (!isSet(.test_command_work)) return;
-    _ = test_work[@backingInt(counter)].fetchAdd(amount, .monotonic);
+    test_work[@backingInt(counter)].add(amount);
 }
 
 /// The number of times a stage has counted this test work.
 pub fn testWorkCount(counter: TestWork) u64 {
-    return test_work[@backingInt(counter)].load(.monotonic);
+    return test_work[@backingInt(counter)].load();
 }
 
 /// The variable's value, or null when it is unset or this compiler does not

@@ -22,7 +22,7 @@ pub const body_fields = .{
 const frozen_fields = .{
     "fns",                  "const_fn_evidence",       "const_fn_evidence_targets", "const_fn_evidence_structurals", "const_fn_evidence_frames", "roots",
     "layout_requests",      "runtime_schema_requests", "static_data_values",        "comptime_sites",                "source_files",             "comptime_value_roots",
-    "comptime_value_reads", "lowering_modules",        "literal_roots",
+    "comptime_value_reads", "lowering_modules",        "literal_roots",             "signature_var_steps",
 };
 
 /// Every virtual-ID pool whose frozen boundary a shard must retain.
@@ -91,6 +91,7 @@ const Relocation = struct {
             .{ ast.PatData, "record", "record_destructs" },
             .{ ast.Fn, "args", "typed_locals" },
             .{ ast.Fn, "captures", "typed_locals" },
+            .{ ast.FnBody, "hosted", "signature_var_steps" },
             .{ Mono.RecordUpdate, "fields", "field_exprs" },
             .{ Mono.TagExpr, "payloads", "expr_ids" },
             .{ Mono.LambdaExpr, "args", "typed_locals" },
@@ -140,7 +141,7 @@ const Relocation = struct {
         if (T == ast.StmtId) return self.id("stmts", item);
         if (T == ast.LocalId) return self.id("locals", item);
         if (T == ast.StringLiteralId) return self.id("string_literals", item);
-        if (T == ast.InlineScopeId) return if (item == ast.InlineScopeId.none) item else .fromRow(@intCast(self.index("inline_scopes", item.row())));
+        if (T == ast.InlineScopeRow) return self.id("inline_scopes", item);
         if (T == Common.Symbol) return @fromBackingInt(@intCast(@backingInt(item) + if (@backingInt(item) >= self.symbol_start) self.symbol_offset else @as(u32, 0)));
         if (T == ast.JoinPointId) return @fromBackingInt(@intCast(@backingInt(item) + if (@backingInt(item) >= self.join_start) self.join_offset else @as(u32, 0)));
         if (T == ast.Span(void)) @compileError("body spans must be relocated through their owning field");
@@ -295,8 +296,8 @@ test "body shard relocation preserves metadata sentinels and donor values" {
 
     var scope: ast.InlineScope = .{
         .source_symbol = @fromBackingInt(@intCast(50)),
-        .source_loc = .{ .file = 70, .line = 80, .column = 90 },
-        .call_site = .{ .file = 100, .line = 110, .column = 120 },
+        .source_loc = .at(70, 80, 90),
+        .call_site = .at(100, 110, 120),
     };
     const source_loc = scope.source_loc;
     const call_site = scope.call_site;

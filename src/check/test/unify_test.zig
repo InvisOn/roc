@@ -103,10 +103,14 @@ const TestEnv = struct {
             .unify_scratch = &self.scratch,
             .occurs_scratch = &self.occurs_scratch,
         };
-        return try unify_mod.unify(&env, a, b, .{});
+        return try unify_mod.unify(&env, a, b, &.{ .actual_region = base.Region.zero() }, .mismatch);
     }
 
     fn unifyWithOptions(self: *Self, a: Var, b: Var, opts: unify_mod.Options) std.mem.Allocator.Error!Result {
+        return self.unifyRepeatedLabelRows(a, b, opts, .mismatch);
+    }
+
+    fn unifyRepeatedLabelRows(self: *Self, a: Var, b: Var, opts: unify_mod.Options, repeated_label_rows: unify_mod.RepeatedLabelRows) std.mem.Allocator.Error!Result {
         const env = unify_mod.Env{
             .ident_store = self.module_env.getIdentStoreConst(),
             .self_module_identity = self.module_env.selfModuleIdentity(),
@@ -117,7 +121,9 @@ const TestEnv = struct {
             .unify_scratch = &self.scratch,
             .occurs_scratch = &self.occurs_scratch,
         };
-        return try unify_mod.unify(&env, a, b, opts);
+        var region_opts = opts;
+        region_opts.actual_region = base.Region.zero();
+        return try unify_mod.unify(&env, a, b, &region_opts, repeated_label_rows);
     }
 
     /// Helper to call the write-no-report unify variant from TestEnv.
@@ -132,7 +138,7 @@ const TestEnv = struct {
             .unify_scratch = &self.scratch,
             .occurs_scratch = &self.occurs_scratch,
         };
-        return try unify_mod.unify(&env, a, b, .{ .on_mismatch = .write_no_report });
+        return try unify_mod.unify(&env, a, b, &.{ .on_mismatch = .write_no_report }, .mismatch);
     }
 
     fn unifyExact(self: *Self, a: Var, b: Var) std.mem.Allocator.Error!Result {
@@ -146,10 +152,10 @@ const TestEnv = struct {
             .unify_scratch = &self.scratch,
             .occurs_scratch = &self.occurs_scratch,
         };
-        return try unify_mod.unify(&env, a, b, .{
+        return try unify_mod.unify(&env, a, b, &.{
             .on_mismatch = .write_no_report,
             .row_width_relation = .exact,
-        });
+        }, .mismatch);
     }
 
     const Error = error{ VarIsNotRoot, IsNotRecord, IsNotTagUnion };
@@ -374,6 +380,92 @@ test "unify - row extensions preserve either merged equivalence class" {
     }
 }
 
+// unification - ranks of created rows //
+
+const old_rank = types_mod.Rank.outermost;
+const young_rank = types_mod.Rank.outermost.next();
+
+fn rankOf(env: *TestEnv, var_: Var) types_mod.Rank {
+    return env.module_env.types.resolveVar(var_).desc.rank;
+}
+
+fn flexAt(env: *TestEnv, rank: types_mod.Rank) std.mem.Allocator.Error!Var {
+    return env.module_env.types.freshFromContentWithRank(.{ .flex = Flex.init() }, rank);
+}
+
+const RowShape = enum { tag_union, record };
+const RowOverlap = enum { young_extends_old, old_extends_young, both_extend };
+
+/// An old row and a young row sharing `Shared`. The young row has an
+/// unshared entry whose payload is the young `payload`, over the young
+/// `young_ext`; under `both_extend` the old row has an unshared entry too.
+fn mkRankedRows(env: *TestEnv, shape: RowShape, overlap: RowOverlap, payload: Var, young_ext: Var) std.mem.Allocator.Error![2]Var {
+    const store = &env.module_env.types;
+    const shared_value = try store.freshFromContentWithRank(.{ .structure = .empty_record }, old_rank);
+    const old_ext = try flexAt(env, old_rank);
+    const old_has_own = overlap != .young_extends_old;
+    const young_has_own = overlap != .old_extends_young;
+    const old_content, const young_content = switch (shape) {
+        .tag_union => blk: {
+            const shared = try env.mkTag("Shared", &.{shared_value});
+            const old_tags: []const Tag = if (old_has_own) &.{ shared, try env.mkTag("Old", &.{}) } else &.{shared};
+            const young_tags: []const Tag = if (young_has_own) &.{ shared, try env.mkTag("Young", &.{payload}) } else &.{shared};
+            break :blk .{ (try env.mkTagUnion(old_tags, old_ext)).content, (try env.mkTagUnion(young_tags, young_ext)).content };
+        },
+        .record => blk: {
+            const shared = try env.mkRecordField("shared", shared_value);
+            const old_fields: []const RecordField = if (old_has_own) &.{ shared, try env.mkRecordField("old", shared_value) } else &.{shared};
+            const young_fields: []const RecordField = if (young_has_own) &.{ shared, try env.mkRecordField("young", payload) } else &.{shared};
+            break :blk .{ (try env.mkRecord(old_fields, old_ext)).content, (try env.mkRecord(young_fields, young_ext)).content };
+        },
+    };
+    return .{
+        try store.freshFromContentWithRank(old_content, old_rank),
+        try store.freshFromContentWithRank(young_content, young_rank),
+    };
+}
+
+test "unify - a row made of the younger operand's unshared entries holds nothing younger than itself" {
+    // Ranks never increase going deeper (design.md "Def Checking Order"): the
+    // row unification makes for the younger operand's unshared entries is
+    // created at the older rank, so the younger payload and extension it
+    // holds are lowered to that rank, in either operand order.
+    for ([_]RowShape{ .tag_union, .record }) |shape| {
+        for ([_]RowOverlap{ .young_extends_old, .both_extend }) |overlap| {
+            for ([_]bool{ false, true }) |young_first| {
+                var env = try TestEnv.init(std.testing.allocator);
+                defer env.deinit();
+                const payload = try flexAt(&env, young_rank);
+                const young_ext = try flexAt(&env, young_rank);
+                const rows = try mkRankedRows(&env, shape, overlap, payload, young_ext);
+                const result = if (young_first) try env.unify(rows[1], rows[0]) else try env.unify(rows[0], rows[1]);
+                try std.testing.expectEqual(.unified, result);
+                try std.testing.expectEqual(old_rank, rankOf(&env, payload));
+                try std.testing.expectEqual(old_rank, rankOf(&env, young_ext));
+                try std.testing.expectEqual(old_rank, rankOf(&env, rows[1]));
+            }
+        }
+    }
+}
+
+test "unify - a nested younger payload under a created row is reached through its lowered parent" {
+    // Only the created row's direct children are lowered: a younger payload
+    // nested inside one keeps its rank, and the generalization that visits
+    // the lowered child lowers it in turn.
+    for ([_]RowShape{ .tag_union, .record }) |shape| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const store = &env.module_env.types;
+        const nested = try flexAt(&env, young_rank);
+        const payload = try store.freshFromContentWithRank(try env.mkTuple(&.{nested}), young_rank);
+        const young_ext = try flexAt(&env, young_rank);
+        const rows = try mkRankedRows(&env, shape, .young_extends_old, payload, young_ext);
+        try std.testing.expectEqual(.unified, try env.unify(rows[0], rows[1]));
+        try std.testing.expectEqual(old_rank, rankOf(&env, payload));
+        try std.testing.expectEqual(young_rank, rankOf(&env, nested));
+    }
+}
+
 test "unify - a tag repeated along one row's chain relates its payloads" {
     for ([_]enum { related, conflicting, arity }{ .related, .conflicting, .arity }) |case| {
         var env = try TestEnv.init(std.testing.allocator);
@@ -399,6 +491,277 @@ test "unify - a tag repeated along one row's chain relates its payloads" {
             },
             .conflicting, .arity => try std.testing.expect(result.isProblem()),
         }
+    }
+}
+
+/// Whether the first occurrence of `name` along `row`'s chain is pattern-only.
+fn rowTagPatternOnly(env: *TestEnv, row: Var, name: []const u8) std.mem.Allocator.Error!bool {
+    const ident = try env.module_env.getIdentStore().insert(env.module_env.gpa, Ident.for_text(name));
+    const store = &env.module_env.types;
+    var current = row;
+    while (true) {
+        const tag_union = store.resolveVar(current).desc.content.structure.tag_union;
+        const tags = store.getTagsSlice(tag_union.tags);
+        for (tags.items(.name), tags.items(.pattern_only)) |tag_name, pattern_only| {
+            if (tag_name.eql(ident)) return pattern_only;
+        }
+        current = tag_union.ext;
+    }
+}
+
+test "unify - a shared tag is pattern-only only when both rows' tags are" {
+    for ([_][2]bool{ .{ true, true }, .{ true, false }, .{ false, true }, .{ false, false } }) |marks| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const store = &env.module_env.types;
+        var shared_a = try env.mkTag("Shared", &.{});
+        shared_a.pattern_only = marks[0];
+        var shared_b = try env.mkTag("Shared", &.{});
+        shared_b.pattern_only = marks[1];
+        var only_a = try env.mkTag("OnlyA", &.{});
+        only_a.pattern_only = true;
+        const only_b = try env.mkTag("OnlyB", &.{});
+        const a = try store.freshFromContent((try env.mkTagUnionOpen(&.{ shared_a, only_a })).content);
+        const b = try store.freshFromContent((try env.mkTagUnionOpen(&.{ shared_b, only_b })).content);
+        try std.testing.expectEqual(.unified, try env.unify(a, b));
+        try std.testing.expectEqual(marks[0] and marks[1], try rowTagPatternOnly(&env, a, "Shared"));
+        // A tag only one row holds keeps its own mark.
+        try std.testing.expect(try rowTagPatternOnly(&env, a, "OnlyA"));
+        try std.testing.expect(!try rowTagPatternOnly(&env, a, "OnlyB"));
+    }
+}
+
+test "unify - records whose merged row is the second row's own fields keep that row's range" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    const a_info = try env.mkRecordOpen(&.{
+        try env.mkRecordField("x", try store.fresh()),
+        try env.mkRecordField("y", try store.fresh()),
+    });
+    const b_info = try env.mkRecordOpen(&.{
+        try env.mkRecordField("x", try store.fresh()),
+        try env.mkRecordField("y", try store.fresh()),
+    });
+    const a = try store.freshFromContent(a_info.content);
+    const b = try store.freshFromContent(b_info.content);
+    const fields_before = store.record_fields.len();
+
+    try std.testing.expectEqual(.unified, try env.unify(a, b));
+
+    const merged = try TestEnv.getRecordOrErr(store.resolveVar(a).desc);
+    try std.testing.expectEqual(b_info.record.fields, merged.fields);
+    try std.testing.expectEqual(fields_before, store.record_fields.len());
+}
+
+test "unify - a record merge whose merged presence matches neither row stores a new row" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    const a_field = try env.mkRecordField("x", try store.fresh());
+    const b_field = try env.mkUnknownRecordField("x", try store.fresh(), try store.fresh());
+    const a_info = try env.mkRecordOpen(&.{a_field});
+    const b_info = try env.mkRecordOpen(&.{b_field});
+    const a = try store.freshFromContent(a_info.content);
+    const b = try store.freshFromContent(b_info.content);
+    const fields_before = store.record_fields.len();
+
+    try std.testing.expectEqual(.unified, try env.unify(a, b));
+
+    const merged = try TestEnv.getRecordOrErr(store.resolveVar(a).desc);
+    try std.testing.expect(!std.meta.eql(merged.fields, a_info.record.fields));
+    try std.testing.expect(!std.meta.eql(merged.fields, b_info.record.fields));
+    try std.testing.expectEqual(fields_before + 1, store.record_fields.len());
+    // The rows the operands held are as they were.
+    try std.testing.expectEqual(a_field, store.getRecordFieldAt(a_info.record.fields, 0));
+    try std.testing.expectEqual(b_field, store.getRecordFieldAt(b_info.record.fields, 0));
+}
+
+test "unify - tag unions whose merged row is the second row's own tags keep that row's range" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    const a_info = try env.mkTagUnionOpen(&.{
+        try env.mkTag("A", &.{try store.fresh()}),
+        try env.mkTag("B", &.{}),
+    });
+    const b_info = try env.mkTagUnionOpen(&.{
+        try env.mkTag("A", &.{try store.fresh()}),
+        try env.mkTag("B", &.{}),
+    });
+    const a = try store.freshFromContent(a_info.content);
+    const b = try store.freshFromContent(b_info.content);
+    const tags_before = store.tags.len();
+
+    try std.testing.expectEqual(.unified, try env.unify(a, b));
+
+    const merged = try TestEnv.getTagUnionOrErr(store.resolveVar(a).desc);
+    try std.testing.expectEqual(b_info.tag_union.tags, merged.tags);
+    try std.testing.expectEqual(tags_before, store.tags.len());
+}
+
+test "unify - a merged row equal to the first row's own tags keeps the first row's range" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    // Neither tag has a payload, so the merged tag (the second row's payload,
+    // unmarked because the first row's tag is) is the first row's tag.
+    const a_tag = try env.mkTag("Shared", &.{});
+    var b_tag = try env.mkTag("Shared", &.{});
+    b_tag.pattern_only = true;
+    const a_info = try env.mkTagUnionOpen(&.{a_tag});
+    const b_info = try env.mkTagUnionOpen(&.{b_tag});
+    const a = try store.freshFromContent(a_info.content);
+    const b = try store.freshFromContent(b_info.content);
+    const tags_before = store.tags.len();
+
+    try std.testing.expectEqual(.unified, try env.unify(a, b));
+
+    const merged = try TestEnv.getTagUnionOrErr(store.resolveVar(a).desc);
+    try std.testing.expectEqual(a_info.tag_union.tags, merged.tags);
+    try std.testing.expectEqual(tags_before, store.tags.len());
+    try std.testing.expect(!try rowTagPatternOnly(&env, a, "Shared"));
+    try std.testing.expect(store.getTagAt(b_info.tag_union.tags, 0).pattern_only);
+}
+
+test "unify - a shared tag that stops being pattern-only is stored in a new row, leaving the marked one as it was" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    // Distinct payload variables keep the merged tag, which takes the
+    // second row's payload, from equaling the first row's tag.
+    const a_tag = try env.mkTag("Shared", &.{try store.fresh()});
+    var b_tag = try env.mkTag("Shared", &.{try store.fresh()});
+    b_tag.pattern_only = true;
+    const a_info = try env.mkTagUnionOpen(&.{a_tag});
+    const b_info = try env.mkTagUnionOpen(&.{b_tag});
+    const a = try store.freshFromContent(a_info.content);
+    const b = try store.freshFromContent(b_info.content);
+    const tags_before = store.tags.len();
+
+    try std.testing.expectEqual(.unified, try env.unify(a, b));
+
+    const merged = try TestEnv.getTagUnionOrErr(store.resolveVar(a).desc);
+    try std.testing.expect(!std.meta.eql(merged.tags, b_info.tag_union.tags));
+    try std.testing.expectEqual(tags_before + 1, store.tags.len());
+    try std.testing.expect(!try rowTagPatternOnly(&env, a, "Shared"));
+    try std.testing.expect(store.getTagAt(b_info.tag_union.tags, 0).pattern_only);
+}
+
+/// Whether the store journals `part` as keeping its own entry for the
+/// pattern-only tag `name` that `root`'s row holds a copy of.
+fn journalsPatternOnlyTagCopy(env: *TestEnv, part: Var, root: Var, name: []const u8) std.mem.Allocator.Error!bool {
+    const ident = try env.module_env.getIdentStore().insert(env.module_env.gpa, Ident.for_text(name));
+    const store = &env.module_env.types;
+    for (store.pattern_only_tag_copies.items) |copy| {
+        if (!copy.name.eql(ident)) continue;
+        if (store.resolveVar(copy.part).var_ != store.resolveVar(part).var_) continue;
+        if (store.resolveVar(copy.root).var_ == store.resolveVar(root).var_) return true;
+    }
+    return false;
+}
+
+test "issue 13105: a producer met through a shared row extension is journaled for the extension's own entry" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    var gone = try env.mkTag("Gone", &.{});
+    gone.pattern_only = true;
+    const errors = try store.freshFromContent((try env.mkTagUnionOpen(&.{gone})).content);
+    const requirement = try store.freshFromContent((try env.mkTagUnion(&.{try env.mkTag("Bad", &.{})}, errors)).content);
+    const result = try store.freshFromContent((try env.mkTagUnion(&.{try env.mkTag("Bad", &.{})}, errors)).content);
+    const declared = try store.freshFromContent((try env.mkTagUnionOpen(&.{ try env.mkTag("Bad", &.{}), try env.mkTag("Gone", &.{}) })).content);
+
+    try std.testing.expectEqual(.unified, try env.unify(requirement, declared));
+    // The merged row holds a produced `Gone`. The extension `result` shares
+    // keeps its own marked entry, journaled as the same tag.
+    try std.testing.expect(!try rowTagPatternOnly(&env, requirement, "Gone"));
+    try std.testing.expect(try rowTagPatternOnly(&env, result, "Gone"));
+    try std.testing.expect(try journalsPatternOnlyTagCopy(&env, errors, requirement, "Gone"));
+}
+
+test "member demand - growing a row leaves its observed suffix intact" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    const initial = try env.mkTagUnionOpen(&.{try env.mkTag("Z", &.{})});
+    const root = try store.freshFromContent(initial.content);
+    const observed_tail = initial.tag_union.ext;
+    for ([_][]const u8{ "D", "A", "C", "B" }) |label| {
+        var tag = try env.mkTag(label, &.{});
+        tag.pattern_only = true;
+        const demand = try env.mkTagUnionOpen(&.{tag});
+        const pattern = try store.freshFromContent(demand.content);
+        try std.testing.expectEqual(.unified, try env.unifyWithOptions(root, pattern, .{ .member_tail = demand.tag_union.ext }));
+        try std.testing.expectEqual(store.resolveDescIdx(root), store.resolveDescIdx(pattern));
+    }
+    const suffix = try env.mkTagUnionClosed(&.{
+        try env.mkTag("A", &.{}), try env.mkTag("B", &.{}), try env.mkTag("C", &.{}), try env.mkTag("D", &.{}),
+    });
+    try std.testing.expectEqual(.unified, try env.unify(observed_tail, try store.freshFromContent(suffix.content)));
+    const extra = try env.mkTagUnionOpen(&.{try env.mkTag("Extra", &.{})});
+    try std.testing.expect((try env.unifyWithOptions(root, try store.freshFromContent(extra.content), .{ .member_tail = extra.tag_union.ext })).isProblem());
+}
+
+test "member demand - an observable tail gets the exact complement" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    const whole = try env.mkTagUnionClosed(&.{ try env.mkTag("A", &.{}), try env.mkTag("B", &.{}) });
+    const open = try env.mkTagUnionOpen(&.{try env.mkTag("A", &.{})});
+    // No private-tail evidence: a client of this relation can read `rest`.
+    const rest = open.tag_union.ext;
+    try std.testing.expectEqual(.unified, try env.unify(try store.freshFromContent(whole.content), try store.freshFromContent(open.content)));
+    const just_b = try env.mkTagUnionClosed(&.{try env.mkTag("B", &.{})});
+    try std.testing.expectEqual(.unified, try env.unify(rest, try store.freshFromContent(just_b.content)));
+}
+
+test "unify - both rows' unique pattern-only tags are journaled against the part each extension becomes" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    var gone = try env.mkTag("Gone", &.{});
+    gone.pattern_only = true;
+    const a_ext = try store.freshFromContent(.{ .flex = types_mod.Flex.init() });
+    const b_ext = try store.freshFromContent(.{ .flex = types_mod.Flex.init() });
+    const a = try store.freshFromContent((try env.mkTagUnion(&.{gone}, a_ext)).content);
+    const b = try store.freshFromContent((try env.mkTagUnion(&.{try env.mkTag("Bad", &.{})}, b_ext)).content);
+
+    try std.testing.expectEqual(.unified, try env.unify(a, b));
+    try std.testing.expect(try rowTagPatternOnly(&env, a, "Gone"));
+    try std.testing.expect(try rowTagPatternOnly(&env, b_ext, "Gone"));
+    try std.testing.expect(try journalsPatternOnlyTagCopy(&env, b_ext, a, "Gone"));
+}
+
+test "unify - a pattern-only tag meeting a produced tag in an extension journals no copy" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const store = &env.module_env.types;
+    const errors = try store.freshFromContent((try env.mkTagUnionOpen(&.{try env.mkTag("Gone", &.{})})).content);
+    const requirement = try store.freshFromContent((try env.mkTagUnion(&.{try env.mkTag("Bad", &.{})}, errors)).content);
+    var marked_gone = try env.mkTag("Gone", &.{});
+    marked_gone.pattern_only = true;
+    const pattern = try store.freshFromContent((try env.mkTagUnionOpen(&.{marked_gone})).content);
+
+    try std.testing.expectEqual(.unified, try env.unify(pattern, requirement));
+    try std.testing.expect(!try rowTagPatternOnly(&env, pattern, "Gone"));
+    try std.testing.expectEqual(0, store.pattern_only_tag_copies.items.len);
+}
+
+test "unify - a tag repeated along one row's chain is pattern-only only when every occurrence is" {
+    for ([_][2]bool{ .{ true, true }, .{ true, false }, .{ false, true } }) |marks| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const store = &env.module_env.types;
+        var inner_tag = try env.mkTag("Oops", &.{});
+        inner_tag.pattern_only = marks[1];
+        var outer_tag = try env.mkTag("Oops", &.{});
+        outer_tag.pattern_only = marks[0];
+        const inner = try store.freshFromContent((try env.mkTagUnionOpen(&.{inner_tag})).content);
+        const row = try store.freshFromContent((try env.mkTagUnion(&.{outer_tag}, inner)).content);
+        const other = try store.freshFromContent((try env.mkTagUnionOpen(&.{try env.mkTag("Other", &.{})})).content);
+        try std.testing.expectEqual(.unified, try env.unify(row, other));
+        try std.testing.expectEqual(marks[0] and marks[1], try rowTagPatternOnly(&env, row, "Oops"));
     }
 }
 
@@ -465,7 +828,7 @@ test "unify - a repeated label whose occurrences conflict is the repeating row's
                 },
             };
             const a, const b = if (row_is_actual) .{ other, row } else .{ row, other };
-            const result = try env.unifyWithOptions(a, b, .{ .repeated_label_rows = .return_row });
+            const result = try env.unifyRepeatedLabelRows(a, b, .{}, .return_row);
             try std.testing.expectEqual(.mismatch, result);
             try std.testing.expectEqual(store.resolveVar(row).var_, store.resolveVar(env.scratch.repeatedLabelRow().?).var_);
             try std.testing.expectEqual(@as(usize, 0), env.problems.len());
@@ -793,6 +1156,158 @@ test "unify - alias (concrete backing) with rigid (fail, other way)" {
 
     const result = try env.unify(rigid, alias);
     try std.testing.expectEqual(false, result.isAccepted());
+}
+
+test "unify - two uses of one alias whose arguments are one class merge into the second use" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const arg = try types.freshFromContent(Content{ .structure = .empty_record });
+
+    const a_backing_var = try types.freshFromContent(try env.mkTuple(&[_]Var{arg}));
+    const a_alias = try env.mkAlias("Alias", a_backing_var, &[_]Var{arg});
+    const a = try types.freshFromContent(a_alias);
+
+    const b_backing_var = try types.freshFromContent(try env.mkTuple(&[_]Var{arg}));
+    const b_alias = try env.mkAlias("Alias", b_backing_var, &[_]Var{arg});
+    const b = try types.freshFromContent(b_alias);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    try std.testing.expectEqual(b_alias, types.resolveVar(b).desc.content);
+    // The two backings are related as well.
+    try std.testing.expectEqual(b_backing_var, types.resolveVar(a_backing_var).var_);
+}
+
+test "unify - two uses of one alias over one backing merge into the second use" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const backing_var = try types.freshFromContent(Content{ .structure = .empty_record });
+    const a_alias = try env.mkAlias("Alias", backing_var, &[_]Var{});
+    const a = try types.freshFromContent(a_alias);
+    const b_alias = try env.mkAlias("Alias", backing_var, &[_]Var{});
+    const b = try types.freshFromContent(b_alias);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    try std.testing.expectEqual(b_alias, types.resolveVar(b).desc.content);
+}
+
+test "unify - two uses of one alias relate their arguments before they merge" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const a_arg = try types.fresh();
+    const a_backing_var = try types.freshFromContent(try env.mkTuple(&[_]Var{a_arg}));
+    const a_alias = try env.mkAlias("Alias", a_backing_var, &[_]Var{a_arg});
+    const a = try types.freshFromContent(a_alias);
+
+    const b_arg = try types.freshFromContent(Content{ .structure = .empty_record });
+    const b_backing_var = try types.freshFromContent(try env.mkTuple(&[_]Var{b_arg}));
+    const b_alias = try env.mkAlias("Alias", b_backing_var, &[_]Var{b_arg});
+    const b = try types.freshFromContent(b_alias);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b_arg, types.resolveVar(a_arg).var_);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    try std.testing.expectEqual(b_alias, types.resolveVar(b).desc.content);
+    try std.testing.expectEqual(b_backing_var, types.resolveVar(a_backing_var).var_);
+}
+
+test "unify - two uses of one alias with a mismatched argument do not unify" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const a_arg = try types.freshFromContent(Content{ .structure = .empty_record });
+    const a_backing_var = try types.freshFromContent(try env.mkTuple(&[_]Var{a_arg}));
+    const a = try types.freshFromContent(try env.mkAlias("Alias", a_backing_var, &[_]Var{a_arg}));
+
+    const b_arg = try types.freshFromContent(try env.mkTuple(&[_]Var{a_arg}));
+    const b_backing_var = try types.freshFromContent(try env.mkTuple(&[_]Var{b_arg}));
+    const b = try types.freshFromContent(try env.mkAlias("Alias", b_backing_var, &[_]Var{b_arg}));
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(false, result.isAccepted());
+}
+
+test "unify - an alias of an alias relates to a structure through both backings" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const inner_backing_var = try types.fresh();
+    const inner = try types.freshFromContent(try env.mkAlias("Inner", inner_backing_var, &[_]Var{}));
+    const outer_alias = try env.mkAlias("Outer", inner, &[_]Var{});
+    const a = try types.freshFromContent(outer_alias);
+    const b = try types.freshFromContent(Content{ .structure = .empty_record });
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    // Both aliases stay as they are, and the innermost backing is the
+    // structure's class.
+    try std.testing.expectEqual(outer_alias, types.resolveVar(a).desc.content);
+    try std.testing.expect(types.resolveVar(inner).desc.content == .alias);
+    try std.testing.expectEqual(b, types.resolveVar(inner_backing_var).var_);
+}
+
+test "unify - an alias backed by itself relates to a structure without looping" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const a = try types.fresh();
+    try types.setRootVarContent(a, try env.mkAlias("Loop", a, &[_]Var{}));
+    const b = try types.freshFromContent(Content{ .structure = .empty_record });
+
+    const result = try env.unify(a, b);
+
+    // The alias leads only back to the pair already being related, so there
+    // is nothing further to relate.
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expect(types.resolveVar(a).desc.content == .alias);
+    try std.testing.expect(types.resolveVar(a).var_ != types.resolveVar(b).var_);
+}
+
+test "unify - an uncommitted record tail meeting an alias relates to the alias's backing" {
+    for (0..2) |order| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const types = &env.module_env.types;
+
+        const backing = try types.freshFromContent(Content{ .structure = .empty_record });
+        const alias = try types.freshFromContent(try env.mkAlias("Unit", backing, &[_]Var{}));
+        const tail = try types.fresh();
+        try types.markUncommittedRecordTail(tail, false);
+
+        const result = if (order == 0) try env.unify(tail, alias) else try env.unify(alias, tail);
+
+        try std.testing.expectEqual(.unified, result);
+        // The tail commits to the empty record the alias is backed by. It
+        // does not become the alias.
+        try std.testing.expectEqual(types.resolveVar(backing).var_, types.resolveVar(tail).var_);
+        try std.testing.expectEqual(Content{ .structure = .empty_record }, types.resolveVar(tail).desc.content);
+        try std.testing.expect(!types.resolveVar(tail).desc.flags.uncommitted_record_tail);
+        try std.testing.expect(types.resolveVar(alias).desc.content == .alias);
+    }
 }
 
 // unification - structure/flex_vars //
@@ -1128,7 +1643,10 @@ test "unify - issue 11024 - empty nominal row absorption respects field kinds an
                     try env.mkUnknownRecordField("field", presence, value),
                 })).content);
                 const nominal = try store.freshFromContent(try env.mkNominalType("Cfg", backing, &.{}));
-                const empty = try store.freshFromContent(.{ .structure = .empty_record });
+                // A `{}` literal: no fields over an uncommitted tail.
+                const tail = try store.fresh();
+                try store.markUncommittedRecordTail(tail, false);
+                const empty = try store.freshFromContent((try env.mkRecord(&.{}, tail)).content);
                 const a = if (order == 0) nominal else empty;
                 const b = if (order == 0) empty else nominal;
                 const result = if (exact) try env.unifyExact(a, b) else try env.unifyWriteNoReport(a, b);
@@ -1138,12 +1656,19 @@ test "unify - issue 11024 - empty nominal row absorption respects field kinds an
                     try std.testing.expect(store.resolveVar(empty).desc.content.structure == .nominal_type);
                     try std.testing.expect(store.resolveVar(backing).desc.content.structure == .record);
                 }
-                const omissions = env.scratch.absorbed_record_defaults.items.items;
+                const omissions = env.scratch.absorbed_record_defaults.items();
                 try std.testing.expectEqual(@as(usize, if (accepts and kind == .defaulted) 1 else 0), omissions.len);
                 if (omissions.len != 0) {
+                    // Publication groups by the whole construction, not its
+                    // internal extension or the nominal on the other side.
                     try std.testing.expectEqual(empty, omissions[0].record_var);
                     try std.testing.expectEqual(default_id, omissions[0].default);
                 }
+
+                // A committed empty record never lifts.
+                const committed = try store.freshFromContent(.{ .structure = .empty_record });
+                const committed_result = if (order == 0) try env.unifyWriteNoReport(nominal, committed) else try env.unifyWriteNoReport(committed, nominal);
+                try std.testing.expectEqual(Result.mismatch, committed_result);
             }
         }
     }
@@ -1178,7 +1703,9 @@ test "unify - issue 11024 - zero-field nominal backing stays structural across c
         const backing = try store.freshFromContent((try env.mkRecordClosed(&.{})).content);
         const nominal = try store.freshFromContent(try env.mkNominalType("Cfg", backing, &.{}));
         for (0..2) |_| {
-            const empty = try store.freshFromContent(.{ .structure = .empty_record });
+            const tail = try store.fresh();
+            try store.markUncommittedRecordTail(tail, false);
+            const empty = try store.freshFromContent((try env.mkRecord(&.{}, tail)).content);
             const result = if (order == 0)
                 try env.unifyExact(nominal, empty)
             else
@@ -1203,17 +1730,23 @@ test "unify - empty nominal type with empty tag union (nominal on left)" {
         try env.mkNominalType("Empty", backing_var, &[_]Var{}),
     );
 
-    // Create empty tag union: []
+    // Create an empty tag union inference closed: []
     const empty_var = try env.module_env.types.freshFromContent(Content{ .structure = .empty_tag_union });
+    try env.module_env.types.markUncommittedTagTail(empty_var);
+    const empty_union = try env.module_env.types.freshFromContent((try env.mkTagUnion(&.{}, empty_var)).content);
 
     // Unify: Empty ~ []
-    const result = try env.unify(nominal_var, empty_var);
+    const result = try env.unify(nominal_var, empty_union);
 
     // Should succeed and merge to nominal type
     try std.testing.expectEqual(.unified, result);
-    const resolved = env.module_env.types.resolveVar(empty_var);
+    const resolved = env.module_env.types.resolveVar(empty_union);
     try std.testing.expect(resolved.desc.content == .structure);
     try std.testing.expect(resolved.desc.content.structure == .nominal_type);
+
+    // A committed empty tag union never lifts.
+    const committed = try env.module_env.types.freshFromContent(Content{ .structure = .empty_tag_union });
+    try std.testing.expect((try env.unify(nominal_var, committed)).isProblem());
 }
 
 test "unify - empty tag union with empty nominal type (nominal on right)" {
@@ -1221,8 +1754,10 @@ test "unify - empty tag union with empty nominal type (nominal on right)" {
     var env = try TestEnv.init(gpa);
     defer env.deinit();
 
-    // Create empty tag union: []
+    // Create an empty tag union inference closed: []
     const empty_var = try env.module_env.types.freshFromContent(Content{ .structure = .empty_tag_union });
+    try env.module_env.types.markUncommittedTagTail(empty_var);
+    const empty_union = try env.module_env.types.freshFromContent((try env.mkTagUnion(&.{}, empty_var)).content);
 
     // Create nominal type: Empty := []
     const backing_var = try env.module_env.types.freshFromContent(Content{ .structure = .empty_tag_union });
@@ -1231,11 +1766,11 @@ test "unify - empty tag union with empty nominal type (nominal on right)" {
     );
 
     // Unify: [] ~ Empty
-    const result = try env.unify(empty_var, nominal_var);
+    const result = try env.unify(empty_union, nominal_var);
 
     // Should succeed and merge to nominal type
     try std.testing.expectEqual(.unified, result);
-    const resolved = env.module_env.types.resolveVar(empty_var);
+    const resolved = env.module_env.types.resolveVar(empty_union);
     try std.testing.expect(resolved.desc.content == .structure);
     try std.testing.expect(resolved.desc.content.structure == .nominal_type);
 }
@@ -1264,16 +1799,67 @@ test "unify - two empty nominal types" {
     try std.testing.expectEqual(false, result.isAccepted());
 }
 
+test "unify - two applications of one nominal whose arguments are one class merge into the second" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const arg = try types.freshFromContent(Content{ .structure = .empty_record });
+    const backing_var = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+    const a = try types.freshFromContent(try env.mkNominalType("Wrapper", backing_var, &[_]Var{arg}));
+    const b_nominal = try env.mkNominalType("Wrapper", backing_var, &[_]Var{arg});
+    const b = try types.freshFromContent(b_nominal);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    try std.testing.expectEqual(b_nominal, types.resolveVar(b).desc.content);
+}
+
+test "unify - two applications of one nominal relate their arguments before they merge" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const backing_var = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+    const a_arg = try types.fresh();
+    const a = try types.freshFromContent(try env.mkNominalType("Wrapper", backing_var, &[_]Var{a_arg}));
+    const b_arg = try types.freshFromContent(Content{ .structure = .empty_record });
+    const b_nominal = try env.mkNominalType("Wrapper", backing_var, &[_]Var{b_arg});
+    const b = try types.freshFromContent(b_nominal);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b_arg, types.resolveVar(a_arg).var_);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    try std.testing.expectEqual(b_nominal, types.resolveVar(b).desc.content);
+}
+
+test "unify - two applications of one nominal with a mismatched argument do not unify" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const backing_var = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+    const a_arg = try types.freshFromContent(Content{ .structure = .empty_record });
+    const a = try types.freshFromContent(try env.mkNominalType("Wrapper", backing_var, &[_]Var{a_arg}));
+    const b_arg = try types.freshFromContent(try env.mkTuple(&[_]Var{a_arg}));
+    const b = try types.freshFromContent(try env.mkNominalType("Wrapper", backing_var, &[_]Var{b_arg}));
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(false, result.isAccepted());
+}
+
 test "unify - distinct concrete builtin numeric nominals never unify" {
-    // GUARD for `structurallyIncompatiblePair` in src/check/unify.zig (the
-    // pair classifier behind `numeralCandidateStructurallyRefuted` in
-    // src/check/Check.zig): its dispatcher-position refutation (and the
-    // witness-probe assertion in `commitLiteralDefault`) assumes two
-    // CONCRETE builtin numeric nominals with different identities (origin +
-    // source decl) can never unify—
-    // there is no implicit numeric widening/coercion in the unifier. If such
-    // coercion is ever added, this test fails legibly BEFORE the structural
-    // pre-filter starts skipping probes that would now succeed.
+    // Two concrete builtin numeric nominals with different identities
+    // (origin + source decl) never unify: the unifier has no implicit numeric
+    // widening or coercion.
     const gpa = std.testing.allocator;
     var env = try TestEnv.init(gpa);
     defer env.deinit();
@@ -2182,6 +2768,149 @@ test "unify - open tag extends closed (fail)" {
     try std.testing.expectEqual(Content.err, (try env.getDescForRootVar(b)).content);
 }
 
+test "unify - tag unions with the same tags relate their payloads and merge" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const a_payload = try types.fresh();
+    const a_row = try env.mkTagUnionClosed(&[_]Tag{ try env.mkTag("A", &[_]Var{a_payload}), try env.mkTag("B", &[_]Var{}) });
+    const a = try types.freshFromContent(a_row.content);
+    const b_payload = try types.freshFromContent(Content{ .structure = .empty_record });
+    const b_row = try env.mkTagUnionClosed(&[_]Tag{ try env.mkTag("A", &[_]Var{b_payload}), try env.mkTag("B", &[_]Var{}) });
+    const b = try types.freshFromContent(b_row.content);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    try std.testing.expectEqual(b_payload, types.resolveVar(a_payload).var_);
+    try std.testing.expectEqual(types.resolveVar(b_row.tag_union.ext).var_, types.resolveVar(a_row.tag_union.ext).var_);
+    const merged = types.resolveVar(b).desc.content.structure.tag_union;
+    try std.testing.expectEqual(@as(u32, 2), merged.tags.count);
+    try std.testing.expectEqualStrings("A", env.module_env.getIdentStore().getText(types.getTagAt(merged.tags, 0).name));
+    try std.testing.expectEqualStrings("B", env.module_env.getIdentStore().getText(types.getTagAt(merged.tags, 1).name));
+    try std.testing.expectEqual(b_payload, types.resolveVar(types.getVarAt(types.getTagAt(merged.tags, 0).args, 0)).var_);
+}
+
+test "unify - tag unions with the same tags over the same payloads and extension merge" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const payload = try types.freshFromContent(Content{ .structure = .empty_record });
+    const ext = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+    const a_row = try env.mkTagUnion(&[_]Tag{ try env.mkTag("A", &[_]Var{payload}), try env.mkTag("B", &[_]Var{}) }, ext);
+    const a = try types.freshFromContent(a_row.content);
+    const b_row = try env.mkTagUnion(&[_]Tag{ try env.mkTag("A", &[_]Var{payload}), try env.mkTag("B", &[_]Var{}) }, ext);
+    const b = try types.freshFromContent(b_row.content);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    const merged = types.resolveVar(b).desc.content.structure.tag_union;
+    try std.testing.expectEqual(ext, merged.ext);
+    try std.testing.expectEqual(@as(u32, 2), merged.tags.count);
+    try std.testing.expectEqualStrings("A", env.module_env.getIdentStore().getText(types.getTagAt(merged.tags, 0).name));
+    try std.testing.expectEqualStrings("B", env.module_env.getIdentStore().getText(types.getTagAt(merged.tags, 1).name));
+    try std.testing.expectEqual(payload, types.getVarAt(types.getTagAt(merged.tags, 0).args, 0));
+}
+
+test "unify - tag unions that store the same tags out of name order merge into an ordered row" {
+    const gpa = std.testing.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const a_row = try env.mkTagUnionClosed(&[_]Tag{ try env.mkTag("B", &[_]Var{}), try env.mkTag("A", &[_]Var{}) });
+    const a = try types.freshFromContent(a_row.content);
+    const b_row = try env.mkTagUnionClosed(&[_]Tag{ try env.mkTag("B", &[_]Var{}), try env.mkTag("A", &[_]Var{}) });
+    const b = try types.freshFromContent(b_row.content);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    try std.testing.expectEqual(b, types.resolveVar(a).var_);
+    const merged = types.resolveVar(b).desc.content.structure.tag_union;
+    try std.testing.expectEqual(@as(u32, 2), merged.tags.count);
+    try std.testing.expectEqualStrings("A", env.module_env.getIdentStore().getText(types.getTagAt(merged.tags, 0).name));
+    try std.testing.expectEqualStrings("B", env.module_env.getIdentStore().getText(types.getTagAt(merged.tags, 1).name));
+}
+
+test "unify - tag unions that each hold a tag the other lacks merge into one row in name order" {
+    // The merged row holds the shared tag and each side's own tags. Its order
+    // is the tags' name order, whichever operand comes first and wherever each
+    // side's own tags fall among the shared ones.
+    for ([_]bool{ false, true }) |b_first| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const types = &env.module_env.types;
+
+        const a_row = try env.mkTagUnionOpen(&[_]Tag{ try env.mkTag("B", &[_]Var{}), try env.mkTag("D", &[_]Var{}) });
+        const a = try types.freshFromContent(a_row.content);
+        const b_row = try env.mkTagUnionOpen(&[_]Tag{ try env.mkTag("A", &[_]Var{}), try env.mkTag("B", &[_]Var{}), try env.mkTag("C", &[_]Var{}) });
+        const b = try types.freshFromContent(b_row.content);
+
+        const result = if (b_first) try env.unify(b, a) else try env.unify(a, b);
+
+        try std.testing.expectEqual(.unified, result);
+        try std.testing.expectEqual(types.resolveVar(a).var_, types.resolveVar(b).var_);
+        const merged = types.resolveVar(a).desc.content.structure.tag_union;
+        const expected = [_][]const u8{ "A", "B", "C", "D" };
+        try std.testing.expectEqual(@as(u32, expected.len), merged.tags.count);
+        for (expected, 0..) |name, index| {
+            try std.testing.expectEqualStrings(name, env.module_env.getIdentStore().getText(types.getTagAt(merged.tags, @intCast(index)).name));
+        }
+    }
+}
+
+test "unify - tag unions with the same tags commit an uncommitted tag tail that meets a committed one" {
+    for (0..2) |order| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const types = &env.module_env.types;
+
+        const committed_ext = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+        const committed = try types.freshFromContent((try env.mkTagUnion(&[_]Tag{try env.mkTag("A", &[_]Var{})}, committed_ext)).content);
+        const uncommitted_ext = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+        try types.markUncommittedTagTail(uncommitted_ext);
+        const uncommitted = try types.freshFromContent((try env.mkTagUnion(&[_]Tag{try env.mkTag("A", &[_]Var{})}, uncommitted_ext)).content);
+
+        const result = if (order == 0) try env.unify(committed, uncommitted) else try env.unify(uncommitted, committed);
+
+        try std.testing.expectEqual(.unified, result);
+        try std.testing.expectEqual(types.resolveVar(committed).var_, types.resolveVar(uncommitted).var_);
+        // The two tails are one class, and it is committed.
+        try std.testing.expectEqual(types.resolveVar(committed_ext).var_, types.resolveVar(uncommitted_ext).var_);
+        const merged = types.resolveVar(committed).desc.content.structure.tag_union;
+        const merged_ext = types.resolveVar(merged.ext);
+        try std.testing.expectEqual(Content{ .structure = .empty_tag_union }, merged_ext.desc.content);
+        try std.testing.expect(!merged_ext.desc.flags.uncommitted_tag_tail);
+    }
+}
+
+test "unify - tag unions with the same tags over two uncommitted tag tails keep an uncommitted tail" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    const types = &env.module_env.types;
+
+    const a_ext = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+    try types.markUncommittedTagTail(a_ext);
+    const a = try types.freshFromContent((try env.mkTagUnion(&[_]Tag{try env.mkTag("A", &[_]Var{})}, a_ext)).content);
+    const b_ext = try types.freshFromContent(Content{ .structure = .empty_tag_union });
+    try types.markUncommittedTagTail(b_ext);
+    const b = try types.freshFromContent((try env.mkTagUnion(&[_]Tag{try env.mkTag("A", &[_]Var{})}, b_ext)).content);
+
+    const result = try env.unify(a, b);
+
+    try std.testing.expectEqual(.unified, result);
+    const merged = types.resolveVar(b).desc.content.structure.tag_union;
+    try std.testing.expect(types.resolveVar(merged.ext).desc.flags.uncommitted_tag_tail);
+}
+
 test "unify - closed tag union extends open" {
     const gpa = std.testing.allocator;
     var env = try TestEnv.init(gpa);
@@ -2228,7 +2957,7 @@ test "unify - closed tag union extends open" {
     // check that fresh vars are correct
 
     try std.testing.expectEqual(1, env.scratch.fresh_vars.len());
-    try std.testing.expectEqual(b_tag_union.ext, env.scratch.fresh_vars.items.items[0]);
+    try std.testing.expectEqual(b_tag_union.ext, env.scratch.fresh_vars.items()[0]);
 }
 
 // unification - recursion //
@@ -2681,7 +3410,7 @@ test "unify - flex with constraints vs structure captures deferred check" {
 
     // Check that constraint was captured
     try std.testing.expectEqual(1, env.scratch.deferred_constraints.len());
-    const deferred = env.scratch.deferred_constraints.items.items[0];
+    const deferred = env.scratch.deferred_constraints.items()[0];
     try std.testing.expectEqual(
         env.module_env.types.resolveVar(structure_var).var_,
         env.module_env.types.resolveVar(deferred.var_).var_,
@@ -2716,7 +3445,7 @@ test "unify - structure vs flex with constraints captures deferred check (revers
 
     // Check that constraint was captured (note: vars might be swapped due to merge order)
     try std.testing.expectEqual(1, env.scratch.deferred_constraints.len());
-    const deferred = env.scratch.deferred_constraints.items.items[0];
+    const deferred = env.scratch.deferred_constraints.items()[0];
     try std.testing.expectEqual(
         env.module_env.types.resolveVar(flex_var).var_,
         env.module_env.types.resolveVar(deferred.var_).var_,
@@ -2769,7 +3498,7 @@ test "unify - rigid with from_numeral flex retains constraints on resolved rigid
     const retained_constraints = env.module_env.types.sliceStaticDispatchConstraints(resolved.desc.content.rigid.constraints);
     try std.testing.expectEqual(@as(usize, 0), retained_constraints.len);
     try std.testing.expectEqual(1, env.scratch.deferred_constraints.len());
-    try std.testing.expectEqual(constraints, env.scratch.deferred_constraints.items.items[0].constraints);
+    try std.testing.expectEqual(constraints, env.scratch.deferred_constraints.items()[0].constraints);
 }
 
 test "unify - non-numeric flex with rigid keeps constraints deferred-only" {
@@ -2800,7 +3529,7 @@ test "unify - non-numeric flex with rigid keeps constraints deferred-only" {
     try std.testing.expect(resolved.desc.content == .rigid);
     try std.testing.expectEqual(types_mod.StaticDispatchConstraint.SafeList.Range.empty(), resolved.desc.content.rigid.constraints);
     try std.testing.expectEqual(1, env.scratch.deferred_constraints.len());
-    try std.testing.expectEqual(constraints, env.scratch.deferred_constraints.items.items[0].constraints);
+    try std.testing.expectEqual(constraints, env.scratch.deferred_constraints.items()[0].constraints);
 }
 
 test "unify order - resulting type is order-independent for recursive types" {
@@ -2870,7 +3599,7 @@ test "unify order - deferred constraint origin var depends on operand order" {
             const result = if (flex_first) try env.unify(flex, rigid) else try env.unify(rigid, flex);
             try std.testing.expectEqual(.unified, result);
             try std.testing.expectEqual(@as(usize, 1), env.scratch.deferred_constraints.len());
-            const origin = env.scratch.deferred_constraints.items.items[0].var_;
+            const origin = env.scratch.deferred_constraints.items()[0].var_;
             return @backingInt(ts.resolveVar(origin).var_);
         }
     };
@@ -2936,7 +3665,7 @@ const DeclaringModule = struct {
 };
 
 fn copyIntoConsumer(consumer: *TestEnv, source: *DeclaringModule, var_: Var) std.mem.Allocator.Error!Var {
-    var var_mapping = @import("collections").DenseMap(Var, Var).init(consumer.module_env.gpa);
+    var var_mapping = @import("collections").EpochMap(Var, Var).init(consumer.module_env.gpa);
     defer var_mapping.deinit();
     return try copy_import.copyVar(
         &source.env.types,
@@ -2963,7 +3692,7 @@ test "cross-module copy substitutes exact source vars without conflating equal r
     const source_tuple = try source.module_env.types.freshFromContent(try source.mkTuple(&.{ substituted_source, copied_source }));
 
     const replacement = try consumer.module_env.types.freshFromContent(.{ .structure = .empty_record });
-    var var_mapping = @import("collections").DenseMap(Var, Var).init(gpa);
+    var var_mapping = @import("collections").EpochMap(Var, Var).init(gpa);
     defer var_mapping.deinit();
     try var_mapping.put(substituted_source, replacement);
 
@@ -3027,7 +3756,7 @@ test "cross-module copy substitutes every application of an explicit alias decla
     );
 
     const replacement = try consumer.module_env.types.freshFromContent(.{ .structure = .empty_record });
-    var var_mapping = @import("collections").DenseMap(Var, Var).init(gpa);
+    var var_mapping = @import("collections").EpochMap(Var, Var).init(gpa);
     defer var_mapping.deinit();
     var alias_source_mapping = std.AutoHashMap(copy_import.AliasSource, Var).init(gpa);
     defer alias_source_mapping.deinit();
@@ -3164,12 +3893,12 @@ test "content identity: deep hash covers transitive imports (byte-identical modu
     // not share identity: their field layouts could differ.
     var over_v1 = try DeclaringModule.init(gpa, "Api", "T := { x : Dep.X }");
     defer over_v1.deinit();
-    over_v1.env.self_module_identity = base.ModuleIdentity.Idx.NONE;
+    over_v1.env.self_module_identity = .none;
     try over_v1.env.ensureContentIdentity(&.{@as(*const ModuleEnv, dep_v1.env)});
 
     var over_v2 = try DeclaringModule.init(gpa, "Api", "T := { x : Dep.X }");
     defer over_v2.deinit();
-    over_v2.env.self_module_identity = base.ModuleIdentity.Idx.NONE;
+    over_v2.env.self_module_identity = .none;
     try over_v2.env.ensureContentIdentity(&.{@as(*const ModuleEnv, dep_v2.env)});
 
     try std.testing.expect(!std.mem.eql(

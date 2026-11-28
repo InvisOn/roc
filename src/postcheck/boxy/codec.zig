@@ -30,7 +30,6 @@ const layouts_mod = @import("layouts.zig");
 
 const Allocator = std.mem.Allocator;
 const checked = check.CheckedModule;
-const ExprId = check.CheckedBodies.ExprId;
 const static_dispatch = check.StaticDispatchRegistry;
 const LIR = lir_core.LIR;
 const LocalId = LIR.LocalId;
@@ -63,6 +62,10 @@ const Resolved = union(enum) {
     structural: DerivationId,
     /// A call checking rejected.
     checked_error: TypeId,
+    /// A call on a type variable of the definition the contract was derived
+    /// in, whose evidence the use supplies: the family's captured value
+    /// `local`, of the call's callable type `fn_ty`.
+    forwarded: struct { local: u32, fn_ty: TypeId },
 };
 
 const FamilyKey = struct { kind: Kind, digest: [32]u8 };
@@ -70,8 +73,13 @@ const FamilyKey = struct { kind: Kind, digest: [32]u8 };
 /// One renamed record field the constructor computes.
 const NameEntry = struct { record: TypeId, label: NameId };
 
-/// A local procedure the family calls, at the family's type `fn_ty`.
-const LocalCall = struct { node: static_dispatch.EvidenceNodeId, fn_ty: TypeId };
+/// A function value the family captures, at the family's type `fn_ty`: a
+/// local procedure the family calls, or the dictionary a use supplies for a
+/// forwarded call, by the call's position in `forwardedRefs` order.
+const LocalCall = struct {
+    source: union(enum) { local_proc: static_dispatch.EvidenceNodeId, forwarded: u32 },
+    fn_ty: TypeId,
+};
 
 /// The generated codec workers of one derivation at one instantiation.
 pub const Family = struct {
@@ -93,10 +101,13 @@ pub const Family = struct {
     names: std.ArrayList(NameEntry) = .empty,
     /// The first name of each record's fields, by record type.
     record_names: collections.DenseMapUnmanaged(TypeId, u32) = .empty,
-    /// The local procedures the family calls. A use builds their function
-    /// values in its own body, where they are declared, and the constructor
-    /// captures them.
+    /// The function values the family calls: local procedures, whose values
+    /// a use builds in its own body, where they are declared, and the
+    /// dictionaries of forwarded calls, which a use supplies from its own
+    /// evidence. The constructor captures them.
     locals: std.ArrayList(LocalCall) = .empty,
+    /// How many of `locals` are forwarded dictionaries.
+    forwarded_count: u32 = 0,
     /// The tuple of every renamed name, then every local procedure's
     /// function value (the empty record when there are none).
     names_ty: TypeId,
@@ -134,10 +145,9 @@ pub const PieceKind = enum(u8) {
     field_names_step,
 };
 
-/// One generated codec worker: its family, kind, and kind-specific operands.
-pub const Piece = struct { family: u32, kind: PieceKind, a: u32 = 0, b: u32 = 0 };
-
-const no_family = std.math.maxInt(u32);
+/// One generated codec worker: its family (absent for a piece of none),
+/// kind, and kind-specific operands.
+pub const Piece = struct { family: collections.OptionalU32, kind: PieceKind, a: u32 = 0, b: u32 = 0 };
 
 /// What a piece's `a` and `b` hold, for a stored function naming it.
 pub const PieceOperands = enum { none, types, type_and_name, type_and_word };
@@ -153,16 +163,16 @@ pub fn pieceOperands(kind: PieceKind) PieceOperands {
 }
 
 /// The derivation of `piece`'s family, by which a stored function names the
-/// family, or `no_family` for a piece of none.
-pub fn pieceFamilyRoot(program: *const Program, piece: Piece) u32 {
-    if (piece.family == no_family) return no_family;
-    return @backingInt(program.codec.families.items[piece.family].root);
+/// family, absent for a piece of none.
+pub fn pieceFamilyRoot(program: *const Program, piece: Piece) collections.OptionalU32 {
+    const family = piece.family.get() orelse return .none;
+    return .some(@backingInt(program.codec.families.items[family].root));
 }
 
 /// The worker of a piece a stored function names: `root` is its family's
 /// derivation in `module`'s plans (`pieceFamilyRoot`).
-pub fn restorePiece(program: *Program, module: ModuleIndex, root: u32, kind: PieceKind, a: u32, b: u32, params: []const TypeId, ret: TypeId, captures: []const TypeId) Allocator.Error!WorkerId {
-    const family = if (root == no_family) no_family else try familyFor(program, module, @fromBackingInt(root));
+pub fn restorePiece(program: *Program, module: ModuleIndex, root: collections.OptionalU32, kind: PieceKind, a: u32, b: u32, params: []const TypeId, ret: TypeId, captures: []const TypeId) Allocator.Error!WorkerId {
+    const family: collections.OptionalU32 = if (root.get()) |derivation| .some(try familyFor(program, module, @fromBackingInt(derivation))) else .none;
     const erased = switch (kind) {
         .encode_helper, .parse_helper => false,
         .constructor, .runtime, .record_body, .tuple_body, .list_body, .dict_body, .tag_body, .value_thunk, .key_thunk, .tag_spec, .field_names_step => true,
@@ -212,13 +222,13 @@ fn convertIn(program: *Program, env: types.Env, ty: checked.CheckedTypeId) Alloc
 /// no variable of the family either: no generated code can produce a value at
 /// such a row's tail, so a use wider than the sealed row converts at
 /// `constructorAt` (design.md "Sealed Result Rows").
-fn contractEnv(program: *Program, module: ModuleIndex, constructor_ty: checked.CheckedTypeId, shape_ty: checked.CheckedTypeId) Allocator.Error!types.Env {
+fn contractEnv(program: *Program, module: ModuleIndex, constructor_ty: checked.CheckedTypeId, shape_ty: checked.CheckedTypeId, forwarded_subjects: []const checked.CheckedTypeId) Allocator.Error!types.Env {
     const allocator = program.allocator;
     const store = program.module(module).types();
     var vars: std.ArrayList(checked.CheckedTypeId) = .empty;
     defer vars.deinit(allocator);
-    var seen: collections.DenseMapUnmanaged(checked.CheckedTypeId, void) = .empty;
-    defer seen.deinit(allocator);
+    program.store.beginCheckedWalk();
+    defer program.store.endCheckedWalk();
     var pending: std.ArrayList(checked.CheckedTypeId) = .empty;
     defer pending.deinit(allocator);
     // The shape's types are visited first and contribute no variables.
@@ -227,10 +237,13 @@ fn contractEnv(program: *Program, module: ModuleIndex, constructor_ty: checked.C
     var shape_done = false;
     while (pending.pop()) |ty| {
         if (!shape_done and pending.items.len == 0 and ty == constructor_ty) shape_done = true;
-        if ((try seen.getOrPut(allocator, ty)).found_existing) continue;
+        if (!try program.store.visitChecked(ty)) continue;
         const start = pending.items.len;
         switch (store.payload(ty)) {
-            .flex, .rigid => if (shape_done and !store.payload(ty).variableSealsToRowDefault()) try vars.append(allocator, ty),
+            // A forwarded call's subject is a variable of the family even
+            // inside the shape: each use supplies its type and its codec.
+            .flex, .rigid => if ((shape_done or std.mem.findScalar(checked.CheckedTypeId, forwarded_subjects, ty) != null) and
+                !store.payload(ty).variableSealsToRowDefault()) try vars.append(allocator, ty),
             .alias => |alias| try pending.append(allocator, alias.backing),
             .record => |record| {
                 for (0..record.fields.len()) |field_index| {
@@ -264,6 +277,13 @@ fn contractEnv(program: *Program, module: ModuleIndex, constructor_ty: checked.C
     return .{ .module = module, .vars = try arena.dupe(checked.CheckedTypeId, vars.items), .bound = bound };
 }
 
+fn listElem(program: *Program, list_ty: TypeId) TypeId {
+    return switch (program.store.get(list_ty)) {
+        .list => |elem| elem,
+        .primitive, .empty_record, .record, .tuple, .tag_union, .box, .nominal, .function, .variable => invariant("a generated codec's list operand is not a list"),
+    };
+}
+
 fn functionOf(program: *Program, ty: TypeId) @FieldType(types.Node, "function") {
     return switch (program.store.get(ty)) {
         .function => |function| function,
@@ -284,7 +304,7 @@ pub fn familyFor(program: *Program, module: ModuleIndex, id: DerivationId) Alloc
     const state = &program.codec;
     const allocator = program.allocator;
     const table = program.module(module).view.static_dispatch_plans;
-    const derivation = table.generated_codec_derivations[@backingInt(id)];
+    const derivation = table.generated_codec_derivations.items()[@backingInt(id)];
     const kind: Kind = switch (derivation.kind) {
         .parser => .parser,
         .encoder => .encoder,
@@ -292,7 +312,11 @@ pub fn familyFor(program: *Program, module: ModuleIndex, id: DerivationId) Alloc
     const key: FamilyKey = .{ .kind = kind, .digest = derivation.content.bytes };
     if (state.family_ids.get(key)) |existing| return existing;
 
-    const env = try contractEnv(program, module, derivation.constructor_ty, derivation.shape_ty);
+    const forwarded_refs = try forwardedRefs(allocator, table, id);
+    defer allocator.free(forwarded_refs);
+    const forwarded_subjects = try forwardedSubjects(allocator, table, id);
+    defer allocator.free(forwarded_subjects);
+    const env = try contractEnv(program, module, derivation.constructor_ty, derivation.shape_ty, forwarded_subjects);
     const constructor_fn = try convertIn(program, env, derivation.constructor_ty);
     if (fnArgs(program, constructor_fn).len != 1) invariant("a generated codec constructor does not take one encoding");
     const encoding_ty = fnArgs(program, constructor_fn)[0];
@@ -307,7 +331,9 @@ pub fn familyFor(program: *Program, module: ModuleIndex, id: DerivationId) Alloc
     // and the state can hold the family's variables: a format type declared
     // in a function body lists the variables of the function it depends on
     // as hidden arguments, which name the instance's types.
-    if (!try program.converter().representationClosed(shape)) {
+    // Only a forwarded call's subject, a variable of the family, can leave it
+    // open.
+    if (forwarded_subjects.len == 0 and !try program.converter().representationClosed(shape)) {
         invariant("a generated codec's value shape is open");
     }
 
@@ -326,7 +352,7 @@ pub fn familyFor(program: *Program, module: ModuleIndex, id: DerivationId) Alloc
         .try_template = fnRet(program, runtime_fn),
     });
     try state.family_ids.put(allocator, key, index);
-    try collectCalls(program, index);
+    try collectCalls(program, index, forwarded_refs);
     try planNames(program, index);
     return index;
 }
@@ -363,9 +389,63 @@ fn peelable(nominal: types.Nominal) bool {
     return builtin == .try_;
 }
 
+/// The `evidence_refs` entries the forwarded calls of contract `root` and of
+/// the contracts it nests name, in a fixed order: contracts in first-visit
+/// order of a depth-first walk over nested calls, and each contract's calls
+/// in order. Equal contracts list their forwarded calls in the same order,
+/// whichever module recorded them, so a family's forwarded dictionaries are
+/// numbered by it and a use supplies them in it.
+fn forwardedRefs(allocator: Allocator, table: *const static_dispatch.StaticDispatchPlanTable, root: DerivationId) Allocator.Error![]u32 {
+    var refs: std.ArrayList(u32) = .empty;
+    errdefer refs.deinit(allocator);
+    if (!table.generated_codec_derivations.items()[@backingInt(root)].forwarded) return try refs.toOwnedSlice(allocator);
+    var pending: std.ArrayList(DerivationId) = .empty;
+    defer pending.deinit(allocator);
+    var visited: collections.DenseMapUnmanaged(DerivationId, void) = .empty;
+    defer visited.deinit(allocator);
+    try pending.append(allocator, root);
+    try visited.put(allocator, root, {});
+    while (pending.pop()) |id| {
+        const calls = table.generated_codec_derivations.items()[@backingInt(id)].callsSlice(table);
+        for (calls) |call| switch (call.resolution) {
+            .forwarded => |ref| try refs.append(allocator, ref),
+            .callable, .structural, .pending, .checked_error => {},
+        };
+        const nested_start = pending.items.len;
+        for (calls) |call| switch (call.resolution) {
+            .structural => |nested| if (!(try visited.getOrPut(allocator, nested)).found_existing) try pending.append(allocator, nested),
+            .forwarded, .callable, .pending, .checked_error => {},
+        };
+        std.mem.reverse(DerivationId, pending.items[nested_start..]);
+    }
+    return try refs.toOwnedSlice(allocator);
+}
+
+/// The subject types of the forwarded calls of contract `root` and of the
+/// contracts it nests.
+fn forwardedSubjects(allocator: Allocator, table: *const static_dispatch.StaticDispatchPlanTable, root: DerivationId) Allocator.Error![]checked.CheckedTypeId {
+    var subjects: std.ArrayList(checked.CheckedTypeId) = .empty;
+    errdefer subjects.deinit(allocator);
+    if (!table.generated_codec_derivations.items()[@backingInt(root)].forwarded) return try subjects.toOwnedSlice(allocator);
+    var pending: std.ArrayList(DerivationId) = .empty;
+    defer pending.deinit(allocator);
+    var visited: collections.DenseMapUnmanaged(DerivationId, void) = .empty;
+    defer visited.deinit(allocator);
+    try pending.append(allocator, root);
+    try visited.put(allocator, root, {});
+    while (pending.pop()) |id| {
+        for (table.generated_codec_derivations.items()[@backingInt(id)].callsSlice(table)) |call| switch (call.resolution) {
+            .forwarded => try subjects.append(allocator, call.subject_ty.get() orelse invariant("a forwarded generated codec call has no subject")),
+            .structural => |nested| if (!(try visited.getOrPut(allocator, nested)).found_existing) try pending.append(allocator, nested),
+            .callable, .pending, .checked_error => {},
+        };
+    }
+    return try subjects.toOwnedSlice(allocator);
+}
+
 /// Every call of the root derivation's contract and of each nested
 /// structural derivation it reaches, by selection key.
-fn collectCalls(program: *Program, family_index: u32) Allocator.Error!void {
+fn collectCalls(program: *Program, family_index: u32, forwarded_refs: []const u32) Allocator.Error!void {
     const allocator = program.allocator;
     const module = program.codec.families.items[family_index].module;
     const env = program.codec.families.items[family_index].env;
@@ -378,7 +458,7 @@ fn collectCalls(program: *Program, family_index: u32) Allocator.Error!void {
     try pending.append(allocator, program.codec.families.items[family_index].root);
     try visited.put(allocator, program.codec.families.items[family_index].root, {});
     while (pending.pop()) |id| {
-        const derivation = table.generated_codec_derivations[@backingInt(id)];
+        const derivation = table.generated_codec_derivations.items()[@backingInt(id)];
         for (derivation.callsSlice(table)) |call| {
             const method = try methodName(program, names.methodNameText(call.method));
             const subject: ?TypeId = if (call.subject_ty.get()) |subject_ty|
@@ -389,6 +469,10 @@ fn collectCalls(program: *Program, family_index: u32) Allocator.Error!void {
                 .pending => invariant("a generated codec contract retained an unlinked call"),
                 .checked_error => .{ .checked_error = try convertIn(program, env, call.callable_ty) },
                 .callable => |node| .{ .callable = .{ .node = node, .fn_ty = try convertIn(program, env, call.callable_ty), .checked_fn = call.callable_ty } },
+                .forwarded => |ref| .{ .forwarded = .{
+                    .local = @intCast(std.mem.findScalar(u32, forwarded_refs, ref) orelse invariant("a forwarded generated codec call is outside its family's forwarded calls")),
+                    .fn_ty = try convertIn(program, env, call.callable_ty),
+                } },
                 .structural => |nested| blk: {
                     if ((try visited.getOrPut(allocator, nested)).found_existing == false) try pending.append(allocator, nested);
                     break :blk .{ .structural = nested };
@@ -401,7 +485,13 @@ fn collectCalls(program: *Program, family_index: u32) Allocator.Error!void {
                 switch (value) {
                     .callable => |*callable| if (table.evidenceNode(callable.node).target.kind == .local_proc) {
                         callable.local = @intCast(family.locals.items.len);
-                        try family.locals.append(allocator, .{ .node = callable.node, .fn_ty = callable.fn_ty });
+                        try family.locals.append(allocator, .{ .source = .{ .local_proc = callable.node }, .fn_ty = callable.fn_ty });
+                    },
+                    .forwarded => |*forwarded| {
+                        const position = forwarded.local;
+                        forwarded.local = @intCast(family.locals.items.len);
+                        try family.locals.append(allocator, .{ .source = .{ .forwarded = position }, .fn_ty = forwarded.fn_ty });
+                        family.forwarded_count += 1;
                     },
                     .structural, .checked_error => {},
                 }
@@ -520,7 +610,7 @@ fn classify(program: *Program, family_index: u32, ty: TypeId) Allocator.Error!Sh
         if (builtinArgs(program, current, .dict)) |args| return .{ .dict = .{ .key = args[0], .value = args[1] } };
         if (builtinArgs(program, current, .set)) |args| return .{ .set = args[0] };
         if (try findCall(program, family_index, boundary, current)) |resolved| switch (resolved) {
-            .callable, .checked_error => return .{ .custom = resolved },
+            .callable, .checked_error, .forwarded => return .{ .custom = resolved },
             .structural => {},
         };
         if (scalarOf(program, current)) |scalar| return .{ .scalar = scalar };
@@ -664,7 +754,7 @@ pub fn hashPieceContent(program: *Program, hasher: *base.TypeDigestHasher, index
 
 /// The worker of `piece`, created on first request.
 fn pieceWorker(program: *Program, module: ModuleIndex, piece: Piece, params: []const TypeId, ret: TypeId, captures: []const TypeId, erased: bool) Allocator.Error!WorkerId {
-    const scheme_vars: []const checked.CheckedTypeId = if (piece.family == no_family) &.{} else program.codec.families.items[piece.family].env.vars;
+    const scheme_vars: []const checked.CheckedTypeId = if (piece.family.get()) |family| program.codec.families.items[family].env.vars else &.{};
     const state = &program.codec;
     if (state.piece_ids.get(piece)) |existing| return existing;
     const arena = program.arena.allocator();
@@ -707,7 +797,7 @@ fn localTypes(program: *Program, family_index: u32) Allocator.Error![]const Type
 /// The constructor captures the family's local procedure values.
 fn constructorWorker(program: *Program, family_index: u32) Allocator.Error!WorkerId {
     const family = program.codec.families.items[family_index];
-    return pieceWorker(program, family.module, .{ .family = family_index, .kind = .constructor }, fnArgs(program, family.constructor_fn), family.runtime_fn, try localTypes(program, family_index), true);
+    return pieceWorker(program, family.module, .{ .family = .some(family_index), .kind = .constructor }, fnArgs(program, family.constructor_fn), family.runtime_fn, try localTypes(program, family_index), true);
 }
 
 fn runtimeCaptures(program: *Program, family_index: u32) Allocator.Error![]const TypeId {
@@ -722,7 +812,7 @@ fn runtimeCaptures(program: *Program, family_index: u32) Allocator.Error![]const
 fn runtimeWorker(program: *Program, family_index: u32) Allocator.Error!WorkerId {
     const family = program.codec.families.items[family_index];
     const runtime = functionOf(program, family.runtime_fn);
-    return pieceWorker(program, family.module, .{ .family = family_index, .kind = .runtime }, program.store.span(runtime.args), runtime.ret, try runtimeCaptures(program, family_index), true);
+    return pieceWorker(program, family.module, .{ .family = .some(family_index), .kind = .runtime }, program.store.span(runtime.args), runtime.ret, try runtimeCaptures(program, family_index), true);
 }
 
 fn helperWorker(program: *Program, family_index: u32, kind: Kind, value_ty: TypeId, ret: TypeId) Allocator.Error!WorkerId {
@@ -735,7 +825,7 @@ fn helperWorker(program: *Program, family_index: u32, kind: Kind, value_ty: Type
         .encoder => .encode_helper,
         .parser => .parse_helper,
     };
-    return pieceWorker(program, family.module, .{ .family = family_index, .kind = piece_kind, .a = @backingInt(value_ty), .b = @backingInt(ret) }, params, ret, &.{}, false);
+    return pieceWorker(program, family.module, .{ .family = .some(family_index), .kind = piece_kind, .a = @backingInt(value_ty), .b = @backingInt(ret) }, params, ret, &.{}, false);
 }
 
 /// An erased callback of the family: `captures` are the captured value's
@@ -755,20 +845,16 @@ fn callbackWorker(program: *Program, family_index: u32, piece: Piece, fn_ty: Typ
 pub fn dictionary(b: *Builder, structural: static_dispatch.StructuralEvidence) Allocator.Error!Body.Word {
     const id = structural.generated_codec_derivation orelse invariant("structural codec evidence names no generated derivation");
     const family = try familyFor(b.program, b.module, id);
-    return try constructorAt(b, family, try b.convert(structural.callable_ty));
-}
-
-/// The dictionary of generated derivation `id` of `module_index` at the
-/// method callable type `callable`.
-pub fn dictionaryAt(b: *Builder, module_index: ModuleIndex, id: static_dispatch.GeneratedCodecDerivationId, callable: TypeId) Allocator.Error!Body.Word {
-    const family = try familyFor(b.program, module_index, id);
-    return try constructorAt(b, family, callable);
+    return try constructorAt(b, family, id, try b.convert(structural.callable_ty));
 }
 
 /// A family's constructor at a use whose constructor type is `actual`:
 /// the immortal callable capturing the family's local procedure values at
-/// the use's types, then its variables' descriptors, adapted to `actual`.
-fn constructorAt(b: *Builder, family: u32, actual: TypeId) Allocator.Error!Body.Word {
+/// the use's types and the dictionaries the use's evidence supplies for its
+/// forwarded calls, then its variables' descriptors, adapted to `actual`.
+/// `use_id` is the derivation the use selected, in the use's module, whose
+/// forwarded calls name the use's evidence.
+fn constructorAt(b: *Builder, family: u32, use_id: DerivationId, actual: TypeId) Allocator.Error!Body.Word {
     const fam_ = b.program.codec.families.items[family];
     const bound = try b.relateVariables(fam_.constructor_fn, actual, fam_.env.vars.len);
     defer b.allocator.free(bound);
@@ -779,13 +865,21 @@ fn constructorAt(b: *Builder, family: u32, actual: TypeId) Allocator.Error!Body.
     const captures = try b.allocator.alloc(Body.Word, fam_.locals.items.len + 1);
     defer b.allocator.free(captures);
     if (fam_.locals.items.len != 0) {
-        if (fam_.module != b.module) invariant("a generated codec calling local procedures is used outside the module declaring them");
         const table = b.view.view.static_dispatch_plans;
+        const use_refs = try forwardedRefs(b.allocator, table, use_id);
+        defer b.allocator.free(use_refs);
         // The constructor is immortal, and so are the function values it
         // holds.
         for (fam_.locals.items, captures[0..fam_.locals.items.len]) |local, *value| {
             const fn_ty = try b.program.substitute(b.allocator, local.fn_ty, bound);
-            value.* = try b.localMethodWord(table.evidenceNode(local.node), fn_ty);
+            value.* = switch (local.source) {
+                .local_proc => |node| local: {
+                    if (fam_.module != b.module) invariant("a generated codec calling local procedures is used outside the module declaring them");
+                    break :local try b.localMethodWord(table.evidenceNode(node), fn_ty);
+                },
+                // The use's own evidence for the call's type variable.
+                .forwarded => |position| try b.dictionaryOfAt(table.evidence_refs.items()[use_refs[position]], fn_ty),
+            };
         }
     }
     // The constructor captures the local procedures' function values, then
@@ -801,15 +895,6 @@ fn constructorAt(b: *Builder, family: u32, actual: TypeId) Allocator.Error!Body.
     return try b.adaptDictionary(composed, try b.program.substitute(b.allocator, fam_.constructor_fn, bound), actual);
 }
 
-/// The function values of a family's local procedures in the active declaration.
-pub fn localValues(b: *Builder, family: u32, bound: []const TypeId, out: []LocalId) Allocator.Error!void {
-    const fam_ = b.program.codec.families.items[family];
-    const table = b.view.view.static_dispatch_plans;
-    for (fam_.locals.items, out) |local, *value| {
-        value.* = try b.localMethodValue(table.evidenceNode(local.node), try b.program.substitute(b.allocator, local.fn_ty, bound));
-    }
-}
-
 /// A structural `parser_for`/`encoder_for` dispatch: the derivation's
 /// constructor applied to the encoding operand.
 pub fn dispatch(b: *Builder, call_plan: static_dispatch.StaticDispatchCallPlan, operands: []const static_dispatch.StaticDispatchOperand, operand_types: []const TypeId, result_ty: TypeId) Allocator.Error!void {
@@ -817,65 +902,48 @@ pub fn dispatch(b: *Builder, call_plan: static_dispatch.StaticDispatchCallPlan, 
     if (operands.len != 1) invariant("a structural codec dispatch does not take one encoding");
     const family = try familyFor(b.program, b.module, id);
     const fn_ty = try b.convert(call_plan.callable_ty);
-    const constructor = try b.materialize(try constructorAt(b, family, fn_ty));
+    const constructor = try b.materialize(try constructorAt(b, family, id, fn_ty));
     try b.push(.{ .finish_erased_call = .{ .fn_ty = fn_ty, .arg_count = 1, .result = result_ty } });
     try b.pushOperand(operands[0], operand_types[0]);
     try b.pushValue(constructor);
 }
 
-/// A stored structural edge read in the module holding it.
-pub const StoredEdge = struct { module: ModuleIndex, callable_ty: checked.CheckedTypeId, id: ?DerivationId };
-
-/// The checked edge a stored function's structural evidence names. A codec
-/// edge reads as the first module of the storing module's reflexive import
-/// closure, in breadth-first direct-import order, that holds a contract with
-/// the edge's content and checked roots with its dispatcher and callable
-/// keys. The stored function was lowered from bodies that closure reaches, so
-/// one of its modules recorded the contract.
-pub fn storedEdge(b: *Builder, source: lower.ConstSource, edge: check.ConstStore.CheckedStructuralEdge) Allocator.Error!StoredEdge {
-    const codec = switch (edge) {
-        .recorded => |recorded| return .{
-            .module = b.program.moduleByKey(.{ .bytes = recorded.view.bytes }).index,
-            .callable_ty = recorded.callable_ty,
-            .id = recorded.generated_codec_derivation.get(),
-        },
-        .codec => |codec| codec,
-    };
-    var closure = ImportClosure{ .program = b.program, .allocator = b.allocator };
-    defer closure.deinit();
-    try closure.start(source.module);
-    while (try closure.next()) |module| {
-        if (try edgeIn(b.program.module(module), codec)) |found| return .{ .module = module, .callable_ty = found.callable_ty, .id = found.id };
-    }
-    invariant("a stored codec edge's contract was not held by its storing module's import closure");
-}
-
-/// The modules of one module's reflexive import closure that this lowering
-/// holds, in breadth-first direct-import order.
-const ImportClosure = struct {
+/// The modules whose bodies a module's stored values can come from, of those
+/// this lowering holds, breadth first: the module, then each module's direct
+/// imports in order, and after the lowering root's imports its platform
+/// relation modules, since a platform's constant can hold a value its app
+/// supplied for a requirement (design.md "Structural Serialization
+/// Methods").
+const StoredValueClosure = struct {
     program: *Program,
     allocator: Allocator,
     reached: std.AutoHashMapUnmanaged([32]u8, void) = .empty,
     pending: std.ArrayList(ModuleIndex) = .empty,
     at: usize = 0,
 
-    fn deinit(self: *ImportClosure) void {
+    fn deinit(self: *StoredValueClosure) void {
         self.reached.deinit(self.allocator);
         self.pending.deinit(self.allocator);
     }
 
-    fn start(self: *ImportClosure, module: ModuleIndex) Allocator.Error!void {
+    fn start(self: *StoredValueClosure, module: ModuleIndex) Allocator.Error!void {
         try self.reached.put(self.allocator, self.program.module(module).key.bytes, {});
         try self.pending.append(self.allocator, module);
     }
 
-    fn next(self: *ImportClosure) Allocator.Error!?ModuleIndex {
+    fn next(self: *StoredValueClosure) Allocator.Error!?ModuleIndex {
         if (self.at == self.pending.items.len) return null;
         const module = self.pending.items[self.at];
         self.at += 1;
         for (self.program.module(module).view.direct_import_module_keys) |imported| {
             if ((try self.reached.getOrPut(self.allocator, imported.bytes)).found_existing) continue;
             try self.pending.append(self.allocator, self.program.modules.by_key.get(imported.bytes) orelse continue);
+        }
+        if (module == self.program.modules.views.items[0].index) {
+            for (self.program.modules.relations.items) |relation| {
+                if ((try self.reached.getOrPut(self.allocator, self.program.module(relation).key.bytes)).found_existing) continue;
+                try self.pending.append(self.allocator, relation);
+            }
         }
         return module;
     }
@@ -885,101 +953,23 @@ const ImportClosure = struct {
 /// `store_module`'s constants names `piece` (`pieceFamilyRoot`). A family is
 /// shared by every module whose derivation has its content, so its own
 /// module can be one the storing module does not import. A piece of a
-/// family is named by the first module of the storing module's reflexive
-/// import closure, in breadth-first direct-import order, holding a
-/// derivation with the family's content: the stored function was lowered
-/// from bodies that closure reaches, so one of its modules recorded the
-/// derivation. A piece of no family is named by the storing module.
-pub fn storedPieceHome(program: *Program, allocator: Allocator, store_module: ModuleIndex, piece: Piece) Allocator.Error!struct { ModuleIndex, u32 } {
-    if (piece.family == no_family) return .{ store_module, no_family };
-    const family = program.codec.families.items[piece.family];
-    const owner = program.module(family.module).view.static_dispatch_plans.generated_codec_derivations[@backingInt(family.root)];
-    var closure = ImportClosure{ .program = program, .allocator = allocator };
+/// family is named by the first module of the storing module's stored-value
+/// closure (`StoredValueClosure`) holding a derivation with the family's
+/// content: the stored function was lowered from bodies that closure
+/// reaches, so one of its modules recorded the derivation. A piece of no
+/// family is named by the storing module.
+pub fn storedPieceHome(program: *Program, allocator: Allocator, store_module: ModuleIndex, piece: Piece) Allocator.Error!struct { ModuleIndex, collections.OptionalU32 } {
+    const family = program.codec.families.items[piece.family.get() orelse return .{ store_module, .none }];
+    const owner = program.module(family.module).view.static_dispatch_plans.generated_codec_derivations.items()[@backingInt(family.root)];
+    var closure = StoredValueClosure{ .program = program, .allocator = allocator };
     defer closure.deinit();
     try closure.start(store_module);
     while (try closure.next()) |module| {
-        for (program.module(module).view.static_dispatch_plans.generated_codec_derivations, 0..) |derivation, index| {
-            if (derivation.kind == owner.kind and std.mem.eql(u8, &derivation.content.bytes, &owner.content.bytes)) return .{ module, @intCast(index) };
+        for (program.module(module).view.static_dispatch_plans.generated_codec_derivations.items(), 0..) |derivation, index| {
+            if (derivation.kind == owner.kind and std.mem.eql(u8, &derivation.content.bytes, &owner.content.bytes)) return .{ module, .some(@intCast(index)) };
         }
     }
-    invariant("a stored codec piece's derivation was not held by its storing module's import closure");
-}
-
-fn edgeIn(view: *const types.ModuleView, codec: check.ConstStore.StoredCodecEdge) Allocator.Error!?struct { callable_ty: checked.CheckedTypeId, id: DerivationId } {
-    _ = (try view.types().rootForKey(codec.dispatcher_key)) orelse return null;
-    const callable_ty = (try view.types().rootForKey(codec.callable_key)) orelse return null;
-    for (view.view.static_dispatch_plans.generated_codec_derivations, 0..) |contract, index| {
-        if (std.mem.eql(u8, &contract.content.bytes, &codec.content.bytes)) return .{ .callable_ty = callable_ty, .id = @fromBackingInt(@intCast(index)) };
-    }
-    return null;
-}
-
-/// Restore a stored generated runtime: its family's runtime callable over
-/// the stored encoding and renamed names. Compile-time evaluation numbered
-/// those captures in the family's name order after the encoding.
-pub fn restoreRuntime(b: *Builder, source: lower.ConstSource, fn_id: check.ConstStore.ConstFnId, owner: check.CheckedNames.ProcTemplate, expr: ExprId, fn_ty: TypeId) Allocator.Error!void {
-    const program = b.program;
-    const stored = program.constStore(source).getFn(fn_id);
-    const owner_view = program.moduleByKey(.{ .bytes = owner.artifact.bytes });
-    const plan_id = switch (owner_view.bodies().exprData(expr)) {
-        .dispatch_call, .type_dispatch_call => owner_view.bodies().dispatchPlan(@backingInt(expr)) orelse invariant("a stored generated codec runtime's dispatch has no plan"),
-        .numeral, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .list, .empty_list, .tuple, .match_, .if_, .call, .record, .empty_record, .block, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .field_access, .interpolation, .structural_eq, .structural_hash, .method_eq, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => invariant("a stored generated codec runtime does not name a dispatch"),
-    };
-    const plan = owner_view.view.static_dispatch_plans.plans[@backingInt(plan_id)];
-    // A dispatch on a constrained variable reaches its derivation through
-    // the evidence the stored value's procedure was instantiated with.
-    const derivation_module, const derivation = if (plan.generated_codec_derivation.get()) |id| .{ owner_view.index, id } else switch (plan.resolution) {
-        .evidence_dependent => |dependent| blk: {
-            var frame_index = stored.evidence_frame_head orelse invariant("a stored generated codec runtime has no evidence");
-            for (0..dependent.index.depth) |_| frame_index = stored.evidence_frames[frame_index].parent.get() orelse
-                invariant("a stored generated codec runtime's evidence has fewer frames than its dispatch names");
-            const frame = stored.evidence_frames[frame_index];
-            if (dependent.index.index >= frame.roots_len) invariant("a stored generated codec runtime's evidence frame lacks its dispatch's parameter");
-            const roots = try b.storedEvidenceRoots(stored.evidence, frame.roots_start, frame.roots_len);
-            defer b.allocator.free(roots);
-            const structural = switch (stored.evidence.nodes[roots[dependent.index.index]]) {
-                .structural => |index| stored.evidence.structural(index).*,
-                .target, .from_callable, .from_scheme, .unreachable_value, .checked_error => invariant("a stored generated codec runtime's evidence is not a structural derivation"),
-            };
-            const edge = try storedEdge(b, source, structural.checked orelse invariant("stored structural codec evidence records no checked edge"));
-            break :blk .{ edge.module, edge.id orelse invariant("stored structural codec evidence names no generated derivation") };
-        },
-        .direct_pending, .direct_closed, .direct_parametric, .structural, .checked_error, .@"unreachable" => invariant("a stored generated codec runtime's dispatch names no derivation"),
-    };
-    const family = try familyFor(program, derivation_module, derivation);
-    const worker = try runtimeWorker(program, family);
-    const captures = try runtimeCaptures(program, family);
-    const fam_ = program.codec.families.items[family];
-    const bound = try b.relateVariables(fam_.runtime_fn, fn_ty, fam_.env.vars.len);
-    defer b.allocator.free(bound);
-    const descs = try b.descWords(bound);
-    try b.push(.{ .finish_restore_closure = .{ .worker = worker, .count = @intCast(captures.len), .descs = descs, .dicts = &.{}, .capture_types = captures, .worker_ty = try program.substitute(b.allocator, fam_.runtime_fn, bound), .ty = fn_ty } });
-    // The local procedures' function values follow the names; compile-time
-    // evaluation stores none of them, as a local procedure is a procedure
-    // of its declaring body, not a value the runtime holds. They are built
-    // in the declaration context of the stored value's procedure, which
-    // declares them, at the instance the value records.
-    const stored_count = 1 + fam_.names.items.len;
-    if (fam_.locals.items.len != 0) {
-        if (fam_.module != b.module) invariant("a stored generated codec calling local procedures is restored outside the module declaring them");
-        const values = try b.allocator.alloc(LocalId, fam_.locals.items.len);
-        defer b.allocator.free(values);
-        try b.storedRuntimeLocals(source, stored, owner, values, family, bound);
-        var local_index = values.len;
-        while (local_index > 0) {
-            local_index -= 1;
-            try b.push(.{ .push_value = values[local_index] });
-        }
-    }
-    var index = stored_count;
-    while (index > 0) {
-        index -= 1;
-        const needle = check.CheckedIds.CaptureId.generatedCheck(@intCast(index));
-        const node = for (stored.captures) |capture| {
-            if (capture.id == needle) break capture.value;
-        } else invariant("a stored generated codec runtime lacks one of its captures");
-        try b.push(.{ .restore = .{ .source = source, .node = node, .ty = captures[index] } });
-    }
+    invariant("a stored codec piece's derivation was not held by its storing module's stored-value closure");
 }
 
 /// The body of an intrinsic wrapper template's worker, whose explicit
@@ -988,7 +978,7 @@ pub fn restoreRuntime(b: *Builder, source: lower.ConstSource, fn_id: check.Const
 /// inspection and equality.
 pub fn lowerIntrinsic(b: *Builder, intrinsic: checked.IntrinsicId, params: []const LocalId) Allocator.Error!void {
     const worker = b.currentWorker().*;
-    var gen: Gen = .{ .b = b, .family = no_family, .piece = no_family };
+    var gen: Gen = .{ .b = b, .family = .none, .piece = .none };
     const result = switch (intrinsic) {
         // A spec is the erased callable that parses its union's tags.
         .parse_tag_union => try b.emitErasedCall(params[0], try b.program.store.intern(.{ .function = .{ .args = worker.params[1..2], .ret = worker.ret, .effectful = false } }), params[1..2], worker.ret),
@@ -1001,12 +991,12 @@ pub fn lowerIntrinsic(b: *Builder, intrinsic: checked.IntrinsicId, params: []con
         // The descriptor-guided walkers (design.md "Dynamic Values In LIR").
         .str_inspect => blk: {
             const text = try b.closedLocal(.str);
-            try b.emitDyn(text, .{ .inspect = .{ .value = params[0], .desc = try b.descOf(worker.params[0]), .names = try b.namesOf(worker.params[0]) } });
+            try b.emitDyn(text, .{ .inspect = .{ .value = params[0], .desc = try b.opDescOf(worker.params[0], .inspect), .names = try b.namesOf(worker.params[0]) } });
             break :blk text;
         },
         .structural_eq => blk: {
             const equal = try b.closedLocal(.bool);
-            try b.emitDyn(equal, .{ .eq = .{ .lhs = params[0], .rhs = params[1], .desc = try b.descOf(worker.params[0]) } });
+            try b.emitDyn(equal, .{ .eq = .{ .lhs = params[0], .rhs = params[1], .desc = try b.opDescOf(worker.params[0], .eq) } });
             break :blk equal;
         },
     };
@@ -1017,7 +1007,7 @@ pub fn lowerIntrinsic(b: *Builder, intrinsic: checked.IntrinsicId, params: []con
 /// Lower piece `index` into the worker `b` builds.
 pub fn lowerPiece(b: *Builder, index: u32) Allocator.Error!void {
     const piece = b.program.codec.pieces.items[index];
-    var gen: Gen = .{ .b = b, .family = piece.family, .piece = index };
+    var gen: Gen = .{ .b = b, .family = piece.family, .piece = .some(index) };
     switch (piece.kind) {
         .constructor => try gen.lowerConstructor(),
         .runtime => try gen.lowerRuntime(),
@@ -1048,8 +1038,9 @@ const Typed = struct { value: LocalId, ty: TypeId };
 
 const Gen = struct {
     b: *Builder,
-    family: u32,
-    piece: u32,
+    /// The family and piece being lowered; both absent for an intrinsic.
+    family: collections.OptionalU32,
+    piece: collections.OptionalU32,
     /// The encoding and names of the worker being lowered.
     encoding: LocalId = undefined,
     names: LocalId = undefined,
@@ -1066,8 +1057,13 @@ const Gen = struct {
         return &self.b.program.store;
     }
 
+    /// The family of the piece being lowered.
+    fn familyIndex(self: *const Gen) u32 {
+        return self.family.get().?;
+    }
+
     fn fam(self: *Gen) *Family {
-        return &self.b.program.codec.families.items[self.family];
+        return &self.b.program.codec.families.items[self.familyIndex()];
     }
 
     fn name(self: *Gen, text: []const u8) Allocator.Error!NameId {
@@ -1096,6 +1092,14 @@ const Gen = struct {
 
     fn u64Value(self: *Gen, value: u64) Allocator.Error!LocalId {
         return self.b.intValue(value, try self.u64Ty());
+    }
+
+    /// The length of `list`, of `list_ty`. Its items can hold a forwarded
+    /// call's type variable, whose layout the family's descriptors decide.
+    fn listLen(self: *Gen, list: LocalId, list_ty: TypeId) Allocator.Error!LocalId {
+        const len = try self.b.closedLocal(.u64);
+        try self.b.emitListLowLevel(len, .list_len, &.{list}, listElem(self.program(), list_ty), list_ty);
+        return len;
     }
 
     fn lowLevelLayout(self: *Gen, op: LIR.LowLevel, args: []const LocalId, result_layout: layout.Idx) Allocator.Error!LocalId {
@@ -1325,7 +1329,7 @@ const Gen = struct {
 
     /// Call the contract's `method` for `subject` with `args`.
     fn callFormat(self: *Gen, method: []const u8, subject: ?TypeId, args: []const LocalId) Allocator.Error!Typed {
-        const resolved = try lookupCall(self.program(), self.family, method, subject);
+        const resolved = try lookupCall(self.program(), self.familyIndex(), method, subject);
         return self.callResolved(resolved, args);
     }
 
@@ -1334,6 +1338,13 @@ const Gen = struct {
         const program_ = self.program();
         switch (resolved) {
             .structural => invariant("a generated codec called a nested structural derivation as a procedure"),
+            // The dictionary the use supplied: the value's own codec
+            // constructor.
+            .forwarded => |forwarded| {
+                const value = try self.localValue(forwarded.local);
+                const ret_ty = fnRet(program_, forwarded.fn_ty);
+                return .{ .value = try b.emitErasedCall(value, forwarded.fn_ty, args, ret_ty), .ty = ret_ty };
+            },
             .checked_error => |fn_ty| {
                 const ret_ty = fnRet(program_, fn_ty);
                 const literal = try b.store.insertString("runtime error");
@@ -1369,7 +1380,7 @@ const Gen = struct {
                     .resolved => table.nestedEvidence(node),
                     .from_callable, .through_alias => invariant("a generated codec call's evidence is not resolved"),
                 };
-                const subst = table.site_substitutions[node.subst.start..][0..node.subst.len];
+                const subst = table.site_substitutions.items()[node.subst.start..][0..node.subst.len];
                 const instance = switch (node.instantiation) {
                     .alias => blk: {
                         if (b.module != self.fam().module) invariant("a generated codec piece is lowered outside its family's module");
@@ -1394,7 +1405,7 @@ const Gen = struct {
 
     /// Call the family helper for `value_ty` at result type `ret_ty`.
     fn callHelper(self: *Gen, kind: Kind, value_ty: TypeId, ret_ty: TypeId, explicit: []const LocalId) Allocator.Error!LocalId {
-        const worker = try helperWorker(self.program(), self.family, kind, value_ty, ret_ty);
+        const worker = try helperWorker(self.program(), self.familyIndex(), kind, value_ty, ret_ty);
         const explicit_all = try std.mem.concat(self.b.allocator, LocalId, &.{ explicit, &.{ self.encoding, self.names } });
         defer self.b.allocator.free(explicit_all);
         const all = try self.b.callArgs(explicit_all, worker, try self.familyInputs());
@@ -1418,7 +1429,7 @@ const Gen = struct {
     /// The inputs of the family's workers: the descriptors of its types,
     /// which this worker's are.
     fn familyInputs(self: *Gen) Allocator.Error![]Body.Word {
-        return try self.b.descInputWords(0, self.b.var_descs.len);
+        return try self.b.descInputWords(0, self.b.scopeCounts().descs);
     }
 
     /// Renamed name `index` of the family's names.
@@ -1462,7 +1473,7 @@ const Gen = struct {
         const params = try b.allocator.alloc(LocalId, worker.params.len + @intFromBool(has_table));
         if (has_table) {
             params[worker.params.len] = try b.closedLocal(.opaque_ptr);
-            try b.beginTable(params[worker.params.len], 0);
+            try b.beginTable(params[worker.params.len]);
         }
         for (params[0..worker.params.len], worker.params) |*param, ty| param.* = try b.localOf(ty, .param);
         const ret_layout = try self.resultLayout(worker.ret);
@@ -1499,8 +1510,14 @@ const Gen = struct {
             slot.* = if (index < worker.capture_types.len) try self.layoutOf(worker.capture_types[index]) else .opaque_ptr;
             if (slot.* != .zst) all_zero_sized = false;
         }
+        // The reuse argument holds this worker's own callable, whose closed
+        // capture record a packing of the same layout repacks.
+        const reuse: Builder.ReuseKind = if (capture_layouts.len == 0)
+            .none
+        else
+            .{ .static = try b.captureLayout(worker.capture_types, @intFromBool(has_table)) };
         // A capture record of zero-sized values has no storage to read.
-        var start = try b.beginErasedWorker(if (all_zero_sized) &.{} else capture_layouts);
+        var start = try b.beginErasedWorker(if (all_zero_sized) &.{} else capture_layouts, reuse);
         if (all_zero_sized and capture_layouts.len != 0) {
             b.allocator.free(start.captures);
             start.captures = try b.allocator.alloc(LocalId, capture_layouts.len);
@@ -1509,7 +1526,7 @@ const Gen = struct {
                 try b.emitEntry(.{ .assign_struct = .{ .target = capture.*, .fields = LIR.LocalSpan.empty(), .next = undefined } });
             }
         }
-        if (has_table) try b.beginTable(start.captures[worker.capture_types.len], 0);
+        if (has_table) try b.beginTable(start.captures[worker.capture_types.len]);
         return try self.finishErasedStart(worker, start);
     }
 
@@ -1520,6 +1537,10 @@ const Gen = struct {
         const b = self.b;
         b.entry_hole = try b.newHole();
         const capture_ptr = try b.closedLocal(.opaque_ptr);
+        // The reuse argument holds this worker's own dynamic capture record,
+        // which owns the capture views `dynamicCaptures` reads, so it exists
+        // before them.
+        _ = try b.beginReuseArg(.dynamic);
         const start: Builder.ErasedStart = .{
             .entry = b.entry_hole,
             .body_start = undefined,
@@ -1556,14 +1577,8 @@ const Gen = struct {
         const b = self.b;
         defer b.allocator.free(frame.args);
         defer b.allocator.free(frame.start.captures);
-        var proc_args: std.ArrayList(LocalId) = .empty;
-        defer proc_args.deinit(b.allocator);
-        if (frame.record) |record| try proc_args.append(b.allocator, record);
-        try proc_args.append(b.allocator, frame.start.capture_ptr);
-        try b.finishProc(frame.start.entry, frame.body_start, proc_args.items, frame.ret_layout);
-        const proc = b.store.getProcSpecPtr(b.currentWorker().proc);
-        proc.erased_capture_arg = .of(frame.start.capture_ptr);
-        proc.abi = .erased_record;
+        const args: []const LocalId = if (frame.record) |*record| record[0..1] else &.{};
+        try b.finishErasedProc(frame.start.entry, frame.body_start, args, frame.ret_layout, frame.start.capture_ptr);
     }
 
     /// Bind a callback's trailing encoding and names captures.
@@ -1591,7 +1606,7 @@ const Gen = struct {
             const label = try self.b.strLiteral(self.store().nameText(entry.label));
             slot.* = (try self.callFormat("rename_field", null, &.{ encoding, label })).value;
         }
-        const runtime = try runtimeWorker(program_, self.family);
+        const runtime = try runtimeWorker(program_, self.familyIndex());
         const closure = try self.packFamilyClosure(runtime, captured, program_.worker(runtime).capture_types);
         try self.ret(closure);
         try self.finishErased(frame);
@@ -1625,7 +1640,7 @@ const Gen = struct {
     /// Write `value` of `value_ty` into `state`, producing `ret_ty`.
     fn encodeShape(self: *Gen, value_ty: TypeId, value: LocalId, state: LocalId, ret_ty: TypeId) Allocator.Error!LocalId {
         const program_ = self.program();
-        switch (try classify(program_, self.family, value_ty)) {
+        switch (try classify(program_, self.familyIndex(), value_ty)) {
             .null_try => |null_try| {
                 const merged = try self.merge(ret_ty);
                 const err_hole = try self.branchTag(value, value_ty, "Ok");
@@ -1640,7 +1655,7 @@ const Gen = struct {
             },
             .dict => {
                 const entries = try self.callFormat("to_list", value_ty, &.{value});
-                const len = try self.lowLevelLayout(.list_len, &.{entries.value}, .u64);
+                const len = try self.listLen(entries.value, entries.ty);
                 return try self.encodeContainer("encode_dict", value_ty, .dict_body, @backingInt(value_ty), 0, &.{entries.value}, &.{entries.ty}, &.{ state, len }, ret_ty);
             },
             .set => {
@@ -1679,7 +1694,7 @@ const Gen = struct {
     }
 
     fn encodeList(self: *Gen, list_ty: TypeId, subject: TypeId, list: LocalId, state: LocalId, ret_ty: TypeId) Allocator.Error!LocalId {
-        const len = try self.lowLevelLayout(.list_len, &.{list}, .u64);
+        const len = try self.listLen(list, list_ty);
         return try self.encodeContainer("encode_list", subject, .list_body, @backingInt(list_ty), 0, &.{list}, &.{list_ty}, &.{ state, len }, ret_ty);
     }
 
@@ -1698,15 +1713,16 @@ const Gen = struct {
         ret_ty: TypeId,
     ) Allocator.Error!LocalId {
         const program_ = self.program();
-        const resolved = try lookupCall(program_, self.family, method, subject);
+        const resolved = try lookupCall(program_, self.familyIndex(), method, subject);
         const method_fn = switch (resolved) {
             .callable => |callable| callable.fn_ty,
             .checked_error => |fn_ty| fn_ty,
             .structural => invariant("a container encoder method resolved to a structural derivation"),
+            .forwarded => invariant("a generated codec format method was forwarded"),
         };
         const method_args = fnArgs(program_, method_fn);
         const body_ty = method_args[method_args.len - 1];
-        const body_worker = try callbackWorker(program_, self.family, .{ .family = self.family, .kind = body_kind, .a = a, .b = b_arg }, body_ty, captured_types);
+        const body_worker = try callbackWorker(program_, self.familyIndex(), .{ .family = self.family, .kind = body_kind, .a = a, .b = b_arg }, body_ty, captured_types);
         const body = try self.packCallback(body_worker, captured, captured_types);
         const all = try std.mem.concat(self.b.allocator, LocalId, &.{ leading, &.{body} });
         defer self.b.allocator.free(all);
@@ -1766,7 +1782,7 @@ const Gen = struct {
         const program_ = self.program();
         const writer_args = fnArgs(program_, body.writer_ty);
         const thunk_ty = writer_args[writer_args.len - 1];
-        const thunk_worker = try callbackWorker(program_, self.family, .{ .family = self.family, .kind = .value_thunk, .a = @backingInt(value_ty), .b = @backingInt(thunk_ty) }, thunk_ty, &.{value_ty});
+        const thunk_worker = try callbackWorker(program_, self.familyIndex(), .{ .family = self.family, .kind = .value_thunk, .a = @backingInt(value_ty), .b = @backingInt(thunk_ty) }, thunk_ty, &.{value_ty});
         const thunk = try self.packCallback(thunk_worker, &.{value}, &.{value_ty});
         const args = try std.mem.concat(self.b.allocator, LocalId, &.{ &.{state}, leading, &.{thunk} });
         defer self.b.allocator.free(args);
@@ -1850,7 +1866,7 @@ const Gen = struct {
             .list => |elem| elem,
             .primitive, .empty_record, .record, .tuple, .tag_union, .box, .nominal, .function, .variable => invariant("a generated list encoder's elements are not a list"),
         };
-        const len = try self.lowLevelLayout(.list_len, &.{list}, .u64);
+        const len = try self.listLen(list, list_ty);
         const head = self.b.freshJoin();
         const index = try self.b.closedLocal(.u64);
         const state_ty = self.b.currentWorker().params[0];
@@ -1861,7 +1877,7 @@ const Gen = struct {
         self.b.hole = head_body;
         const more = try self.branchIf(try self.lowLevelLayout(.bool_not, &.{try self.isEq(index, len)}, .bool));
         const elem = try self.local(elem_ty);
-        try self.b.emitLowLevel(elem, .list_get_unsafe, &.{ list, index });
+        try self.b.emitListLowLevel(elem, .list_get_unsafe, &.{ list, index }, elem_ty, list_ty);
         const next_state = switch (kind) {
             .list => try self.writeItem(body, state, &.{}, elem, elem_ty),
             .dict => blk: {
@@ -1872,7 +1888,7 @@ const Gen = struct {
                 const item_value = try self.b.readField(elem_ty, elem, 1, value_ty);
                 const writer_args = fnArgs(program_, body.writer_ty);
                 const key_writer_ty = writer_args[1];
-                const key_worker = try callbackWorker(program_, self.family, .{ .family = self.family, .kind = .key_thunk, .a = @backingInt(key_ty), .b = @backingInt(key_writer_ty) }, key_writer_ty, &.{key_ty});
+                const key_worker = try callbackWorker(program_, self.familyIndex(), .{ .family = self.family, .kind = .key_thunk, .a = @backingInt(key_ty), .b = @backingInt(key_writer_ty) }, key_writer_ty, &.{key_ty});
                 const key_thunk = try self.packCallback(key_worker, &.{key}, &.{key_ty});
                 break :blk try self.writeItem(body, state, &.{key_thunk}, item_value, value_ty);
             },
@@ -2019,7 +2035,7 @@ const Gen = struct {
     fn parseShape(self: *Gen, value_ty: TypeId, state: LocalId, ret_ty: TypeId) Allocator.Error!void {
         const program_ = self.program();
         const on_err: OnErr = .{ .ret = ret_ty };
-        switch (try classify(program_, self.family, value_ty)) {
+        switch (try classify(program_, self.familyIndex(), value_ty)) {
             .null_try => |null_try| {
                 const parts = (try tryParts(program_, value_ty)).?;
                 const nulled = try self.callFormat("parse_null", null, &.{ self.encoding, state });
@@ -2057,13 +2073,14 @@ const Gen = struct {
             },
             .record => |record_ty| try self.parseRecord(record_ty, value_ty, state, ret_ty),
             .tag_union => |union_ty| {
-                const resolved = try lookupCall(program_, self.family, "parse_tag_union", union_ty);
+                const resolved = try lookupCall(program_, self.familyIndex(), "parse_tag_union", union_ty);
                 const method_fn = switch (resolved) {
                     .callable => |callable| callable.fn_ty,
                     .checked_error => |fn_ty| fn_ty,
                     .structural => invariant("parse_tag_union resolved to a structural derivation"),
+                    .forwarded => invariant("a generated codec format method was forwarded"),
                 };
-                const worker = try callbackWorker(program_, self.family, .{ .family = self.family, .kind = .tag_spec, .a = @backingInt(union_ty), .b = @backingInt(method_fn) }, try self.specType(method_fn), &.{});
+                const worker = try callbackWorker(program_, self.familyIndex(), .{ .family = self.family, .kind = .tag_spec, .a = @backingInt(union_ty), .b = @backingInt(method_fn) }, try self.specType(method_fn), &.{});
                 const spec = try self.packCallback(worker, &.{}, &.{});
                 const result = try self.callResolved(resolved, &.{ self.encoding, spec, state });
                 try self.ret(try self.injectTry(result.value, result.ty, ret_ty));
@@ -2146,7 +2163,7 @@ const Gen = struct {
         return switch (container) {
             .list => blk: {
                 const list = try self.local(container_ty);
-                try self.b.emitLowLevel(list, .list_with_capacity, &.{capacity});
+                try self.b.emitListLowLevel(list, .list_with_capacity, &.{capacity}, listElem(self.program(), container_ty), container_ty);
                 break :blk list;
             },
             .dict => (try self.callFormat("with_capacity", container_ty, &.{capacity})).value,
@@ -2213,10 +2230,11 @@ const Gen = struct {
     }
 
     fn append(self: *Gen, list: LocalId, list_ty: TypeId, elem: LocalId) Allocator.Error!LocalId {
+        const elem_ty = listElem(self.program(), list_ty);
         const reserved = try self.local(list_ty);
-        try self.b.emitLowLevel(reserved, .list_reserve_for_append, &.{ list, try self.u64Value(1) });
+        try self.b.emitListLowLevel(reserved, .list_reserve_for_append, &.{ list, try self.u64Value(1) }, elem_ty, list_ty);
         const appended = try self.local(list_ty);
-        try self.b.emitLowLevel(appended, .list_append_unsafe, &.{ reserved, elem });
+        try self.b.emitListLowLevel(appended, .list_append_unsafe, &.{ reserved, elem }, elem_ty, list_ty);
         return appended;
     }
 
@@ -2293,11 +2311,12 @@ const Gen = struct {
         const base_index = self.recordNameBase(record_ty);
 
         // The field set the format matches names against.
-        const field_call = try lookupCall(program_, self.family, "parse_record_field", record_ty);
+        const field_call = try lookupCall(program_, self.familyIndex(), "parse_record_field", record_ty);
         const field_fn = switch (field_call) {
             .callable => |callable| callable.fn_ty,
             .checked_error => |fn_ty| fn_ty,
             .structural => invariant("parse_record_field resolved to a structural derivation"),
+            .forwarded => invariant("a generated codec format method was forwarded"),
         };
         const field_set_ty = fnArgs(program_, field_fn)[1];
         const handle_ty = switch (program_.store.get(field_set_ty)) {
@@ -2755,14 +2774,14 @@ const Gen = struct {
     fn nameBound(self: *Gen, fields: LocalId, fields_ty: TypeId, bound: Bound) Allocator.Error!LocalId {
         const u64_ty = try self.u64Ty();
         const Context = struct { bound: Bound, fields_ty: TypeId };
-        // The accumulator is the bound so far, `none` before the first.
-        const none = try self.u64Value(std.math.maxInt(u64));
-        const folded = try self.foldList(fields, fields_ty, u64_ty, none, Context{ .bound = bound, .fields_ty = fields_ty }, struct {
-            fn each(ctx: Context, gen: *Gen, handle: LocalId, acc: LocalId, _: LocalId) Allocator.Error!LocalId {
+        // The accumulator is the bound so far. The first field's length
+        // starts it, so an empty set keeps the initial 0.
+        return self.foldList(fields, fields_ty, u64_ty, try self.u64Value(0), Context{ .bound = bound, .fields_ty = fields_ty }, struct {
+            fn each(ctx: Context, gen: *Gen, handle: LocalId, acc: LocalId, index: LocalId) Allocator.Error!LocalId {
                 const handle_ty = gen.store().get(ctx.fields_ty).list;
                 const len = (try gen.field(handle, handle_ty, "name_len")).value;
                 const merged = try gen.merge(try gen.u64Ty());
-                const first = try gen.isEq(acc, try gen.u64Value(std.math.maxInt(u64)));
+                const first = try gen.isEq(index, try gen.u64Value(0));
                 const later = try gen.branchIf(first);
                 try gen.jump(merged.id, &.{merged.param}, &.{len});
                 gen.b.hole = later;
@@ -2778,13 +2797,6 @@ const Gen = struct {
                 return merged.param;
             }
         }.each);
-        const merged = try self.merge(u64_ty);
-        const nonempty = try self.branchIf(try self.isEq(folded, none));
-        try self.jump(merged.id, &.{merged.param}, &.{try self.u64Value(0)});
-        self.b.hole = nonempty;
-        try self.jump(merged.id, &.{merged.param}, &.{folded});
-        self.b.hole = merged.after;
-        return merged.param;
     }
 
     /// The iterator over a field set's handles from `position`: all of them
@@ -2805,7 +2817,7 @@ const Gen = struct {
         }
         const fields_ty = try self.fieldsTypeOf(iter_ty);
         const u64_ty = try self.u64Ty();
-        const worker = try pieceWorker(program_, self.b.module, .{ .family = no_family, .kind = .field_names_step, .a = @backingInt(iter_ty), .b = @intFromBool(filtered) }, &.{}, fnRet(program_, step_fn), &.{ fields_ty, u64_ty, u64_ty }, true);
+        const worker = try pieceWorker(program_, self.b.module, .{ .family = .none, .kind = .field_names_step, .a = @backingInt(iter_ty), .b = @intFromBool(filtered) }, &.{}, fnRet(program_, step_fn), &.{ fields_ty, u64_ty, u64_ty }, true);
         const step = try self.b.packClosure(worker, &.{ fields, position, size }, &.{ fields_ty, u64_ty, u64_ty }, &.{});
         // `len_if_known : Try(U64, [Unknown])`.
         const len = if (filtered) blk: {
@@ -2829,7 +2841,7 @@ const Gen = struct {
     }
 
     fn lowerFieldNamesStep(self: *Gen, iter_ty: TypeId) Allocator.Error!void {
-        const filtered = self.b.program.codec.pieces.items[self.piece].b != 0;
+        const filtered = self.b.program.codec.pieces.items[self.piece.get().?].b != 0;
         const frame = try self.beginErased();
         const worker = self.b.currentWorker().*;
         const fields = frame.captures[0];

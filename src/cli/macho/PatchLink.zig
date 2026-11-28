@@ -24,6 +24,7 @@
 //! load commands and the file tail belonging to the coordinating thread.
 const std = @import("std");
 const base = @import("base");
+const collections = @import("collections");
 const backend = @import("backend");
 const macho = std.macho;
 const HostPrelink = @import("HostPrelink.zig");
@@ -59,6 +60,8 @@ pub const Inputs = struct {
     root: usize,
     /// Symbols the host must provide when the app imports them. Sorted.
     host_required: []const []const u8,
+    /// Where the stored images the units' pool imports name are.
+    pool: unit_walk.PoolSource,
 };
 
 /// Link `inputs` into `output`, whose first `host.segments().len` bytes
@@ -76,7 +79,9 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
 
     // What the program reaches from the `provides` symbols.
     const host = inputs.host;
-    var walk: unit_walk.Walk = .{ .gpa = gpa, .images = images.items, .resolver = .{ .exports = &exports, .host = .{ .context = &host, .find = findHostSymbol }, .host_required = inputs.host_required } };
+    var pool: unit_walk.Pool = .{ .source = inputs.pool };
+    defer pool.deinit(gpa);
+    var walk: unit_walk.Walk = .{ .gpa = gpa, .images = images.items, .resolver = .{ .exports = &exports, .host = .{ .context = &host, .find = findHostSymbol }, .host_required = inputs.host_required, .pool = &pool } };
     defer walk.deinit();
     try walk.init();
     for (host.provides()) |provide| {
@@ -94,6 +99,12 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
     const reached = try gpa.alloc(bool, images.items.len);
     defer gpa.free(reached);
     for (walk.states, reached) |state, *placed| placed.* = state != null;
+    // The stored images reached atoms name, each placed once.
+    pool.markKept(walk.states);
+    try pool.layOut(gpa);
+    timing.pool_named = pool.entries.items.len;
+    timing.pool_placed = pool.kept.items.len;
+    timing.pool_bytes = pool.size;
 
     // Placement order: the support image, then the units by content digest.
     var order: std.ArrayList(u32) = .empty;
@@ -147,6 +158,10 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
         places[index].data = data_vmaddr + rw_file_size;
         rw_file_size += view.data().len;
     }
+    // The constant pool follows the images' data.
+    rw_file_size = std.mem.alignForward(u64, rw_file_size, pool.alignment);
+    const pool_base = data_vmaddr + rw_file_size;
+    rw_file_size += pool.size;
     var rw_mem_size = rw_file_size;
     for (order.items) |index| {
         const view = images.items[index].view;
@@ -184,7 +199,7 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
     const reached_atoms = try gpa.alloc([]const bool, images.items.len);
     defer gpa.free(reached_atoms);
     for (walk.states, reached_atoms) |state, *atoms| atoms.* = if (state) |placed| placed.atoms else &.{};
-    const symbol_slots = try gpa.alloc([]u32, images.items.len);
+    const symbol_slots = try gpa.alloc([]collections.OptionalU32, images.items.len);
     @memset(symbol_slots, &.{});
     defer {
         for (order.items) |index| gpa.free(symbol_slots[index]);
@@ -194,15 +209,15 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
     var app_strings: u64 = 0;
     for (order.items) |index| {
         const view = images.items[index].view;
-        const slots = try gpa.alloc(u32, view.symbols().len);
+        const slots = try gpa.alloc(collections.OptionalU32, view.symbols().len);
         symbol_slots[index] = slots;
         var kept: u32 = 0;
         for (view.symbolAtoms(), slots) |atom, *slot| {
-            if (atom != UnitImage.no_atom and !reached_atoms[index][atom]) {
-                slot.* = no_symbol;
+            if (if (atom.get()) |present| !reached_atoms[index][present] else false) {
+                slot.* = .none;
                 continue;
             }
-            slot.* = kept;
+            slot.* = .some(kept);
             kept += 1;
         }
         places[index].first_symbol = dysymtab.nlocalsym + app_symbol_count;
@@ -243,6 +258,7 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
                     break :host vaddr;
                 },
                 .missing => unreachable, // a missing host symbol failed the link above
+                .pool => |entry| pool.address(entry, pool_base),
             };
         }
     }
@@ -260,7 +276,7 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
         const place = places[index];
         for (view.sites()) |site| {
             if (@as(UnitImage.SiteKind, @fromBackingInt(site.kind)) != .abs64) continue;
-            if (site.atom != UnitImage.no_atom and !reached_atoms[index][site.atom]) continue;
+            if (view.siteAtom(site)) |atom| if (!reached_atoms[index][atom]) continue;
             const region: UnitImage.Region = @fromBackingInt(site.region);
             switch (region) {
                 .data => {},
@@ -278,6 +294,11 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
             }
             try rebases.append(gpa, fixup);
         }
+    }
+    // Every pointer word of the kept stored images.
+    for (pool.kept.items) |entry_index| {
+        const entry = pool.entries.items[entry_index];
+        for (entry.image.pointers) |pointer| try rebases.append(gpa, .{ .segment = data_segment_index, .offset = pool_base - data_vmaddr + entry.offset + pointer });
     }
     // The provides: their windows' contents and fixups.
     const host_data_segment: usize = for (exe.sections) |section| {
@@ -349,7 +370,7 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
     const signature_size = signature_header_size + page_count * 32;
     const file_size = signature_offset + signature_size;
     const linkedit_filesize = file_size - linkedit_fileoff;
-    if (file_size > std.math.maxInt(u32)) return error.ProgramTooLarge;
+    if (std.math.cast(u32, file_size) == null) return error.ProgramTooLarge;
 
     try output.resize(file_size);
     const mapped = try output.map(file_size);
@@ -384,6 +405,9 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
         .dirty_pages_end = exe.first_content,
         .dirty_ranges = &.{},
     };
+    // Each kept stored image, once, its pointer words relocated as it is
+    // copied.
+    pool.write(mapped[@intCast(context.fileOffsetOf(pool_base))..][0..@intCast(pool.size)], pool_base);
     var copy_list: std.ArrayList(fanout.Copy) = .empty;
     defer copy_list.deinit(gpa);
     var symbol_ranges: std.ArrayList(fanout.Range) = .empty;
@@ -393,7 +417,8 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
     for (order.items) |index| {
         const view = images.items[index].view;
         const place = places[index];
-        const atoms_reached = reached_atoms[index];
+        // The block's reached atoms; the writable data is placed whole.
+        const atoms_reached = reached_atoms[index][0..view.atoms().len];
         var atom: u32 = 0;
         while (atom < atoms_reached.len) {
             if (!atoms_reached[atom]) {
@@ -526,7 +551,7 @@ pub fn link(gpa: Allocator, arena: Allocator, std_io: std.Io, inputs: Inputs, ou
     hash_context.dirty_ranges = dirty_ranges.items;
     var hash_ranges: std.ArrayList(fanout.Range) = .empty;
     defer hash_ranges.deinit(gpa);
-    try fanout.addRanges(gpa, &hash_ranges, 0, page_count);
+    try fanout.addRanges(gpa, &hash_ranges, 0, @intCast(page_count));
     var hashes: std.ArrayList(Task) = .empty;
     defer hashes.deinit(gpa);
     for (hash_ranges.items) |range| try hashes.append(gpa, .{ .context = &hash_context, .work = .{ .hashes = range } });
@@ -546,9 +571,6 @@ fn findHostSymbol(context: *const anyopaque, name: []const u8) ?u64 {
     const symbol = host.findSymbol(name) orelse return null;
     return symbol.vaddr;
 }
-
-/// `Context.symbol_slots` entry of a symbol the output's symbol table omits.
-const no_symbol: u32 = std.math.maxInt(u32);
 
 const Place = struct {
     block: u64 = 0,
@@ -731,7 +753,7 @@ const Context = struct {
     /// Section ordinals of the app's text, data and zero-fill.
     section_ordinals: [3]u8,
     reached_atoms: []const []const bool,
-    symbol_slots: []const []const u32,
+    symbol_slots: []const []const collections.OptionalU32,
     signature_offset: u64,
     /// Where the code directory's page hashes start.
     hashes_offset: u64,
@@ -827,9 +849,9 @@ const Task = struct {
         const symbols = view.symbols()[range.first..][0..range.count];
         const slots = context.symbol_slots[range.image][range.first..][0..range.count];
         var written: u64 = 0;
-        for (symbols, slots) |symbol, slot| {
+        for (symbols, slots) |symbol, symbol_slot| {
             // A symbol of code the link left as a hole has no entry.
-            if (slot == no_symbol) continue;
+            const slot = symbol_slot.get() orelse continue;
             const entry = context.out[@intCast(context.symtab_offset + (place.first_symbol + slot) * nlist_size)..][0..nlist_size];
             written += nlist_size;
             const region: UnitImage.Region = @fromBackingInt(symbol.region);
@@ -858,7 +880,7 @@ const Task = struct {
         const bindings = context.bindings[range.image];
         const atoms_reached = context.reached_atoms[range.image];
         for (view.sites()[range.first..][0..range.count]) |site| {
-            if (site.atom != UnitImage.no_atom and !atoms_reached[site.atom]) continue;
+            if (view.siteAtom(site)) |atom| if (!atoms_reached[atom]) continue;
             const region: UnitImage.Region = @fromBackingInt(site.region);
             const kind: UnitImage.SiteKind = @fromBackingInt(site.kind);
             const out = context.regionOut(place, view, region);
@@ -899,7 +921,7 @@ const Task = struct {
             }
             const start = page * context.page_size;
             const end = @min(start + context.page_size, context.signature_offset);
-            std.crypto.hash.sha2.Sha256.hash(context.out[@intCast(start)..@intCast(end)], slot, .{});
+            base.Sha256.hash(context.out[@intCast(start)..@intCast(end)], slot, .{});
         }
         self.bytes = range.count * 32;
     }
@@ -1002,13 +1024,7 @@ fn rewriteLoadCommands(out: []u8, exe: HostPrelink.Executable, layout: Layout) v
         .{ .name = "__data", .addr = layout.data_vmaddr, .size = layout.data_content, .offset = layout.data_fileoff, .flags = macho.S_REGULAR, .@"align" = 12 },
         .{ .name = "__bss", .addr = layout.data_vmaddr + layout.data_content, .size = layout.bss_size, .offset = 0, .flags = macho.S_ZEROFILL, .@"align" = 4 },
     });
-    // Unmapped, but in address order before `__LINKEDIT`, as dyld requires
-    // of a dylib's segments.
-    at = writeSegment(out, at, "__DWARF", layout.linkedit_vmaddr, 0, layout.dwarf_fileoff, layout.dwarf_size, 0, &.{
-        .{ .name = "__debug_abbrev", .addr = layout.debug_offsets[0] - layout.dwarf_fileoff, .size = layout.debug_sizes[0], .offset = layout.debug_offsets[0], .flags = macho.S_ATTR_DEBUG, .@"align" = 0 },
-        .{ .name = "__debug_info", .addr = layout.debug_offsets[1] - layout.dwarf_fileoff, .size = layout.debug_sizes[1], .offset = layout.debug_offsets[1], .flags = macho.S_ATTR_DEBUG, .@"align" = 0 },
-        .{ .name = "__debug_line", .addr = layout.debug_offsets[2] - layout.dwarf_fileoff, .size = layout.debug_sizes[2], .offset = layout.debug_offsets[2], .flags = macho.S_ATTR_DEBUG, .@"align" = 0 },
-    });
+    at = writeDwarfSegment(out, at, layout);
     std.debug.assert(at == linkedit_command + inserted_commands);
     const Shift = struct {
         insertion: u32,
@@ -1054,6 +1070,21 @@ fn rewriteLoadCommands(out: []u8, exe: HostPrelink.Executable, layout: Layout) v
     std.mem.writeInt(u32, out[signature + 12 ..][0..4], @intCast(layout.signature_size), .little);
     std.mem.writeInt(u32, out[16..20], exe.header.ncmds + 3, .little);
     std.mem.writeInt(u32, out[20..24], exe.header.sizeofcmds + inserted_commands, .little);
+}
+
+/// Write the debug information's segment command. The segment is unmapped,
+/// but sits at `__LINKEDIT`'s address so the segments stay in address order,
+/// as dyld requires of a dylib's. Each section's address is the segment's
+/// plus the section's place in the segment, as in a dSYM: Mach-O readers
+/// reject a section below its segment's address.
+fn writeDwarfSegment(out: []u8, at: usize, layout: Layout) usize {
+    const vmaddr = layout.linkedit_vmaddr;
+    const names = [3][]const u8{ "__debug_abbrev", "__debug_info", "__debug_line" };
+    var sections: [3]SectionSpec = undefined;
+    for (&sections, names, layout.debug_offsets, layout.debug_sizes) |*section, name, offset, size| {
+        section.* = .{ .name = name, .addr = vmaddr + (offset - layout.dwarf_fileoff), .size = size, .offset = offset, .flags = macho.S_ATTR_DEBUG, .@"align" = 0 };
+    }
+    return writeSegment(out, at, "__DWARF", vmaddr, 0, layout.dwarf_fileoff, layout.dwarf_size, 0, &sections);
 }
 
 const SectionSpec = struct { name: []const u8, addr: u64, size: u64, offset: u64, flags: u32, @"align": u32 };
@@ -1117,6 +1148,30 @@ test "a dyld opcode stream ends at its DONE, not at its padding" {
     const bind = [_]u8{ 0x51, 0x11, 0x40 } ++ "_memcpy\x00".* ++ [_]u8{ 0x74, 0x00, 0x90, 0x00, 0x00 };
     try std.testing.expectEqualSlices(u8, bind[0 .. bind.len - 2], withoutDone(&bind, .bind));
     try std.testing.expectEqualSlices(u8, &.{}, withoutDone(&.{}, .rebase));
+}
+
+test "issue 13139: debug sections lie within their segment's addresses" {
+    var layout = std.mem.zeroes(Layout);
+    layout.linkedit_vmaddr = 0x1_0047_8000;
+    layout.dwarf_fileoff = 0x47_8000;
+    layout.debug_offsets = .{ 0x47_8000, 0x47_80b0, 0x4d_9e5e };
+    layout.debug_sizes = .{ 0xb0, 0x6_1dae, 0x1234 };
+    layout.dwarf_size = layout.debug_offsets[2] + layout.debug_sizes[2] - layout.dwarf_fileoff;
+
+    var out: [segment_command_size + 3 * section_header_size]u8 = undefined;
+    try std.testing.expectEqual(out.len, writeDwarfSegment(&out, 0, layout));
+
+    const segment = std.mem.bytesToValue(macho.segment_command_64, out[0..segment_command_size]);
+    try std.testing.expectEqualStrings("__DWARF", segment.segName());
+    try std.testing.expectEqual(layout.linkedit_vmaddr, segment.vmaddr);
+    try std.testing.expectEqual(@as(u32, 3), segment.nsects);
+    const sections = std.mem.bytesToValue([3]macho.section_64, out[segment_command_size..]);
+    for (sections) |section| {
+        // LLVM's Mach-O reader: "addr field of section N ... less than the segment's vmaddr".
+        try std.testing.expect(section.addr >= segment.vmaddr);
+        try std.testing.expectEqual(section.offset - segment.fileoff, section.addr - segment.vmaddr);
+        try std.testing.expect(section.offset + section.size <= segment.fileoff + segment.filesize);
+    }
 }
 
 test "the signature header describes its code directory" {

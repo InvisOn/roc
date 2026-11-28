@@ -72,9 +72,9 @@ pub fn intrinsicAnnotation(env: *const ModuleEnv, ident: base.Ident.Idx) ?Intrin
     if (ident.eql(env.idents.builtin_str_inspect)) return .str_inspect;
 
     const entries = [_]struct { name: []const u8, intrinsic: IntrinsicId }{
-        .{ .name = "Builtin.Str.Utf8Problem.is_eq", .intrinsic = .structural_eq },
-        .{ .name = "Builtin.Str.Utf16Problem.is_eq", .intrinsic = .structural_eq },
-        .{ .name = "Builtin.Str.Utf32Problem.is_eq", .intrinsic = .structural_eq },
+        .{ .name = "Builtin.StrUtf8Problem.is_eq", .intrinsic = .structural_eq },
+        .{ .name = "Builtin.StrUtf16Problem.is_eq", .intrinsic = .structural_eq },
+        .{ .name = "Builtin.StrUtf32Problem.is_eq", .intrinsic = .structural_eq },
         .{ .name = "Builtin.Encoding.ParseTagUnionSpec.parse", .intrinsic = .parse_tag_union },
         .{ .name = "Builtin.Encoding.FieldName.FieldNames.rename_fields", .intrinsic = .field_names_rename_fields },
         .{ .name = "Builtin.Encoding.FieldName.FieldNames.shortest_name", .intrinsic = .field_names_shortest_name },
@@ -838,6 +838,7 @@ fn replaceProvidedByCompilerLowLevels(env: *ModuleEnv) (Allocator.Error || error
         .{ "f32_acos_unsafe", .num_acos },
         .{ "f32_atan_unsafe", .num_atan },
         .{ "f32_atan2_unsafe", .num_atan2 },
+        .{ "Builtin.Num.Dec.times_saturated", .dec_mul_saturated },
         .{ "dec_sqrt_unsafe", .num_sqrt },
         .{ "dec_pow_unsafe", .num_pow },
         .{ "dec_sin_unsafe", .num_sin },
@@ -923,14 +924,14 @@ fn replaceProvidedByCompilerLowLevels(env: *ModuleEnv) (Allocator.Error || error
 
     for (def_indices.items) |def_idx| {
         const def = env.store.getDef(def_idx);
-        const expr = env.store.getExpr(def.expr);
+        const expr_kind = env.store.exprKind(def.expr);
 
         // Check if this is an anno-only def (e_anno_only expression)
-        if (expr == .e_anno_only and def.annotation != null) {
+        if (expr_kind == .e_anno_only and def.annotation != null) {
             // Get the identifier from the pattern
-            const pattern = env.store.getPattern(def.pattern);
-            if (pattern == .assign) {
-                const ident = pattern.assign.ident;
+            const pattern = env.store.patternAs(def.pattern, .assign);
+            if (pattern != null) {
+                const ident = pattern.?.ident;
 
                 // Check if this identifier matches a low-level operation
                 const entry = low_level_map.fetchRemove(ident) orelse {
@@ -981,18 +982,12 @@ fn replaceProvidedByCompilerLowLevels(env: *ModuleEnv) (Allocator.Error || error
                 } }, base.Region.zero());
 
                 // Now replace the e_anno_only expression with the e_lambda
-                // Def structure is stored in def_data list
-                const def_node_idx = @as(@TypeOf(env.store.nodes).Idx, @fromBackingInt(@intCast(@backingInt(def_idx))));
-                const def_node = env.store.nodes.get(def_node_idx);
-                const def_data_idx = def_node.getPayload().def.def_data_idx;
-
-                // Update the expr field in def_data
-                env.store.def_data.items.items[def_data_idx].expr = @backingInt(expr_idx);
+                try env.setTopLevelDefExpr(def_idx, expr_idx);
 
                 // Track this replaced def index
                 try new_def_indices.append(gpa, def_idx);
-                if (env.provided_low_level_defs.items.items.len > 0) {
-                    const previous = env.provided_low_level_defs.items.items[env.provided_low_level_defs.items.items.len - 1];
+                if (env.provided_low_level_defs.items().len > 0) {
+                    const previous = env.provided_low_level_defs.items()[env.provided_low_level_defs.items().len - 1];
                     std.debug.assert(previous.def_idx < @backingInt(def_idx));
                 }
                 _ = try env.provided_low_level_defs.append(gpa, .{
