@@ -377,6 +377,7 @@ pub const CoffWriter = struct {
         std.debug.assert(self.arch == switch (kind) {
             .x86_call_rel32 => Architecture.x86_64,
             .aarch64_call26 => Architecture.aarch64,
+            .arm32_call => invariant("COFF invariant violated: arm32 call relocation, but arm32 code is written only as ELF", .{}),
         });
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,
@@ -384,6 +385,7 @@ pub const CoffWriter = struct {
             .reloc_type = switch (kind) {
                 .x86_call_rel32 => COFF.IMAGE_REL_AMD64_REL32,
                 .aarch64_call26 => COFF.IMAGE_REL_ARM64_BRANCH26,
+                .arm32_call => invariant("COFF invariant violated: arm32 call relocation, but arm32 code is written only as ELF", .{}),
             },
         });
     }
@@ -411,6 +413,7 @@ pub const CoffWriter = struct {
                 .aarch64 => invariant("COFF invariant violated: abs32_field data relocation in aarch64 code, which only an x86_64 test unit emits", .{}),
             },
             .abs64_field => self.arch.absolutePointerRelocType(),
+            .arm32_movw_prel, .arm32_movt_prel => invariant("COFF invariant violated: arm32 data relocation, but arm32 code is written only as ELF", .{}),
         };
         try self.text_relocs.append(self.allocator, .{
             .offset = offset,

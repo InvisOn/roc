@@ -2149,6 +2149,7 @@ pub fn build(b: *std.Build) void {
     const run_check_baseline_codegen_step = b.step("run-check-baseline-codegen", "Check that v1 targets emit no instruction above the architecture baseline");
     const run_check_arm32_encoding_oracle_step = b.step("run-check-arm32-encoding-oracle", "Check that the arm32 encoder tests match the assembler oracle");
     const run_arm32_encoding_oracle_step = b.step("run-arm32-encoding-oracle", "Regenerate the arm32 encoder tests from the assembler oracle");
+    const run_check_arm32_link_smoke_step = b.step("run-check-arm32-link-smoke", "Check that an arm32 object links and its relocations resolve to their targets");
     const run_check_str_eq_same_allocation_step = b.step("run-check-str-eq-same-allocation", "Check that comparing a string against itself does not read its bytes");
     const build_snapshot_tool_step = b.step("build-snapshot-tool", "Build the snapshot tool");
     const build_valgrind_step = b.step("build-valgrind", "Build roc and the snapshot tool, and copy the native str and int test hosts into the checkout, for the CI Valgrind job");
@@ -2783,6 +2784,28 @@ pub fn build(b: *std.Build) void {
     _ = run_arm32_encoding_oracle.addOutputDirectoryArg("arm32-encoding-oracle");
     run_arm32_encoding_oracle.has_side_effects = true;
     run_arm32_encoding_oracle_step.dependOn(&run_arm32_encoding_oracle.step);
+
+    // The arm32 link smoke tool writes an object with the arm32 encoder and
+    // ELF writer, links it with the build's own `zig cc`, and checks what the
+    // linker resolved. It does not run the executable.
+    const arm32_link_smoke_root = b.createModule(.{
+        .root_source_file = b.path("ci/arm32_link_smoke.zig"),
+        .target = hostToolTarget(b, .debug),
+        .optimize = .debug,
+        .imports = &.{.{ .name = "backend", .module = roc_modules.backend }},
+    });
+    const arm32_link_smoke_exe = b.addExecutable(.{ .name = "arm32-link-smoke", .root_module = arm32_link_smoke_root });
+    const install_arm32_link_smoke = b.addInstallArtifact(arm32_link_smoke_exe, .{});
+    build_check_tools_step.dependOn(&install_arm32_link_smoke.step);
+    const arm32_link_smoke_tests = b.addTest(.{ .name = "arm32-link-smoke-tests", .root_module = arm32_link_smoke_root });
+    build_check_tools_step.dependOn(&arm32_link_smoke_tests.step);
+    run_check_arm32_link_smoke_step.dependOn(&b.addRunArtifact(arm32_link_smoke_tests).step);
+    const run_arm32_link_smoke = b.addRunArtifact(arm32_link_smoke_exe);
+    run_arm32_link_smoke.addArg(b.graph.zig_exe);
+    _ = run_arm32_link_smoke.addOutputDirectoryArg("arm32-link-smoke");
+    run_arm32_link_smoke.has_side_effects = true;
+    run_arm32_link_smoke.step.dependOn(&install_arm32_link_smoke.step);
+    run_check_arm32_link_smoke_step.dependOn(&run_arm32_link_smoke.step);
 
     const minici_exe = b.addExecutable(.{
         .name = "minici",

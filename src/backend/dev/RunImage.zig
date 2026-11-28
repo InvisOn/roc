@@ -352,6 +352,8 @@ pub fn writeToSharedMemory(
                     .kind = @backingInt(switch (function.kind) {
                         .x86_call_rel32 => RelocationKind.linked_function_x86_call_rel32,
                         .aarch64_call26 => RelocationKind.linked_function_aarch64_call26,
+                        // The shim applies no arm32 relocations yet.
+                        .arm32_call => return error.UnsupportedDevRunRelocation,
                     }),
                 });
             },
@@ -359,7 +361,7 @@ pub fn writeToSharedMemory(
                 relocation_records.appendAssumeCapacity(.{
                     .code_offset = data.offset,
                     .symbol = symbol_refs[@backingInt(data.symbol)],
-                    .kind = @backingInt(relocationKindForData(data.kind)),
+                    .kind = @backingInt(try relocationKindForData(data.kind)),
                 });
             },
             .local_data => return error.UnsupportedDevRunRelocation,
@@ -885,12 +887,13 @@ pub fn viewMappedImage(header: *const Header, base_ptr: [*]align(1) u8, image_bo
     };
 }
 
-fn relocationKindForData(kind: DataRelocationKind) RelocationKind {
+fn relocationKindForData(kind: DataRelocationKind) error{UnsupportedDevRunRelocation}!RelocationKind {
     return switch (kind) {
         .abs64 => .linked_data_abs64,
         .rel32 => .linked_data_rel32,
         .page21 => .linked_data_page21,
         .pageoff12 => .linked_data_pageoff12,
+        .arm32_movw_prel, .arm32_movt_prel => error.UnsupportedDevRunRelocation,
         .abs32_field, .abs64_field => base.invariant("run image invariant violated: an expect-site data relocation, which only a test unit emits, and no run image holds a test unit's code", .{}),
     };
 }

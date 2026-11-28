@@ -172,7 +172,8 @@ pub fn Emit(comptime target: RocTarget) type {
     // division calls `__aeabi_*` helpers. Roc names no CPU floor of its own
     // for arm32 (`RocTarget.cpuContract`), so the target gets Zig's arm
     // baseline; if a Zig upgrade moves that baseline, the code generated here
-    // must move with it.
+    // must move with it. `.ARM.attributes` in `object/elf.zig` states this
+    // floor; change both together.
     comptime {
         const arch = target.toCpuArch();
         const os: std.Target.Os = .{ .tag = target.toOsTag(), .version_range = .{ .none = {} } };
